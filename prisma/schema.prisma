@@ -7,6 +7,410 @@ datasource db {
   provider = "postgresql"
 }
 
+// ---------------------------------------------------------------------------
+// ENUMS
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  TERMINATED
+}
+
+enum AssignmentType {
+  PRIMARY   // permanently assigned driver
+  RELIEF    // temporary / cover assignment
+}
+
+enum PeriodType {
+  DAILY
+  WEEKLY
+  MONTHLY
+  CUSTOM
+}
+
+enum FuelEventType {
+  FILLING
+  THEFT
+}
+
+// ---------------------------------------------------------------------------
+// IAM — identity & access control
+// ---------------------------------------------------------------------------
+
+/// Top-level tenant. All entities are scoped to an organisation.
+model Organisation {
+  id        String   @id @default(cuid())
+  name      String
+  code      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  roles            Role[]
+  users            User[]
+  vehicleGroups    VehicleGroup[]
+  vehicles         Vehicle[]
+  reportingPeriods ReportingPeriod[]
+
+  @@map("organisation")
+}
+
+/// Named role scoped to an organisation (e.g. "fleet_manager", "driver", "mechanic").
+model Role {
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  name           String
+  slug           String
+  description    String?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organisation Organisation     @relation(fields: [organisationId], references: [id])
+  permissions  RolePermission[]
+  userRoles    UserRole[]
+
+  @@unique([organisationId, slug])
+  @@index([organisationId])
+  @@map("role")
+}
+
+/// Atomic capability — resource + action (e.g. vehicle:read, trip:create).
+model Permission {
+  id       String @id @default(cuid())
+  name     String
+  slug     String @unique
+  resource String // e.g. "vehicle", "trip", "fuel_theft"
+  action   String // e.g. "read", "create", "update", "delete"
+
+  roles RolePermission[]
+
+  @@unique([resource, action])
+  @@map("permission")
+}
+
+/// Many-to-many join: which permissions belong to which role.
+model RolePermission {
+  roleId       String @map("role_id")
+  permissionId String @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@id([roleId, permissionId])
+  @@map("role_permission")
+}
+
+/// A person who can log in to the system and/or be assigned to a vehicle.
+/// Drivers are Users who hold the "driver" Role.
 model User {
-  id Int @id @default(autoincrement())
+  id             String     @id @default(cuid())
+  organisationId String     @map("organisation_id")
+  fullName       String     @map("full_name")
+  email          String     @unique
+  phone          String?
+  licenceNumber  String?    @map("licence_number")
+  employeeId     String?    @map("employee_id")
+  status         UserStatus @default(ACTIVE)
+  createdAt      DateTime   @default(now()) @map("created_at")
+  updatedAt      DateTime   @updatedAt @map("updated_at")
+  deletedAt      DateTime?  @map("deleted_at") // soft delete — preserves FK integrity on trips
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  // IAM
+  userRoles UserRole[]
+
+  // Driver-specific relations (only relevant when user holds "driver" role)
+  vehicleAssignments   VehicleAssignment[] @relation("AssignedUser")
+  trips                Trip[]              @relation("TripDriver")
+  fuelThefts           FuelTheft[]         @relation("TheftDriver")
+
+  // Audit — who assigned/unassigned
+  assignmentsGranted   VehicleAssignment[] @relation("AssignedByUser")
+  userRolesGranted     UserRole[]          @relation("UserRoleGrantedBy")
+
+  @@index([organisationId])
+  @@index([email])
+  @@index([organisationId, status])
+  @@map("user")
+}
+
+/// Audit-tracked role grant. Soft-revoked via revokedAt rather than hard-deleted.
+model UserRole {
+  id           String    @id @default(cuid())
+  userId       String    @map("user_id")
+  roleId       String    @map("role_id")
+  assignedAt   DateTime  @default(now()) @map("assigned_at")
+  revokedAt    DateTime? @map("revoked_at")
+  assignedById String?   @map("assigned_by")
+
+  user       User  @relation(fields: [userId], references: [id])
+  role       Role  @relation(fields: [roleId], references: [id])
+  assignedBy User? @relation("UserRoleGrantedBy", fields: [assignedById], references: [id])
+
+  @@index([userId])
+  @@index([roleId])
+  @@index([userId, revokedAt]) // fast "active roles for user" query
+  @@map("user_role")
+}
+
+// ---------------------------------------------------------------------------
+// FLEET — master data
+// ---------------------------------------------------------------------------
+
+/// Logical grouping of vehicles (e.g. Harvesting, Ambulance, Sales).
+model VehicleGroup {
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  name           String
+  code           String
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  vehicles     Vehicle[]
+
+  @@unique([organisationId, code])
+  @@index([organisationId])
+  @@map("vehicle_group")
+}
+
+/// A physical vehicle tracked by a GPS/FLS device.
+model Vehicle {
+  id                   String   @id @default(cuid())
+  organisationId       String   @map("organisation_id")
+  vehicleGroupId       String   @map("vehicle_group_id")
+  name                 String
+  registrationPlate    String   @unique @map("registration_plate")
+  deviceId             String   @unique @map("device_id") // GPS/FLS hardware identifier — ingest key
+  vehicleType          String   @map("vehicle_type")      // BUS, AMBULANCE, TRACTOR, WINCH, etc.
+  fuelEfficiencyKmpl   Float?   @map("fuel_efficiency_kmpl")
+  tankCapacityLitres   Float?   @map("tank_capacity_litres")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  organisation  Organisation @relation(fields: [organisationId], references: [id])
+  vehicleGroup  VehicleGroup @relation(fields: [vehicleGroupId], references: [id])
+
+  assignments          VehicleAssignment[]
+  trips                Trip[]
+  engineHourSessions   EngineHourSession[]
+  fuelFillings         FuelFilling[]
+  fuelThefts           FuelTheft[]
+  periodSummaries      VehiclePeriodSummary[]
+
+  @@index([organisationId])
+  @@index([vehicleGroupId])
+  @@index([deviceId])   // critical — raw telemetry arrives keyed to deviceId
+  @@map("vehicle")
+}
+
+/// Time-bounded record of which user (driver) is assigned to which vehicle.
+/// Query current assignment: WHERE unassignedAt IS NULL AND vehicleId = ?
+/// Query assignment on a date: WHERE assignedAt <= date AND (unassignedAt IS NULL OR unassignedAt > date)
+model VehicleAssignment {
+  id             String         @id @default(cuid())
+  vehicleId      String         @map("vehicle_id")
+  userId         String         @map("user_id")
+  assignmentType AssignmentType @default(PRIMARY) @map("assignment_type")
+  assignedAt     DateTime       @default(now()) @map("assigned_at")
+  unassignedAt   DateTime?      @map("unassigned_at") // NULL = currently active
+  assignedById   String?        @map("assigned_by")
+  notes          String?
+
+  vehicle    Vehicle @relation(fields: [vehicleId], references: [id])
+  user       User    @relation("AssignedUser", fields: [userId], references: [id])
+  assignedBy User?   @relation("AssignedByUser", fields: [assignedById], references: [id])
+
+  @@index([vehicleId, unassignedAt])   // "who is assigned to this vehicle right now?"
+  @@index([userId, unassignedAt])      // "which vehicle is this driver assigned to?"
+  @@index([vehicleId, assignedAt])     // time-range lookups for incident investigation
+  @@map("vehicle_assignment")
+}
+
+// ---------------------------------------------------------------------------
+// REPORTING
+// ---------------------------------------------------------------------------
+
+/// Named time window that groups all events (e.g. "Week 24", "June 2026").
+model ReportingPeriod {
+  id             String     @id @default(cuid())
+  organisationId String     @map("organisation_id")
+  label          String
+  periodStart    DateTime   @map("period_start")
+  periodEnd      DateTime   @map("period_end")
+  periodType     PeriodType @map("period_type")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  trips           Trip[]
+  engineSessions  EngineHourSession[]
+  fuelFillings    FuelFilling[]
+  fuelThefts      FuelTheft[]
+  periodSummaries VehiclePeriodSummary[]
+
+  @@index([organisationId, periodStart])
+  @@map("reporting_period")
+}
+
+// ---------------------------------------------------------------------------
+// EVENTS — high-volume transactional tables (partition by began_at in Postgres)
+// ---------------------------------------------------------------------------
+
+/// One recorded journey: a vehicle moving from A to B.
+model Trip {
+  id                      String    @id @default(cuid())
+  vehicleId               String    @map("vehicle_id")
+  driverId                String?   @map("driver_id")     // nullable — may be unassigned
+  reportingPeriodId       String    @map("reporting_period_id")
+  beganAt                 DateTime  @map("began_at")
+  endedAt                 DateTime  @map("ended_at")
+  initialLocation         String?   @map("initial_location")
+  finalLocation           String?   @map("final_location")
+  durationSeconds         Int       @map("duration_seconds")   // store as int, format in app
+  mileageKm               Float     @map("mileage_km")
+  avgSpeedKmh             Float?    @map("avg_speed_kmh")
+  maxSpeedKmh             Float?    @map("max_speed_kmh")
+  engineHoursSeconds      Int?      @map("engine_hours_seconds")
+  consumedMl              Int?      @map("consumed_ml")        // millilitres as int — no float drift
+  consumedByFlsMl         Int?      @map("consumed_by_fls_ml")
+  ratesDeviationByFls     Float?    @map("rates_deviation_by_fls")
+  avgConsumptionL100km    Float?    @map("avg_consumption_l100km")
+  avgConsumptionByFls     Float?    @map("avg_consumption_by_fls")
+  avgIdleConsumptionByFls Float?    @map("avg_idle_consumption_by_fls")
+  avgMileagePerUnitFls    Float?    @map("avg_mileage_per_unit_fls")
+  initialFuelLevelMl      Int?      @map("initial_fuel_level_ml")
+  finalFuelLevelMl        Int?      @map("final_fuel_level_ml")
+  maxFuelLevelMl          Int?      @map("max_fuel_level_ml")
+  minFuelLevelMl          Int?      @map("min_fuel_level_ml")
+
+  vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
+  driver          User?           @relation("TripDriver", fields: [driverId], references: [id])
+  reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
+
+  @@index([vehicleId, beganAt])
+  @@index([driverId, beganAt])
+  @@index([reportingPeriodId])
+  @@index([beganAt])             // partition key for future Postgres range partitioning
+  @@map("trip")
+}
+
+/// Engine-on session: captures idle vs in-motion time, useful for machinery without trips.
+model EngineHourSession {
+  id                       String   @id @default(cuid())
+  vehicleId                String   @map("vehicle_id")
+  reportingPeriodId        String   @map("reporting_period_id")
+  beganAt                  DateTime @map("began_at")
+  endedAt                  DateTime @map("ended_at")
+  initialLocation          String?  @map("initial_location")
+  finalLocation            String?  @map("final_location")
+  engineHoursSeconds       Int      @map("engine_hours_seconds")
+  initialEngineHoursSeconds Int?    @map("initial_engine_hours_seconds")
+  finalEngineHoursSeconds  Int?     @map("final_engine_hours_seconds")
+  totalTimeSeconds         Int      @map("total_time_seconds")
+  offTimeSeconds           Int?     @map("off_time_seconds")
+  inMotionSeconds          Int?     @map("in_motion_seconds")
+  idlingSeconds            Int?     @map("idling_seconds")
+  mileageKm                Float?   @map("mileage_km")
+  avgSpeedKmh              Float?   @map("avg_speed_kmh")
+  maxSpeedKmh              Float?   @map("max_speed_kmh")
+  consumedMl               Int?     @map("consumed_ml")
+  consumedByFlsMl          Int?     @map("consumed_by_fls_ml")
+  consumedFlsMotionMl      Int?     @map("consumed_fls_motion_ml")
+  consumedFlsIdleMl        Int?     @map("consumed_fls_idle_ml")
+  avgConsumptionByFls      Float?   @map("avg_consumption_by_fls")
+  avgConsumptionFlsMotion  Float?   @map("avg_consumption_fls_motion")
+  avgConsumptionFlsIdle    Float?   @map("avg_consumption_fls_idle")
+  avgConsumptionFlsTrips   Float?   @map("avg_consumption_fls_trips")
+  initialFuelLevelMl       Int?     @map("initial_fuel_level_ml")
+  finalFuelLevelMl         Int?     @map("final_fuel_level_ml")
+  maxFuelLevelMl           Int?     @map("max_fuel_level_ml")
+  minFuelLevelMl           Int?     @map("min_fuel_level_ml")
+
+  vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
+  reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
+
+  @@index([vehicleId, beganAt])
+  @@index([reportingPeriodId])
+  @@index([beganAt])
+  @@map("engine_hour_session")
+}
+
+/// A single refuelling event.
+model FuelFilling {
+  id                 String   @id @default(cuid())
+  vehicleId          String   @map("vehicle_id")
+  reportingPeriodId  String   @map("reporting_period_id")
+  filledAt           DateTime @map("filled_at")
+  location           String?
+  mileageAtFillKm    Float?   @map("mileage_at_fill_km")
+  initialFuelLevelMl Int?     @map("initial_fuel_level_ml")
+  filledMl           Int      @map("filled_ml")
+  finalFuelLevelMl   Int?     @map("final_fuel_level_ml")
+
+  vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
+  reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
+
+  @@index([vehicleId, filledAt])
+  @@index([reportingPeriodId])
+  @@index([filledAt])
+  @@map("fuel_filling")
+}
+
+/// A detected anomalous fuel-level drop (suspected theft or siphoning).
+model FuelTheft {
+  id                 String   @id @default(cuid())
+  vehicleId          String   @map("vehicle_id")
+  driverId           String?  @map("driver_id")     // nullable — vehicle may be unattended
+  reportingPeriodId  String   @map("reporting_period_id")
+  beganAt            DateTime @map("began_at")
+  detectedAt         DateTime @map("detected_at")
+  initialLocation    String?  @map("initial_location")
+  initialFuelLevelMl Int?     @map("initial_fuel_level_ml")
+  finalFuelLevelMl   Int?     @map("final_fuel_level_ml")
+  stolenMl           Int      @map("stolen_ml")
+  initialSpeedKmh    Float?   @map("initial_speed_kmh")  // 0 = stationary drain
+  finalSpeedKmh      Float?   @map("final_speed_kmh")
+
+  vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
+  driver          User?           @relation("TheftDriver", fields: [driverId], references: [id])
+  reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
+
+  @@index([vehicleId, beganAt])
+  @@index([reportingPeriodId])
+  @@index([beganAt])
+  @@map("fuel_theft")
+}
+
+// ---------------------------------------------------------------------------
+// SUMMARY — materialised roll-up (refresh periodically, not source of truth)
+// ---------------------------------------------------------------------------
+
+/// Pre-aggregated KPIs per vehicle per reporting period.
+/// Powers dashboards without scanning all event tables.
+model VehiclePeriodSummary {
+  id                      String   @id @default(cuid())
+  vehicleId               String   @map("vehicle_id")
+  reportingPeriodId       String   @map("reporting_period_id")
+  mileageInTripsKm        Float?   @map("mileage_in_trips_km")
+  mileageAllMessagesKm    Float?   @map("mileage_all_messages_km")
+  avgSpeedKmh             Float?   @map("avg_speed_kmh")
+  maxSpeedKmh             Float?   @map("max_speed_kmh")
+  timeInTripsSeconds      Int?     @map("time_in_trips_seconds")
+  engineHoursSeconds      Int?     @map("engine_hours_seconds")
+  consumedByFlsMl         Int?     @map("consumed_by_fls_ml")
+  avgConsumptionByFls     Float?   @map("avg_consumption_by_fls")
+  avgMileagePerUnitFls    Float?   @map("avg_mileage_per_unit_fls")
+  initialFuelLevelMl      Int?     @map("initial_fuel_level_ml")
+  finalFuelLevelMl        Int?     @map("final_fuel_level_ml")
+  totalFilledMl           Int?     @map("total_filled_ml")
+  totalStolenMl           Int?     @map("total_stolen_ml")
+  refreshedAt             DateTime @default(now()) @map("refreshed_at")
+
+  vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
+  reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
+
+  @@unique([vehicleId, reportingPeriodId])
+  @@index([reportingPeriodId])
+  @@map("vehicle_period_summary")
 }
