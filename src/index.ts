@@ -12,7 +12,6 @@ async function main() {
     logger.info({ port: env.PORT, env: env.NODE_ENV }, 'Fleet Server started')
   })
 
-  // ── Graceful shutdown ───────────────────────────────────────────────────────
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received')
     server.close(async () => {
@@ -20,7 +19,7 @@ async function main() {
       logger.info('Graceful shutdown complete')
       process.exit(0)
     })
-    // Force exit if shutdown takes too long
+   
     setTimeout(() => process.exit(1), 10_000)
   }
 

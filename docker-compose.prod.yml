@@ -1,0 +1,32 @@
+name: fleet-server-prod
+
+services:
+  app:
+    build:
+      context: .
+      target: runner        # minimal production image
+    ports:
+      - "3000:3000"
+    env_file: .env.prod     # separate prod env — never commit this file
+    restart: always
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first  # zero-downtime rolling deploy
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

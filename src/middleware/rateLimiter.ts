@@ -8,10 +8,7 @@ const base = {
   message: { statusCode: 429, status: 'error', message: 'Too many requests, please try again later' },
 }
 
-/** General API rate limit — applied globally. */
 export const globalLimiter = rateLimit({ ...base, max: env.RATE_LIMIT_MAX })
-
-/** Tighter limit for auth endpoints to slow brute-force attacks. */
 export const authLimiter = rateLimit({ ...base, windowMs: 15 * 60_000, max: 20 })
 
 /**

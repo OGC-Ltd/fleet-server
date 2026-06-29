@@ -1,0 +1,78 @@
+name: fleet-server
+
+services:
+  app:
+    build:
+      context: .
+      target: builder       # use the builder stage for dev (includes devDeps + tsx)
+    command: npx tsx watch src/index.ts
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules   # prevent host node_modules from shadowing container's
+      - /app/generated      # same for generated prisma client
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://fleet:fleet@postgres:5432/fleet_dev?pgbouncer=false
+      DIRECT_URL: postgresql://fleet:fleet@postgres:5432/fleet_dev
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      CORS_ORIGIN: "*"
+      RATE_LIMIT_MAX: "1000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+  test:
+    build:
+      context: .
+      target: builder
+    command: npx vitest run
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/generated
+    environment:
+      NODE_ENV: test
+      # Test DB — isolated from dev data
+      DATABASE_URL: postgresql://fleet:fleet@postgres-test:5432/fleet_test?pgbouncer=false
+      DIRECT_URL: postgresql://fleet:fleet@postgres-test:5432/fleet_test
+      SUPABASE_URL: http://localhost
+      SUPABASE_ANON_KEY: test_anon_key_placeholder_32chars_xx
+      SUPABASE_JWT_SECRET: test_jwt_secret_placeholder_32chars_xxx
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    profiles: [test]
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fleet_dev
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: fleet
+    ports:
+      - "5433:5432"           # 5433 on host to avoid clashing with local Postgres
+    volumes:
+      - postgres_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleet -d fleet_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  postgres-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fleet_test
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: fleet
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleet -d fleet_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    profiles: [test]
+
+volumes:
+  postgres_dev:
