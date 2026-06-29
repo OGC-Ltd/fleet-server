@@ -110,6 +110,7 @@ export function makeTrip(overrides: Partial<Trip> = {}): Trip {
     finalFuelLevelMl: null,
     maxFuelLevelMl: null,
     minFuelLevelMl: null,
+    routeId: null,
     ...overrides,
   }
 }

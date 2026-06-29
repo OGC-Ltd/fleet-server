@@ -1,5 +1,9 @@
 # Live Vehicle Telemetry — Design Specification
 
+> **Revision note (2026-06-29):** Nine bottlenecks identified and resolved during schema implementation. See §12 for the full audit.
+
+
+
 ## 1. What We're Building
 
 A real-time vehicle intelligence layer on top of the existing fleet-server REST API. It covers:
@@ -462,6 +466,20 @@ model Vehicle {
 | Excel import | `exceljs` npm package | Handles `.xlsx` natively, streams large files |
 
 ---
+
+## 12. Bottleneck Audit & Fixes Applied
+
+| # | Bottleneck | Impact | Fix Applied in Schema |
+|---|---|---|---|
+| 1 | CUID PK on `VehicleTelemetry` | B-tree fragmentation at millions of rows/day — random CUID suffix scatters inserts across index pages | Changed to `BigInt @default(autoincrement())` — sequential inserts pack cleanly |
+| 2 | No deduplication on telemetry | Vendor platform retries on network failure silently create duplicate rows | Added `@@unique([deviceId, capturedAt])` — ingest is now idempotent |
+| 3 | `rawPayload Json?` inline on every ping | At 144k rows/day × 1-2 KB JSON ≈ 200 MB/day on the hot table; kills sequential scan cache efficiency | Split to `VehicleTelemetryRaw` — join only for debug/reprocessing |
+| 4 | `driverId` absent from `VehicleTelemetry` | Every telemetry read joins through `VehicleAssignment` with a point-in-time range predicate — expensive at scale | Denormalize `driverId` at ingest time (already resolved from active-assignment lookup) |
+| 5 | Geofence evaluation on the ingest hot path | 100 vehicles × 10 fences × 500 pings/min = 500k checks/min blocks the HTTP response | Marked mandatory-async in schema comments; `notifiedAt` on `GeofenceViolation` tracks async dispatch |
+| 6 | Redis pub/sub described as optional for SSE | Two Docker replicas with local SSE means half the clients miss events — must be day-one requirement | Called out as mandatory in architecture; `GeofenceViolation.notifiedAt` supports tracking |
+| 7 | No `IngestApiKey` model | Can't rotate keys, scope per org, audit per-key usage, or invalidate without redeploy | Added `IngestApiKey` with `keyHash` (SHA-256), `lastUsedAt`, `expiresAt`, `organisationId` |
+| 8 | `cargoType String?` free text | "bulk", "BULK", "Bulk flour" all valid → inconsistent analytics | Replaced with `CargoType` enum: BULK, PACKAGED, LIVESTOCK, HAZMAT, FUEL, MACHINERY, OTHER |
+| 9 | Missing `updatedAt`, audit fields, redundant index | `Route`/`Geofence` had no `updatedAt`; `VehicleGeofence` had no `assignedById`/`assignedAt`; `CargoManifest @@index([tripId])` redundant (implicit from `@unique`); `RouteWaypoint` had no cascade delete | All normalized: `updatedAt` added, audit columns added, redundant index removed, `onDelete: Cascade` added to waypoints and vehicle-geofence |
 
 ## 11. Vendor Integration Notes
 
