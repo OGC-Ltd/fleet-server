@@ -12,10 +12,7 @@ const schema = z.object({
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_JWT_SECRET: z.string().min(32),
 
-  // Controls whether to allow cross-origin requests from specific origins
   CORS_ORIGIN: z.string().default('*'),
-
-  // Rate limiter windows (ms) and max requests
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   INGEST_RATE_LIMIT_MAX: z.coerce.number().default(500),

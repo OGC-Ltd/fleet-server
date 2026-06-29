@@ -23,46 +23,38 @@ import { validateQuery } from './middleware/validate.js'
 export function createApp() {
   const app = express()
 
-  // ── Security & parsing ──────────────────────────────────────────────────────
   app.use(helmet())
   app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }))
   app.use(compression())
   app.use(express.json({ limit: '1mb' }))
   app.use(express.urlencoded({ extended: true }))
 
-  // ── Global rate limit ───────────────────────────────────────────────────────
   app.use(globalLimiter)
 
-  // ── Health check (unauthenticated) ──────────────────────────────────────────
   app.get('/health', (_req, res) => {
     res.json({ statusCode: 200, status: 'success', data: { uptime: process.uptime(), timestamp: new Date() } })
   })
 
-  // ── API v1 ──────────────────────────────────────────────────────────────────
+
   const v1 = '/api/v1'
 
   app.use(`${v1}/auth`, authRoutes)
   app.use(`${v1}/organisations`, orgRoutes)
-
-  // Global permission catalogue (authenticated, not org-scoped)
   app.get(`${v1}/permissions`, authenticate, validateQuery(listQuerySchema), roleCtrl.listPermissions)
 
-  // Org-scoped sub-resources (all use :orgId param)
+
   const orgBase = `${v1}/organisations/:orgId`
 
-  app.use(orgBase, userRoutes)
-  app.use(orgBase, roleRoutes)
+  app.use(`${orgBase}/users`, userRoutes)
+  app.use(`${orgBase}/roles`, roleRoutes)
   app.use(orgBase, vehicleRoutes)
   app.use(`${orgBase}/trips`, tripRoutes)
   app.use(`${orgBase}/fuel`, fuelRoutes)
   app.use(orgBase, reportRoutes)
 
-  // ── 404 handler ─────────────────────────────────────────────────────────────
   app.use((_req, res) => {
     sendError(res, 404, 'Route not found')
   })
-
-  // ── Global error handler (must be last) ─────────────────────────────────────
   app.use(errorHandler)
 
   return app
