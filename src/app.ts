@@ -16,6 +16,13 @@ import vehicleRoutes from './modules/vehicles/vehicle.routes.js'
 import tripRoutes from './modules/trips/trip.routes.js'
 import fuelRoutes from './modules/fuel/fuel.routes.js'
 import reportRoutes from './modules/reports/report.routes.js'
+import ingestRoutes from './modules/ingest/ingest.routes.js'
+import telemetryRoutes from './modules/telemetry/telemetry.routes.js'
+import routeRoutes from './modules/routes/route.routes.js'
+import geofenceRoutes from './modules/geofences/geofence.routes.js'
+import cargoRoutes from './modules/cargo/cargo.routes.js'
+import apiKeyRoutes from './modules/api-keys/api-key.routes.js'
+import analyticsRoutes from './modules/analytics/analytics.routes.js'
 import * as roleCtrl from './modules/roles/role.controller.js'
 import { listQuerySchema } from './modules/roles/role.schema.js'
 import { validateQuery } from './middleware/validate.js'
@@ -45,12 +52,20 @@ export function createApp() {
 
   const orgBase = `${v1}/organisations/:orgId`
 
+  app.use(`${v1}/ingest`, ingestRoutes)
+
   app.use(`${orgBase}/users`, userRoutes)
   app.use(`${orgBase}/roles`, roleRoutes)
   app.use(orgBase, vehicleRoutes)
+  app.use(orgBase, telemetryRoutes)
   app.use(`${orgBase}/trips`, tripRoutes)
+  app.use(`${orgBase}/trips`, cargoRoutes)
   app.use(`${orgBase}/fuel`, fuelRoutes)
   app.use(orgBase, reportRoutes)
+  app.use(`${orgBase}/routes`, routeRoutes)
+  app.use(`${orgBase}/geofences`, geofenceRoutes)
+  app.use(`${orgBase}/api-keys`, apiKeyRoutes)
+  app.use(`${orgBase}/analytics`, analyticsRoutes)
 
   app.use((_req, res) => {
     sendError(res, 404, 'Route not found')

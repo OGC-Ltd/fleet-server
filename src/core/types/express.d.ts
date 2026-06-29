@@ -11,6 +11,11 @@ declare global {
         fullName: string
         status: UserStatus
       }
+      /** Populated by ingestAuth middleware for device-to-server telemetry push. */
+      ingestOrg?: {
+        id: string
+        apiKeyId: string
+      }
     }
   }
 }

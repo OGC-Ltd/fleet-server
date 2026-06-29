@@ -18,8 +18,8 @@ enum UserStatus {
 }
 
 enum AssignmentType {
-  PRIMARY   // permanently assigned driver
-  RELIEF    // temporary / cover assignment
+  PRIMARY // permanently assigned driver
+  RELIEF  // temporary / cover assignment
 }
 
 enum PeriodType {
@@ -32,6 +32,29 @@ enum PeriodType {
 enum FuelEventType {
   FILLING
   THEFT
+}
+
+/// Shape of a geofence boundary.
+enum GeofenceType {
+  CIRCLE  // defined by centerLat + centerLng + radiusM
+  POLYGON // defined by polygonCoords (GeoJSON ring)
+}
+
+/// Controls whether the fence is an allowed zone or a forbidden zone.
+enum FenceMode {
+  ALLOWLIST // vehicle must stay INSIDE — alert on exit
+  BLOCKLIST // vehicle must stay OUTSIDE — alert on entry
+}
+
+/// Structured cargo classification — prevents free-text inconsistency.
+enum CargoType {
+  BULK
+  PACKAGED
+  LIVESTOCK
+  HAZMAT
+  FUEL
+  MACHINERY
+  OTHER
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +74,9 @@ model Organisation {
   vehicleGroups    VehicleGroup[]
   vehicles         Vehicle[]
   reportingPeriods ReportingPeriod[]
+  routes           Route[]
+  geofences        Geofence[]
+  ingestApiKeys    IngestApiKey[]
 
   @@map("organisation")
 }
@@ -121,13 +147,16 @@ model User {
   userRoles UserRole[]
 
   // Driver-specific relations (only relevant when user holds "driver" role)
-  vehicleAssignments   VehicleAssignment[] @relation("AssignedUser")
-  trips                Trip[]              @relation("TripDriver")
-  fuelThefts           FuelTheft[]         @relation("TheftDriver")
+  vehicleAssignments VehicleAssignment[] @relation("AssignedUser")
+  trips              Trip[]              @relation("TripDriver")
+  fuelThefts         FuelTheft[]         @relation("TheftDriver")
+  geofenceViolations GeofenceViolation[] @relation("ViolationDriver")
 
   // Audit — who assigned/unassigned
   assignmentsGranted   VehicleAssignment[] @relation("AssignedByUser")
   userRolesGranted     UserRole[]          @relation("UserRoleGrantedBy")
+  geofencesAssigned    VehicleGeofence[]   @relation("GeofenceAssignedBy")
+  ingestApiKeysCreated IngestApiKey[]      @relation("ApiKeyCreatedBy")
 
   @@index([organisationId])
   @@index([email])
@@ -155,6 +184,32 @@ model UserRole {
 }
 
 // ---------------------------------------------------------------------------
+// DEVICE AUTH — ingest API keys (separate from user JWT auth)
+// ---------------------------------------------------------------------------
+
+/// Scoped API key that authorises a GPS/FLS device (or vendor platform) to
+/// push telemetry to POST /api/v1/ingest/telemetry.
+/// Store only the SHA-256 hash — never the raw key.
+model IngestApiKey {
+  id             String    @id @default(cuid())
+  organisationId String    @map("organisation_id")
+  label          String                           // human name e.g. "Controltech Webhook"
+  keyHash        String    @unique @map("key_hash") // SHA-256(rawKey) — raw key shown once at creation
+  isActive       Boolean   @default(true) @map("is_active")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  expiresAt      DateTime? @map("expires_at")    // NULL = no expiry
+  lastUsedAt     DateTime? @map("last_used_at")  // updated on every successful ingest
+  createdById    String?   @map("created_by")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  createdBy    User?        @relation("ApiKeyCreatedBy", fields: [createdById], references: [id])
+
+  @@index([organisationId])
+  @@index([keyHash])       // primary lookup on every ingest request
+  @@map("ingest_api_key")
+}
+
+// ---------------------------------------------------------------------------
 // FLEET — master data
 // ---------------------------------------------------------------------------
 
@@ -177,31 +232,36 @@ model VehicleGroup {
 
 /// A physical vehicle tracked by a GPS/FLS device.
 model Vehicle {
-  id                   String   @id @default(cuid())
-  organisationId       String   @map("organisation_id")
-  vehicleGroupId       String   @map("vehicle_group_id")
-  name                 String
-  registrationPlate    String   @unique @map("registration_plate")
-  deviceId             String   @unique @map("device_id") // GPS/FLS hardware identifier — ingest key
-  vehicleType          String   @map("vehicle_type")      // BUS, AMBULANCE, TRACTOR, WINCH, etc.
-  fuelEfficiencyKmpl   Float?   @map("fuel_efficiency_kmpl")
-  tankCapacityLitres   Float?   @map("tank_capacity_litres")
-  createdAt            DateTime @default(now()) @map("created_at")
-  updatedAt            DateTime @updatedAt @map("updated_at")
+  id                 String   @id @default(cuid())
+  organisationId     String   @map("organisation_id")
+  vehicleGroupId     String   @map("vehicle_group_id")
+  name               String
+  registrationPlate  String   @unique @map("registration_plate")
+  deviceId           String   @unique @map("device_id") // GPS/FLS hardware identifier — ingest key
+  vehicleType        String   @map("vehicle_type")      // BUS, AMBULANCE, TRACTOR, WINCH, etc.
+  fuelEfficiencyKmpl Float?   @map("fuel_efficiency_kmpl")
+  tankCapacityLitres Float?   @map("tank_capacity_litres")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
 
-  organisation  Organisation @relation(fields: [organisationId], references: [id])
-  vehicleGroup  VehicleGroup @relation(fields: [vehicleGroupId], references: [id])
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  vehicleGroup VehicleGroup @relation(fields: [vehicleGroupId], references: [id])
 
-  assignments          VehicleAssignment[]
-  trips                Trip[]
-  engineHourSessions   EngineHourSession[]
-  fuelFillings         FuelFilling[]
-  fuelThefts           FuelTheft[]
-  periodSummaries      VehiclePeriodSummary[]
+  assignments        VehicleAssignment[]
+  trips              Trip[]
+  engineHourSessions EngineHourSession[]
+  fuelFillings       FuelFilling[]
+  fuelThefts         FuelTheft[]
+  periodSummaries    VehiclePeriodSummary[]
+
+  // Live telemetry relations
+  telemetry          VehicleTelemetry[]
+  geofences          VehicleGeofence[]
+  geofenceViolations GeofenceViolation[]
 
   @@index([organisationId])
   @@index([vehicleGroupId])
-  @@index([deviceId])   // critical — raw telemetry arrives keyed to deviceId
+  @@index([deviceId]) // critical — raw telemetry arrives keyed to deviceId
   @@map("vehicle")
 }
 
@@ -222,9 +282,9 @@ model VehicleAssignment {
   user       User    @relation("AssignedUser", fields: [userId], references: [id])
   assignedBy User?   @relation("AssignedByUser", fields: [assignedById], references: [id])
 
-  @@index([vehicleId, unassignedAt])   // "who is assigned to this vehicle right now?"
-  @@index([userId, unassignedAt])      // "which vehicle is this driver assigned to?"
-  @@index([vehicleId, assignedAt])     // time-range lookups for incident investigation
+  @@index([vehicleId, unassignedAt]) // "who is assigned to this vehicle right now?"
+  @@index([userId, unassignedAt])    // "which vehicle is this driver assigned to?"
+  @@index([vehicleId, assignedAt])   // time-range lookups for incident investigation
   @@map("vehicle_assignment")
 }
 
@@ -254,6 +314,125 @@ model ReportingPeriod {
 }
 
 // ---------------------------------------------------------------------------
+// ROUTES — named origin-destination paths with ordered waypoints
+// ---------------------------------------------------------------------------
+
+/// A pre-defined route between two named locations, optionally with intermediate waypoints.
+/// Trips are linked to a route at dispatch time; ad-hoc trips leave routeId NULL.
+model Route {
+  id              String   @id @default(cuid())
+  organisationId  String   @map("organisation_id")
+  name            String                           // "Garissa Depot → Nairobi CBD Warehouse"
+  originName      String   @map("origin_name")
+  originLat       Float    @map("origin_lat")
+  originLng       Float    @map("origin_lng")
+  destinationName String   @map("destination_name")
+  destinationLat  Float    @map("destination_lat")
+  destinationLng  Float    @map("destination_lng")
+  distanceKm      Float?   @map("distance_km")    // expected / approved distance
+  isActive        Boolean  @default(true) @map("is_active") // retire without deleting
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  organisation Organisation   @relation(fields: [organisationId], references: [id])
+  waypoints    RouteWaypoint[]
+  trips        Trip[]
+
+  @@index([organisationId])
+  @@index([organisationId, isActive]) // list active routes for an org
+  @@map("route")
+}
+
+/// Ordered checkpoint along a Route. Arrival is confirmed when a telemetry ping
+/// falls within radiusM of the waypoint's coordinates.
+model RouteWaypoint {
+  id       String  @id @default(cuid())
+  routeId  String  @map("route_id")
+  sequence Int                      // 1-based ordering along the route
+  name     String?                  // e.g. "Thika Bypass Interchange"
+  lat      Float
+  lng      Float
+  radiusM  Int     @default(200) @map("radius_m") // arrival tolerance in metres
+
+  route Route @relation(fields: [routeId], references: [id], onDelete: Cascade)
+
+  @@unique([routeId, sequence])       // enforce ordering uniqueness
+  @@index([routeId, sequence])
+  @@map("route_waypoint")
+}
+
+// ---------------------------------------------------------------------------
+// GEOFENCING — spatial boundaries with violation tracking
+// ---------------------------------------------------------------------------
+
+/// A named spatial boundary applied to one or more vehicles.
+model Geofence {
+  id             String     @id @default(cuid())
+  organisationId String     @map("organisation_id")
+  name           String                          // "Nairobi CBD Delivery Zone"
+  type           GeofenceType                    // CIRCLE | POLYGON
+  mode           FenceMode  @default(ALLOWLIST) @map("mode") // ALLOWLIST | BLOCKLIST
+  // Circle geometry
+  centerLat      Float?     @map("center_lat")
+  centerLng      Float?     @map("center_lng")
+  radiusM        Int?       @map("radius_m")
+  // Polygon geometry — GeoJSON LinearRing [[lng,lat],...] stored as Json
+  polygonCoords  Json?      @map("polygon_coords")
+  isActive       Boolean    @default(true) @map("is_active")
+  createdAt      DateTime   @default(now()) @map("created_at")
+  updatedAt      DateTime   @updatedAt @map("updated_at")
+
+  organisation Organisation      @relation(fields: [organisationId], references: [id])
+  vehicles     VehicleGeofence[]
+  violations   GeofenceViolation[]
+
+  @@index([organisationId])
+  @@index([organisationId, isActive])
+  @@map("geofence")
+}
+
+/// Join table scoping a Geofence to a specific Vehicle, with audit trail.
+model VehicleGeofence {
+  vehicleId   String   @map("vehicle_id")
+  geofenceId  String   @map("geofence_id")
+  assignedAt  DateTime @default(now()) @map("assigned_at")
+  assignedById String? @map("assigned_by")
+
+  vehicle    Vehicle  @relation(fields: [vehicleId], references: [id])
+  geofence   Geofence @relation(fields: [geofenceId], references: [id], onDelete: Cascade)
+  assignedBy User?    @relation("GeofenceAssignedBy", fields: [assignedById], references: [id])
+
+  @@id([vehicleId, geofenceId])
+  @@index([geofenceId])
+  @@map("vehicle_geofence")
+}
+
+/// Recorded instance of a vehicle crossing a geofence boundary unexpectedly.
+/// Written asynchronously by the geofence-evaluation BullMQ worker — never on the ingest hot path.
+model GeofenceViolation {
+  id         String    @id @default(cuid())
+  vehicleId  String    @map("vehicle_id")
+  geofenceId String    @map("geofence_id")
+  driverId   String?   @map("driver_id")
+  occurredAt DateTime  @map("occurred_at")  // timestamp from the triggering telemetry ping
+  resolvedAt DateTime? @map("resolved_at")  // when the vehicle returned / dispatcher acknowledged
+  lat        Float
+  lng        Float
+  speedKmh   Float?    @map("speed_kmh")
+  notifiedAt DateTime? @map("notified_at")  // when SSE / SMS alert was dispatched
+
+  vehicle  Vehicle  @relation(fields: [vehicleId], references: [id])
+  geofence Geofence @relation(fields: [geofenceId], references: [id])
+  driver   User?    @relation("ViolationDriver", fields: [driverId], references: [id])
+
+  @@index([vehicleId, occurredAt])
+  @@index([geofenceId, occurredAt])
+  @@index([driverId, occurredAt])   // driver-centric violation reports
+  @@index([occurredAt])             // org-wide violation timeline
+  @@map("geofence_violation")
+}
+
+// ---------------------------------------------------------------------------
 // EVENTS — high-volume transactional tables (partition by began_at in Postgres)
 // ---------------------------------------------------------------------------
 
@@ -261,8 +440,9 @@ model ReportingPeriod {
 model Trip {
   id                      String    @id @default(cuid())
   vehicleId               String    @map("vehicle_id")
-  driverId                String?   @map("driver_id")     // nullable — may be unassigned
+  driverId                String?   @map("driver_id")          // nullable — may be unassigned
   reportingPeriodId       String    @map("reporting_period_id")
+  routeId                 String?   @map("route_id")           // NULL = ad-hoc / unplanned trip
   beganAt                 DateTime  @map("began_at")
   endedAt                 DateTime  @map("ended_at")
   initialLocation         String?   @map("initial_location")
@@ -287,45 +467,48 @@ model Trip {
   vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
   driver          User?           @relation("TripDriver", fields: [driverId], references: [id])
   reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
+  route           Route?          @relation(fields: [routeId], references: [id])
+  cargoManifest   CargoManifest?
 
   @@index([vehicleId, beganAt])
   @@index([driverId, beganAt])
   @@index([reportingPeriodId])
-  @@index([beganAt])             // partition key for future Postgres range partitioning
+  @@index([routeId])
+  @@index([beganAt]) // partition key for future Postgres range partitioning
   @@map("trip")
 }
 
 /// Engine-on session: captures idle vs in-motion time, useful for machinery without trips.
 model EngineHourSession {
-  id                       String   @id @default(cuid())
-  vehicleId                String   @map("vehicle_id")
-  reportingPeriodId        String   @map("reporting_period_id")
-  beganAt                  DateTime @map("began_at")
-  endedAt                  DateTime @map("ended_at")
-  initialLocation          String?  @map("initial_location")
-  finalLocation            String?  @map("final_location")
-  engineHoursSeconds       Int      @map("engine_hours_seconds")
-  initialEngineHoursSeconds Int?    @map("initial_engine_hours_seconds")
-  finalEngineHoursSeconds  Int?     @map("final_engine_hours_seconds")
-  totalTimeSeconds         Int      @map("total_time_seconds")
-  offTimeSeconds           Int?     @map("off_time_seconds")
-  inMotionSeconds          Int?     @map("in_motion_seconds")
-  idlingSeconds            Int?     @map("idling_seconds")
-  mileageKm                Float?   @map("mileage_km")
-  avgSpeedKmh              Float?   @map("avg_speed_kmh")
-  maxSpeedKmh              Float?   @map("max_speed_kmh")
-  consumedMl               Int?     @map("consumed_ml")
-  consumedByFlsMl          Int?     @map("consumed_by_fls_ml")
-  consumedFlsMotionMl      Int?     @map("consumed_fls_motion_ml")
-  consumedFlsIdleMl        Int?     @map("consumed_fls_idle_ml")
-  avgConsumptionByFls      Float?   @map("avg_consumption_by_fls")
-  avgConsumptionFlsMotion  Float?   @map("avg_consumption_fls_motion")
-  avgConsumptionFlsIdle    Float?   @map("avg_consumption_fls_idle")
-  avgConsumptionFlsTrips   Float?   @map("avg_consumption_fls_trips")
-  initialFuelLevelMl       Int?     @map("initial_fuel_level_ml")
-  finalFuelLevelMl         Int?     @map("final_fuel_level_ml")
-  maxFuelLevelMl           Int?     @map("max_fuel_level_ml")
-  minFuelLevelMl           Int?     @map("min_fuel_level_ml")
+  id                        String   @id @default(cuid())
+  vehicleId                 String   @map("vehicle_id")
+  reportingPeriodId         String   @map("reporting_period_id")
+  beganAt                   DateTime @map("began_at")
+  endedAt                   DateTime @map("ended_at")
+  initialLocation           String?  @map("initial_location")
+  finalLocation             String?  @map("final_location")
+  engineHoursSeconds        Int      @map("engine_hours_seconds")
+  initialEngineHoursSeconds Int?     @map("initial_engine_hours_seconds")
+  finalEngineHoursSeconds   Int?     @map("final_engine_hours_seconds")
+  totalTimeSeconds          Int      @map("total_time_seconds")
+  offTimeSeconds            Int?     @map("off_time_seconds")
+  inMotionSeconds           Int?     @map("in_motion_seconds")
+  idlingSeconds             Int?     @map("idling_seconds")
+  mileageKm                 Float?   @map("mileage_km")
+  avgSpeedKmh               Float?   @map("avg_speed_kmh")
+  maxSpeedKmh               Float?   @map("max_speed_kmh")
+  consumedMl                Int?     @map("consumed_ml")
+  consumedByFlsMl           Int?     @map("consumed_by_fls_ml")
+  consumedFlsMotionMl       Int?     @map("consumed_fls_motion_ml")
+  consumedFlsIdleMl         Int?     @map("consumed_fls_idle_ml")
+  avgConsumptionByFls       Float?   @map("avg_consumption_by_fls")
+  avgConsumptionFlsMotion   Float?   @map("avg_consumption_fls_motion")
+  avgConsumptionFlsIdle     Float?   @map("avg_consumption_fls_idle")
+  avgConsumptionFlsTrips    Float?   @map("avg_consumption_fls_trips")
+  initialFuelLevelMl        Int?     @map("initial_fuel_level_ml")
+  finalFuelLevelMl          Int?     @map("final_fuel_level_ml")
+  maxFuelLevelMl            Int?     @map("max_fuel_level_ml")
+  minFuelLevelMl            Int?     @map("min_fuel_level_ml")
 
   vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
   reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
@@ -361,7 +544,7 @@ model FuelFilling {
 model FuelTheft {
   id                 String   @id @default(cuid())
   vehicleId          String   @map("vehicle_id")
-  driverId           String?  @map("driver_id")     // nullable — vehicle may be unattended
+  driverId           String?  @map("driver_id")          // nullable — vehicle may be unattended
   reportingPeriodId  String   @map("reporting_period_id")
   beganAt            DateTime @map("began_at")
   detectedAt         DateTime @map("detected_at")
@@ -383,29 +566,117 @@ model FuelTheft {
 }
 
 // ---------------------------------------------------------------------------
+// LIVE TELEMETRY — high-frequency device pings
+// ---------------------------------------------------------------------------
+
+/// One positional/state snapshot pushed by the GPS/FLS device.
+///
+/// Performance design decisions:
+///   • BigInt autoincrement PK — sequential inserts pack the B-tree efficiently;
+///     CUID would scatter and fragment the index at millions of rows/day.
+///   • @@unique([deviceId, capturedAt]) — idempotent ingest; vendor platform
+///     retries never create duplicate rows.
+///   • driverId denormalised — avoids a point-in-time join through VehicleAssignment
+///     on every telemetry read. Resolved once at ingest time.
+///   • rawPayload NOT stored here — moved to VehicleTelemetryRaw (separate table)
+///     to keep this hot table narrow and cache-friendly.
+///   • Geofence evaluation is NEVER run on this insert path; it is enqueued as a
+///     BullMQ job and processed asynchronously by the geofence worker.
+model VehicleTelemetry {
+  id         BigInt   @id @default(autoincrement())
+  vehicleId  String   @map("vehicle_id")
+  deviceId   String   @map("device_id")   // denormalised — no join needed on ingest
+  driverId   String?  @map("driver_id")   // denormalised — active driver at ping time
+  capturedAt DateTime @map("captured_at") // device timestamp (NOT server receipt time)
+  receivedAt DateTime @default(now()) @map("received_at")
+
+  // Position
+  lat        Float?
+  lng        Float?
+  altitudeM  Float?  @map("altitude_m")
+  headingDeg Float?  @map("heading_deg")  // 0-360 compass bearing
+  accuracyM  Float?  @map("accuracy_m")   // GPS horizontal accuracy in metres
+
+  // Motion & engine
+  speedKmh   Float?  @map("speed_kmh")    // instantaneous GPS speed
+  engineOn   Boolean @default(false) @map("engine_on") // digital I/O pin state
+
+  // Fuel (FLS sensor reading)
+  fuelLevelMl Int?   @map("fuel_level_ml") // calibrated tank level in millilitres
+  fuelUsedMl  Int?   @map("fuel_used_ml")  // delta vs. previous ping (negative = impossible → flag)
+
+  // Cargo weight (load-cell sensor — NULL if vehicle not fitted)
+  cargoWeightKg Float? @map("cargo_weight_kg")
+
+  vehicle Vehicle  @relation(fields: [vehicleId], references: [id])
+
+  @@unique([deviceId, capturedAt])    // idempotent ingest
+  @@index([vehicleId, capturedAt])    // timeline + latest-ping (B-tree serves ASC and DESC)
+  @@index([capturedAt])               // partition key — range queries across all vehicles
+  @@map("vehicle_telemetry")
+}
+
+/// Raw vendor payload stored separately so VehicleTelemetry stays narrow.
+/// Only join this table for debugging, reprocessing, or vendor audit.
+/// Linked 1-to-1 via the same BigInt id as VehicleTelemetry.
+model VehicleTelemetryRaw {
+  telemetryId BigInt @id @map("telemetry_id") // FK = VehicleTelemetry.id (no Prisma relation — avoid eager load)
+  payload     Json                            // original vendor JSON/parsed binary packet
+
+  @@map("vehicle_telemetry_raw")
+}
+
+// ---------------------------------------------------------------------------
+// CARGO — manifest attached to a trip
+// ---------------------------------------------------------------------------
+
+/// Cargo declaration and load-sensor readings for a single trip.
+/// declaredWeightKg comes from the waybill (manual entry at dispatch).
+/// departureWeightKg / arrivalWeightKg come from load-cell sensor readings
+/// pushed in VehicleTelemetry.cargoWeightKg at trip start and end.
+model CargoManifest {
+  id                 String    @id @default(cuid())
+  tripId             String    @unique @map("trip_id") // one manifest per trip
+  description        String?                           // free-text e.g. "Maize flour 50 kg bags"
+  cargoType          CargoType? @map("cargo_type")     // enum — prevents "bulk" vs "BULK" drift
+  declaredWeightKg   Float?    @map("declared_weight_kg")  // from waybill
+  departureWeightKg  Float?    @map("departure_weight_kg") // sensor reading at trip start
+  arrivalWeightKg    Float?    @map("arrival_weight_kg")   // sensor reading at trip end
+  weightVarianceKg   Float?    @map("weight_variance_kg")  // computed: departure - arrival
+  notes              String?
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  trip Trip @relation(fields: [tripId], references: [id])
+
+  // No explicit @@index([tripId]) — @unique already creates an implicit B-tree index
+  @@map("cargo_manifest")
+}
+
+// ---------------------------------------------------------------------------
 // SUMMARY — materialised roll-up (refresh periodically, not source of truth)
 // ---------------------------------------------------------------------------
 
 /// Pre-aggregated KPIs per vehicle per reporting period.
 /// Powers dashboards without scanning all event tables.
 model VehiclePeriodSummary {
-  id                      String   @id @default(cuid())
-  vehicleId               String   @map("vehicle_id")
-  reportingPeriodId       String   @map("reporting_period_id")
-  mileageInTripsKm        Float?   @map("mileage_in_trips_km")
-  mileageAllMessagesKm    Float?   @map("mileage_all_messages_km")
-  avgSpeedKmh             Float?   @map("avg_speed_kmh")
-  maxSpeedKmh             Float?   @map("max_speed_kmh")
-  timeInTripsSeconds      Int?     @map("time_in_trips_seconds")
-  engineHoursSeconds      Int?     @map("engine_hours_seconds")
-  consumedByFlsMl         Int?     @map("consumed_by_fls_ml")
-  avgConsumptionByFls     Float?   @map("avg_consumption_by_fls")
-  avgMileagePerUnitFls    Float?   @map("avg_mileage_per_unit_fls")
-  initialFuelLevelMl      Int?     @map("initial_fuel_level_ml")
-  finalFuelLevelMl        Int?     @map("final_fuel_level_ml")
-  totalFilledMl           Int?     @map("total_filled_ml")
-  totalStolenMl           Int?     @map("total_stolen_ml")
-  refreshedAt             DateTime @default(now()) @map("refreshed_at")
+  id                   String   @id @default(cuid())
+  vehicleId            String   @map("vehicle_id")
+  reportingPeriodId    String   @map("reporting_period_id")
+  mileageInTripsKm     Float?   @map("mileage_in_trips_km")
+  mileageAllMessagesKm Float?   @map("mileage_all_messages_km")
+  avgSpeedKmh          Float?   @map("avg_speed_kmh")
+  maxSpeedKmh          Float?   @map("max_speed_kmh")
+  timeInTripsSeconds   Int?     @map("time_in_trips_seconds")
+  engineHoursSeconds   Int?     @map("engine_hours_seconds")
+  consumedByFlsMl      Int?     @map("consumed_by_fls_ml")
+  avgConsumptionByFls  Float?   @map("avg_consumption_by_fls")
+  avgMileagePerUnitFls Float?   @map("avg_mileage_per_unit_fls")
+  initialFuelLevelMl   Int?     @map("initial_fuel_level_ml")
+  finalFuelLevelMl     Int?     @map("final_fuel_level_ml")
+  totalFilledMl        Int?     @map("total_filled_ml")
+  totalStolenMl        Int?     @map("total_stolen_ml")
+  refreshedAt          DateTime @default(now()) @map("refreshed_at")
 
   vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
   reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
