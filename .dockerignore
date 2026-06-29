@@ -1,0 +1,12 @@
+node_modules
+dist
+coverage
+generated
+.env
+.env.*
+!.env.example
+*.log
+.git
+.gitignore
+**/*.test.ts
+tests/
