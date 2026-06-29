@@ -30,6 +30,11 @@ import { validateQuery } from './middleware/validate.js'
 export function createApp() {
   const app = express()
 
+  // BigInt values (VehicleTelemetry.id) are not JSON-serializable by default
+  app.set('json replacer', (_key: string, value: unknown) =>
+    typeof value === 'bigint' ? value.toString() : value,
+  )
+
   app.use(helmet())
   app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }))
   app.use(compression())
