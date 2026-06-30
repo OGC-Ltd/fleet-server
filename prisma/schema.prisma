@@ -69,16 +69,17 @@ model Organisation {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  roles            Role[]
-  users            User[]
-  vehicleGroups    VehicleGroup[]
-  vehicles         Vehicle[]
-  reportingPeriods ReportingPeriod[]
-  routes           Route[]
-  geofences        Geofence[]
-  ingestApiKeys    IngestApiKey[]
+  roles             Role[]
+  users             User[]
+  vehicleGroups     VehicleGroup[]
+  vehicles          Vehicle[]
+  reportingPeriods  ReportingPeriod[]
+  routes            Route[]
+  geofences         Geofence[]
+  ingestApiKeys     IngestApiKey[]
+  pushSubscriptions PushSubscription[]
 
-  @@map("organisation")
+  @@map("organisations")
 }
 
 /// Named role scoped to an organisation (e.g. "fleet_manager", "driver", "mechanic").
@@ -97,7 +98,7 @@ model Role {
 
   @@unique([organisationId, slug])
   @@index([organisationId])
-  @@map("role")
+  @@map("roles")
 }
 
 /// Atomic capability — resource + action (e.g. vehicle:read, trip:create).
@@ -111,7 +112,7 @@ model Permission {
   roles RolePermission[]
 
   @@unique([resource, action])
-  @@map("permission")
+  @@map("permissions")
 }
 
 /// Many-to-many join: which permissions belong to which role.
@@ -123,7 +124,7 @@ model RolePermission {
   permission Permission @relation(fields: [permissionId], references: [id])
 
   @@id([roleId, permissionId])
-  @@map("role_permission")
+  @@map("role_permissions")
 }
 
 /// A person who can log in to the system and/or be assigned to a vehicle.
@@ -158,10 +159,13 @@ model User {
   geofencesAssigned    VehicleGeofence[]   @relation("GeofenceAssignedBy")
   ingestApiKeysCreated IngestApiKey[]      @relation("ApiKeyCreatedBy")
 
+  // Notifications
+  pushSubscriptions PushSubscription[]
+
   @@index([organisationId])
   @@index([email])
   @@index([organisationId, status])
-  @@map("user")
+  @@map("users")
 }
 
 /// Audit-tracked role grant. Soft-revoked via revokedAt rather than hard-deleted.
@@ -180,7 +184,7 @@ model UserRole {
   @@index([userId])
   @@index([roleId])
   @@index([userId, revokedAt]) // fast "active roles for user" query
-  @@map("user_role")
+  @@map("user_roles")
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +210,7 @@ model IngestApiKey {
 
   @@index([organisationId])
   @@index([keyHash])       // primary lookup on every ingest request
-  @@map("ingest_api_key")
+  @@map("ingest_api_keys")
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +231,7 @@ model VehicleGroup {
 
   @@unique([organisationId, code])
   @@index([organisationId])
-  @@map("vehicle_group")
+  @@map("vehicle_groups")
 }
 
 /// A physical vehicle tracked by a GPS/FLS device.
@@ -262,7 +266,7 @@ model Vehicle {
   @@index([organisationId])
   @@index([vehicleGroupId])
   @@index([deviceId]) // critical — raw telemetry arrives keyed to deviceId
-  @@map("vehicle")
+  @@map("vehicles")
 }
 
 /// Time-bounded record of which user (driver) is assigned to which vehicle.
@@ -285,7 +289,7 @@ model VehicleAssignment {
   @@index([vehicleId, unassignedAt]) // "who is assigned to this vehicle right now?"
   @@index([userId, unassignedAt])    // "which vehicle is this driver assigned to?"
   @@index([vehicleId, assignedAt])   // time-range lookups for incident investigation
-  @@map("vehicle_assignment")
+  @@map("vehicle_assignments")
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +314,7 @@ model ReportingPeriod {
   periodSummaries VehiclePeriodSummary[]
 
   @@index([organisationId, periodStart])
-  @@map("reporting_period")
+  @@map("reporting_periods")
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +344,7 @@ model Route {
 
   @@index([organisationId])
   @@index([organisationId, isActive]) // list active routes for an org
-  @@map("route")
+  @@map("routes")
 }
 
 /// Ordered checkpoint along a Route. Arrival is confirmed when a telemetry ping
@@ -358,7 +362,7 @@ model RouteWaypoint {
 
   @@unique([routeId, sequence])       // enforce ordering uniqueness
   @@index([routeId, sequence])
-  @@map("route_waypoint")
+  @@map("route_waypoints")
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +392,7 @@ model Geofence {
 
   @@index([organisationId])
   @@index([organisationId, isActive])
-  @@map("geofence")
+  @@map("geofences")
 }
 
 /// Join table scoping a Geofence to a specific Vehicle, with audit trail.
@@ -404,7 +408,7 @@ model VehicleGeofence {
 
   @@id([vehicleId, geofenceId])
   @@index([geofenceId])
-  @@map("vehicle_geofence")
+  @@map("vehicle_geofences")
 }
 
 /// Recorded instance of a vehicle crossing a geofence boundary unexpectedly.
@@ -429,7 +433,7 @@ model GeofenceViolation {
   @@index([geofenceId, occurredAt])
   @@index([driverId, occurredAt])   // driver-centric violation reports
   @@index([occurredAt])             // org-wide violation timeline
-  @@map("geofence_violation")
+  @@map("geofence_violations")
 }
 
 // ---------------------------------------------------------------------------
@@ -475,7 +479,7 @@ model Trip {
   @@index([reportingPeriodId])
   @@index([routeId])
   @@index([beganAt]) // partition key for future Postgres range partitioning
-  @@map("trip")
+  @@map("trips")
 }
 
 /// Engine-on session: captures idle vs in-motion time, useful for machinery without trips.
@@ -516,7 +520,7 @@ model EngineHourSession {
   @@index([vehicleId, beganAt])
   @@index([reportingPeriodId])
   @@index([beganAt])
-  @@map("engine_hour_session")
+  @@map("engine_hour_sessions")
 }
 
 /// A single refuelling event.
@@ -537,7 +541,7 @@ model FuelFilling {
   @@index([vehicleId, filledAt])
   @@index([reportingPeriodId])
   @@index([filledAt])
-  @@map("fuel_filling")
+  @@map("fuel_fillings")
 }
 
 /// A detected anomalous fuel-level drop (suspected theft or siphoning).
@@ -562,7 +566,7 @@ model FuelTheft {
   @@index([vehicleId, beganAt])
   @@index([reportingPeriodId])
   @@index([beganAt])
-  @@map("fuel_theft")
+  @@map("fuel_thefts")
 }
 
 // ---------------------------------------------------------------------------
@@ -613,7 +617,7 @@ model VehicleTelemetry {
   @@unique([deviceId, capturedAt])    // idempotent ingest
   @@index([vehicleId, capturedAt])    // timeline + latest-ping (B-tree serves ASC and DESC)
   @@index([capturedAt])               // partition key — range queries across all vehicles
-  @@map("vehicle_telemetry")
+  @@map("vehicle_telemetries")
 }
 
 /// Raw vendor payload stored separately so VehicleTelemetry stays narrow.
@@ -623,7 +627,7 @@ model VehicleTelemetryRaw {
   telemetryId BigInt @id @map("telemetry_id") // FK = VehicleTelemetry.id (no Prisma relation — avoid eager load)
   payload     Json                            // original vendor JSON/parsed binary packet
 
-  @@map("vehicle_telemetry_raw")
+  @@map("vehicle_telemetry_raws")
 }
 
 // ---------------------------------------------------------------------------
@@ -650,7 +654,32 @@ model CargoManifest {
   trip Trip @relation(fields: [tripId], references: [id])
 
   // No explicit @@index([tripId]) — @unique already creates an implicit B-tree index
-  @@map("cargo_manifest")
+  @@map("cargo_manifests")
+}
+
+// ---------------------------------------------------------------------------
+// NOTIFICATIONS — Web Push subscriptions
+// ---------------------------------------------------------------------------
+
+/// Browser Web Push subscription registered by a dashboard user.
+/// Keyed by endpoint (unique per browser × origin). Stale subscriptions
+/// (HTTP 410/404 from the push service) are automatically cleaned up.
+model PushSubscription {
+  id             String    @id @default(cuid())
+  organisationId String?   @map("organisation_id")
+  userId         String?   @map("user_id")
+  endpoint       String    @unique        // push service URL — the natural key
+  p256dh         String    @map("p256dh") // ECDH public key (base64url)
+  auth           String                   // HMAC auth secret (base64url)
+  userAgent      String?   @map("user_agent")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  organisation Organisation? @relation(fields: [organisationId], references: [id])
+  user         User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([organisationId])
+  @@index([userId])
+  @@map("push_subscriptions")
 }
 
 // ---------------------------------------------------------------------------
@@ -683,5 +712,5 @@ model VehiclePeriodSummary {
 
   @@unique([vehicleId, reportingPeriodId])
   @@index([reportingPeriodId])
-  @@map("vehicle_period_summary")
+  @@map("vehicle_period_summaries")
 }

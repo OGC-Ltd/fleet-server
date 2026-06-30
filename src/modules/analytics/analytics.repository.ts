@@ -1,4 +1,4 @@
-import { prisma } from '../../lib/prisma.js'
+﻿import { prisma } from '../../lib/prisma.js'
 import type { AnalyticsRange, SpeedingQuery } from './analytics.schema.js'
 
 export async function fleetOverview(orgId: string) {
@@ -41,13 +41,13 @@ export async function fuelEfficiency(orgId: string, q: AnalyticsRange) {
   const vehicleIds = rows.map(r => r.vehicleId)
   const vehicles = await prisma.vehicle.findMany({
     where:  { id: { in: vehicleIds } },
-    select: { id: true, plateNumber: true },
+    select: { id: true, registrationPlate: true },
   })
-  const vehicleMap = new Map(vehicles.map(v => [v.id, v.plateNumber]))
+  const vehicleMap = new Map(vehicles.map(v => [v.id, v.registrationPlate]))
 
   return rows.map(r => ({
     vehicleId:   r.vehicleId,
-    plateNumber: vehicleMap.get(r.vehicleId) ?? null,
+    registrationPlate: vehicleMap.get(r.vehicleId) ?? null,
     totalFuelMl: r._sum.fuelUsedMl ?? 0,
     pingCount:   r._count.id,
   }))
@@ -74,13 +74,13 @@ export async function speedingEvents(orgId: string, q: SpeedingQuery) {
   const vehicleIds = [...new Set(pings.map(p => p.vehicleId))]
   const vehicles = await prisma.vehicle.findMany({
     where:  { id: { in: vehicleIds } },
-    select: { id: true, plateNumber: true },
+    select: { id: true, registrationPlate: true },
   })
-  const vehicleMap = new Map(vehicles.map(v => [v.id, v.plateNumber]))
+  const vehicleMap = new Map(vehicles.map(v => [v.id, v.registrationPlate]))
 
   return pings.map(ping => ({
     vehicleId:   ping.vehicleId,
-    plateNumber: vehicleMap.get(ping.vehicleId) ?? null,
+    registrationPlate: vehicleMap.get(ping.vehicleId) ?? null,
     capturedAt:  ping.capturedAt,
     speedKmh:    ping.speedKmh,
     lat:         ping.lat,
@@ -99,3 +99,4 @@ export async function violationHeatmap(orgId: string, q: AnalyticsRange) {
     take:    1000,
   })
 }
+
