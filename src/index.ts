@@ -2,6 +2,9 @@ import { env } from './config/env.js'
 import { createApp } from './app.js'
 import { connectDB, disconnectDB } from './lib/prisma.js'
 import { logger } from './lib/logger.js'
+import { startPoller } from './lib/poller.js'
+import { startTelemetryWorker }     from './lib/workers/telemetry.worker.js'
+import { startNotificationWorker }  from './lib/workers/notification.worker.js'
 
 async function main() {
   await connectDB()
@@ -12,14 +15,22 @@ async function main() {
     logger.info({ port: env.PORT, env: env.NODE_ENV }, 'Fleet Server started')
   })
 
+  // Start event-bus workers before the poller so no events are missed
+  const stopTelemetryWorker    = startTelemetryWorker()
+  const stopNotificationWorker = startNotificationWorker()
+  const poller                 = startPoller()
+
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received')
+    poller.stop()
+    stopTelemetryWorker()
+    stopNotificationWorker()
     server.close(async () => {
       await disconnectDB()
       logger.info('Graceful shutdown complete')
       process.exit(0)
     })
-   
+
     setTimeout(() => process.exit(1), 10_000)
   }
 
