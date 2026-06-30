@@ -1,4 +1,4 @@
-﻿import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll } from 'vitest'
 import request from 'supertest'
 import type { Express } from 'express'
 import { TEST_ORG_ID, testAuthUser } from '../helpers/factories.js'
@@ -21,12 +21,17 @@ let app: Express
 beforeAll(async () => { app = await buildApp() })
 const BASE = `/api/v1/organisations/${TEST_ORG_ID}/analytics`
 
+// groupBy has complex overloads that vitest-mock-extended can't infer — cast to any
+const groupByMock = prismaMock.vehicleTelemetry.groupBy as unknown as {
+  mockResolvedValue: (v: unknown) => void
+}
+
 describe('GET /analytics/overview', () => {
   it('returns fleet overview metrics', async () => {
     prismaMock.vehicle.count.mockResolvedValue(10)
     prismaMock.trip.count.mockResolvedValue(3)
     prismaMock.geofenceViolation.count.mockResolvedValue(1)
-    prismaMock.vehicleTelemetry.groupBy.mockResolvedValue([{ vehicleId: 'v1', _count: 1 }] as never)
+    groupByMock.mockResolvedValue([{ vehicleId: 'v1', _count: 1 }])
 
     const res = await request(app).get(`${BASE}/overview`)
 
@@ -43,17 +48,17 @@ describe('GET /analytics/fuel-efficiency', () => {
   })
 
   it('returns fuel data per vehicle', async () => {
-    prismaMock.vehicleTelemetry.groupBy.mockResolvedValue([
+    groupByMock.mockResolvedValue([
       { vehicleId: 'veh_01', _sum: { fuelUsedMl: 50_000 }, _count: { id: 100 } },
-    ] as never)
-    prismaMock.vehicle.findMany.mockResolvedValue([{ id: 'veh_01', plateNumber: 'KCA 001X' }] as never)
+    ])
+    prismaMock.vehicle.findMany.mockResolvedValue([{ id: 'veh_01', registrationPlate: 'KCA 001X' }] as never)
 
     const res = await request(app)
       .get(`${BASE}/fuel-efficiency`)
       .query({ from: '2026-06-01', to: '2026-06-30' })
 
     expect(res.status).toBe(200)
-    expect(res.body.data[0]).toHaveProperty('plateNumber', 'KCA 001X')
+    expect(res.body.data[0]).toHaveProperty('registrationPlate', 'KCA 001X')
     expect(res.body.data[0]).toHaveProperty('totalFuelMl', 50_000)
   })
 })
@@ -68,7 +73,7 @@ describe('GET /analytics/speeding', () => {
     prismaMock.vehicleTelemetry.findMany.mockResolvedValue([
       { vehicleId: 'veh_01', capturedAt: new Date(), speedKmh: 120, lat: -1.29, lng: 36.82 },
     ] as never)
-    prismaMock.vehicle.findMany.mockResolvedValue([{ id: 'veh_01', plateNumber: 'KCA 001X' }] as never)
+    prismaMock.vehicle.findMany.mockResolvedValue([{ id: 'veh_01', registrationPlate: 'KCA 001X' }] as never)
 
     const res = await request(app)
       .get(`${BASE}/speeding`)
@@ -94,4 +99,3 @@ describe('GET /analytics/violation-heatmap', () => {
     expect(res.body.data[0]).toHaveProperty('lng')
   })
 })
-
