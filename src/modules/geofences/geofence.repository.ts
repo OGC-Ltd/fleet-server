@@ -1,4 +1,4 @@
-import { prisma } from '../../lib/prisma.js'
+﻿import { prisma } from '../../lib/prisma.js'
 import type { CreateGeofence, UpdateGeofence, GeofenceListQuery } from './geofence.schema.js'
 
 export async function create(orgId: string, createdById: string, dto: CreateGeofence) {
@@ -68,7 +68,7 @@ export async function listVehicles(geofenceId: string, orgId: string) {
   if (!fence) return null
   return prisma.vehicleGeofence.findMany({
     where: { geofenceId },
-    include: { vehicle: { select: { id: true, plateNumber: true } } },
+    include: { vehicle: { select: { id: true, registrationPlate: true } } },
   })
 }
 
@@ -81,3 +81,4 @@ export async function listViolations(geofenceId: string, orgId: string) {
     take:    100,
   })
 }
+

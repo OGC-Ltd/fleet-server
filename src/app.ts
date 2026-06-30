@@ -6,7 +6,6 @@ import { env } from './config/env.js'
 import { globalLimiter } from './middleware/rateLimiter.js'
 import { errorHandler } from './middleware/errorHandler.js'
 import { sendError } from './core/response/response.js'
-import { authenticate } from './middleware/auth.js'
 
 import authRoutes from './modules/auth/auth.routes.js'
 import orgRoutes from './modules/organisations/organisation.routes.js'
@@ -23,6 +22,9 @@ import geofenceRoutes from './modules/geofences/geofence.routes.js'
 import cargoRoutes from './modules/cargo/cargo.routes.js'
 import apiKeyRoutes from './modules/api-keys/api-key.routes.js'
 import analyticsRoutes from './modules/analytics/analytics.routes.js'
+import { notificationsOrgRouter } from './modules/notifications/notifications.router.js'
+import * as notificationsCtrl from './modules/notifications/notifications.controller.js'
+import { authenticate, requireOrgAccess } from './middleware/auth.js'
 import * as roleCtrl from './modules/roles/role.controller.js'
 import { listQuerySchema } from './modules/roles/role.schema.js'
 import { validateQuery } from './middleware/validate.js'
@@ -54,6 +56,8 @@ export function createApp() {
   app.use(`${v1}/organisations`, orgRoutes)
   app.get(`${v1}/permissions`, authenticate, validateQuery(listQuerySchema), roleCtrl.listPermissions)
 
+  // Web Push public key — no auth; called by Service Workers before subscribe
+  app.get(`${v1}/notifications/vapid-key`, notificationsCtrl.getVapidKey)
 
   const orgBase = `${v1}/organisations/:orgId`
 
@@ -71,6 +75,10 @@ export function createApp() {
   app.use(`${orgBase}/geofences`, geofenceRoutes)
   app.use(`${orgBase}/api-keys`, apiKeyRoutes)
   app.use(`${orgBase}/analytics`, analyticsRoutes)
+
+  // Org-wide dashboard SSE stream + push subscription management
+  app.get(`${orgBase}/live`, authenticate, requireOrgAccess, notificationsCtrl.dashboardStream)
+  app.use(`${orgBase}/notifications`, notificationsOrgRouter)
 
   app.use((_req, res) => {
     sendError(res, 404, 'Route not found')
