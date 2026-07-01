@@ -1,10 +1,17 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import { registerSseClient, emitHeartbeat } from '../../lib/sse.js'
-import { listPings, getLatestPing } from './telemetry.service.js'
+import { listPings, getLatestPing, getFleetSnapshot, getActiveAlerts } from './telemetry.service.js'
 import type { TelemetryListQuery } from './telemetry.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
+
+export const getFleetSnapshotHandler: RequestHandler = async (req, res, next) => {
+  try {
+    const data = await getFleetSnapshot(p(req, 'orgId'))
+    sendSuccess(res, data)
+  } catch (err) { next(err) }
+}
 
 export const getTelemetryHistory: RequestHandler = async (req, res, next) => {
   try {
@@ -22,6 +29,13 @@ export const getLatestTelemetry: RequestHandler = async (req, res, next) => {
   } catch (err) {
     next(err)
   }
+}
+
+export const getActiveAlertsHandler: RequestHandler = async (req, res, next) => {
+  try {
+    const data = await getActiveAlerts(p(req, 'orgId'))
+    sendSuccess(res, data)
+  } catch (err) { next(err) }
 }
 
 export const liveVehicleFeed: RequestHandler = (req, res, next) => {

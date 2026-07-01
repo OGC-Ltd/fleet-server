@@ -26,7 +26,8 @@
     "test:coverage": "vitest run --coverage",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
-    "seed": "tsx prisma/seed.ts"
+    "seed": "tsx prisma/seed.ts",
+    "seed:silos": "tsx prisma/seed-silos.ts"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",
