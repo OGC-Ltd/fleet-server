@@ -37,9 +37,11 @@ import type { VehicleSimState }    from './controltech.simulator.js'
 // Shared by both mock and future live adapters.
 
 const DOOR_MAP: Record<0 | 1 | 2, DoorStatus> = { 0: 'CLOSED', 1: 'OPEN', 2: 'AJAR' }
-const SPEED_LIMIT_KMH = 100
+const SPEED_LIMIT_KMH              = 100
 const FUEL_INCONSISTENCY_THRESHOLD_ML = 30_000   // 30 L sudden drop = suspect
-const LOW_FUEL_PCT = 0.10
+const LOW_FUEL_PCT                 = 0.20
+const HIGH_ENGINE_TEMP_C           = 105          // °C — overheat threshold
+const LOW_OIL_PCT                  = 10           // % — critically low oil
 
 export function normaliseCtSnapshot(
   raw: CtDeviceSnapshot,
@@ -58,6 +60,8 @@ export function normaliseCtSnapshot(
                            ? Boolean(((raw as unknown as Record<string, unknown>)['_sim'] as Record<string, unknown>)['outsideFence'])
                            : false,
     lowBattery:          raw.battery_v < 11.5,
+    highEngineTemp:      raw.engine_temp_c != null && raw.engine_temp_c > HIGH_ENGINE_TEMP_C,
+    lowOil:              raw.oil_level_pct != null && raw.oil_level_pct < LOW_OIL_PCT,
   }
 
   return {
@@ -75,6 +79,8 @@ export function normaliseCtSnapshot(
     cargoWeightKg:      raw.cargo_weight_kg,
     batteryVoltageV:    raw.battery_v,
     doorStatus:         DOOR_MAP[raw.door_state] ?? 'UNKNOWN',
+    engineTempC:        raw.engine_temp_c ?? null,
+    oilLevelPct:        raw.oil_level_pct ?? null,
     panicButtonPressed: raw.panic === 1,
     gpsFixQuality:      raw.gps_fix,
     satelliteCount:     raw.sat_count,
@@ -105,12 +111,12 @@ export class ControltechMockAdapter implements TelemetryProvider {
   /** Pre-load all vehicles from DB so we can simulate every registered device. */
   private async init(): Promise<void> {
     const vehicles = await prisma.vehicle.findMany({
-      select: { deviceId: true, tankCapacityLitres: true },
+      select: { deviceId: true, tankCapacityLitres: true, vehicleType: true },
     })
 
     vehicles.forEach((v, idx) => {
       const tankLitres = v.tankCapacityLitres ?? 200
-      const state      = initVehicleState(v.deviceId, idx, tankLitres)
+      const state      = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType)
       this.states.set(v.deviceId, { ...state, tankCapacityMl: tankLitres * 1000 })
     })
 

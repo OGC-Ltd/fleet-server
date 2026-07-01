@@ -29,6 +29,8 @@ export interface CtDeviceSnapshot {
   fuel_used_ml:    number | null
   cargo_weight_kg: number | null
   battery_v:       number
+  engine_temp_c:   number | null   // OBD-II engine coolant temperature
+  oil_level_pct:   number | null   // OBD-II oil level as % of max fill
   network:         'GSM' | '3G' | '4G' | '5G'
   signal_pct:      number           // 0–100
   odometer_km:     number

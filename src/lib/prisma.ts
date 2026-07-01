@@ -6,7 +6,10 @@ import { logger } from './logger.js'
 // Prisma v7 requires a driver adapter — @prisma/adapter-pg wraps the pg pool.
 // The pooler URL (pgbouncer=true) is used for the pool; DIRECT_URL is used for migrations.
 function createPrismaClient() {
-  const adapter = new PrismaPg({ connectionString: env.DATABASE_URL })
+  // max: bound the pg pool a little above the default (10) so the 30 s telemetry
+  // poller and interactive API/SSE traffic don't starve each other for
+  // connections over the remote pooler. Kept under Supabase's default pool size.
+  const adapter = new PrismaPg({ connectionString: env.DATABASE_URL, max: 14 })
   return new PrismaClient({ adapter })
 }
 

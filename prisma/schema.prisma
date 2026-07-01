@@ -57,6 +57,12 @@ enum CargoType {
   OTHER
 }
 
+/// Severity tier for live operational alerts in the Fleet Operations feed.
+enum AlertSeverity {
+  WARNING
+  CRITICAL
+}
+
 // ---------------------------------------------------------------------------
 // IAM — identity & access control
 // ---------------------------------------------------------------------------
@@ -78,6 +84,8 @@ model Organisation {
   geofences         Geofence[]
   ingestApiKeys     IngestApiKey[]
   pushSubscriptions PushSubscription[]
+  alerts            VehicleAlert[]
+  silos             Silo[]
 
   @@map("organisations")
 }
@@ -262,6 +270,7 @@ model Vehicle {
   telemetry          VehicleTelemetry[]
   geofences          VehicleGeofence[]
   geofenceViolations GeofenceViolation[]
+  alerts             VehicleAlert[]
 
   @@index([organisationId])
   @@index([vehicleGroupId])
@@ -434,6 +443,66 @@ model GeofenceViolation {
   @@index([driverId, occurredAt])   // driver-centric violation reports
   @@index([occurredAt])             // org-wide violation timeline
   @@map("geofence_violations")
+}
+
+/// Live operational alert raised from a telemetry flag (overspeeding, fuel
+/// theft, low fuel, etc). Stays open (resolvedAt = null) for as long as the
+/// underlying condition is still active on each poll cycle — the poller
+/// closes it the moment the flag clears. This is what makes a vehicle's
+/// critical state survive a page reload instead of disappearing with the
+/// transient SSE event that originally raised it.
+model VehicleAlert {
+  id             String        @id @default(cuid())
+  organisationId String        @map("organisation_id")
+  vehicleId      String        @map("vehicle_id")
+  type           String        // AlertType: overspeeding, fuelInconsistency, lowFuel, …
+  severity       AlertSeverity
+  message        String
+  lat            Float?
+  lng            Float?
+  speedKmh       Float?        @map("speed_kmh")
+  fuelLevelMl    Int?          @map("fuel_level_ml")
+  meta           Json?
+  triggeredAt    DateTime      @map("triggered_at")
+  resolvedAt     DateTime?     @map("resolved_at") // null = still active/critical
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  vehicle      Vehicle      @relation(fields: [vehicleId], references: [id])
+
+  @@index([organisationId, resolvedAt])
+  @@index([vehicleId, type, resolvedAt])
+  @@map("vehicle_alerts")
+}
+
+// ---------------------------------------------------------------------------
+// STORAGE — sugar silos / warehouses (source of the "sugar in storage" KPI)
+// ---------------------------------------------------------------------------
+
+/// A physical sugar storage silo / warehouse operated by the organisation.
+/// storedTonnes is the current stock; fill ratio drives the ok/warning/critical
+/// status shown in the dashboard header. Updated by intake/dispatch operations
+/// (seeded for the demo; a real deployment would mutate storedTonnes on
+/// weighbridge intake and depot dispatch events).
+model Silo {
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  name           String                              // "Sukari HQ Silo 1"
+  code           String                              // stable per-org identifier — "SILO-HQ-01"
+  locationName   String   @map("location_name")      // "Sukari Industries, Kakamega"
+  lat            Float
+  lng            Float
+  capacityTonnes Float    @map("capacity_tonnes")
+  storedTonnes   Float    @map("stored_tonnes")
+  sugarType      String   @map("sugar_type")         // RAW | PROCESSED
+  status         String   @default("ok")             // ok | warning | critical
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@unique([organisationId, code])
+  @@index([organisationId])
+  @@map("silos")
 }
 
 // ---------------------------------------------------------------------------
