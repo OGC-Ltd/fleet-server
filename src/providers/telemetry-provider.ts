@@ -44,16 +44,20 @@ export interface VehicleTelemetryFrame {
   satelliteCount:    number | null
   networkType:       NetworkType
   signalStrengthPct: number | null     // 0–100
+  engineTempC:       number | null     // engine coolant temperature in °C
+  oilLevelPct:       number | null     // engine oil level as % of max fill (0–100)
 
   // ── Derived / diagnostic flags ────────────────────────────────────────────
   flags: {
     overspeeding:        boolean   // speedKmh > speedLimitKmh
     fuelInconsistency:   boolean   // sudden unexplained drop > threshold
     doorOpenWhileMoving: boolean
-    lowFuel:             boolean   // fuelLevelMl < 10 % of tank capacity
+    lowFuel:             boolean   // fuelLevelMl < 20 % of tank capacity
     engineIdling:        boolean   // engineOn && speedKmh === 0
     outsideGeofence:     boolean   // pre-computed by simulator for test visibility
     lowBattery:          boolean   // batteryVoltageV < 11.5 V
+    highEngineTemp:      boolean   // engineTempC > 105 °C — vehicle must stop
+    lowOil:              boolean   // oilLevelPct < 10 % — vehicle must stop
   }
 
   // ── Raw vendor envelope (stored in vehicle_telemetry_raws) ────────────────

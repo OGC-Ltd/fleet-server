@@ -14,19 +14,43 @@ import { prisma }                from './prisma.js'
 import { processTelemetry }      from '../modules/ingest/ingest.service.js'
 import { eventBus }              from './event-bus.js'
 import type { AlertType }        from './event-bus.js'
+import { syncFrameAlerts }       from './alerts.js'
 import { ControltechMockAdapter } from '../providers/controltech/controltech.adapter.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
 
 const POLL_INTERVAL_MS = 30_000   // 30 seconds
 
+// Max frames processed at once. Firing all ~100 concurrently monopolises every
+// connection in the pg pool for the whole cycle, starving interactive API/SSE
+// requests (a trivial query would wait 20 s+). Bounding this leaves connections
+// free for the dashboard/map while telemetry still refreshes each cycle.
+const POLL_CONCURRENCY = 6
+
+/** Run `worker` over `items` with at most `limit` in flight at a time. */
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let idx = 0
+  const runNext = async (): Promise<void> => {
+    const i = idx++
+    if (i >= items.length) return
+    await worker(items[i]!)
+    return runNext()
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => runNext()))
+}
+
 // ─── device metadata cache ─────────────────────────────────────────────────
 // Avoids a DB hit on every frame.  Refreshed every 5 min.
 
 interface DeviceMeta {
-  orgId:       string
-  vehicleId:   string
-  vehicleName: string
-  plate:       string
+  orgId:           string
+  vehicleId:       string
+  vehicleName:     string
+  plate:           string
+  tankCapacityMl:  number
 }
 
 let deviceCache   = new Map<string, DeviceMeta>()
@@ -36,18 +60,20 @@ const CACHE_TTL_MS = 5 * 60_000
 async function refreshCache(): Promise<void> {
   const rows = await prisma.vehicle.findMany({
     select: {
-      deviceId:          true,
-      organisationId:    true,
-      id:                true,
-      name:              true,
-      registrationPlate: true,
+      deviceId:           true,
+      organisationId:     true,
+      id:                 true,
+      name:               true,
+      registrationPlate:  true,
+      tankCapacityLitres: true,
     },
   })
   deviceCache   = new Map(rows.map(r => [r.deviceId, {
-    orgId:       r.organisationId,
-    vehicleId:   r.id,
-    vehicleName: r.name,
-    plate:       r.registrationPlate,
+    orgId:          r.organisationId,
+    vehicleId:      r.id,
+    vehicleName:    r.name,
+    plate:          r.registrationPlate,
+    tankCapacityMl: (r.tankCapacityLitres ?? 200) * 1000,
   }]))
   cacheLoadedAt = Date.now()
 }
@@ -66,7 +92,14 @@ const FLAG_KEYS: Array<keyof VehicleTelemetryFrame['flags'] & AlertType> = [
   'lowFuel',
   'outsideGeofence',
   'lowBattery',
+  'highEngineTemp',
+  'lowOil',
 ]
+
+// ─── per-vehicle "previously active" flag tracking ─────────────────────────
+// Ensures alert:triggered fires ONCE when a flag first becomes true, not on
+// every subsequent 30-s poll cycle while the condition persists.
+const prevActiveMap = new Map<string, Set<AlertType>>()
 
 // ─── single poll cycle ─────────────────────────────────────────────────────
 // Guard prevents a slow cycle from overlapping with the next interval tick.
@@ -95,8 +128,7 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
 
   let processed = 0, skipped = 0, errors = 0
 
-  await Promise.allSettled(
-    frames.map(async (frame) => {
+  await runWithConcurrency(frames, POLL_CONCURRENCY, async (frame) => {
       const meta = await getDeviceMeta(frame.deviceId)
       if (!meta) { skipped++; return }
 
@@ -132,15 +164,31 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
         // 2. Publish processed event for workers (dashboard SSE, etc.)
         eventBus.publish('telemetry:processed', {
           frame,
-          orgId:       meta.orgId,
-          vehicleId:   meta.vehicleId,
-          vehicleName: meta.vehicleName,
-          plate:       meta.plate,
+          orgId:          meta.orgId,
+          vehicleId:      meta.vehicleId,
+          vehicleName:    meta.vehicleName,
+          plate:          meta.plate,
+          tankCapacityMl: meta.tankCapacityMl,
         })
 
-        // 3. Publish one alert event per active flag
-        for (const flagKey of FLAG_KEYS) {
-          if (!frame.flags[flagKey]) continue
+        // 3. Determine which flags are currently active
+        const activeAlertTypes = FLAG_KEYS.filter(k => frame.flags[k])
+
+        // 4. Persist open/resolved alerts in DB (creates new rows, resolves stale ones)
+        //    Awaited so it counts toward POLL_CONCURRENCY — otherwise these
+        //    detached writes would still saturate the connection pool.
+        await syncFrameAlerts(meta.orgId, meta.vehicleId, frame, activeAlertTypes).catch(
+          err => logger.warn({ err, deviceId: frame.deviceId }, 'syncFrameAlerts failed'),
+        )
+
+        // 5. Emit SSE+Push ONLY for flags that are newly active this cycle
+        //    (rising-edge detection — prevents flooding the feed every 30 s
+        //    while a condition like lowFuel or highEngineTemp persists)
+        const prevActive = prevActiveMap.get(meta.vehicleId) ?? new Set<AlertType>()
+        const newlyActive = activeAlertTypes.filter(k => !prevActive.has(k))
+        prevActiveMap.set(meta.vehicleId, new Set(activeAlertTypes))
+
+        for (const flagKey of newlyActive) {
           eventBus.publish('alert:triggered', {
             type:        flagKey,
             orgId:       meta.orgId,
@@ -165,8 +213,7 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
         errors++
         logger.error({ err, deviceId: frame.deviceId }, 'processTelemetry error')
       }
-    }),
-  )
+  })
 
   logger.info(
     {

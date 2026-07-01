@@ -19,6 +19,17 @@ interface SupabaseJwtPayload {
  */
 export const authenticate: RequestHandler = async (req, _res, next) => {
   try {
+    // Auth bypass: auto-attach the first active user — for development/single-org use
+    if (env.AUTH_BYPASS) {
+      const user = await prisma.user.findFirst({
+        where: { status: 'ACTIVE', deletedAt: null },
+        select: { id: true, organisationId: true, email: true, fullName: true, status: true },
+      })
+      if (!user) throw new UnauthorizedError('No active user found (AUTH_BYPASS mode)')
+      req.user = user
+      return next()
+    }
+
     const header = req.headers.authorization
     if (!header?.startsWith('Bearer ')) throw new UnauthorizedError('Missing Bearer token')
 
@@ -46,6 +57,7 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
  * Must be used AFTER `authenticate`.
  */
 export const requireOrgAccess: RequestHandler = (req, _res, next) => {
+  if (env.AUTH_BYPASS) return next()
   const orgId = req.params['orgId'] as string | undefined
   if (!orgId) return next()
   if (req.user?.organisationId !== orgId) {

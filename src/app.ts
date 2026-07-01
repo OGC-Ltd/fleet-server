@@ -5,7 +5,7 @@ import compression from 'compression'
 import { env } from './config/env.js'
 import { globalLimiter } from './middleware/rateLimiter.js'
 import { errorHandler } from './middleware/errorHandler.js'
-import { sendError } from './core/response/response.js'
+import { sendError, sendSuccess } from './core/response/response.js'
 
 import authRoutes from './modules/auth/auth.routes.js'
 import orgRoutes from './modules/organisations/organisation.routes.js'
@@ -22,9 +22,11 @@ import geofenceRoutes from './modules/geofences/geofence.routes.js'
 import cargoRoutes from './modules/cargo/cargo.routes.js'
 import apiKeyRoutes from './modules/api-keys/api-key.routes.js'
 import analyticsRoutes from './modules/analytics/analytics.routes.js'
+import dashboardRoutes from './modules/dashboard/dashboard.routes.js'
 import { notificationsOrgRouter } from './modules/notifications/notifications.router.js'
 import * as notificationsCtrl from './modules/notifications/notifications.controller.js'
 import { authenticate, requireOrgAccess } from './middleware/auth.js'
+import { prisma } from './lib/prisma.js'
 import * as roleCtrl from './modules/roles/role.controller.js'
 import { listQuerySchema } from './modules/roles/role.schema.js'
 import { validateQuery } from './middleware/validate.js'
@@ -52,6 +54,15 @@ export function createApp() {
 
   const v1 = '/api/v1'
 
+  // Bootstrap — returns the default org for single-org / auth-bypass mode
+  app.get(`${v1}/bootstrap`, async (_req, res) => {
+    try {
+      const org = await prisma.organisation.findFirst({ select: { id: true, name: true } })
+      if (!org) return sendError(res, 503, 'No organisation configured')
+      sendSuccess(res, { orgId: org.id, orgName: org.name })
+    } catch { sendError(res, 500, 'Bootstrap failed') }
+  })
+
   app.use(`${v1}/auth`, authRoutes)
   app.use(`${v1}/organisations`, orgRoutes)
   app.get(`${v1}/permissions`, authenticate, validateQuery(listQuerySchema), roleCtrl.listPermissions)
@@ -75,6 +86,7 @@ export function createApp() {
   app.use(`${orgBase}/geofences`, geofenceRoutes)
   app.use(`${orgBase}/api-keys`, apiKeyRoutes)
   app.use(`${orgBase}/analytics`, analyticsRoutes)
+  app.use(`${orgBase}/dashboard`, dashboardRoutes)
 
   // Org-wide dashboard SSE stream + push subscription management
   app.get(`${orgBase}/live`, authenticate, requireOrgAccess, notificationsCtrl.dashboardStream)
