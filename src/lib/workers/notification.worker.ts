@@ -9,21 +9,14 @@ import { eventBus }           from '../event-bus.js'
 import { logger }             from '../logger.js'
 import { emitDashboardAlert } from '../sse.js'
 import { pushService }        from '../../modules/notifications/notifications.service.js'
-
-const ALERT_LABELS: Record<string, string> = {
-  overspeeding:        'Overspeeding detected',
-  fuelInconsistency:   'Fuel inconsistency — possible theft',
-  doorOpenWhileMoving: 'Door open while vehicle is moving',
-  lowFuel:             'Low fuel warning',
-  outsideGeofence:     'Vehicle outside assigned geofence',
-  lowBattery:          'Low device battery',
-}
+import { ALERT_LABELS, ALERT_SEVERITY } from '../alerts.js'
 
 export function startNotificationWorker(): () => void {
   const unsub = eventBus.subscribe('alert:triggered', async (alert) => {
     try {
       const payload = {
         alertType:   alert.type,
+        severity:    ALERT_SEVERITY[alert.type],
         title:       ALERT_LABELS[alert.type] ?? alert.type,
         vehicleId:   alert.vehicleId,
         vehicleName: alert.vehicleName,

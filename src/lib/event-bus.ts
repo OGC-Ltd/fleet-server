@@ -19,6 +19,8 @@ export type AlertType =
   | 'lowFuel'
   | 'outsideGeofence'
   | 'lowBattery'
+  | 'highEngineTemp'
+  | 'lowOil'
 
 export interface FleetAlert {
   type:         AlertType
@@ -36,11 +38,12 @@ export interface FleetAlert {
 }
 
 export interface TelemetryProcessedEvent {
-  frame:        VehicleTelemetryFrame
-  orgId:        string
-  vehicleId:    string
-  vehicleName:  string
-  plate:        string
+  frame:           VehicleTelemetryFrame
+  orgId:           string
+  vehicleId:       string
+  vehicleName:     string
+  plate:           string
+  tankCapacityMl?: number   // used by telemetry.worker to compute fuelLevelPct
 }
 
 type EventMap = {
