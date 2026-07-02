@@ -27,10 +27,12 @@
  */
 
 import { prisma }          from '../../lib/prisma.js'
+import { Prisma }          from '../../../generated/prisma/client.js'
 import { logger }          from '../../lib/logger.js'
+import { getSimFleetVehicles } from '../../lib/sim-fleet.js'
 import type { TelemetryProvider, VehicleTelemetryFrame, DoorStatus, NetworkType } from '../telemetry-provider.js'
 import type { CtDeviceSnapshot }   from './controltech.types.js'
-import { initVehicleState, tickVehicle, renderSnapshot } from './controltech.simulator.js'
+import { initVehicleState, tickVehicle, renderSnapshot, initSimClock, advanceSimClock, simNow } from './controltech.simulator.js'
 import type { VehicleSimState }    from './controltech.simulator.js'
 
 // ─── normaliser — CtDeviceSnapshot → VehicleTelemetryFrame ────────────────
@@ -101,27 +103,58 @@ export function normaliseCtSnapshot(
 
 // ─── mock adapter ─────────────────────────────────────────────────────────
 
+type SimEntry = VehicleSimState & { tankCapacityMl: number }
+
 export class ControltechMockAdapter implements TelemetryProvider {
   readonly name = 'Controltech EA (mock)'
 
   /** deviceId → sim state; populated on first fetchAll() call */
-  private states = new Map<string, VehicleSimState & { tankCapacityMl: number }>()
+  private states = new Map<string, SimEntry>()
+  /** deviceId → owning organisation, captured at init for state persistence */
+  private orgByDevice = new Map<string, string>()
   private initialised = false
 
-  /** Pre-load all vehicles from DB so we can simulate every registered device. */
+  /**
+   * Pre-load all vehicles from DB so we can simulate every registered device.
+   *
+   * Simulation state is persisted to `simulation_states` each cycle, so on a
+   * fresh start we HYDRATE each device from its saved row and only cold-start
+   * (initVehicleState) devices that have never run before. This is what makes
+   * the simulation pause on stop and resume exactly where it left off.
+   */
   private async init(): Promise<void> {
-    const vehicles = await prisma.vehicle.findMany({
-      select: { deviceId: true, tankCapacityLitres: true, vehicleType: true },
-    })
+    // Only the live-simulation fleet (5 tractors, 8 trucks, 7 lorries) is ticked;
+    // the rest of the org's vehicles remain in the DB but idle. See lib/sim-fleet.
+    const [vehicles, saved, meta] = await Promise.all([
+      getSimFleetVehicles(),
+      prisma.simulationState.findMany(),
+      prisma.simulationMeta.findUnique({ where: { id: 'singleton' }, select: { simClockMs: true } }),
+    ])
+
+    // Resume the sim clock from where it paused (or start at real "now").
+    initSimClock(meta?.simClockMs != null ? Number(meta.simClockMs) : null)
+
+    const savedByDevice = new Map(saved.map(r => [r.deviceId, r.state as unknown as SimEntry]))
+    let hydrated = 0, coldStarted = 0
 
     vehicles.forEach((v, idx) => {
+      this.orgByDevice.set(v.deviceId, v.organisationId)
       const tankLitres = v.tankCapacityLitres ?? 200
-      const state      = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType)
-      this.states.set(v.deviceId, { ...state, tankCapacityMl: tankLitres * 1000 })
+      const prior      = savedByDevice.get(v.deviceId)
+
+      if (prior && typeof prior.lat === 'number') {
+        // Resume: trust the persisted state, refresh derived tank capacity.
+        this.states.set(v.deviceId, { ...prior, tankCapacityMl: tankLitres * 1000 })
+        hydrated++
+      } else {
+        const state = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType)
+        this.states.set(v.deviceId, { ...state, tankCapacityMl: tankLitres * 1000 })
+        coldStarted++
+      }
     })
 
     logger.info(
-      { adapter: this.name, deviceCount: this.states.size },
+      { adapter: this.name, deviceCount: this.states.size, hydrated, coldStarted },
       'Controltech mock adapter initialised',
     )
     this.initialised = true
@@ -129,6 +162,10 @@ export class ControltechMockAdapter implements TelemetryProvider {
 
   async fetchAll(): Promise<VehicleTelemetryFrame[]> {
     if (!this.initialised) await this.init()
+
+    // Advance the sim clock once per cycle (before ticking) so all vehicles
+    // share the same simulated time step.
+    advanceSimClock()
 
     const frames: VehicleTelemetryFrame[] = []
 
@@ -138,11 +175,53 @@ export class ControltechMockAdapter implements TelemetryProvider {
         const raw   = renderSnapshot(state)
         const frame = normaliseCtSnapshot(raw, state.tankCapacityMl)
         frames.push(frame)
+        // One-shot lifecycle events have now been copied into the frame; clear
+        // them so each completed trip / theft / refuel is persisted exactly once
+        // and never re-snapshotted to the DB on the next persist().
+        state.eventTripCompleted = null
+        state.eventFuelTheft     = null
+        state.eventRefuel        = null
       } catch (err) {
         logger.warn({ err, deviceId: state.deviceId }, 'Simulator tick failed — skipping device')
       }
     }
 
+    // Snapshot the advanced state so a restart resumes from here. Fire-and-forget
+    // so a slow DB never delays telemetry delivery to the poller.
+    void this.persist()
+
     return frames
+  }
+
+  /**
+   * Persist every device's current sim state in ONE bulk statement.
+   *
+   * A 100-row interactive transaction blows past the pooler's 5 s timeout, so
+   * we use a single multi-row `INSERT … ON CONFLICT DO UPDATE` — one round trip,
+   * no interactive transaction, negligible pool pressure per cycle.
+   */
+  async persist(): Promise<void> {
+    if (this.states.size === 0) return
+    const now = new Date()
+    try {
+      const rows = [...this.states.values()].map((s) => {
+        const { tankCapacityMl: _tank, ...state } = s   // don't persist derived field
+        return Prisma.sql`(${s.deviceId}, ${this.orgByDevice.get(s.deviceId) ?? null}, ${JSON.stringify(state)}::jsonb, ${now})`
+      })
+      await prisma.$executeRaw`
+        INSERT INTO simulation_states (device_id, organisation_id, state, updated_at)
+        VALUES ${Prisma.join(rows)}
+        ON CONFLICT (device_id) DO UPDATE
+          SET state           = EXCLUDED.state,
+              organisation_id = EXCLUDED.organisation_id,
+              updated_at      = EXCLUDED.updated_at
+      `
+      await prisma.$executeRaw`
+        INSERT INTO simulation_meta (id, last_tick_at, sim_clock_ms) VALUES ('singleton', ${now}, ${BigInt(simNow())})
+        ON CONFLICT (id) DO UPDATE SET last_tick_at = EXCLUDED.last_tick_at, sim_clock_ms = EXCLUDED.sim_clock_ms
+      `
+    } catch (err) {
+      logger.warn({ err, adapter: this.name }, 'Failed to persist simulation state')
+    }
   }
 }
