@@ -27,6 +27,12 @@ export interface DashboardPositionPayload {
   doorStatus:   string | undefined
   engineTempC:  number | null
   oilLevelPct:  number | null
+  // Current journey leg (from→to + progress) for on-road routing on the map.
+  leg?: {
+    from: string; fromLat: number; fromLng: number
+    to:   string; toLat:   number; toLng:   number
+    progress: number; coveredKm: number; totalKm: number; moving: boolean
+  } | null
   flags: {
     overspeeding:        boolean
     fuelInconsistency:   boolean
@@ -63,6 +69,7 @@ export function startTelemetryWorker(): () => void {
         doorStatus:   frame.doorStatus,
         engineTempC:  frame.engineTempC ?? null,
         oilLevelPct:  frame.oilLevelPct ?? null,
+        leg:          (frame.rawPayload as { _sim?: { leg?: DashboardPositionPayload['leg'] } } | undefined)?._sim?.leg ?? null,
         flags: {
           overspeeding:        frame.flags.overspeeding,
           fuelInconsistency:   frame.flags.fuelInconsistency,
