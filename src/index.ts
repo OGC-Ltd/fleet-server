@@ -23,6 +23,8 @@ async function main() {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received')
     poller.stop()
+    // Freeze the simulation exactly where it is so the next start resumes it.
+    await poller.flush().catch((err) => logger.warn({ err }, 'Simulation flush failed on shutdown'))
     stopTelemetryWorker()
     stopNotificationWorker()
     server.close(async () => {

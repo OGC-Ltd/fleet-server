@@ -15,10 +15,18 @@ import { processTelemetry }      from '../modules/ingest/ingest.service.js'
 import { eventBus }              from './event-bus.js'
 import type { AlertType }        from './event-bus.js'
 import { syncFrameAlerts }       from './alerts.js'
+import { persistSimEvents }      from './simulation.persistence.js'
+import type { SimEvents }        from './simulation.persistence.js'
 import { ControltechMockAdapter } from '../providers/controltech/controltech.adapter.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
 
 const POLL_INTERVAL_MS = 30_000   // 30 seconds
+
+// Minimum gap before the SAME vehicle+alert is allowed to notify again. The
+// rising-edge map already suppresses a continuously-active flag; this stops a
+// flapping condition (e.g. overspeeding that dips below the limit and spikes
+// again) from re-spamming the feed until an hour has passed.
+const NOTIFY_COOLDOWN_MS = 60 * 60_000
 
 // Max frames processed at once. Firing all ~100 concurrently monopolises every
 // connection in the pg pool for the whole cycle, starving interactive API/SSE
@@ -101,6 +109,17 @@ const FLAG_KEYS: Array<keyof VehicleTelemetryFrame['flags'] & AlertType> = [
 // every subsequent 30-s poll cycle while the condition persists.
 const prevActiveMap = new Map<string, Set<AlertType>>()
 
+// vehicleId:alertType → epoch ms it was last notified — enforces the 1-hour
+// re-arm window so a recurring issue notifies at most once per hour.
+const lastNotifiedAt = new Map<string, number>()
+
+/** True if the previously-active alert set equals the current active list. */
+function sameAlertSet(prev: Set<AlertType>, current: AlertType[]): boolean {
+  if (prev.size !== current.length) return false
+  for (const t of current) if (!prev.has(t)) return false
+  return true
+}
+
 // ─── single poll cycle ─────────────────────────────────────────────────────
 // Guard prevents a slow cycle from overlapping with the next interval tick.
 
@@ -174,21 +193,46 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
         // 3. Determine which flags are currently active
         const activeAlertTypes = FLAG_KEYS.filter(k => frame.flags[k])
 
-        // 4. Persist open/resolved alerts in DB (creates new rows, resolves stale ones)
-        //    Awaited so it counts toward POLL_CONCURRENCY — otherwise these
-        //    detached writes would still saturate the connection pool.
-        await syncFrameAlerts(meta.orgId, meta.vehicleId, frame, activeAlertTypes).catch(
-          err => logger.warn({ err, deviceId: frame.deviceId }, 'syncFrameAlerts failed'),
-        )
+        // 4. Persist open/resolved alerts — but ONLY when this vehicle's active
+        //    alert set actually changed since last cycle. When it's unchanged
+        //    (the common case: a healthy vehicle, or a persistent condition),
+        //    the DB already holds exactly the right open rows, so we skip 3
+        //    queries/vehicle/cycle. This is the main lever that keeps the poll
+        //    cycle fast at 100 vehicles over a remote pooler.
+        const prevActive = prevActiveMap.get(meta.vehicleId)
+        const alertsChanged = prevActive === undefined || !sameAlertSet(prevActive, activeAlertTypes)
+        if (alertsChanged) {
+          await syncFrameAlerts(meta.orgId, meta.vehicleId, frame, activeAlertTypes).catch(
+            err => logger.warn({ err, deviceId: frame.deviceId }, 'syncFrameAlerts failed'),
+          )
+        }
+
+        // 4b. Persist simulation lifecycle events (completed trips, fuel theft,
+        //     self-heal refuels) surfaced on the frame. Awaited inside the
+        //     bounded concurrency like the alert write, and a no-op on cycles
+        //     where nothing transitioned.
+        const simEvents = (frame.rawPayload as { _sim?: { events?: SimEvents } } | undefined)?._sim?.events
+        if (simEvents) {
+          await persistSimEvents(meta.orgId, meta.vehicleId, simEvents).catch(
+            err => logger.warn({ err, deviceId: frame.deviceId }, 'persistSimEvents failed'),
+          )
+        }
 
         // 5. Emit SSE+Push ONLY for flags that are newly active this cycle
         //    (rising-edge detection — prevents flooding the feed every 30 s
         //    while a condition like lowFuel or highEngineTemp persists)
-        const prevActive = prevActiveMap.get(meta.vehicleId) ?? new Set<AlertType>()
-        const newlyActive = activeAlertTypes.filter(k => !prevActive.has(k))
+        const newlyActive = activeAlertTypes.filter(k => !(prevActive?.has(k)))
         prevActiveMap.set(meta.vehicleId, new Set(activeAlertTypes))
 
+        const nowMs = Date.now()
         for (const flagKey of newlyActive) {
+          // Suppress a re-notification if this vehicle+alert fired within the
+          // last hour — a persistent/flapping issue is reported only once until
+          // the re-arm window elapses.
+          const cooldownKey = `${meta.vehicleId}:${flagKey}`
+          if (nowMs - (lastNotifiedAt.get(cooldownKey) ?? 0) < NOTIFY_COOLDOWN_MS) continue
+          lastNotifiedAt.set(cooldownKey, nowMs)
+
           eventBus.publish('alert:triggered', {
             type:        flagKey,
             orgId:       meta.orgId,
@@ -232,6 +276,8 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
 
 export interface PollerHandle {
   stop: () => void
+  /** Flush any provider-held state (e.g. simulation snapshot) to durable storage. */
+  flush: () => Promise<void>
 }
 
 export function startPoller(provider: TelemetryProvider = new ControltechMockAdapter()): PollerHandle {
@@ -244,6 +290,13 @@ export function startPoller(provider: TelemetryProvider = new ControltechMockAda
     stop() {
       clearInterval(timer)
       logger.info({ provider: provider.name }, 'Telemetry poller stopped')
+    },
+    async flush() {
+      // Persist the latest simulation state so a restart resumes from here.
+      const p = provider as TelemetryProvider & { persist?: () => Promise<void> }
+      if (typeof p.persist === 'function') {
+        await p.persist().catch(err => logger.warn({ err }, 'Poller flush failed'))
+      }
     },
   }
 }
