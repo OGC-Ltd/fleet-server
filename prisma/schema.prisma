@@ -783,3 +783,32 @@ model VehiclePeriodSummary {
   @@index([reportingPeriodId])
   @@map("vehicle_period_summaries")
 }
+
+// ---------------------------------------------------------------------------
+// SIMULATION — persisted state for the Controltech mock so the simulation can
+// pause on server stop and resume exactly where it left off on restart.
+// ---------------------------------------------------------------------------
+
+/// One row per simulated device holding the full VehicleSimState as JSON.
+/// Written each poll cycle by ControltechMockAdapter and read on boot to
+/// hydrate the in-memory simulator. Not part of the domain model — purely an
+/// implementation detail of the mock telemetry provider.
+model SimulationState {
+  deviceId  String   @id @map("device_id")
+  orgId     String?  @map("organisation_id")
+  state     Json                            // serialised VehicleSimState
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("simulation_states")
+}
+
+/// Single-row (id = "singleton") heartbeat used to detect how long the
+/// simulation was paused between a stop and the next start.
+model SimulationMeta {
+  id         String   @id @default("singleton")
+  lastTickAt DateTime @map("last_tick_at")
+  simDayKey  String?  @map("sim_day_key")
+  simClockMs BigInt?  @map("sim_clock_ms")   // simulated-time epoch ms (6× real; paused across downtime)
+
+  @@map("simulation_meta")
+}

@@ -76,8 +76,12 @@ export function createApp() {
 
   app.use(`${orgBase}/users`, userRoutes)
   app.use(`${orgBase}/roles`, roleRoutes)
-  app.use(orgBase, vehicleRoutes)
+  // Telemetry MUST mount before vehicleRoutes: its literal `/vehicles/snapshot`
+  // and `/vehicles/:vehicleId/telemetry` paths would otherwise be shadowed by
+  // vehicleRoutes' `/vehicles/:vehicleId`, 404-ing the fleet snapshot the map
+  // depends on. Non-matching paths fall through to vehicleRoutes as before.
   app.use(orgBase, telemetryRoutes)
+  app.use(orgBase, vehicleRoutes)
   app.use(`${orgBase}/trips`, tripRoutes)
   app.use(`${orgBase}/trips`, cargoRoutes)
   app.use(`${orgBase}/fuel`, fuelRoutes)

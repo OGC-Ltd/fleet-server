@@ -20,6 +20,10 @@ import { prisma }     from './prisma.js'
 import type { AlertType } from './event-bus.js'
 import type { VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
 
+// Marker written into every alert's meta so the dashboard feed can be scoped to
+// THIS server's alerts, ignoring any competing writer on the shared DB.
+export const ALERT_SOURCE = 'sim-live'
+
 export const ALERT_LABELS: Record<AlertType, string> = {
   overspeeding:        'Overspeeding detected',
   fuelInconsistency:   'Fuel inconsistency — possible theft',
@@ -85,6 +89,7 @@ export async function syncFrameAlerts(
       speedKmh:    frame.speedKmh,
       fuelLevelMl: frame.fuelLevelMl != null ? Math.round(frame.fuelLevelMl) : null,
       meta: {
+        source:          ALERT_SOURCE,   // scopes the feed to THIS server's alerts
         batteryVoltageV: frame.batteryVoltageV,
         doorStatus:      frame.doorStatus,
         fuelUsedMl:      frame.fuelUsedMl,
