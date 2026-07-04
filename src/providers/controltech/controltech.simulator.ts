@@ -91,6 +91,20 @@ const SUGAR_DEPOTS: [number, number, string][] = [
   [-0.3031, 36.0800, 'Nakuru Depot'],
   [-1.2921, 36.8219, 'Nairobi Depot'],
   [ 0.5143, 35.2698, 'Eldoret Depot'],
+  [-3.3573, 40.0206, 'Watamu Depot'],
+]
+
+// Third-party repair garages, spread across the operating region (mill +
+// every depot town) so "nearest garage" is meaningful no matter where an
+// overdue vehicle currently is — not just near the mill.
+const GARAGES: [number, number, string][] = [
+  [-0.8280, 34.3920, 'Migori Fleet Garage'],       // near Sukari Industries / the mill
+  [-0.0980, 34.7610, 'Kisumu Motors & Tyres'],     // near Kisumu Depot
+  [-0.3110, 36.0680, 'Nakuru Truck Clinic'],       // near Nakuru Depot
+  [-1.3050, 36.8280, 'Nairobi Heavy Vehicle Garage'], // near Nairobi Depot
+  [ 0.5210, 35.2610, 'Eldoret Auto Care'],         // near Eldoret Depot
+  [-4.0510, 39.6600, 'Mombasa Coastal Garage'],    // near Mombasa Depot
+  [-3.3600, 40.0250, 'Watamu Marine & Motors'],    // near Watamu Depot
 ]
 
 function isTractorType(t: string): boolean { return t === 'TRACTOR' }
@@ -109,6 +123,33 @@ function randInt(lo: number, hi: number) { return lo + Math.floor(Math.random() 
 function fuelDrainMl(distKm: number, litresPer100km: number): number {
   return Math.round(litresPer100km * distKm * 10)
 }
+
+// Truck/lorry consumption scales with how loaded the vehicle is — real-world
+// reference points a fleet fuel audit would use:
+//   Empty / light load   ~30 L/100 km  (~145 L one-way over a ~480 km haul)
+//   Standard loaded      ~38 L/100 km  (~184 L one-way)
+//   Maximum load (40+ t) ~45 L/100 km  (~218 L one-way)
+// Modelled as a straight line between the empty and max-load points and
+// evaluated at the vehicle's actual cargo weight, rather than a flat rate per
+// phase — so a truck only 60% loaded burns proportionally less than one at
+// max, matching the table instead of jumping between two fixed numbers.
+const DELIVERY_CONSUMPTION_EMPTY_L100    = 30
+const DELIVERY_CONSUMPTION_MAXLOAD_L100  = 45
+const DELIVERY_CONSUMPTION_MAXLOAD_REF_KG = 40_000   // the table's "40+ tons" reference point
+
+function deliveryConsumptionL100(cargoWeightKg: number | null): number {
+  const loadFraction = clamp((cargoWeightKg ?? 0) / DELIVERY_CONSUMPTION_MAXLOAD_REF_KG, 0, 1)
+  return lerp(DELIVERY_CONSUMPTION_EMPTY_L100, DELIVERY_CONSUMPTION_MAXLOAD_L100, loadFraction)
+}
+
+// Overspeeding burns disproportionately more fuel than the extra distance
+// alone accounts for (aerodynamic drag rises with the square of speed) — so
+// an overspeed tick bumps the effective L/100 km rate, not just the ground
+// covered. Fuel theft is a separate, deliberate sudden-drop event (see
+// advanceLeg below) and never goes through this multiplier — overspeeding
+// drives consumption, theft drives the fuel-inconsistency flag, and the two
+// never overlap.
+const OVERSPEED_CONSUMPTION_MULTIPLIER = 1.35
 
 // ─── simulation clock ───────────────────────────────────────────────────────
 // The sim runs SIM_SCALE× faster than real time (10 real minutes = 1 sim hour),
@@ -156,7 +197,6 @@ function hourOfDay(d = simDate()): number { return d.getHours() + d.getMinutes()
 const MIN_MS = 60_000
 const LOAD_MIN_TRACTOR    = () => randInt(15, 30)   // load cane at the farm
 const UNLOAD_MIN_TRACTOR  = () => randInt(15, 25)   // offload cane at the mill
-const MAINTENANCE_MIN     = () => randInt(120, 240) // 2–4 h workshop visit
 // Depot offload scales with load: ~30 min base + 3 min/tonne.
 const OFFLOAD_MIN_DELIVERY = (cargoKg: number) => Math.round(30 + (cargoKg / 1000) * 3)
 
@@ -222,6 +262,13 @@ export interface VehicleSimState {
   // correctly with real-world distance regardless of scenario speed.
   routeProgressKm:  number
 
+  // ── current leg's real departure/ETA (drives the dashboard's Fleet grid:
+  // Departure / Expected Arrival / Late-Early columns) ──────────────────────
+  legBeganAtMs:        number   // sim-time epoch ms this leg started (set in setLeg)
+  legPlannedArrivalMs: number   // legBeganAtMs + (distance / this vehicle type's typical cruising speed) — the
+                                 // same baseline speed tickLogistics targets before jitter/overspeed/halts, so
+                                 // "late" genuinely means slower-than-planned, not just a fabricated number
+
   // route classification — drives type-aware routing in tickVehicle()
   vehicleType:      string                    // TRACTOR, TRUCK, LORRY, TANKER, …
   legDirection:     'outbound' | 'inbound'     // outbound = away from Sukari Industries
@@ -241,6 +288,11 @@ export interface VehicleSimState {
   lowOilHalted:     boolean  // oil level < 10 %
   haltedFuelTicks:  number   // ticks since low-fuel halt began (for auto-refuel timer)
   haltedOilTicks:   number   // ticks since low-oil halt began (for auto-service timer)
+  // Road position captured the moment a halt begins. Held until all halt
+  // conditions clear so renderSnapshot always reports the exact stop point
+  // regardless of any downstream state mutation.
+  haltLat:          number | null
+  haltLng:          number | null
 
   // ── realistic logistics cycle (TRACTOR / TRUCK / LORRY only) ──────────────
   // Wall-clock driven so a full day/week of behaviour spans real time and the
@@ -255,6 +307,20 @@ export interface VehicleSimState {
   weeklyTripTarget: number      // 0–4 deliveries planned this week (trucks/lorries)
   nextServiceOdoKm: number      // odometer at which the vehicle is due for maintenance
 
+  // ── garage redirect (overdue-service handling) ────────────────────────────
+  garageDestLat:     number      // chosen garage's coords — 0 when not en route/at a garage
+  garageDestLng:     number
+  garageDestName:    string
+  garageEnteredAtMs: number      // epoch ms the vehicle arrived at the garage (0 = not there yet)
+  // Baseline odometer the 13-item checklist cycles are measured FROM (see
+  // MAINTENANCE_CATALOG below) — 0 until the vehicle's first garage visit,
+  // then reset to the odometer at every visit so a serviced vehicle actually
+  // reads "Good" again afterwards instead of immediately re-qualifying for
+  // another redirect. Must mirror the dash's maintenanceSchedule.js exactly:
+  // that's what computes the SAME per-item statuses for display, using this
+  // same baseline (sent to the client as `_sim.maintenance.resetOdoKm`).
+  maintenanceResetOdoKm: number
+
   // ── trip / incident bookkeeping (drives DB persistence in the poller) ─────
   tripBeganAtMs:    number      // epoch ms the current haul leg started (0 = not on a haul)
   tripStartOdoKm:   number      // odometer at haul start
@@ -263,10 +329,14 @@ export interface VehicleSimState {
   tripMaxSpeedKmh:  number      // running max speed on the current haul
   tripSpeedSumKmh:  number      // running speed sum for avg
   tripSpeedSamples: number      // running speed sample count
+  tripOverspeedTicks: number    // count of sim ticks this haul where the overspeed roll hit —
+                                 // feeds the per-trip driver-rating penalty (see simulation.persistence.ts)
   // one-shot event flags read + cleared by the poller each cycle
-  eventTripCompleted: TripEvent | null
-  eventFuelTheft:     TheftEvent | null
-  eventRefuel:        RefuelEvent | null
+  eventTripCompleted:      TripEvent | null
+  eventFuelTheft:          TheftEvent | null
+  eventRefuel:             RefuelEvent | null
+  eventServiceCompleted:   ServiceEvent | null
+  eventGarageVisitCompleted: GarageVisitEvent | null
 }
 
 // Steps in the realistic daily/weekly logistics cycle.
@@ -283,7 +353,9 @@ export type LogiPhase =
   | 'DWELL'         // truck/lorry: parked at the depot overnight before returning
   | 'DONE'          // finished today's/this week's plan — parked until next day
   | 'SUNDAY'        // Sunday rest — parked
-  | 'MAINTENANCE'   // service due — parked at the mill workshop (timed)
+  | 'TO_GARAGE'     // service overdue — driving to the nearest garage for a fix
+  | 'AT_GARAGE'     // being serviced at the garage (timed, severity-scaled, capped at 2h)
+  | 'FROM_GARAGE'   // serviced — driving back from the garage to resume its normal cycle
 
 export interface TripEvent {
   beganAtMs:     number
@@ -293,6 +365,7 @@ export interface TripEvent {
   distanceKm:    number
   avgSpeedKmh:   number
   maxSpeedKmh:   number
+  overspeedTicks: number
   consumedMl:    number
   startFuelMl:   number
   endFuelMl:     number
@@ -315,6 +388,30 @@ export interface RefuelEvent {
   startFuelMl: number
   endFuelMl:   number
   loc:         string
+}
+
+export interface ServiceEvent {
+  completedAtMs:    number
+  odometerKm:       number
+  nextServiceOdoKm: number
+}
+
+export interface GarageVisitItem {
+  name:     string
+  replaced: boolean   // true = new part fitted; false = inspected/topped-up/serviced only
+}
+
+/** Emitted when an overdue vehicle finishes being serviced at a garage —
+ *  see the TO_GARAGE / AT_GARAGE phase handling below. */
+export interface GarageVisitEvent {
+  garageName:   string
+  garageLat:    number
+  garageLng:    number
+  enteredAtMs:  number
+  exitedAtMs:   number
+  odometerKm:   number
+  severityScore: number   // 0–1, drives both the duration and how many items get addressed
+  itemsFixed:   GarageVisitItem[]
 }
 
 // ─── scenario distribution (assigned round-robin to vehicles) ─────────────
@@ -393,6 +490,8 @@ export function initVehicleState(
     panicPressed:    false,
     odometer:        Math.round(20_000 + index * 1500),
     routeProgressKm: 0,
+    legBeganAtMs:        0,
+    legPlannedArrivalMs: 0,
     vehicleType,
     legDirection:    'outbound',
     fenceLat:        SUKARI[0],
@@ -410,6 +509,8 @@ export function initVehicleState(
     lowOilHalted:    false,
     haltedFuelTicks: 0,
     haltedOilTicks:  0,
+    haltLat:         null,
+    haltLng:         null,
 
     // Realistic-cycle fields. simDayKey/weekStartKey start empty so the first
     // tick always triggers a fresh daily/weekly plan and dispatches the vehicle.
@@ -423,6 +524,12 @@ export function initVehicleState(
     weeklyTripTarget: 0,
     nextServiceOdoKm: Math.round(20_000 + index * 1500) + randInt(8_000, 15_000),
 
+    garageDestLat:     0,
+    garageDestLng:     0,
+    garageDestName:    '',
+    garageEnteredAtMs: 0,
+    maintenanceResetOdoKm: 0,
+
     tripBeganAtMs:    0,
     tripStartOdoKm:   0,
     tripStartFuelMl:  0,
@@ -430,9 +537,12 @@ export function initVehicleState(
     tripMaxSpeedKmh:  0,
     tripSpeedSumKmh:  0,
     tripSpeedSamples: 0,
-    eventTripCompleted: null,
-    eventFuelTheft:     null,
-    eventRefuel:        null,
+    tripOverspeedTicks: 0,
+    eventTripCompleted:        null,
+    eventFuelTheft:            null,
+    eventRefuel:               null,
+    eventServiceCompleted:     null,
+    eventGarageVisitCompleted: null,
   }
 }
 
@@ -469,6 +579,11 @@ export function tickVehicle(s: VehicleSimState): void {
     if (!s.highTempHalted && s.engineTempC > HIGH_TEMP_THRESHOLD)     s.highTempHalted = true
     if (!s.lowOilHalted   && s.oilLevelPct  < LOW_OIL_THRESHOLD)     s.lowOilHalted   = true
 
+    // Freeze the stop position the first time we enter a halt so the vehicle
+    // stays exactly where it was on the road for the full duration. Reset when
+    // all conditions clear (see below).
+    if (s.haltLat == null) { s.haltLat = s.lat; s.haltLng = s.lng }
+
     s.haltedFuelTicks += s.lowFuelHalted  ? 1 : 0
     s.haltedOilTicks  += s.lowOilHalted   ? 1 : 0
 
@@ -496,7 +611,7 @@ export function tickVehicle(s: VehicleSimState): void {
         filledMl:    s.fuelLevelMl - startFuel,
         startFuelMl: startFuel,
         endFuelMl:   s.fuelLevelMl,
-        loc:         `${s.lat.toFixed(4)}, ${s.lng.toFixed(4)}`,
+        loc:         `${(s.haltLat ?? s.lat).toFixed(4)}, ${(s.haltLng ?? s.lng).toFixed(4)}`,
       }
     }
 
@@ -510,6 +625,14 @@ export function tickVehicle(s: VehicleSimState): void {
       s.oilLevelPct    = jitter(88, 5)
       s.lowOilHalted   = false
       s.haltedOilTicks = 0
+    }
+
+    // Once all conditions are clear, unfreeze position so the vehicle can resume
+    if (!s.lowFuelHalted && !s.highTempHalted && !s.lowOilHalted) {
+      s.lat    = s.haltLat ?? s.lat    // restore exact road stop point as starting position
+      s.lng    = s.haltLng ?? s.lng
+      s.haltLat = null
+      s.haltLng = null
     }
 
     return   // skip scenario movement for this tick
@@ -556,7 +679,7 @@ export function tickVehicle(s: VehicleSimState): void {
 
 /** Resolve a coordinate back to a known place name for trip records. */
 function placeName(lat: number, lng: number): string {
-  const pools: [number, number, string][] = [SUKARI, ...SUGARCANE_FARMS, ...SUGAR_DEPOTS]
+  const pools: [number, number, string][] = [SUKARI, ...SUGARCANE_FARMS, ...SUGAR_DEPOTS, ...GARAGES]
   let best = `${lat.toFixed(4)}, ${lng.toFixed(4)}`
   let bestKm = 5   // only match within 5 km
   for (const [pLat, pLng, name] of pools) {
@@ -575,10 +698,38 @@ function parkAt(s: VehicleSimState, lat: number, lng: number): void {
   s.batteryV = clamp(jitter(12.6, 0.15), 12.0, 13.0)
 }
 
+// Same baseline cruising speed tickLogistics targets for this vehicle type
+// before per-tick jitter/overspeed rolls (see the `roadKmh` computed at the
+// top of tickLogistics) — used only to plan an ETA, not to drive movement.
+function typicalSpeedKmh(vehicleType: string): number {
+  const tractor = vehicleType === 'TRACTOR'
+  const lorry   = vehicleType === 'LORRY'
+  return tractor ? 60 * 0.55 : 62 * (lorry ? 0.85 : 1)
+}
+
 function setLeg(s: VehicleSimState, from: [number, number], to: [number, number]): void {
   s.originLat = from[0]; s.originLng = from[1]
   s.destLat   = to[0];   s.destLng   = to[1]
   s.routeProgressKm = 0
+
+  // Real departure time + a planned-duration ETA for this leg, at this
+  // vehicle's typical cruising speed — feeds the dashboard's Fleet grid
+  // (Departure / Expected Arrival / Late-Early). Halts (fuel/temp/oil) and
+  // the occasional overspeed roll both push the actual arrival later or
+  // earlier than this plan, which is exactly what "late/early" measures.
+  s.legBeganAtMs = simNow()
+  const totalKm  = haversineApproxKm(from[0], from[1], to[0], to[1])
+  // A few legs are genuinely tiny intra-facility hops (e.g. TO_PARKING is
+  // only the mill-to-parking ~250m) — distance/speed alone can compute a
+  // planned duration under 30s there, which rounds the departure and
+  // arrival times shown on the dashboard to the exact same minute and
+  // reads as broken data rather than "this trip is just very short". A
+  // floor of a few minutes is itself realistic (pulling out, parking,
+  // slowing/stopping) rather than a fudge on top of the distance/speed
+  // estimate, which still drives every longer, real haul unchanged.
+  const MIN_PLANNED_MINUTES = 3
+  const plannedHours = Math.max(totalKm / typicalSpeedKmh(s.vehicleType), MIN_PLANNED_MINUTES / 60)
+  s.legPlannedArrivalMs = s.legBeganAtMs + plannedHours * 3_600_000
 }
 
 /** Move along the current leg. Returns progress [0,1]. Applies rare overspeed
@@ -592,7 +743,10 @@ function advanceLeg(s: VehicleSimState, targetKmh: number, drainPer100: number):
   const distKm = s.speedKmh * simHoursThisTick()
   s.odometer        += distKm
   s.routeProgressKm += distKm
-  const drain = fuelDrainMl(distKm, drainPer100)   // drainPer100 = L/100 km
+  // Overspeeding bumps the effective consumption rate, not just the distance
+  // covered — see OVERSPEED_CONSUMPTION_MULTIPLIER above.
+  const effectiveDrainPer100 = overspeed ? drainPer100 * OVERSPEED_CONSUMPTION_MULTIPLIER : drainPer100
+  const drain = fuelDrainMl(distKm, effectiveDrainPer100)   // drainPer100 = L/100 km
   s.prevFuelLevelMl = s.fuelLevelMl
   s.fuelLevelMl = Math.max(s.fuelLevelMl - drain, 0)
 
@@ -607,6 +761,7 @@ function advanceLeg(s: VehicleSimState, targetKmh: number, drainPer100: number):
   s.tripMaxSpeedKmh = Math.max(s.tripMaxSpeedKmh, s.speedKmh)
   s.tripSpeedSumKmh += s.speedKmh
   s.tripSpeedSamples++
+  if (overspeed) s.tripOverspeedTicks++
 
   // Rare in-transit siphoning — a large sudden drop the adapter flags as theft.
   // Gated by a fleet-wide daily budget so there are only a few (≤3) cases/day.
@@ -633,6 +788,7 @@ function beginTrip(s: VehicleSimState, fromName: string): void {
   s.tripMaxSpeedKmh  = 0
   s.tripSpeedSumKmh  = 0
   s.tripSpeedSamples = 0
+  s.tripOverspeedTicks = 0
 }
 
 function completeTrip(
@@ -649,6 +805,7 @@ function completeTrip(
     distanceKm:    Math.max(0, s.odometer - s.tripStartOdoKm),
     avgSpeedKmh:   s.tripSpeedSumKmh / samples,
     maxSpeedKmh:   s.tripMaxSpeedKmh,
+    overspeedTicks: s.tripOverspeedTicks,
     consumedMl:    Math.max(0, s.tripStartFuelMl - s.fuelLevelMl),
     startFuelMl:   s.tripStartFuelMl,
     endFuelMl:     s.fuelLevelMl,
@@ -672,6 +829,128 @@ function farmsInRange(): [number, number, string][] {
   return SUGARCANE_FARMS.filter(f => haversineApproxKm(SUKARI[0], SUKARI[1], f[0], f[1]) <= TRACTOR_DISPATCH_RADIUS_KM)
 }
 
+// ─── overdue-service → garage redirect ─────────────────────────────────────
+// A vehicle gets redirected to a garage for EITHER of two reasons:
+//   1. The coarse major-service cycle (nextServiceOdoKm) has come due — the
+//      original signal, still feeds the "scheduled service" record.
+//   2. The dashboard's own per-item checklist (MAINTENANCE_CATALOG below) —
+//      the SAME 13 items/intervals/thresholds the Maintenance page grid
+//      shows as Good/Monitor/Due Soon/Overdue — has its worst item at
+//      Due Soon or Overdue. This must mirror dash/src/lib/maintenanceSchedule.js
+//      exactly, because the redirect has to happen for precisely the
+//      vehicles the UI is already labelling Due Soon/Overdue — not some
+//      separately-drifting backend approximation.
+// Either way the vehicle finds the nearest garage to wherever it actually is
+// and drives there (no more teleporting to the mill workshop).
+
+// Kept in lockstep with dash/src/lib/maintenanceSchedule.js's MAINTENANCE_CATALOG.
+const MAINTENANCE_CATALOG: [string, number][] = [
+  ['Engine Oil & Filter',           5_000],
+  ['Tyre Rotation',                 8_000],
+  ['Tyre Tread & Pressure',        10_000],
+  ['Engine Air Filter',            15_000],
+  ['Cabin/Pollen Filter',          15_000],
+  ['Wheel Alignment & Suspension', 15_000],
+  ['Battery & Terminals',          20_000],
+  ['Wiper Blades & Lights',        20_000],
+  ['Brake Pads & Rotors',          20_000],
+  ['Brake Fluid',                  40_000],
+  ['Coolant (Antifreeze)',         60_000],
+  ['Transmission Fluid',           60_000],
+  ['Belts & Hoses',                80_000],
+]
+
+type MaintenanceTier = 'Good' | 'Monitor' | 'DueSoon' | 'Overdue'
+const TIER_SEVERITY: Record<MaintenanceTier, number> = { Overdue: 0, DueSoon: 1, Monitor: 2, Good: 3 }
+
+// Same thresholds as dash's maintenanceStatus().
+function maintenanceTier(remainingPct: number): MaintenanceTier {
+  if (remainingPct > 70) return 'Good'
+  if (remainingPct > 40) return 'Monitor'
+  if (remainingPct > 15) return 'DueSoon'
+  return 'Overdue'
+}
+
+/** Worst (most urgent) tier across all 13 checklist items, cycling from
+ *  `resetOdoKm` (the vehicle's last garage visit, or 0 if it's never had one) —
+ *  exactly what the dashboard grid would show for this vehicle right now. */
+function worstMaintenanceTier(odometerKm: number, resetOdoKm: number): MaintenanceTier {
+  let worst: MaintenanceTier = 'Good'
+  for (const [, intervalKm] of MAINTENANCE_CATALOG) {
+    const kmIntoCycle  = (odometerKm - resetOdoKm) % intervalKm
+    const remainingPct = ((intervalKm - kmIntoCycle) / intervalKm) * 100
+    const tier = maintenanceTier(remainingPct)
+    if (TIER_SEVERITY[tier] < TIER_SEVERITY[worst]) worst = tier
+  }
+  return worst
+}
+
+function isDueSoonOrOverdue(s: VehicleSimState): boolean {
+  const tier = worstMaintenanceTier(s.odometer, s.maintenanceResetOdoKm)
+  return tier === 'DueSoon' || tier === 'Overdue'
+}
+
+function nearestGarage(lat: number, lng: number): [number, number, string] {
+  let best = GARAGES[0]!
+  let bestKm = haversineApproxKm(lat, lng, best[0], best[1])
+  for (const g of GARAGES.slice(1)) {
+    const d = haversineApproxKm(lat, lng, g[0], g[1])
+    if (d < bestKm) { bestKm = d; best = g }
+  }
+  return best
+}
+
+// Real severity signal built from three things already tracked on the
+// vehicle: how far past its due odometer it is, how degraded its oil is, and
+// how hot the engine is running — not a fabricated random roll.
+function garageSeverity(s: VehicleSimState): number {
+  const overdueKm      = Math.max(0, s.odometer - s.nextServiceOdoKm)
+  const overdueSeverity = clamp(overdueKm / 2_000, 0, 1)          // 2,000 km overdue = maxed out
+  const oilSeverity     = clamp((90 - s.oilLevelPct) / 50, 0, 1)  // fresh oil is ~92%
+  const tempSeverity    = clamp((s.engineTempC - 95) / 20, 0, 1)  // normal running temp ~90°C
+  return clamp(overdueSeverity * 0.4 + oilSeverity * 0.3 + tempSeverity * 0.3, 0, 1)
+}
+
+const GARAGE_MAX_MINUTES = 120   // hard cap — never more than 2h simulation time at the garage
+const GARAGE_MIN_MINUTES = 30
+
+function garageServiceMinutes(severity: number): number {
+  return Math.min(GARAGE_MAX_MINUTES, Math.round(GARAGE_MIN_MINUTES + severity * (GARAGE_MAX_MINUTES - GARAGE_MIN_MINUTES)))
+}
+
+// Typical line items a fleet garage visit covers. How many get addressed (and
+// whether a part is actually replaced vs. just inspected/topped-up) scales
+// with severity, so a vehicle caught barely-overdue gets a light touch and a
+// badly-overdue one gets worked on more thoroughly.
+const GARAGE_ITEM_CATALOG = [
+  'Engine Oil & Filter', 'Brake Pads & Rotors', 'Tyre Rotation & Pressure',
+  'Engine Air Filter', 'Coolant Top-up', 'Battery & Terminals', 'Belts & Hoses',
+]
+
+function pickGarageItems(severity: number): GarageVisitItem[] {
+  const count = Math.max(1, Math.round(1 + severity * (GARAGE_ITEM_CATALOG.length - 1)))
+  const pool  = [...GARAGE_ITEM_CATALOG]
+  const chosen: string[] = []
+  for (let i = 0; i < count && pool.length > 0; i++) {
+    chosen.push(pool.splice(randInt(0, pool.length - 1), 1)[0]!)
+  }
+  // Higher severity → more likely a part actually gets replaced rather than
+  // just inspected/topped-up.
+  return chosen.map(name => ({ name, replaced: Math.random() < 0.25 + severity * 0.5 }))
+}
+
+/** Redirect an overdue vehicle to the nearest garage instead of continuing
+ *  its normal cycle. Called from the two places that used to flip straight
+ *  into the old MAINTENANCE phase. */
+function redirectToGarage(s: VehicleSimState): void {
+  const garage = nearestGarage(s.lat, s.lng)
+  setLeg(s, [s.lat, s.lng], [garage[0], garage[1]])
+  s.garageDestLat  = garage[0]
+  s.garageDestLng  = garage[1]
+  s.garageDestName = garage[2]
+  s.phase = 'TO_GARAGE'
+}
+
 /** Draw a fresh daily (and, on a week rollover, weekly) plan for the vehicle. */
 function planDay(s: VehicleSimState, tractor: boolean): void {
   const now = simDate()
@@ -687,16 +966,13 @@ function planDay(s: VehicleSimState, tractor: boolean): void {
   s.tripsToday      = 0
   s.dailyTripTarget = randInt(0, 3)      // tractors: 0–3 farm hauls / day
 
-  // Don't yank a vehicle that's mid-haul when the calendar day rolls over.
-  const midHaul = ['TO_FARM', 'TO_INDUSTRY', 'TO_DEPOT', 'TO_PARKING', 'LOADING', 'OFFLOADING', 'DWELL'].includes(s.phase)
+  // Don't yank a vehicle that's mid-haul (or already off getting fixed) when
+  // the calendar day rolls over.
+  const midHaul = ['TO_FARM', 'TO_INDUSTRY', 'TO_DEPOT', 'TO_PARKING', 'LOADING', 'OFFLOADING', 'DWELL', 'TO_GARAGE', 'AT_GARAGE', 'FROM_GARAGE'].includes(s.phase)
   if (midHaul) return
 
   if (isSunday(now))                     { s.phase = 'SUNDAY'; return }
-  if (s.odometer >= s.nextServiceOdoKm)  {
-    s.phase = 'MAINTENANCE'
-    s.phaseEndsAtMs = now.getTime() + MAINTENANCE_MIN() * MIN_MS
-    return
-  }
+  if (s.odometer >= s.nextServiceOdoKm || isDueSoonOrOverdue(s)) { redirectToGarage(s); return }
   s.phase = tractor ? 'AT_PARKING' : 'AT_INDUSTRY'
 }
 
@@ -710,11 +986,7 @@ function dispatch(s: VehicleSimState, tractor: boolean, now: Date): void {
   const idle = tractor ? 'AT_PARKING' as const : 'AT_INDUSTRY' as const
 
   if (isSunday(now))                    { s.phase = 'SUNDAY'; return }
-  if (s.odometer >= s.nextServiceOdoKm) {
-    s.phase = 'MAINTENANCE'
-    s.phaseEndsAtMs = now.getTime() + MAINTENANCE_MIN() * MIN_MS
-    return
-  }
+  if (s.odometer >= s.nextServiceOdoKm || isDueSoonOrOverdue(s)) { redirectToGarage(s); return }
   // Stop dispatching in the late evening — crews go home; vehicle stays put.
   if (hourOfDay(now) >= 18) { s.phase = idle; return }
 
@@ -753,14 +1025,63 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
       parkAt(s, home[0], home[1])
       break
 
-    case 'MAINTENANCE':
-      parkAt(s, SUKARI[0], SUKARI[1])   // serviced at the mill workshop
+    case 'TO_GARAGE': {
+      const p = advanceLeg(s, roadKmh, 30)   // urgent, unplanned run — treat like a loaded-ish trip
+      if (p >= 0.98) {
+        const severity = garageSeverity(s)
+        s.garageEnteredAtMs = nowMs
+        s.phaseEndsAtMs     = nowMs + garageServiceMinutes(severity) * MIN_MS
+        s.phase = 'AT_GARAGE'
+      }
+      break
+    }
+
+    case 'AT_GARAGE':
+      parkAt(s, s.garageDestLat, s.garageDestLng)
       if (nowMs >= s.phaseEndsAtMs) {
-        s.nextServiceOdoKm = s.odometer + randInt(8_000, 15_000)
+        const severity = garageSeverity(s)
+        const newNextServiceOdoKm = s.odometer + randInt(8_000, 15_000)
+
+        s.eventServiceCompleted = {
+          completedAtMs:    nowMs,
+          odometerKm:       s.odometer,
+          nextServiceOdoKm: newNextServiceOdoKm,
+        }
+        s.eventGarageVisitCompleted = {
+          garageName:    s.garageDestName,
+          garageLat:     s.garageDestLat,
+          garageLng:     s.garageDestLng,
+          enteredAtMs:   s.garageEnteredAtMs,
+          exitedAtMs:    nowMs,
+          odometerKm:    s.odometer,
+          severityScore: severity,
+          itemsFixed:    pickGarageItems(severity),
+        }
+
+        s.nextServiceOdoKm = newNextServiceOdoKm
         s.oilLevelPct      = jitter(92, 4)
+        s.engineTempC      = jitter(88, 3)
+        // Reset the 13-item checklist's cycle baseline to right now — the
+        // vehicle reads "Good" across the board immediately after a visit,
+        // not still Due Soon/Overdue on the very next tick.
+        s.maintenanceResetOdoKm = s.odometer
+        s.garageEnteredAtMs = 0
+        // Drive back from the garage to home base instead of teleporting —
+        // once there, the normal AT_PARKING/AT_INDUSTRY → dispatch() cycle
+        // resumes the vehicle's mission exactly as it would have otherwise.
+        setLeg(s, [s.garageDestLat, s.garageDestLng], [home[0], home[1]])
+        s.phase = 'FROM_GARAGE'
+      }
+      break
+
+    case 'FROM_GARAGE': {
+      const p = advanceLeg(s, roadKmh, 30)
+      if (p >= 0.98) {
+        s.garageDestLat = 0; s.garageDestLng = 0; s.garageDestName = ''
         s.phase = tractor ? 'AT_PARKING' : 'AT_INDUSTRY'
       }
       break
+    }
 
     case 'AT_PARKING':
     case 'AT_INDUSTRY':
@@ -785,7 +1106,10 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
       break
 
     case 'TO_INDUSTRY': {
-      const p = advanceLeg(s, roadKmh, tractor ? 28 : 26)   // tractor loaded / truck empty
+      // Tractor loaded with cane: flat rate. Truck/lorry returning empty:
+      // load-based rate (cargoWeightKg is 0 here, so this evaluates to the
+      // table's ~30 L/100 km empty tier).
+      const p = advanceLeg(s, roadKmh, tractor ? 28 : deliveryConsumptionL100(s.cargoWeightKg))
       if (p >= 0.98) {
         if (tractor) { s.phase = 'UNLOADING'; s.phaseEndsAtMs = nowMs + UNLOAD_MIN_TRACTOR() * MIN_MS }
         else          { s.phase = 'AT_INDUSTRY' }   // truck/lorry returned empty to the mill
@@ -815,7 +1139,7 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
     }
 
     case 'TO_DEPOT': {
-      const p = advanceLeg(s, roadKmh, 34)   // fully-loaded delivery ~34 L/100 km
+      const p = advanceLeg(s, roadKmh, deliveryConsumptionL100(s.cargoWeightKg))   // load-based rate — ~38 L/100 km at a standard load
       if (p >= 0.98) {
         s.phase = 'OFFLOADING'
         s.phaseEndsAtMs = nowMs + OFFLOAD_MIN_DELIVERY(s.cargoWeightKg ?? 0) * MIN_MS
@@ -858,15 +1182,20 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
 // ─── render state → Controltech wire packet ────────────────────────────────
 
 export function renderSnapshot(s: VehicleSimState): CtDeviceSnapshot {
-  const fuelDelta     = s.fuelLevelMl - s.prevFuelLevelMl          // negative = used
-  const isOutsideFence = haversineApproxKm(s.lat, s.lng, s.fenceLat, s.fenceLng) * 1000 > s.fenceRadiusM
+  const fuelDelta      = s.fuelLevelMl - s.prevFuelLevelMl          // negative = used
+  const isOutsideFence = haversineApproxKm(s.haltLat ?? s.lat, s.haltLng ?? s.lng, s.fenceLat, s.fenceLng) * 1000 > s.fenceRadiusM
+
+  // Use frozen halt coordinates when available so the map marker stays pinned
+  // to the exact road position for the entire halt duration.
+  const snapLat = s.haltLat ?? s.lat
+  const snapLng = s.haltLng ?? s.lng
 
   return {
     imei:            s.imei,
     device_id:       s.deviceId,
     timestamp_utc:   new Date().toISOString(),
-    lat:             +s.lat.toFixed(6),
-    lng:             +s.lng.toFixed(6),
+    lat:             +snapLat.toFixed(6),
+    lng:             +snapLng.toFixed(6),
     altitude_m:      +(1200 + Math.random() * 900).toFixed(1),
     heading_deg:     s.headingDeg,
     gps_accuracy_m:  +(2 + Math.random() * 6).toFixed(1),
@@ -917,12 +1246,36 @@ export function renderSnapshot(s: VehicleSimState): CtDeviceSnapshot {
           coveredKm: +coveredKm.toFixed(1),
           totalKm:   +totalKm.toFixed(1),
           moving:    s.speedKmh > 0 && s.engineOn,
+          beganAtMs:        s.legBeganAtMs,
+          plannedArrivalMs: s.legPlannedArrivalMs,
         }
       })(),
       events: {
-        tripCompleted: s.eventTripCompleted ?? null,
-        fuelTheft:     s.eventFuelTheft ?? null,
-        refuel:        s.eventRefuel ?? null,
+        tripCompleted:       s.eventTripCompleted ?? null,
+        fuelTheft:           s.eventFuelTheft ?? null,
+        refuel:              s.eventRefuel ?? null,
+        serviceCompleted:    s.eventServiceCompleted ?? null,
+        garageVisitCompleted: s.eventGarageVisitCompleted ?? null,
+      },
+      // Real per-vehicle service cycle — nextServiceOdoKm is randomised
+      // 8,000-15,000 km after each service (see the TO_GARAGE/AT_GARAGE phase
+      // handling above); odometer_km (top-level on this frame) is the other
+      // half of the picture. The dashboard derives its whole maintenance
+      // checklist from these two real numbers instead of faking it.
+      maintenance: {
+        nextServiceOdoKm:    +s.nextServiceOdoKm.toFixed(1),
+        inMaintenance:       s.phase === 'TO_GARAGE' || s.phase === 'AT_GARAGE' || s.phase === 'FROM_GARAGE',
+        maintenanceEndsAtMs: s.phase === 'AT_GARAGE' ? s.phaseEndsAtMs : null,
+        garageName:          s.phase === 'TO_GARAGE' || s.phase === 'AT_GARAGE' ? s.garageDestName : null,
+        // Only populated while the vehicle is en route to or actually at the
+        // garage — the dashboard draws the ripple radius off these and hides
+        // it the moment the vehicle sets off back on FROM_GARAGE.
+        garageLat:           s.phase === 'TO_GARAGE' || s.phase === 'AT_GARAGE' ? +s.garageDestLat.toFixed(6) : null,
+        garageLng:           s.phase === 'TO_GARAGE' || s.phase === 'AT_GARAGE' ? +s.garageDestLng.toFixed(6) : null,
+        // Baseline the dashboard's own per-item checklist cycles from — see
+        // MAINTENANCE_CATALOG / worstMaintenanceTier above. Must be applied
+        // client-side exactly as dash/src/lib/maintenanceSchedule.js does.
+        resetOdoKm:          +s.maintenanceResetOdoKm.toFixed(1),
       },
     } } as Record<string, unknown>),
   } as CtDeviceSnapshot & { _sim: unknown }

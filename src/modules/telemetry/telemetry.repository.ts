@@ -59,7 +59,7 @@ export async function findFleetSnapshot(orgId: string) {
       tankCapacityLitres: true,
       assignments: {
         where: { unassignedAt: null },
-        select: { user: { select: { fullName: true } } },
+        select: { user: { select: { fullName: true, driverRatingScore: true } } },
         take: 1,
       },
     },
@@ -79,13 +79,17 @@ export async function findFleetSnapshot(orgId: string) {
     speed_kmh: number | null; engine_on: boolean
     fuel_level_ml: number | null; fuel_used_ml: number | null; cargo_weight_kg: number | null
     captured_at: Date; leg: unknown
+    odometer_km: number | null; maintenance: unknown; phase: string | null
   }
   const pings = await prisma.$queryRaw<PingRow[]>`
     SELECT DISTINCT ON (t.vehicle_id)
       t.vehicle_id,
       t.lat, t.lng, t.heading_deg, t.speed_kmh, t.engine_on,
       t.fuel_level_ml, t.fuel_used_ml, t.cargo_weight_kg, t.captured_at,
-      r.payload->'_sim'->'leg' AS leg
+      r.payload->'_sim'->'leg' AS leg,
+      (r.payload->>'odometer_km')::float AS odometer_km,
+      r.payload->'_sim'->'maintenance' AS maintenance,
+      r.payload->'_sim'->>'phase' AS phase
     FROM vehicle_telemetries t
     JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
     WHERE t.vehicle_id IN (${Prisma.join(vehicleIds)})
@@ -102,13 +106,16 @@ export async function findFleetSnapshot(orgId: string) {
       const fuelLevelPct    = fuelLevelMl != null
         ? Math.round((fuelLevelMl / tankCapacityMl) * 100)
         : null
+      const maintenance = ping?.maintenance as
+        { nextServiceOdoKm: number; inMaintenance: boolean; maintenanceEndsAtMs: number | null; resetOdoKm: number; garageLat: number | null; garageLng: number | null } | null | undefined
 
       return {
         vehicleId:      v.id,
         plate:          v.registrationPlate,
         name:           v.name,
         vehicleType:    v.vehicleType,
-        driver:         v.assignments[0]?.user.fullName ?? null,
+        driver:             v.assignments[0]?.user.fullName          ?? null,
+        driverRatingScore:  v.assignments[0]?.user.driverRatingScore ?? null,
         lat:            ping?.lat          ?? null,
         lng:            ping?.lng          ?? null,
         headingDeg:     ping?.heading_deg  ?? null,
@@ -121,6 +128,14 @@ export async function findFleetSnapshot(orgId: string) {
         lowFuel,
         fuelLevelPct,
         leg:            ping?.leg ?? null,
+        odometerKm:          ping?.odometer_km ?? null,
+        nextServiceOdoKm:    maintenance?.nextServiceOdoKm ?? null,
+        inMaintenance:       maintenance?.inMaintenance ?? false,
+        maintenanceEndsAtMs: maintenance?.maintenanceEndsAtMs ?? null,
+        maintenanceResetOdoKm: maintenance?.resetOdoKm ?? 0,
+        garageLat:      maintenance?.garageLat ?? null,
+        garageLng:      maintenance?.garageLng ?? null,
+        phase:          ping?.phase ?? null,
       }
     })
 }
@@ -130,6 +145,165 @@ export async function findGeofencesForVehicle(vehicleId: string) {
     where: { vehicleId },
     include: { geofence: true },
   })
+}
+
+/** Per-vehicle, per-alertType incident counts over the last 90 days.
+ *  Only the four types that feed the driver rating are fetched. */
+export async function findAlertHistoryCounts(orgId: string) {
+  const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
+
+  const rows = await prisma.vehicleAlert.findMany({
+    where: {
+      organisationId: orgId,
+      type: { in: ['overspeeding', 'lowFuel', 'outsideGeofence', 'fuelInconsistency'] },
+      triggeredAt: { gte: since },
+      meta: { path: ['source'], equals: ALERT_SOURCE },
+    },
+    select: { vehicleId: true, type: true },
+  })
+
+  const counts: Record<string, Record<string, number>> = {}
+  for (const { vehicleId, type } of rows) {
+    if (!counts[vehicleId]) counts[vehicleId] = {}
+    counts[vehicleId][type] = (counts[vehicleId][type] ?? 0) + 1
+  }
+
+  return Object.entries(counts).flatMap(([vehicleId, types]) =>
+    Object.entries(types).map(([alertType, count]) => ({ vehicleId, alertType, count }))
+  )
+}
+
+interface MaintenanceHistoryRow {
+  day: Date
+  trip_count: bigint
+  distance_km: number
+  avg_speed_kmh: number
+  fuel_consumed_ml: number
+  overspeeding_count: bigint
+  fuel_inconsistency_count: bigint
+}
+
+/** Daily-bucketed, org-wide history for `days` days ending on `to` (default:
+ *  today, i.e. the last 14 days) — real trip and alert activity (not a
+ *  snapshot), used by the fleet Maintenance page's historical charts and its
+ *  calendar-driven range/single-day selection. Every metric here is a
+ *  genuine driver of wear-and-tear (distance, speed, overspeeding,
+ *  fuel-system incidents), so it reads as maintenance-relevant history
+ *  rather than an arbitrary trip report.
+ *  Missing days are filled with zeros (generate_series), not skipped, so a
+ *  day with no activity still plots as a real zero rather than a gap. */
+export async function findMaintenanceHistory(orgId: string, days = 14, to: Date = new Date()) {
+  const rows = await prisma.$queryRaw<MaintenanceHistoryRow[]>`
+    WITH bounds AS (
+      SELECT date_trunc('day', ${to}::timestamp) AS end_day,
+             date_trunc('day', ${to}::timestamp) - (${days}::int - 1) * interval '1 day' AS start_day
+    ),
+    day_series AS (
+      SELECT generate_series((SELECT start_day FROM bounds), (SELECT end_day FROM bounds), interval '1 day') AS day
+    ),
+    trip_agg AS (
+      SELECT date_trunc('day', t.began_at) AS day,
+             count(*)                       AS trip_count,
+             sum(t.mileage_km)              AS distance_km,
+             avg(t.avg_speed_kmh)           AS avg_speed_kmh,
+             sum(t.consumed_ml)             AS fuel_consumed_ml
+      FROM trips t
+      JOIN vehicles v ON v.id = t.vehicle_id
+      WHERE v.organisation_id = ${orgId}
+        AND t.began_at >= (SELECT start_day FROM bounds)
+        AND t.began_at <  (SELECT end_day FROM bounds) + interval '1 day'
+      GROUP BY 1
+    ),
+    alert_agg AS (
+      SELECT date_trunc('day', a.triggered_at) AS day,
+             count(*) FILTER (WHERE a.type = 'overspeeding')      AS overspeeding_count,
+             count(*) FILTER (WHERE a.type = 'fuelInconsistency') AS fuel_inconsistency_count
+      FROM vehicle_alerts a
+      WHERE a.organisation_id = ${orgId}
+        AND a.type IN ('overspeeding', 'fuelInconsistency')
+        AND a.triggered_at >= (SELECT start_day FROM bounds)
+        AND a.triggered_at <  (SELECT end_day FROM bounds) + interval '1 day'
+        AND a.meta->>'source' = ${ALERT_SOURCE}
+      GROUP BY 1
+    )
+    SELECT
+      d.day,
+      COALESCE(ta.trip_count, 0)               AS trip_count,
+      COALESCE(ta.distance_km, 0)               AS distance_km,
+      COALESCE(ta.avg_speed_kmh, 0)              AS avg_speed_kmh,
+      COALESCE(ta.fuel_consumed_ml, 0)           AS fuel_consumed_ml,
+      COALESCE(aa.overspeeding_count, 0)         AS overspeeding_count,
+      COALESCE(aa.fuel_inconsistency_count, 0)   AS fuel_inconsistency_count
+    FROM day_series d
+    LEFT JOIN trip_agg  ta ON ta.day = d.day
+    LEFT JOIN alert_agg aa ON aa.day = d.day
+    ORDER BY d.day
+  `
+
+  return rows.map(r => ({
+    day:                    r.day.toISOString().slice(0, 10),
+    tripCount:              Number(r.trip_count),
+    distanceKm:             Math.round(Number(r.distance_km)),
+    avgSpeedKmh:            Math.round(Number(r.avg_speed_kmh) * 10) / 10,
+    fuelConsumedL:          Math.round(Number(r.fuel_consumed_ml) / 100) / 10,
+    overspeedingCount:      Number(r.overspeeding_count),
+    fuelInconsistencyCount: Number(r.fuel_inconsistency_count),
+  }))
+}
+
+/** Real, persisted service history for one vehicle — one row per completed
+ *  MAINTENANCE-phase service (see simulation.persistence.ts), newest first.
+ *  Powers the Maintenance page's per-vehicle service-history report. */
+export async function findVehicleServiceHistory(orgId: string, vehicleId: string) {
+  const vehicle = await prisma.vehicle.findFirst({
+    where: { id: vehicleId, organisationId: orgId },
+    select: { id: true },
+  })
+  if (!vehicle) return null
+
+  const records = await prisma.vehicleServiceRecord.findMany({
+    where: { vehicleId },
+    orderBy: { servicedAt: 'desc' },
+  })
+
+  return records.map(r => ({
+    id:                   r.id,
+    servicedAt:           r.servicedAt.toISOString(),
+    odometerKm:           r.odometerKm,
+    previousServiceOdoKm: r.previousServiceOdoKm,
+    nextServiceOdoKm:     r.nextServiceOdoKm,
+    kmCovered:            r.previousServiceOdoKm != null ? r.odometerKm - r.previousServiceOdoKm : null,
+  }))
+}
+
+/** Real, persisted garage-visit history for one vehicle — one row per time
+ *  the vehicle was redirected to a third-party garage because its service
+ *  came due while out on the road (see the simulator's TO_GARAGE/AT_GARAGE
+ *  phases + simulation.persistence.ts), newest first. */
+export async function findVehicleGarageVisits(orgId: string, vehicleId: string) {
+  const vehicle = await prisma.vehicle.findFirst({
+    where: { id: vehicleId, organisationId: orgId },
+    select: { id: true },
+  })
+  if (!vehicle) return null
+
+  const visits = await prisma.vehicleGarageVisit.findMany({
+    where: { vehicleId },
+    orderBy: { enteredAt: 'desc' },
+  })
+
+  return visits.map(v => ({
+    id:              v.id,
+    garageName:      v.garageName,
+    garageLat:       v.garageLat,
+    garageLng:       v.garageLng,
+    enteredAt:       v.enteredAt.toISOString(),
+    exitedAt:        v.exitedAt.toISOString(),
+    durationMinutes: v.durationMinutes,
+    odometerKm:      v.odometerKm,
+    severityScore:   v.severityScore,
+    itemsFixed:      v.itemsFixed as { name: string; replaced: boolean }[],
+  }))
 }
 
 /** All currently-open (unresolved) alerts for an org — used to seed the

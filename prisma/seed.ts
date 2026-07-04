@@ -189,7 +189,16 @@ async function main() {
 
   for (let i = 0; i < 200; i++) {
     const fn = pick(FIRST_NAMES, i)
-    const ln = pick(LAST_NAMES,  i)
+    // Both name pools have 40 entries; indexing both by the same `i` made
+    // the (first, last) combination repeat every 40 users — with 200 users
+    // that's 5 exact-duplicate full names, and since vehicle assignments
+    // are spread across all 200 distinct user rows, those duplicate-named
+    // users would land on different vehicles and look like the same
+    // driver assigned twice. Offsetting the last-name index by how many
+    // full 40-cycles of first names have elapsed keeps every (fn, ln) pair
+    // unique across all 200 users (5 cycles × 40 last names is well within
+    // the 40-name pool's range before it would wrap and repeat a pair).
+    const ln = pick(LAST_NAMES, i + Math.floor(i / FIRST_NAMES.length))
     userRows.push({
       organisationId: org.id,
       fullName:       `${fn} ${ln}`,

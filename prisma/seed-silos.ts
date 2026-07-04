@@ -32,8 +32,7 @@ const SILOS: {
   { code: 'WH-NBI-01',  name: 'Nairobi DC Store',   locationName: 'Nairobi Depot',  lat: -1.2921, lng: 36.8219, capacityTonnes: 4000, storedTonnes: 2450, sugarType: 'PROCESSED' },
   { code: 'WH-ELD-01',  name: 'Eldoret Depot Store',locationName: 'Eldoret Depot',  lat: 0.5143,  lng: 35.2698, capacityTonnes: 2500, storedTonnes: 1310, sugarType: 'PROCESSED' },
   { code: 'WH-MSA-01',  name: 'Mombasa Export Store',locationName:'Mombasa Depot',  lat: -4.0435, lng: 39.6682, capacityTonnes: 6000, storedTonnes: 5720, sugarType: 'PROCESSED' },
-  { code: 'WH-MCH-01',  name: 'Machakos Depot Store',locationName:'Machakos Depot', lat: -1.5177, lng: 37.2634, capacityTonnes: 2000, storedTonnes: 940,  sugarType: 'PROCESSED' },
-  { code: 'WH-KTL-01',  name: 'Kitale Depot Store', locationName: 'Kitale Depot',   lat: 1.0154,  lng: 35.0062, capacityTonnes: 2000, storedTonnes: 1460, sugarType: 'PROCESSED' },
+  { code: 'WH-WTM-01',  name: 'Watamu Coastal Store',locationName:'Watamu Depot',   lat: -3.3573, lng: 40.0206, capacityTonnes: 2500, storedTonnes: 1640, sugarType: 'PROCESSED' },
 ]
 
 // Fill ratio → status. >95% critical (overfull), >85% warning, else ok.

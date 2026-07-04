@@ -26,6 +26,7 @@ import dashboardRoutes from './modules/dashboard/dashboard.routes.js'
 import { notificationsOrgRouter } from './modules/notifications/notifications.router.js'
 import * as notificationsCtrl from './modules/notifications/notifications.controller.js'
 import { authenticate, requireOrgAccess } from './middleware/auth.js'
+import { simNow } from './providers/controltech/controltech.simulator.js'
 import { prisma } from './lib/prisma.js'
 import * as roleCtrl from './modules/roles/role.controller.js'
 import { listQuerySchema } from './modules/roles/role.schema.js'
@@ -53,6 +54,14 @@ export function createApp() {
 
 
   const v1 = '/api/v1'
+
+  // Simulation clock — lets the dashboard extrapolate sim time client-side
+  // without polling on every tick. Returns the current sim timestamp and the
+  // real-world sample time so the client can advance locally at `scale`×.
+  // No auth: this is display-only metadata, not user or org data.
+  app.get(`${v1}/sim-clock`, (_req, res) => {
+    sendSuccess(res, { simMs: simNow(), realMs: Date.now(), scale: 6 })
+  })
 
   // Bootstrap — returns the default org for single-org / auth-bypass mode
   app.get(`${v1}/bootstrap`, async (_req, res) => {

@@ -99,3 +99,8 @@ export function emitDashboardAlert(orgId: string, data: unknown) {
 export function emitDashboardHeartbeat(orgId: string) {
   broadcastDashboard(orgId, 'heartbeat', { ts: new Date().toISOString() })
 }
+
+/** Lifecycle notice (refuel, vehicle back online, etc.) — powers the notification inbox. */
+export function emitDashboardNotice(orgId: string, data: unknown) {
+  broadcastDashboard(orgId, 'notice', data)
+}

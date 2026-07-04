@@ -9,6 +9,7 @@
 
 import { EventEmitter } from 'node:events'
 import type { VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
+import type { SimEvents } from './simulation.persistence.js'
 
 // ─── event payload types ───────────────────────────────────────────────────
 
@@ -17,6 +18,7 @@ export type AlertType =
   | 'fuelInconsistency'
   | 'doorOpenWhileMoving'
   | 'lowFuel'
+  | 'engineIdling'
   | 'outsideGeofence'
   | 'lowBattery'
   | 'highEngineTemp'
@@ -46,9 +48,35 @@ export interface TelemetryProcessedEvent {
   tankCapacityMl?: number   // used by telemetry.worker to compute fuelLevelPct
 }
 
+// Published by the poller instead of awaiting syncFrameAlerts() inline — lets
+// alerts.worker persist the alert-row bookkeeping off the poll cycle's
+// critical path so one vehicle's DB writes don't hold up the next vehicle's
+// turn in the concurrency-bounded poll loop.
+export interface AlertsSyncEvent {
+  orgId:       string
+  vehicleId:   string
+  deviceId:    string
+  frame:       VehicleTelemetryFrame
+  activeTypes: AlertType[]
+}
+
+// Published by the poller instead of awaiting persistSimEvents() inline —
+// same rationale as AlertsSyncEvent. driverId is resolved once by the poller
+// (via its 5-min device cache) so sim-events.worker never needs its own
+// vehicleAssignment lookup.
+export interface SimEventsPersistEvent {
+  orgId:       string
+  vehicleId:   string
+  deviceId:    string
+  events:      SimEvents
+  vehicleMeta: { plate: string; vehicleName: string; driverId: string | null }
+}
+
 type EventMap = {
   'telemetry:processed': TelemetryProcessedEvent
   'alert:triggered':     FleetAlert
+  'alerts:sync':         AlertsSyncEvent
+  'simEvents:persist':   SimEventsPersistEvent
 }
 
 // ─── typed wrapper ─────────────────────────────────────────────────────────

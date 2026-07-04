@@ -16,7 +16,7 @@ const SUGAR_CARRIERS = new Set(['TRACTOR', 'TRUCK', 'LORRY'])
 // Vehicle types fitted with a load-cell (LOAD sensor applies to these only).
 const CARGO_CAPABLE  = new Set(['TRACTOR', 'TRUCK', 'LORRY', 'TANKER', 'TIPPER', 'PICKUP', 'VAN', 'FLATBED', 'REFRIGERATED', 'CARGO VAN'])
 // A sensor is "operational" only if its vehicle produced a fresh ping (~3 poll cycles).
-const FRESH_MS = 90_000
+const FRESH_MS = 300_000
 const LOW_FUEL_RATIO = 0.20
 const SENSOR_TYPES = ['GPS', 'FUEL', 'LOAD', 'SPEED', 'ENGINE'] as const
 
