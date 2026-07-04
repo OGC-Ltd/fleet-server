@@ -2,31 +2,55 @@ import { prisma } from '../../lib/prisma.js'
 import { emitTelemetry } from '../../lib/sse.js'
 import { isInsideFence } from '../../lib/geofence.js'
 import { emitViolation } from '../../lib/sse.js'
+import { createLimiter } from '../../lib/concurrency.js'
+import { logger } from '../../lib/logger.js'
 import type { TelemetryPayload } from './ingest.schema.js'
 import type { FenceGeometry } from '../../lib/geofence.js'
 import { NotFoundError } from '../../core/errors/errors.js'
 
-export async function processTelemetry(orgId: string, dto: TelemetryPayload) {
-  // 1. Resolve vehicle — must belong to the authenticated org
-  const vehicle = await prisma.vehicle.findFirst({
-    where: { deviceId: dto.deviceId, organisationId: orgId },
-    select: { id: true, organisationId: true },
-  })
-  if (!vehicle) throw new NotFoundError(`Device ${dto.deviceId} not registered in this organisation`)
+// Bounds the fire-and-forget raw-payload writes below so a burst of frames
+// can't pile up unbounded connections against the pool.
+const rawPayloadLimit = createLimiter(4)
 
-  // 2. Resolve active driver (point-in-time)
-  const assignment = await prisma.vehicleAssignment.findFirst({
-    where: { vehicleId: vehicle.id, unassignedAt: null },
-    select: { userId: true },
-  })
+export async function processTelemetry(
+  orgId: string,
+  dto: TelemetryPayload,
+  // Pre-resolved vehicleId/driverId, supplied by the poller from its 5-min
+  // device cache. Trusted internal callers (the poller) skip 2 DB round-trips
+  // this way; the public /ingest HTTP endpoint (external devices, a different
+  // trust boundary) omits this and falls back to the full lookup + org check.
+  resolved?: { vehicleId: string; driverId: string | null },
+) {
+  let vehicleId: string
+  let driverId: string | null
+
+  if (resolved) {
+    vehicleId = resolved.vehicleId
+    driverId  = resolved.driverId
+  } else {
+    // 1. Resolve vehicle — must belong to the authenticated org
+    const vehicle = await prisma.vehicle.findFirst({
+      where: { deviceId: dto.deviceId, organisationId: orgId },
+      select: { id: true },
+    })
+    if (!vehicle) throw new NotFoundError(`Device ${dto.deviceId} not registered in this organisation`)
+    vehicleId = vehicle.id
+
+    // 2. Resolve active driver (point-in-time)
+    const assignment = await prisma.vehicleAssignment.findFirst({
+      where: { vehicleId, unassignedAt: null },
+      select: { userId: true },
+    })
+    driverId = assignment?.userId ?? null
+  }
 
   // 3. Upsert telemetry row (@@unique on deviceId+capturedAt makes this idempotent)
   const ping = await prisma.vehicleTelemetry.upsert({
     where: { deviceId_capturedAt: { deviceId: dto.deviceId, capturedAt: dto.capturedAt } },
     create: {
-      vehicleId:     vehicle.id,
+      vehicleId,
       deviceId:      dto.deviceId,
-      driverId:      assignment?.userId ?? null,
+      driverId,
       capturedAt:    dto.capturedAt,
       lat:           dto.lat,
       lng:           dto.lng,
@@ -44,17 +68,9 @@ export async function processTelemetry(orgId: string, dto: TelemetryPayload) {
               engineOn: true, fuelLevelMl: true, lat: true, lng: true },
   })
 
-  // 4. Store raw payload separately (no relation — intentional to avoid eager load)
-  if (dto.rawPayload) {
-    await prisma.vehicleTelemetryRaw.upsert({
-      where: { telemetryId: ping.id },
-      create: { telemetryId: ping.id, payload: dto.rawPayload as object },
-      update: {},
-    })
-  }
-
-  // 5. Broadcast to SSE clients immediately
-  emitTelemetry(orgId, vehicle.id, {
+  // 4. Broadcast to SSE clients immediately — doesn't wait on the raw-payload
+  //    write below, which nothing downstream needs synchronously.
+  emitTelemetry(orgId, vehicleId, {
     id:          ping.id.toString(),
     vehicleId:   ping.vehicleId,
     capturedAt:  ping.capturedAt,
@@ -65,9 +81,23 @@ export async function processTelemetry(orgId: string, dto: TelemetryPayload) {
     lng:         ping.lng,
   })
 
+  // 5. Store raw payload separately (no relation — intentional to avoid eager
+  //    load) — fire-and-forget, bounded by rawPayloadLimit, same pattern as
+  //    the geofence evaluation below. It's diagnostic data; nothing in the
+  //    request/SSE path depends on it having landed yet.
+  if (dto.rawPayload) {
+    void rawPayloadLimit(() =>
+      prisma.vehicleTelemetryRaw.upsert({
+        where: { telemetryId: ping.id },
+        create: { telemetryId: ping.id, payload: dto.rawPayload as object },
+        update: {},
+      }),
+    ).catch(err => logger.warn({ err, deviceId: dto.deviceId }, 'raw telemetry payload write failed'))
+  }
+
   // 6. Geofence evaluation — async fire-and-forget (never blocks ingest response)
   if (dto.lat != null && dto.lng != null) {
-    evaluateGeofences(orgId, vehicle.id, assignment?.userId ?? null, ping.id, dto.lat, dto.lng, dto.speedKmh ?? null).catch(() => undefined)
+    evaluateGeofences(orgId, vehicleId, driverId, ping.id, dto.lat, dto.lng, dto.speedKmh ?? null).catch(() => undefined)
   }
 
   return ping.id

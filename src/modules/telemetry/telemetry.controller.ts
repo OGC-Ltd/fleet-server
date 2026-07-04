@@ -1,7 +1,7 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import { registerSseClient, emitHeartbeat } from '../../lib/sse.js'
-import { listPings, getLatestPing, getFleetSnapshot, getActiveAlerts } from './telemetry.service.js'
+import { listPings, getLatestPing, getFleetSnapshot, getActiveAlerts, getAlertHistoryCounts, getMaintenanceHistory, getVehicleServiceHistory, getVehicleGarageVisits } from './telemetry.service.js'
 import type { TelemetryListQuery } from './telemetry.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -34,6 +34,46 @@ export const getLatestTelemetry: RequestHandler = async (req, res, next) => {
 export const getActiveAlertsHandler: RequestHandler = async (req, res, next) => {
   try {
     const data = await getActiveAlerts(p(req, 'orgId'))
+    sendSuccess(res, data)
+  } catch (err) { next(err) }
+}
+
+export const getAlertHistoryHandler: RequestHandler = async (req, res, next) => {
+  try {
+    const data = await getAlertHistoryCounts(p(req, 'orgId'))
+    sendSuccess(res, data)
+  } catch (err) { next(err) }
+}
+
+export const getMaintenanceHistoryHandler: RequestHandler = async (req, res, next) => {
+  try {
+    // ?days=N&to=YYYY-MM-DD — both optional; default is the last 14 days
+    // ending today (see getMaintenanceHistory's own defaults). Used by the
+    // Maintenance page's calendar range/single-day selection.
+    const daysRaw = req.query['days']
+    const toRaw   = req.query['to']
+    const days = typeof daysRaw === 'string' && daysRaw.trim() !== ''
+      ? Math.min(366, Math.max(1, Math.round(Number(daysRaw))))
+      : undefined
+    const to = typeof toRaw === 'string' && !Number.isNaN(Date.parse(toRaw))
+      ? new Date(toRaw)
+      : undefined
+
+    const data = await getMaintenanceHistory(p(req, 'orgId'), days, to)
+    sendSuccess(res, data)
+  } catch (err) { next(err) }
+}
+
+export const getVehicleServiceHistoryHandler: RequestHandler = async (req, res, next) => {
+  try {
+    const data = await getVehicleServiceHistory(p(req, 'orgId'), p(req, 'vehicleId'))
+    sendSuccess(res, data)
+  } catch (err) { next(err) }
+}
+
+export const getVehicleGarageVisitsHandler: RequestHandler = async (req, res, next) => {
+  try {
+    const data = await getVehicleGarageVisits(p(req, 'orgId'), p(req, 'vehicleId'))
     sendSuccess(res, data)
   } catch (err) { next(err) }
 }

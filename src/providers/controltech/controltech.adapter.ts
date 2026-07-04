@@ -52,18 +52,20 @@ export function normaliseCtSnapshot(
   const fuelUsedMl  = raw.fuel_used_ml ?? 0
   const fuelLevelMl = raw.fuel_level_ml ?? null
 
+  // Sensor channels are powered by the engine — no alerts fire when engine is off.
+  const engineOn = raw.engine_on === 1
   const flags = {
-    overspeeding:        raw.speed_kmh > SPEED_LIMIT_KMH,
-    fuelInconsistency:   fuelUsedMl < -FUEL_INCONSISTENCY_THRESHOLD_ML,  // large negative delta
-    doorOpenWhileMoving: raw.door_state !== 0 && raw.speed_kmh > 5,
-    lowFuel:             fuelLevelMl != null && fuelLevelMl < tankCapacityMl * LOW_FUEL_PCT,
-    engineIdling:        raw.engine_on === 1 && raw.speed_kmh < 2,
-    outsideGeofence:     (raw as unknown as Record<string, unknown>)['_sim'] != null
+    overspeeding:        engineOn && raw.speed_kmh > SPEED_LIMIT_KMH,
+    fuelInconsistency:   engineOn && fuelUsedMl < -FUEL_INCONSISTENCY_THRESHOLD_ML,
+    doorOpenWhileMoving: engineOn && raw.door_state !== 0 && raw.speed_kmh > 5,
+    lowFuel:             engineOn && fuelLevelMl != null && fuelLevelMl < tankCapacityMl * LOW_FUEL_PCT,
+    engineIdling:        engineOn && raw.speed_kmh < 2,
+    outsideGeofence:     engineOn && (raw as unknown as Record<string, unknown>)['_sim'] != null
                            ? Boolean(((raw as unknown as Record<string, unknown>)['_sim'] as Record<string, unknown>)['outsideFence'])
                            : false,
-    lowBattery:          raw.battery_v < 11.5,
-    highEngineTemp:      raw.engine_temp_c != null && raw.engine_temp_c > HIGH_ENGINE_TEMP_C,
-    lowOil:              raw.oil_level_pct != null && raw.oil_level_pct < LOW_OIL_PCT,
+    lowBattery:          engineOn && raw.battery_v < 11.5,
+    highEngineTemp:      engineOn && raw.engine_temp_c != null && raw.engine_temp_c > HIGH_ENGINE_TEMP_C,
+    lowOil:              engineOn && raw.oil_level_pct != null && raw.oil_level_pct < LOW_OIL_PCT,
   }
 
   return {
@@ -144,7 +146,14 @@ export class ControltechMockAdapter implements TelemetryProvider {
 
       if (prior && typeof prior.lat === 'number') {
         // Resume: trust the persisted state, refresh derived tank capacity.
-        this.states.set(v.deviceId, { ...prior, tankCapacityMl: tankLitres * 1000 })
+        // Defaults are spread FIRST and prior OVER them, so any field added to
+        // VehicleSimState after this row was last persisted (e.g. the garage-
+        // redirect / maintenanceResetOdoKm fields) gets a sane fallback
+        // instead of `undefined` — otherwise the very next renderSnapshot()
+        // throws on the missing field for every vehicle hydrated from an
+        // older save.
+        const defaults = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType)
+        this.states.set(v.deviceId, { ...defaults, ...prior, tankCapacityMl: tankLitres * 1000 })
         hydrated++
       } else {
         const state = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType)
@@ -178,9 +187,11 @@ export class ControltechMockAdapter implements TelemetryProvider {
         // One-shot lifecycle events have now been copied into the frame; clear
         // them so each completed trip / theft / refuel is persisted exactly once
         // and never re-snapshotted to the DB on the next persist().
-        state.eventTripCompleted = null
-        state.eventFuelTheft     = null
-        state.eventRefuel        = null
+        state.eventTripCompleted       = null
+        state.eventFuelTheft           = null
+        state.eventRefuel             = null
+        state.eventServiceCompleted    = null
+        state.eventGarageVisitCompleted = null
       } catch (err) {
         logger.warn({ err, deviceId: state.deviceId }, 'Simulator tick failed — skipping device')
       }

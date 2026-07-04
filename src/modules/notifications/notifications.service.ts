@@ -12,19 +12,22 @@
  *   node -e "const wp=require('web-push'); console.log(JSON.stringify(wp.generateVAPIDKeys(),null,2))"
  */
 
-import webpush from 'web-push'
 import { prisma } from '../../lib/prisma.js'
 import { logger }  from '../../lib/logger.js'
+import { initPushDispatcher, getPushDispatcher } from '../../lib/push-dispatcher.js'
 
 // ─── VAPID initialisation ──────────────────────────────────────────────────
+// The actual signing/encryption/delivery (webpush.sendNotification) runs on a
+// dedicated worker thread — see push-dispatcher.ts / workers/push.worker-thread.ts.
+// Nothing on the main thread imports `web-push` directly any more.
 
 const PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY  ?? ''
 const PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY ?? ''
 const SUBJECT     = process.env.VAPID_SUBJECT     ?? 'mailto:fleet@sukari.co.ke'
 
 if (PUBLIC_KEY && PRIVATE_KEY) {
-  webpush.setVapidDetails(SUBJECT, PUBLIC_KEY, PRIVATE_KEY)
-  logger.info({ subject: SUBJECT }, 'Web Push VAPID keys configured')
+  initPushDispatcher({ publicKey: PUBLIC_KEY, privateKey: PRIVATE_KEY, subject: SUBJECT })
+  logger.info({ subject: SUBJECT }, 'Web Push VAPID keys configured (dispatch via worker thread)')
 } else {
   logger.warn('VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY not set — Web Push is disabled')
 }
@@ -101,22 +104,22 @@ class PushService {
     const body = JSON.stringify(payload)
     const stale: string[] = []
 
+    const dispatcher = getPushDispatcher()
+    if (!dispatcher) return   // isEnabled guarantees this shouldn't happen, but stay defensive
+
     await Promise.allSettled(
       subs.map(async (sub) => {
-        try {
-          await webpush.sendNotification(
-            { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-            body,
-            { TTL: 60 },
-          )
-        } catch (err: unknown) {
-          const status = (err as { statusCode?: number }).statusCode
-          if (status === 410 || status === 404) {
-            // Subscription expired / unregistered — clean it up
-            stale.push(sub.id)
-          } else {
-            logger.warn({ err, endpoint: sub.endpoint }, 'Web Push delivery failed')
-          }
+        const result = await dispatcher.send({
+          subscription: { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+          payload: body,
+          ttl: 60,
+        })
+        if (result.ok) return
+        if (result.stale) {
+          // Subscription expired / unregistered — clean it up
+          stale.push(sub.id)
+        } else {
+          logger.warn({ err: result.errorMessage, endpoint: sub.endpoint }, 'Web Push delivery failed')
         }
       }),
     )

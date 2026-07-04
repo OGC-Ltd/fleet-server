@@ -39,6 +39,7 @@ export function makeUser(overrides: Partial<User> = {}): User {
     createdAt: now(),
     updatedAt: now(),
     deletedAt: null,
+    driverRatingScore: 5.0,
     ...overrides,
   }
 }

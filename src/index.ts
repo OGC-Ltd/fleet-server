@@ -5,6 +5,9 @@ import { logger } from './lib/logger.js'
 import { startPoller } from './lib/poller.js'
 import { startTelemetryWorker }     from './lib/workers/telemetry.worker.js'
 import { startNotificationWorker }  from './lib/workers/notification.worker.js'
+import { startAlertsWorker }        from './lib/workers/alerts.worker.js'
+import { startSimEventsWorker }     from './lib/workers/sim-events.worker.js'
+import { stopPushDispatcher }       from './lib/push-dispatcher.js'
 
 async function main() {
   await connectDB()
@@ -18,6 +21,8 @@ async function main() {
   // Start event-bus workers before the poller so no events are missed
   const stopTelemetryWorker    = startTelemetryWorker()
   const stopNotificationWorker = startNotificationWorker()
+  const stopAlertsWorker       = startAlertsWorker()
+  const stopSimEventsWorker    = startSimEventsWorker()
   const poller                 = startPoller()
 
   const shutdown = async (signal: string) => {
@@ -27,6 +32,9 @@ async function main() {
     await poller.flush().catch((err) => logger.warn({ err }, 'Simulation flush failed on shutdown'))
     stopTelemetryWorker()
     stopNotificationWorker()
+    stopAlertsWorker()
+    stopSimEventsWorker()
+    await stopPushDispatcher().catch((err) => logger.warn({ err }, 'Push worker thread shutdown failed'))
     server.close(async () => {
       await disconnectDB()
       logger.info('Graceful shutdown complete')

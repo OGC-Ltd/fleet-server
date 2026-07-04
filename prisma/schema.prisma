@@ -1,6 +1,13 @@
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider             = "prisma-client"
+  output               = "../generated/prisma"
+  // Without these, the generator emits extensionless relative imports
+  // (e.g. `from './enums'`), which only resolves under a bundler/loader.
+  // Plain `node dist/src/index.js` in production needs explicit .js
+  // specifiers to resolve ESM imports — same convention already used
+  // throughout src/.
+  moduleFormat         = "esm"
+  importFileExtension  = "js"
 }
 
 datasource db {
@@ -150,6 +157,13 @@ model User {
   updatedAt      DateTime   @updatedAt @map("updated_at")
   deletedAt      DateTime?  @map("deleted_at") // soft delete — preserves FK integrity on trips
 
+  // Persisted driver rating (1.0–5.0, starts at 5.0). Overspeeding is scored
+  // per-trip and updated here on trip completion (see simulation.persistence.ts)
+  // so the score can self-heal on clean trips instead of being recomputed from
+  // a rolling window every time. Only meaningful when the user holds the
+  // "driver" role.
+  driverRatingScore Float @default(5.0) @map("driver_rating_score")
+
   organisation Organisation @relation(fields: [organisationId], references: [id])
 
   // IAM
@@ -265,6 +279,8 @@ model Vehicle {
   fuelFillings       FuelFilling[]
   fuelThefts         FuelTheft[]
   periodSummaries    VehiclePeriodSummary[]
+  serviceRecords     VehicleServiceRecord[]
+  garageVisits       VehicleGarageVisit[]
 
   // Live telemetry relations
   telemetry          VehicleTelemetry[]
@@ -590,6 +606,50 @@ model EngineHourSession {
   @@index([reportingPeriodId])
   @@index([beganAt])
   @@map("engine_hour_sessions")
+}
+
+/// A completed scheduled service — one row per real MAINTENANCE-phase
+/// completion in the simulator (see controltech.simulator.ts's `eventServiceCompleted`).
+/// This is the durable record the Maintenance page's per-vehicle service
+/// history report reads from; nothing here is derived/fabricated at read time.
+model VehicleServiceRecord {
+  id                   String   @id @default(cuid())
+  vehicleId            String   @map("vehicle_id")
+  servicedAt           DateTime @map("serviced_at")
+  odometerKm           Float    @map("odometer_km")
+  previousServiceOdoKm Float?   @map("previous_service_odo_km") // null for a vehicle's first recorded service
+  nextServiceOdoKm     Float    @map("next_service_odo_km")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
+
+  @@index([vehicleId, servicedAt])
+  @@map("vehicle_service_records")
+}
+
+/// A vehicle redirected to a third-party garage because its service came due
+/// while out on the road (see the simulator's TO_GARAGE/AT_GARAGE phases).
+/// Distinct from VehicleServiceRecord: this tracks the actual garage visit
+/// (where, when in, when out, what was worked on), not just the odometer
+/// cycle bookkeeping.
+model VehicleGarageVisit {
+  id            String   @id @default(cuid())
+  vehicleId     String   @map("vehicle_id")
+  garageName    String   @map("garage_name")
+  garageLat     Float    @map("garage_lat")
+  garageLng     Float    @map("garage_lng")
+  enteredAt     DateTime @map("entered_at")
+  exitedAt      DateTime @map("exited_at")
+  durationMinutes Int    @map("duration_minutes")
+  odometerKm    Float    @map("odometer_km")
+  severityScore Float    @map("severity_score")   // 0–1
+  itemsFixed    Json     @map("items_fixed")       // [{ name, replaced }, ...]
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
+
+  @@index([vehicleId, enteredAt])
+  @@map("vehicle_garage_visits")
 }
 
 /// A single refuelling event.
