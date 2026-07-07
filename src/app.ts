@@ -63,12 +63,18 @@ export function createApp() {
     sendSuccess(res, { simMs: simNow(), realMs: Date.now(), scale: 6 })
   })
 
-  // Bootstrap — returns the default org for single-org / auth-bypass mode
+  // Bootstrap — returns the full organisation roster (for the dashboard's
+  // org switcher) plus a default selection, in auth-bypass mode. Ordered by
+  // creation so the first-seeded org (Sukari) stays the default.
   app.get(`${v1}/bootstrap`, async (_req, res) => {
     try {
-      const org = await prisma.organisation.findFirst({ select: { id: true, name: true } })
-      if (!org) return sendError(res, 503, 'No organisation configured')
-      sendSuccess(res, { orgId: org.id, orgName: org.name })
+      const orgs = await prisma.organisation.findMany({
+        select:  { id: true, name: true, code: true },
+        orderBy: { createdAt: 'asc' },
+      })
+      const first = orgs[0]
+      if (!first) return sendError(res, 503, 'No organisation configured')
+      sendSuccess(res, { orgId: first.id, orgName: first.name, orgs })
     } catch { sendError(res, 500, 'Bootstrap failed') }
   })
 

@@ -1,13 +1,20 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as repo from './analytics.repository.js'
-import type { AnalyticsRange, SpeedingQuery } from './analytics.schema.js'
+import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
 export const overview: RequestHandler = async (req, res, next) => {
   try {
     const data = await repo.fleetOverview(p(req, 'orgId'))
+    sendSuccess(res, data)
+  } catch (err) { next(err) }
+}
+
+export const deliveries: RequestHandler = async (req, res, next) => {
+  try {
+    const data = await repo.deliveriesAnalytics(p(req, 'orgId'), req.query as unknown as DeliveriesQuery)
     sendSuccess(res, data)
   } catch (err) { next(err) }
 }

@@ -125,8 +125,9 @@ export class ControltechMockAdapter implements TelemetryProvider {
    * the simulation pause on stop and resume exactly where it left off.
    */
   private async init(): Promise<void> {
-    // Only the live-simulation fleet (5 tractors, 8 trucks, 7 lorries) is ticked;
-    // the rest of the org's vehicles remain in the DB but idle. See lib/sim-fleet.
+    // Only the live-simulation fleet is ticked — Sukari's 30 (tractors, trucks,
+    // lorries) plus Aquamist's 10 (saloons, trucks, lorries); the rest of each
+    // org's vehicles remain in the DB but idle. See lib/sim-fleet.
     const [vehicles, saved, meta] = await Promise.all([
       getSimFleetVehicles(),
       prisma.simulationState.findMany(),
@@ -143,6 +144,9 @@ export class ControltechMockAdapter implements TelemetryProvider {
       this.orgByDevice.set(v.deviceId, v.organisationId)
       const tankLitres = v.tankCapacityLitres ?? 200
       const prior      = savedByDevice.get(v.deviceId)
+      // Routing profile — which organisation's logistics cycle this vehicle
+      // runs (Sukari sugar haulage vs. Aquamist direct-to-customer delivery).
+      const profile    = v.orgCode === 'AQUAMIST' ? 'AQUAMIST' as const : 'SUKARI' as const
 
       if (prior && typeof prior.lat === 'number') {
         // Resume: trust the persisted state, refresh derived tank capacity.
@@ -152,11 +156,15 @@ export class ControltechMockAdapter implements TelemetryProvider {
         // instead of `undefined` — otherwise the very next renderSnapshot()
         // throws on the missing field for every vehicle hydrated from an
         // older save.
-        const defaults = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType)
-        this.states.set(v.deviceId, { ...defaults, ...prior, tankCapacityMl: tankLitres * 1000 })
+        const defaults = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType, profile)
+        // `profile` is pinned AFTER the prior spread — states persisted before
+        // the org-aware fleet existed have no profile key (fine, defaults win),
+        // but a stale/wrong persisted value must never override the vehicle's
+        // actual organisation.
+        this.states.set(v.deviceId, { ...defaults, ...prior, profile, tankCapacityMl: tankLitres * 1000 })
         hydrated++
       } else {
-        const state = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType)
+        const state = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType, profile)
         this.states.set(v.deviceId, { ...state, tankCapacityMl: tankLitres * 1000 })
         coldStarted++
       }
