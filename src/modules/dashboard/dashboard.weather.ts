@@ -120,7 +120,12 @@ export async function getRouteWeather(orgCode: string = DEFAULT_ORG_CODE) {
     .map(r => r.value)
 
   const failed = results.length - locations.length
-  if (failed > 0) logger.warn({ failed }, 'Some weather locations failed to fetch')
+  if (failed > 0) {
+    const reasons = results
+      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      .map(r => (r.reason instanceof Error ? r.reason.message : String(r.reason)))
+    logger.warn({ failed, reasons }, 'Some weather locations failed to fetch')
+  }
 
   const data = { locations }
   if (locations.length > 0) cache.set(code, { ts: Date.now(), data }) // don't cache a total failure
