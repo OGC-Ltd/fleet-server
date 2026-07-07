@@ -36,6 +36,7 @@ export function createApp() {
   const app = express()
 
   // BigInt values (VehicleTelemetry.id) are not JSON-serializable by default
+  app.set("trust proxy", 1);
   app.set('json replacer', (_key: string, value: unknown) =>
     typeof value === 'bigint' ? value.toString() : value,
   )
