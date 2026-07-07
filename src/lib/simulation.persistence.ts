@@ -160,11 +160,16 @@ export async function persistSimEvents(
 
     await updateDriverRatingForTrip(driverId, t.overspeedTicks)
 
+    // Sukari hauls are bulk loads; Aquamist hauls are packaged bottled product
+    // (still water, sparkling water, juice) with the product carried on the
+    // event's cargoDesc.
+    const bulk = t.cargoType === 'SUGARCANE' || t.cargoType === 'PROCESSED_SUGAR'
     await prisma.cargoManifest.create({
       data: {
         tripId:            trip.id,
-        cargoType:         'BULK',
-        description:       t.cargoType === 'SUGARCANE' ? 'Raw sugarcane' : 'Processed sugar',
+        cargoType:         bulk ? 'BULK' : 'PACKAGED',
+        description:       t.cargoDesc
+                             ?? (t.cargoType === 'SUGARCANE' ? 'Raw sugarcane' : 'Processed sugar'),
         declaredWeightKg:  t.cargoWeightKg,
         departureWeightKg: t.cargoWeightKg,
         arrivalWeightKg:   t.cargoWeightKg,

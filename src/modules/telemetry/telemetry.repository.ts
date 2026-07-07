@@ -47,7 +47,7 @@ export async function findLatest(vehicleId: string, orgId: string) {
 
 /** Latest telemetry snapshot for every vehicle in an org — powers the initial map render. */
 export async function findFleetSnapshot(orgId: string) {
-  // Scope the map to the live-simulation fleet (5 tractors, 8 trucks, 7 lorries).
+  // Scope the map to the live-simulation fleet (org-aware — see lib/sim-fleet).
   const simFleetIds = await getSimFleetVehicleIds()
   const vehicles = await prisma.vehicle.findMany({
     where: { organisationId: orgId, id: { in: simFleetIds } },
@@ -78,6 +78,7 @@ export async function findFleetSnapshot(orgId: string) {
     lat: number | null; lng: number | null; heading_deg: number | null
     speed_kmh: number | null; engine_on: boolean
     fuel_level_ml: number | null; fuel_used_ml: number | null; cargo_weight_kg: number | null
+    cargo_desc: string | null
     captured_at: Date; leg: unknown
     odometer_km: number | null; maintenance: unknown; phase: string | null
   }
@@ -87,6 +88,7 @@ export async function findFleetSnapshot(orgId: string) {
       t.lat, t.lng, t.heading_deg, t.speed_kmh, t.engine_on,
       t.fuel_level_ml, t.fuel_used_ml, t.cargo_weight_kg, t.captured_at,
       r.payload->'_sim'->'leg' AS leg,
+      r.payload->'_sim'->>'cargoDesc' AS cargo_desc,
       (r.payload->>'odometer_km')::float AS odometer_km,
       r.payload->'_sim'->'maintenance' AS maintenance,
       r.payload->'_sim'->>'phase' AS phase
@@ -124,6 +126,7 @@ export async function findFleetSnapshot(orgId: string) {
         fuelLevelMl,
         fuelUsedMl:     ping?.fuel_used_ml ?? null,
         cargoWeightKg:  ping?.cargo_weight_kg ?? null,
+        cargoDesc:      ping?.cargo_desc ?? null,
         capturedAt:     ping?.captured_at?.toISOString() ?? null,
         lowFuel,
         fuelLevelPct,

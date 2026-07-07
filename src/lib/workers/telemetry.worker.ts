@@ -24,6 +24,9 @@ export interface DashboardPositionPayload {
   fuelLevelMl:  number | null
   fuelLevelPct: number | null   // 0–100; computed from tankCapacityMl
   cargoWeightKg: number | null
+  // Product description on board — e.g. Aquamist's 'Still water — 5 L bottles'
+  // (null for Sukari bulk loads, which the dash labels from vehicleType).
+  cargoDesc:    string | null
   doorStatus:   string | undefined
   engineTempC:  number | null
   oilLevelPct:  number | null
@@ -86,6 +89,7 @@ export function startTelemetryWorker(): () => void {
         fuelLevelMl:  frame.fuelLevelMl,
         fuelLevelPct,
         cargoWeightKg: frame.cargoWeightKg ?? null,
+        cargoDesc:    (frame.rawPayload as { _sim?: { cargoDesc?: string | null } } | undefined)?._sim?.cargoDesc ?? null,
         doorStatus:   frame.doorStatus,
         engineTempC:  frame.engineTempC ?? null,
         oilLevelPct:  frame.oilLevelPct ?? null,

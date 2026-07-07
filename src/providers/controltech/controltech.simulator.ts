@@ -5,13 +5,24 @@
  * machine evolves on every tick (30 s) to produce convincing multi-cycle
  * timelines (speed ramps, fuel drain, position interpolation, etc.).
  *
- * Routing is classified by vehicleType:
+ * Routing is classified by organisation profile + vehicleType:
+ *
+ *  SUKARI (sugar logistics):
  *  - TRACTOR          : shuttles Sukari Industries ↔ a nearby sugarcane farm.
  *                        Runs out empty, returns loaded with harvested cane.
  *  - TRUCK / LORRY     : shuttles Sukari Industries ↔ a sugar distribution depot.
  *                        Runs out loaded with processed sugar, returns empty.
  *  - everything else   : keeps the original free-roaming Kenyan-city routing
  *                        (used by TANKER, BUS, AMBULANCE, etc.).
+ *
+ *  AQUAMIST (direct-to-customer beverage distribution — NO depots):
+ *  - SALOON            : several small residential drops per day, delivering
+ *                        bottled products to customers around Nairobi.
+ *  - TRUCK / LORRY     : bulk orders from the Aquamist plant straight to
+ *                        customers in different parts of Nairobi, Kisumu,
+ *                        Nakuru, and Mombasa. Runs out loaded, returns empty.
+ *  Products: still water & sparkling water in a range of bottle volumes, and
+ *  juice (product 2) — see AQUAMIST_PRODUCTS.
  *
  * Design principle: the simulator is an internal implementation detail of
  * ControltechMockAdapter.  Nothing outside the providers/ directory should
@@ -105,10 +116,80 @@ const GARAGES: [number, number, string][] = [
   [ 0.5210, 35.2610, 'Eldoret Auto Care'],         // near Eldoret Depot
   [-4.0510, 39.6600, 'Mombasa Coastal Garage'],    // near Mombasa Depot
   [-3.3600, 40.0250, 'Watamu Marine & Motors'],    // near Watamu Depot
+  [-1.2110, 36.6620, 'Kikuyu Auto Garage'],        // near the Aquamist plant
+]
+
+// ─── Aquamist Limited — direct-to-customer routing profile ─────────────────
+// Aquamist has NO depots: every delivery leaves the bottling plant and goes
+// straight to a customer. Customers reside in different parts of Nairobi,
+// Kisumu, Nakuru, and Mombasa.
+
+export type RoutingProfile = 'SUKARI' | 'AQUAMIST'
+
+// Aquamist bottling plant / HQ — exact coordinates (Kiambu County, NW of Nairobi).
+const AQUAMIST_HQ: [number, number, string] =
+  [-1.2060044099698617, 36.65702647381419, 'Aquamist Plant']
+
+// Customer delivery points — [lat, lng, name] — spread across different parts
+// of the four supply cities. Saloon cars only serve the Nairobi-area customers
+// (within SALOON_RANGE_KM of the plant); trucks and lorries serve all of them.
+const AQUAMIST_CUSTOMERS: [number, number, string][] = [
+  // Nairobi — different parts of the city
+  [-1.2683, 36.8110, 'Customer — Westlands, Nairobi'],
+  [-1.3197, 36.7062, 'Customer — Karen, Nairobi'],
+  [-1.2906, 36.7870, 'Customer — Kilimani, Nairobi'],
+  [-1.3081, 36.8330, 'Customer — South B, Nairobi'],
+  [-1.2230, 36.8991, 'Customer — Kasarani, Nairobi'],
+  [-1.2076, 36.7811, 'Customer — Ruaka, Nairobi'],
+  // Kisumu
+  [-0.1057, 34.7448, 'Customer — Milimani, Kisumu'],
+  [-0.0810, 34.7720, 'Customer — Kondele, Kisumu'],
+  [-0.0570, 34.7900, 'Customer — Mamboleo, Kisumu'],
+  // Nakuru
+  [-0.2963, 36.0517, 'Customer — Milimani, Nakuru'],
+  [-0.2789, 36.0894, 'Customer — Section 58, Nakuru'],
+  [-0.3070, 36.1470, 'Customer — Lanet, Nakuru'],
+  // Mombasa
+  [-4.0202, 39.7076, 'Customer — Nyali, Mombasa'],
+  [-3.9909, 39.7276, 'Customer — Bamburi, Mombasa'],
+  [-4.0842, 39.6650, 'Customer — Likoni, Mombasa'],
+]
+
+// Saloons handle nearby residential drops only — customers within this radius
+// of the plant (covers the Nairobi metro; the upcountry/coast cities are
+// truck/lorry territory).
+const SALOON_RANGE_KM = 60
+
+function aquamistCustomersFor(vehicleType: string): [number, number, string][] {
+  if (vehicleType !== 'SALOON') return AQUAMIST_CUSTOMERS
+  return AQUAMIST_CUSTOMERS.filter(
+    c => haversineApproxKm(AQUAMIST_HQ[0], AQUAMIST_HQ[1], c[0], c[1]) <= SALOON_RANGE_KM,
+  )
+}
+
+// Product catalogue — still & sparkling water packaged in different bottle
+// volumes, plus juice (product 2). A random product is drawn per dispatch and
+// carried through to the trip's cargo manifest.
+export type AquamistCargoKind = 'STILL_WATER' | 'SPARKLING_WATER' | 'JUICE'
+
+const AQUAMIST_PRODUCTS: { kind: AquamistCargoKind; desc: string }[] = [
+  { kind: 'STILL_WATER',     desc: 'Still water — 500 ml PET bottles' },
+  { kind: 'STILL_WATER',     desc: 'Still water — 1 L PET bottles' },
+  { kind: 'STILL_WATER',     desc: 'Still water — 5 L bottles' },
+  { kind: 'STILL_WATER',     desc: 'Still water — 10 L bottles' },
+  { kind: 'STILL_WATER',     desc: 'Still water — 20 L dispenser bottles' },
+  { kind: 'SPARKLING_WATER', desc: 'Sparkling water — 330 ml glass bottles' },
+  { kind: 'SPARKLING_WATER', desc: 'Sparkling water — 750 ml glass bottles' },
+  { kind: 'SPARKLING_WATER', desc: 'Sparkling water — 1 L PET bottles' },
+  { kind: 'JUICE',           desc: 'Juice — 300 ml bottles' },
+  { kind: 'JUICE',           desc: 'Juice — 1 L tetra packs' },
+  { kind: 'JUICE',           desc: 'Juice — 5 L catering packs' },
 ]
 
 function isTractorType(t: string): boolean { return t === 'TRACTOR' }
-function isDeliveryType(t: string): boolean { return t === 'TRUCK' || t === 'LORRY' }
+// SALOON is a delivery type too — only Aquamist seeds saloons, and its whole
+// fleet runs the direct-to-customer delivery cycle.
+function isDeliveryType(t: string): boolean { return t === 'TRUCK' || t === 'LORRY' || t === 'SALOON' }
 
 function lerp(a: number, b: number, t: number) { return a + (b - a) * t }
 function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)) }
@@ -203,11 +284,21 @@ const OFFLOAD_MIN_DELIVERY = (cargoKg: number) => Math.round(30 + (cargoKg / 100
 // Legal max payload per type (kg): tractors 20 t, trucks & lorries 36 t. The
 // mill always leaves a 10 t safety allowance, so a vehicle is never loaded above
 // (max − 10 t) — a tractor tops out at 10 t, a truck/lorry at 26 t.
-export const MAX_PAYLOAD_KG: Record<string, number> = { TRACTOR: 20_000, TRUCK: 36_000, LORRY: 36_000 }
+export const MAX_PAYLOAD_KG: Record<string, number> = { TRACTOR: 20_000, TRUCK: 36_000, LORRY: 36_000, SALOON: 500 }
 const PAYLOAD_ALLOWANCE_KG = 10_000
 function plannedLoadKg(vehicleType: string): number {
   const cap = (MAX_PAYLOAD_KG[vehicleType] ?? 20_000) - PAYLOAD_ALLOWANCE_KG
   return randInt(Math.round(cap * 0.80), cap)   // ≤ (max − 10 t), never overloaded
+}
+
+/** Profile-aware load planner. Aquamist loads are crates/pallets of bottled
+ *  product — a saloon boot-load for residential drops, a part-to-full pallet
+ *  load for trucks/lorries — rather than the Sukari bulk-haul formula (whose
+ *  10 t allowance would go negative on a 500 kg saloon). */
+function plannedLoadFor(s: VehicleSimState): number {
+  if (s.profile !== 'AQUAMIST') return plannedLoadKg(s.vehicleType)
+  if (s.vehicleType === 'SALOON') return randInt(180, 450)      // crates in the boot & back seat
+  return randInt(8_000, 24_000)                                  // palletised bulk order
 }
 
 // Fleet-wide fuel-theft budget — at most a few siphoning incidents per day so
@@ -250,6 +341,8 @@ export interface VehicleSimState {
 
   // cargo
   cargoWeightKg:    number | null
+  cargoKind:        string          // what's on board ('' when empty) — e.g. STILL_WATER, JUICE
+  cargoDesc:        string          // human product description for the trip's manifest
 
   // sensors
   batteryV:         number
@@ -270,8 +363,9 @@ export interface VehicleSimState {
                                  // "late" genuinely means slower-than-planned, not just a fabricated number
 
   // route classification — drives type-aware routing in tickVehicle()
-  vehicleType:      string                    // TRACTOR, TRUCK, LORRY, TANKER, …
-  legDirection:     'outbound' | 'inbound'     // outbound = away from Sukari Industries
+  vehicleType:      string                    // TRACTOR, TRUCK, LORRY, SALOON, TANKER, …
+  profile:          RoutingProfile             // which organisation's cycle this vehicle runs
+  legDirection:     'outbound' | 'inbound'     // outbound = away from the home base
 
   // geofence test — fence centre & radius assigned to this vehicle
   fenceLat:         number
@@ -370,8 +464,12 @@ export interface TripEvent {
   startFuelMl:   number
   endFuelMl:     number
   cargoWeightKg: number
-  cargoType:     'SUGARCANE' | 'PROCESSED_SUGAR'
+  cargoType:     SimCargoKind
+  cargoDesc?:    string   // product description (Aquamist) — manifest text
 }
+
+/** Cargo kinds across both organisation profiles. */
+export type SimCargoKind = 'SUGARCANE' | 'PROCESSED_SUGAR' | AquamistCargoKind
 
 export interface TheftEvent {
   atMs:        number
@@ -446,22 +544,26 @@ export function initVehicleState(
   index: number,
   tankCapacityLitres: number,
   vehicleType: string = 'TRUCK',
+  profile: RoutingProfile = 'SUKARI',
 ): VehicleSimState {
-  const tractor  = isTractorType(vehicleType)
+  const aquamist = profile === 'AQUAMIST'
+  const tractor  = !aquamist && isTractorType(vehicleType)
   const delivery = isDeliveryType(vehicleType)
 
-  // Every vehicle starts the simulation parked AT THE ORGANISATION — tractors at
-  // the dedicated parking, everyone else on the mill premises. Support (non-sugar)
+  // Every vehicle starts the simulation parked AT ITS ORGANISATION — Sukari
+  // tractors at the dedicated parking, other Sukari vehicles on the mill
+  // premises, Aquamist vehicles at the bottling plant. Support (non-logistics)
   // vehicles get a small deterministic yard offset so they don't stack on one
   // pixel. All are engine-off, FULL tank, and healthy: no movement and no alerts
   // until operations begin and vehicles are dispatched.
-  const home: [number, number, string] = tractor ? PARKING : SUKARI
+  const home: [number, number, string] = aquamist ? AQUAMIST_HQ : tractor ? PARKING : SUKARI
   const lat = home[0] + (tractor ? 0 : ((index % 8) - 4) * 0.0009)
   const lng = home[1] + (tractor ? 0 : ((Math.floor(index / 8) % 8) - 4) * 0.0009)
 
   // Outbound destination pool used once the vehicle is dispatched.
-  const dest: [number, number, string] = tractor
-    ? SUGARCANE_FARMS[index % SUGARCANE_FARMS.length]!
+  const dest: [number, number, string] = aquamist
+    ? aquamistCustomersFor(vehicleType)[index % aquamistCustomersFor(vehicleType).length]!
+    : tractor ? SUGARCANE_FARMS[index % SUGARCANE_FARMS.length]!
     : delivery ? SUGAR_DEPOTS[index % SUGAR_DEPOTS.length]!
     : home
 
@@ -485,6 +587,8 @@ export function initVehicleState(
     fuelLevelMl:     tankMl,          // FULL — every vehicle leaves the premises full
     prevFuelLevelMl: tankMl,
     cargoWeightKg:   0,               // empty at HQ
+    cargoKind:       '',
+    cargoDesc:       '',
     batteryV:        jitter(12.6, 0.15),
     doorOpen:        false,
     panicPressed:    false,
@@ -493,9 +597,10 @@ export function initVehicleState(
     legBeganAtMs:        0,
     legPlannedArrivalMs: 0,
     vehicleType,
+    profile,
     legDirection:    'outbound',
-    fenceLat:        SUKARI[0],
-    fenceLng:        SUKARI[1],
+    fenceLat:        home[0],
+    fenceLng:        home[1],
     fenceRadiusM:    1500,
 
     // Healthy vitals — engine off, so temperature is ambient. No seeded criticals:
@@ -639,11 +744,12 @@ export function tickVehicle(s: VehicleSimState): void {
   }
 
   const tractor  = s.vehicleType === 'TRACTOR'
-  const delivery  = s.vehicleType === 'TRUCK' || s.vehicleType === 'LORRY'
+  const delivery  = isDeliveryType(s.vehicleType)
 
   if (tractor || delivery) {
-    // Sugar-logistics vehicles follow the realistic daily/weekly cycle
-    // (trips-per-day quota, farm/depot dwell, maintenance, Sunday rest).
+    // Logistics vehicles follow the realistic daily/weekly cycle (trips-per-day
+    // quota, load/offload dwell, maintenance, Sunday rest) — Sukari's sugar
+    // haulage and Aquamist's direct-to-customer deliveries alike.
     tickLogistics(s, tractor)
   } else {
     // Non-logistics vehicles are support assets that remain parked at the mill —
@@ -679,7 +785,8 @@ export function tickVehicle(s: VehicleSimState): void {
 
 /** Resolve a coordinate back to a known place name for trip records. */
 function placeName(lat: number, lng: number): string {
-  const pools: [number, number, string][] = [SUKARI, ...SUGARCANE_FARMS, ...SUGAR_DEPOTS, ...GARAGES]
+  const pools: [number, number, string][] =
+    [SUKARI, AQUAMIST_HQ, ...SUGARCANE_FARMS, ...SUGAR_DEPOTS, ...AQUAMIST_CUSTOMERS, ...GARAGES]
   let best = `${lat.toFixed(4)}, ${lng.toFixed(4)}`
   let bestKm = 5   // only match within 5 km
   for (const [pLat, pLng, name] of pools) {
@@ -702,6 +809,7 @@ function parkAt(s: VehicleSimState, lat: number, lng: number): void {
 // before per-tick jitter/overspeed rolls (see the `roadKmh` computed at the
 // top of tickLogistics) — used only to plan an ETA, not to drive movement.
 function typicalSpeedKmh(vehicleType: string): number {
+  if (vehicleType === 'SALOON') return 78   // light passenger car — quickest of the fleet
   const tractor = vehicleType === 'TRACTOR'
   const lorry   = vehicleType === 'LORRY'
   return tractor ? 60 * 0.55 : 62 * (lorry ? 0.85 : 1)
@@ -793,14 +901,14 @@ function beginTrip(s: VehicleSimState, fromName: string): void {
 
 function completeTrip(
   s: VehicleSimState, toName: string,
-  cargoType: 'SUGARCANE' | 'PROCESSED_SUGAR', cargoKg: number,
+  cargoType: SimCargoKind, cargoKg: number,
 ): void {
   const endMs   = simNow()
   const samples = Math.max(s.tripSpeedSamples, 1)
   s.eventTripCompleted = {
     beganAtMs:     s.tripBeganAtMs || endMs - 60_000,
     endedAtMs:     endMs,
-    fromLoc:       s.tripStartLoc || 'Sukari Industries',
+    fromLoc:       s.tripStartLoc || homeBaseOf(s)[2],
     toLoc:         toName,
     distanceKm:    Math.max(0, s.odometer - s.tripStartOdoKm),
     avgSpeedKmh:   s.tripSpeedSumKmh / samples,
@@ -811,12 +919,25 @@ function completeTrip(
     endFuelMl:     s.fuelLevelMl,
     cargoWeightKg: cargoKg,
     cargoType,
+    cargoDesc:     s.cargoDesc || undefined,
   }
   s.tripBeganAtMs = 0
 }
 
-// A tractor's home base is the parking; a truck/lorry's is the mill premises.
-function homeBase(tractor: boolean): [number, number, string] { return tractor ? PARKING : SUKARI }
+// Home base: Aquamist vehicles → the bottling plant; Sukari tractors → the
+// dedicated parking; Sukari trucks/lorries → the mill premises.
+function homeBaseOf(s: VehicleSimState): [number, number, string] {
+  if (s.profile === 'AQUAMIST') return AQUAMIST_HQ
+  return s.vehicleType === 'TRACTOR' ? PARKING : SUKARI
+}
+
+/** Consumption (L/100 km) for a delivery leg — a saloon car burns car-like
+ *  fuel regardless of a few crates in the boot; trucks/lorries use the
+ *  load-scaled haulage table. */
+function deliveryLegL100(s: VehicleSimState): number {
+  if (s.vehicleType === 'SALOON') return (s.cargoWeightKg ?? 0) > 0 ? 9 : 8
+  return deliveryConsumptionL100(s.cargoWeightKg)
+}
 
 /** Fill the tank — every vehicle leaves the premises (and every depot) full. */
 function refuelFull(s: VehicleSimState): void {
@@ -960,11 +1081,18 @@ function planDay(s: VehicleSimState, tractor: boolean): void {
   if (s.weekStartKey !== wk) {
     s.weekStartKey     = wk
     s.tripsThisWeek    = 0
-    s.weeklyTripTarget = randInt(0, 4)   // trucks/lorries: 0–4 depot runs / week
+    // Sukari trucks/lorries: 0–4 depot runs / week. Aquamist trucks/lorries:
+    // 1–4 customer deliveries / week — always at least one, so the beverage
+    // fleet never sits idle for a whole week.
+    s.weeklyTripTarget = s.profile === 'AQUAMIST' ? randInt(1, 4) : randInt(0, 4)
   }
 
   s.tripsToday      = 0
-  s.dailyTripTarget = randInt(0, 3)      // tractors: 0–3 farm hauls / day
+  // Tractors: 0–3 farm hauls / day. Aquamist saloons: 1–4 residential customer
+  // drops / day around Nairobi.
+  s.dailyTripTarget = s.profile === 'AQUAMIST' && s.vehicleType === 'SALOON'
+    ? randInt(1, 4)
+    : randInt(0, 3)
 
   // Don't yank a vehicle that's mid-haul (or already off getting fixed) when
   // the calendar day rolls over.
@@ -999,12 +1127,32 @@ function dispatch(s: VehicleSimState, tractor: boolean, now: Date): void {
     s.cargoWeightKg = 0                            // empty run out to the farm
     beginTrip(s, placeName(s.lat, s.lng))
     s.phase = 'TO_FARM'
+  } else if (s.profile === 'AQUAMIST') {
+    // Direct-to-customer beverage delivery — no depots. Saloons run several
+    // small residential drops a day (daily quota); trucks/lorries take bulk
+    // orders across Nairobi, Kisumu, Nakuru, and Mombasa (weekly quota).
+    const saloon = s.vehicleType === 'SALOON'
+    const quotaMet = saloon ? s.tripsToday >= s.dailyTripTarget
+                            : s.tripsThisWeek >= s.weeklyTripTarget
+    if (quotaMet) { s.phase = idle; return }
+    const pool     = aquamistCustomersFor(s.vehicleType)
+    const customer = pool[randInt(0, pool.length - 1)]!
+    const product  = AQUAMIST_PRODUCTS[randInt(0, AQUAMIST_PRODUCTS.length - 1)]!
+    refuelFull(s)                                  // leave the plant full
+    setLeg(s, [AQUAMIST_HQ[0], AQUAMIST_HQ[1]], [customer[0], customer[1]])
+    s.cargoWeightKg = plannedLoadFor(s)            // crates / pallets of product
+    s.cargoKind     = product.kind
+    s.cargoDesc     = product.desc
+    beginTrip(s, AQUAMIST_HQ[2])
+    s.phase = 'TO_DEPOT'                           // reused leg: outbound loaded delivery
   } else {
     if (s.tripsThisWeek >= s.weeklyTripTarget) { s.phase = idle; return }
     const depot = SUGAR_DEPOTS[randInt(0, SUGAR_DEPOTS.length - 1)]!
     refuelFull(s)                                  // leave the premises full
     setLeg(s, [SUKARI[0], SUKARI[1]], [depot[0], depot[1]])
     s.cargoWeightKg = plannedLoadKg(s.vehicleType) // processed sugar, ≤ max − 10 t
+    s.cargoKind     = 'PROCESSED_SUGAR'
+    s.cargoDesc     = 'Processed sugar'
     beginTrip(s, SUKARI[2])
     s.phase = 'TO_DEPOT'
   }
@@ -1013,9 +1161,8 @@ function dispatch(s: VehicleSimState, tractor: boolean, now: Date): void {
 export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
   const now   = simDate()
   const nowMs = simNow()
-  const lorry = s.vehicleType === 'LORRY'
-  const roadKmh = tractor ? 60 * 0.55 : 62 * (lorry ? 0.85 : 1)
-  const home  = homeBase(tractor)
+  const roadKmh = typicalSpeedKmh(s.vehicleType)
+  const home  = homeBaseOf(s)
 
   if (s.simDayKey !== dayKey(now)) planDay(s, tractor)
 
@@ -1106,13 +1253,13 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
       break
 
     case 'TO_INDUSTRY': {
-      // Tractor loaded with cane: flat rate. Truck/lorry returning empty:
-      // load-based rate (cargoWeightKg is 0 here, so this evaluates to the
-      // table's ~30 L/100 km empty tier).
-      const p = advanceLeg(s, roadKmh, tractor ? 28 : deliveryConsumptionL100(s.cargoWeightKg))
+      // Tractor loaded with cane: flat rate. Delivery vehicle returning empty:
+      // saloons at a car-like rate, trucks/lorries at the load-based rate
+      // (cargoWeightKg is 0 here, so that's the table's ~30 L/100 km empty tier).
+      const p = advanceLeg(s, roadKmh, tractor ? 28 : deliveryLegL100(s))
       if (p >= 0.98) {
         if (tractor) { s.phase = 'UNLOADING'; s.phaseEndsAtMs = nowMs + UNLOAD_MIN_TRACTOR() * MIN_MS }
-        else          { s.phase = 'AT_INDUSTRY' }   // truck/lorry returned empty to the mill
+        else          { s.phase = 'AT_INDUSTRY' }   // returned empty to home base
       }
       break
     }
@@ -1139,7 +1286,10 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
     }
 
     case 'TO_DEPOT': {
-      const p = advanceLeg(s, roadKmh, deliveryConsumptionL100(s.cargoWeightKg))   // load-based rate — ~38 L/100 km at a standard load
+      // Outbound loaded delivery — Sukari: to a sugar depot; Aquamist: straight
+      // to a customer. Saloons burn car-like fuel; trucks/lorries the
+      // load-based rate (~38 L/100 km at a standard load).
+      const p = advanceLeg(s, roadKmh, deliveryLegL100(s))
       if (p >= 0.98) {
         s.phase = 'OFFLOADING'
         s.phaseEndsAtMs = nowMs + OFFLOAD_MIN_DELIVERY(s.cargoWeightKg ?? 0) * MIN_MS
@@ -1147,29 +1297,39 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
       break
     }
 
-    case 'OFFLOADING':
-      parkAt(s, s.destLat, s.destLng)   // parked (off-road) at the depot
+    case 'OFFLOADING': {
+      parkAt(s, s.destLat, s.destLng)   // parked (off-road) at the depot / customer
       if (nowMs >= s.phaseEndsAtMs) {
-        completeTrip(s, placeName(s.destLat, s.destLng), 'PROCESSED_SUGAR', s.cargoWeightKg ?? 0)
+        const saloon = s.vehicleType === 'SALOON'
+        const kind: SimCargoKind = s.profile === 'AQUAMIST'
+          ? ((s.cargoKind || 'STILL_WATER') as SimCargoKind)
+          : 'PROCESSED_SUGAR'
+        completeTrip(s, placeName(s.destLat, s.destLng), kind, s.cargoWeightKg ?? 0)
         s.cargoWeightKg = 0
-        s.tripsThisWeek++
-        refuelFull(s)   // trucks refuel at the depot so they get back to the mill
-        // Overnight at a far/late depot, otherwise deadhead back to the mill.
-        const depotFarKm = haversineApproxKm(SUKARI[0], SUKARI[1], s.destLat, s.destLng)
-        if (hourOfDay(now) >= 16 || depotFarKm > 180) {
+        s.cargoKind = ''
+        s.cargoDesc = ''
+        if (saloon) s.tripsToday++
+        else        s.tripsThisWeek++
+        if (!saloon) refuelFull(s)   // trucks/lorries refuel at the drop point for the return leg
+        // Overnight at a far/late destination, otherwise deadhead back home.
+        // Saloons never sleep over at a customer's residence — they always
+        // return to the plant the same day.
+        const destFarKm = haversineApproxKm(home[0], home[1], s.destLat, s.destLng)
+        if (!saloon && (hourOfDay(now) >= 16 || destFarKm > 180)) {
           s.phase = 'DWELL'
         } else {
-          setLeg(s, [s.destLat, s.destLng], [SUKARI[0], SUKARI[1]])
+          setLeg(s, [s.destLat, s.destLng], [home[0], home[1]])
           s.phase = 'TO_INDUSTRY'
         }
       }
       break
+    }
 
     case 'DWELL':
       parkAt(s, s.destLat, s.destLng)
-      // Head back to the mill the next morning.
+      // Head back home the next morning.
       if (hourOfDay(now) >= 6 && hourOfDay(now) < 16) {
-        setLeg(s, [s.destLat, s.destLng], [SUKARI[0], SUKARI[1]])
+        setLeg(s, [s.destLat, s.destLng], [home[0], home[1]])
         s.phase = 'TO_INDUSTRY'
       }
       break
@@ -1232,6 +1392,8 @@ export function renderSnapshot(s: VehicleSimState): CtDeviceSnapshot {
       scenario:     s.scenario,
       phase:        s.phase,
       tick:         s.tick,
+      profile:      s.profile,                 // SUKARI | AQUAMIST
+      cargoDesc:    s.cargoDesc || null,       // product on board (Aquamist)
       outsideFence: isOutsideFence,
       // Current journey leg so the client can draw the on-road route and mark
       // complete back-and-forth trips. `moving` is false when parked at an
