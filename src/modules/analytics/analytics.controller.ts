@@ -39,3 +39,17 @@ export const violationHeatmap: RequestHandler = async (req, res, next) => {
     sendSuccess(res, data)
   } catch (err) { next(err) }
 }
+
+export const driversList: RequestHandler = async (req, res, next) => {
+  try {
+    const data = await repo.driversList(p(req, 'orgId'))
+    sendSuccess(res, data)
+  } catch (err) { next(err) }
+}
+
+export const driverAnalytics: RequestHandler = async (req, res, next) => {
+  try {
+    const data = await repo.driverAnalytics(p(req, 'orgId'), p(req, 'driverId'), req.query as unknown as DeliveriesQuery)
+    sendSuccess(res, data)
+  } catch (err) { next(err) }
+}
