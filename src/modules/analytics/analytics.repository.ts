@@ -200,3 +200,205 @@ export async function violationHeatmap(orgId: string, q: AnalyticsRange) {
   })
 }
 
+// A driver is any org user holding one of the driver roles (see prisma/seed.ts).
+const DRIVER_ROLE_SLUGS = ['driver', 'senior_driver', 'junior_driver']
+
+// Overspeeding threshold (km/h) — matches the server's speeding-query default.
+const OVERSPEED_LIMIT_KMH = 80
+
+// kg → tonnes, 1 dp (shared with deliveriesAnalytics' presentation).
+const toTonnes = (kg: number) => Math.round(kg / 100) / 10
+
+/**
+ * Roster of the org's drivers with headline aggregates for the Drivers table +
+ * leaderboard: rating (persisted driverRatingScore), lifetime trips, tonnes
+ * ferried (Σ CargoManifest.arrivalWeightKg) and distance (Σ Trip.mileageKm).
+ * Derived from real Trip + CargoManifest rows — a driver with no trips renders
+ * as zeros, never fabricated.
+ */
+export async function driversList(orgId: string) {
+  const drivers = await prisma.user.findMany({
+    where: {
+      organisationId: orgId,
+      deletedAt: null,
+      userRoles: { some: { revokedAt: null, role: { slug: { in: DRIVER_ROLE_SLUGS } } } },
+    },
+    select: { id: true, fullName: true, status: true, driverRatingScore: true },
+  })
+  const driverIds = drivers.map(d => d.id)
+
+  const tripAgg = await prisma.trip.groupBy({
+    by: ['driverId'],
+    where: { driverId: { in: driverIds } },
+    _count: { _all: true },
+    _sum: { mileageKm: true },
+  })
+  const tripByDriver = new Map(tripAgg.map(t => [t.driverId!, t]))
+
+  // groupBy can't reach through the cargo relation, so sum arrival weights in JS.
+  const cargoRows = await prisma.trip.findMany({
+    where: { driverId: { in: driverIds }, cargoManifest: { isNot: null } },
+    select: { driverId: true, cargoManifest: { select: { arrivalWeightKg: true } } },
+  })
+  const kgByDriver = new Map<string, number>()
+  for (const r of cargoRows) {
+    if (!r.driverId) continue
+    kgByDriver.set(r.driverId, (kgByDriver.get(r.driverId) ?? 0) + (r.cargoManifest?.arrivalWeightKg ?? 0))
+  }
+
+  // Fuel-theft cases per driver (lifetime), straight off the FuelTheft rows.
+  const theftAgg = await prisma.fuelTheft.groupBy({
+    by: ['driverId'],
+    where: { driverId: { in: driverIds } },
+    _count: { _all: true },
+  })
+  const theftByDriver = new Map(theftAgg.map(t => [t.driverId!, t._count._all]))
+
+  // Overspeeding cases per driver: attribute each org overspeeding alert to the
+  // trip (matching vehicle + time window) that was running when it fired, the
+  // same rule driverAnalytics uses for the windowed figure.
+  const tripWindows = await prisma.trip.findMany({
+    where:  { driverId: { in: driverIds } },
+    select: { driverId: true, vehicleId: true, beganAt: true, endedAt: true },
+  })
+  const tripsByVehicle = new Map<string, { driverId: string | null; beganAt: Date; endedAt: Date | null }[]>()
+  for (const t of tripWindows) {
+    const arr = tripsByVehicle.get(t.vehicleId) ?? []
+    arr.push({ driverId: t.driverId, beganAt: t.beganAt, endedAt: t.endedAt })
+    tripsByVehicle.set(t.vehicleId, arr)
+  }
+  const overspeedByDriver = new Map<string, number>()
+  const alerts = await prisma.vehicleAlert.findMany({
+    where:  { organisationId: orgId, type: 'overspeeding' },
+    select: { vehicleId: true, triggeredAt: true },
+  })
+  for (const a of alerts) {
+    const cand = tripsByVehicle.get(a.vehicleId)
+    if (!cand) continue
+    const hit = cand.find(t =>
+      t.driverId && a.triggeredAt >= t.beganAt && (t.endedAt == null || a.triggeredAt <= t.endedAt),
+    )
+    if (hit?.driverId) overspeedByDriver.set(hit.driverId, (overspeedByDriver.get(hit.driverId) ?? 0) + 1)
+  }
+
+  return drivers
+    .map(d => {
+      const agg = tripByDriver.get(d.id)
+      return {
+        id:                d.id,
+        fullName:          d.fullName,
+        status:            d.status,
+        rating:            Math.round((d.driverRatingScore ?? 0) * 10) / 10,
+        trips:             agg?._count._all ?? 0,
+        tonnes:            toTonnes(kgByDriver.get(d.id) ?? 0),
+        mileageKm:         Math.round(agg?._sum.mileageKm ?? 0),
+        fuelTheftCases:    theftByDriver.get(d.id) ?? 0,
+        overspeedingCases: overspeedByDriver.get(d.id) ?? 0,
+      }
+    })
+    .sort((a, b) => b.tonnes - a.tonnes)
+}
+
+/**
+ * Deep analytics for one driver over the trailing `days` window: mileage, tonnes
+ * ferried, hours on the road, fuel-theft cases, overspeeding trips (trips whose
+ * peak speed exceeded the limit), rating, the single heaviest load (with its
+ * date + route), and a per-day tonnes/mileage series for the trend charts. All
+ * from persisted Trip + CargoManifest + FuelTheft rows.
+ */
+export async function driverAnalytics(orgId: string, driverId: string, q: DeliveriesQuery) {
+  // Anchor the window to the driver's latest trip (the sim clock runs ahead of
+  // wall-clock time), mirroring deliveriesAnalytics.
+  let to = q.to
+  if (!to) {
+    const latest = await prisma.trip.aggregate({
+      where: { driverId, vehicle: { organisationId: orgId } },
+      _max:  { beganAt: true },
+    })
+    to = latest._max.beganAt ?? new Date()
+  }
+  const from = new Date(to.getTime() - q.days * 86_400_000)
+
+  const driver = await prisma.user.findFirst({
+    where:  { id: driverId, organisationId: orgId },
+    select: { id: true, fullName: true, status: true, driverRatingScore: true, licenceNumber: true, employeeId: true },
+  })
+
+  const trips = await prisma.trip.findMany({
+    where:  { driverId, vehicle: { organisationId: orgId }, beganAt: { gte: from, lte: to } },
+    select: {
+      vehicleId: true, beganAt: true, endedAt: true, mileageKm: true, durationSeconds: true,
+      maxSpeedKmh: true, finalLocation: true,
+      route:         { select: { name: true, originName: true, destinationName: true } },
+      cargoManifest: { select: { arrivalWeightKg: true } },
+    },
+    orderBy: { beganAt: 'asc' },
+  })
+
+  let totalKm = 0, totalKg = 0, totalSeconds = 0
+  const byDayMap = new Map<string, { tonnes: number; mileageKm: number }>()
+  let heaviest: { kg: number; date: Date; route: string } | null = null
+
+  for (const t of trips) {
+    const kg = t.cargoManifest?.arrivalWeightKg ?? 0
+    const km = t.mileageKm ?? 0
+    totalKm += km; totalKg += kg; totalSeconds += t.durationSeconds ?? 0
+
+    const dayKey = t.beganAt.toISOString().slice(0, 10)
+    const d = byDayMap.get(dayKey) ?? { tonnes: 0, mileageKm: 0 }
+    d.tonnes += kg / 1000; d.mileageKm += km; byDayMap.set(dayKey, d)
+
+    if (kg > 0 && (!heaviest || kg > heaviest.kg)) {
+      const route =
+        t.route?.name ??
+        (t.route ? `${t.route.originName} → ${t.route.destinationName}` : null) ??
+        t.finalLocation ?? 'Unknown route'
+      heaviest = { kg, date: t.beganAt, route }
+    }
+  }
+
+  const fuelTheftCases = await prisma.fuelTheft.count({
+    where: { driverId, vehicle: { organisationId: orgId }, beganAt: { gte: from, lte: to } },
+  })
+
+  const vehicleIds = [...new Set(trips.map(t => t.vehicleId))]
+  let overspeedingCases = 0
+  if (vehicleIds.length > 0) {
+    const alerts = await prisma.vehicleAlert.findMany({
+      where:  { organisationId: orgId, vehicleId: { in: vehicleIds }, type: 'overspeeding', triggeredAt: { gte: from, lte: to } },
+      select: { vehicleId: true, triggeredAt: true },
+    })
+    overspeedingCases = alerts.filter(a =>
+      trips.some(t => t.vehicleId === a.vehicleId && a.triggeredAt >= t.beganAt && a.triggeredAt <= t.endedAt),
+    ).length
+  }
+
+  return {
+    driver: driver && {
+      id:            driver.id,
+      fullName:      driver.fullName,
+      status:        driver.status,
+      rating:        Math.round((driver.driverRatingScore ?? 0) * 10) / 10,
+      licenceNumber: driver.licenceNumber,
+      employeeId:    driver.employeeId,
+    },
+    totals: {
+      trips:             trips.length,
+      mileageKm:         Math.round(totalKm),
+      tonnes:            toTonnes(totalKg),
+      hoursOnRoad:       Math.round(totalSeconds / 360) / 10, // seconds → hours, 1 dp
+      fuelTheftCases,
+      overspeedingCases,
+      windowDays:        q.days,
+    },
+    heaviestLoad: heaviest && {
+      tonnes: toTonnes(heaviest.kg),
+      date:   heaviest.date.toISOString().slice(0, 10),
+      route:  heaviest.route,
+    },
+    byDay: [...byDayMap]
+      .map(([day, v]) => ({ day, tonnes: Math.round(v.tonnes * 10) / 10, mileageKm: Math.round(v.mileageKm) }))
+      .sort((a, b) => a.day.localeCompare(b.day)),
+  }
+}
+

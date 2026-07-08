@@ -10,6 +10,8 @@ router.use(authenticate, requireOrgAccess)
 
 router.get('/overview',             ctrl.overview)
 router.get('/deliveries',           validateQuery(deliveriesQuerySchema), ctrl.deliveries)
+router.get('/drivers',              ctrl.driversList)
+router.get('/drivers/:driverId',    validateQuery(deliveriesQuerySchema), ctrl.driverAnalytics)
 router.get('/fuel-efficiency',      validateQuery(analyticsRangeSchema), ctrl.fuelEfficiency)
 router.get('/speeding',             validateQuery(speedingQuerySchema),   ctrl.speeding)
 router.get('/violation-heatmap',    validateQuery(analyticsRangeSchema), ctrl.violationHeatmap)
