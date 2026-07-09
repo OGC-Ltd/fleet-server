@@ -29,11 +29,12 @@
 import { prisma }          from '../../lib/prisma.js'
 import { Prisma }          from '../../../generated/prisma/client.js'
 import { logger }          from '../../lib/logger.js'
+import { env }             from '../../config/env.js'
 import { getSimFleetVehicles } from '../../lib/sim-fleet.js'
 import type { TelemetryProvider, VehicleTelemetryFrame, DoorStatus, NetworkType } from '../telemetry-provider.js'
 import type { CtDeviceSnapshot }   from './controltech.types.js'
 import { initVehicleState, tickVehicle, renderSnapshot, initSimClock, advanceSimClock, simNow } from './controltech.simulator.js'
-import type { VehicleSimState }    from './controltech.simulator.js'
+import type { VehicleSimState, RoutingProfile } from './controltech.simulator.js'
 
 // ─── normaliser — CtDeviceSnapshot → VehicleTelemetryFrame ────────────────
 // Shared by both mock and future live adapters.
@@ -125,14 +126,27 @@ export class ControltechMockAdapter implements TelemetryProvider {
    * the simulation pause on stop and resume exactly where it left off.
    */
   private async init(): Promise<void> {
-    // Only the live-simulation fleet is ticked — Sukari's 30 (tractors, trucks,
-    // lorries) plus Aquamist's 10 (saloons, trucks, lorries); the rest of each
-    // org's vehicles remain in the DB but idle. See lib/sim-fleet.
-    const [vehicles, saved, meta] = await Promise.all([
+    // Only the live-simulation fleet is ticked — per-org compositions in
+    // lib/sim-fleet; the rest of each org's vehicles remain in the DB but idle.
+    const [allVehicles, saved, meta] = await Promise.all([
       getSimFleetVehicles(),
       prisma.simulationState.findMany(),
       prisma.simulationMeta.findUnique({ where: { id: 'singleton' }, select: { simClockMs: true } }),
     ])
+
+    // SIM_ORGS (comma-separated org codes) restricts which orgs THIS instance
+    // simulates — lets a dev server tick only newly added orgs while another
+    // deployment keeps simulating the rest against the same DB, with no
+    // double-writing. Unset = simulate every org in the composition. The
+    // fleet SNAPSHOT is deliberately not filtered (see lib/sim-fleet).
+    const simOrgs = env.SIM_ORGS
+      ? new Set(env.SIM_ORGS.split(',').map(s => s.trim().toUpperCase()).filter(Boolean))
+      : null
+    const vehicles = simOrgs ? allVehicles.filter(v => simOrgs.has(v.orgCode)) : allVehicles
+    if (simOrgs) {
+      logger.warn({ simOrgs: [...simOrgs], ticked: vehicles.length, excluded: allVehicles.length - vehicles.length },
+        'SIM_ORGS set — simulating a subset of the fleet')
+    }
 
     // Resume the sim clock from where it paused (or start at real "now").
     initSimClock(meta?.simClockMs != null ? Number(meta.simClockMs) : null)
@@ -145,8 +159,13 @@ export class ControltechMockAdapter implements TelemetryProvider {
       const tankLitres = v.tankCapacityLitres ?? 200
       const prior      = savedByDevice.get(v.deviceId)
       // Routing profile — which organisation's logistics cycle this vehicle
-      // runs (Sukari sugar haulage vs. Aquamist direct-to-customer delivery).
-      const profile    = v.orgCode === 'AQUAMIST' ? 'AQUAMIST' as const : 'SUKARI' as const
+      // runs. Direct-delivery orgs use their own org code as the profile key
+      // (see DIRECT_PROFILES in the simulator); anything unknown falls back to
+      // the Sukari haulage cycle.
+      const DIRECT_ORG_CODES = ['AQUAMIST', 'MENENGAI', 'TIMSALES', 'KABRAS'] as const
+      const profile = (DIRECT_ORG_CODES as readonly string[]).includes(v.orgCode)
+        ? (v.orgCode as RoutingProfile)
+        : 'SUKARI' as const
 
       if (prior && typeof prior.lat === 'number') {
         // Resume: trust the persisted state, refresh derived tank capacity.

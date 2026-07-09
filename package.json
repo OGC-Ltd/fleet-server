@@ -28,6 +28,7 @@
     "test:integration": "vitest run tests/integration",
     "seed": "tsx prisma/seed.ts",
     "seed:aquamist": "tsx prisma/seed-aquamist.ts",
+    "seed:orgs": "tsx prisma/seed-orgs.ts",
     "seed:silos": "tsx prisma/seed-silos.ts"
   },
   "devDependencies": {
