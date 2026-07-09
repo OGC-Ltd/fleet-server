@@ -11,10 +11,10 @@
 import { findSilos, findLatestPerVehicle } from './dashboard.repository.js'
 import type { FleetRow } from './dashboard.repository.js'
 
-// Sugar-logistics carriers: tractors haul raw cane, trucks/lorries processed sugar.
-const SUGAR_CARRIERS = new Set(['TRACTOR', 'TRUCK', 'LORRY'])
+// Sugar-logistics carriers: tractors haul raw cane, lorries/canters processed sugar.
+const SUGAR_CARRIERS = new Set(['TRACTOR', 'TRUCK', 'LORRY', 'LORRY & TRAILER', 'CANTER'])
 // Vehicle types fitted with a load-cell (LOAD sensor applies to these only).
-const CARGO_CAPABLE  = new Set(['TRACTOR', 'TRUCK', 'LORRY', 'TANKER', 'TIPPER', 'PICKUP', 'VAN', 'FLATBED', 'REFRIGERATED', 'CARGO VAN'])
+const CARGO_CAPABLE  = new Set(['TRACTOR', 'TRUCK', 'LORRY', 'LORRY & TRAILER', 'CANTER', 'TANKER', 'TIPPER', 'PICKUP', 'VAN', 'FLATBED', 'REFRIGERATED', 'CARGO VAN'])
 // A sensor is "operational" only if its vehicle produced a fresh ping (~3 poll cycles).
 const FRESH_MS = 300_000
 const LOW_FUEL_RATIO = 0.20
@@ -24,8 +24,8 @@ const round = (n: number, dp = 0) => { const f = 10 ** dp; return Math.round(n *
 
 function deriveCargo(vehicleType: string, kg: number | null): string {
   const loaded = kg != null && kg > 0
-  if (vehicleType === 'TRACTOR')                          return loaded ? 'Raw Sugar Cane'  : 'Empty (en route to farm)'
-  if (vehicleType === 'TRUCK' || vehicleType === 'LORRY') return loaded ? 'Processed Sugar' : 'Empty (returning to depot)'
+  if (vehicleType === 'TRACTOR')                       return loaded ? 'Raw Sugar Cane'  : 'Empty (en route to farm)'
+  if (SUGAR_CARRIERS.has(vehicleType))                 return loaded ? 'Processed Sugar' : 'Empty (returning to depot)'
   return loaded ? 'General Cargo' : 'Empty'
 }
 

@@ -3,9 +3,9 @@
  *
  * Two organisations run concurrently in the live simulation:
  *
- *  - SUKARI   (Sukari Industries Limited): 100 seeded vehicles, of which the
- *    live sim ticks every tractor, truck, and lorry — 10 of each, 30 total.
- *    Routing: mill ↔ sugarcane farms (tractors) / sugar depots (trucks, lorries).
+ *  - SUKARI   (Sukari Industries Limited): 100 seeded vehicles (40 lorry &
+ *    trailer, 40 canter, 20 pickup), of which the live sim ticks 30 —
+ *    15 lorry & trailer, 10 canter, 5 pickup. Routing: mill ↔ sugar depots.
  *
  *  - AQUAMIST (Aquamist Limited): 10 seeded vehicles, ALL in the live sim —
  *    4 saloon cars, 3 trucks, 3 lorries. No depots: vehicles deliver bottled
@@ -30,14 +30,18 @@ export interface OrgFleetComposition {
   types: Array<[string, number]>
 }
 
+// Re-registration of 2026-07-09 replaced most orgs' SALOON/TRUCK/LORRY
+// vehicles with LORRY & TRAILER / CANTER / PICKUP plates — each org's type
+// mix below must mirror what its vehicles table actually holds, or the type
+// filter selects nothing and the org's fleet silently vanishes from the sim.
 export const SIM_FLEET_COMPOSITION: OrgFleetComposition[] = [
-  { orgCode: 'SUKARI',   types: [['TRACTOR', 10], ['TRUCK', 10], ['LORRY', 10]] },
-  { orgCode: 'AQUAMIST', types: [['SALOON', 4],  ['TRUCK', 3],  ['LORRY', 3]] },
+  { orgCode: 'SUKARI',   types: [['LORRY & TRAILER', 15], ['CANTER', 10], ['PICKUP', 5]] },
+  { orgCode: 'AQUAMIST', types: [['LORRY & TRAILER', 5],  ['PICKUP', 3],  ['CANTER', 2]] },
   // Direct-delivery orgs added 2026-07 — see DIRECT_PROFILES in
   // controltech.simulator.ts for each org's HQ / customers / products.
-  { orgCode: 'MENENGAI', types: [['TRUCK', 8],  ['LORRY', 7]] },   // 15 — edible oils, Nakuru
-  { orgCode: 'TIMSALES', types: [['TRUCK', 10], ['LORRY', 10]] },  // 20 — timber, Elburgon
-  { orgCode: 'KABRAS',   types: [['TRUCK', 13], ['LORRY', 12]] },  // 25 — sugar, Malava
+  { orgCode: 'MENENGAI', types: [['CANTER', 6],  ['LORRY & TRAILER', 5],  ['PICKUP', 4]] },                // 15 — edible oils, Nakuru
+  { orgCode: 'TIMSALES', types: [['LORRY & TRAILER', 10], ['CANTER', 6],  ['PICKUP', 4]] },                // 20 — timber, Elburgon
+  { orgCode: 'KABRAS',   types: [['TRUCK', 7], ['CANTER', 6], ['LORRY & TRAILER', 5], ['PICKUP', 4], ['LORRY', 3]] }, // 25 — sugar, Malava
 ]
 
 export const SIM_FLEET_SIZE = SIM_FLEET_COMPOSITION

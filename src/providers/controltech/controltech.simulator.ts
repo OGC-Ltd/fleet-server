@@ -300,8 +300,12 @@ function directCustomersFor(org: DirectDeliveryOrg, vehicleType: string): [numbe
 
 function isTractorType(t: string): boolean { return t === 'TRACTOR' }
 // SALOON is a delivery type too — only Aquamist seeds saloons, and its whole
-// fleet runs the direct-to-customer delivery cycle.
-function isDeliveryType(t: string): boolean { return t === 'TRUCK' || t === 'LORRY' || t === 'SALOON' }
+// fleet runs the direct-to-customer delivery cycle. Sukari now runs a mixed
+// hauler fleet (lorry & trailer / canter / pickup) on the mill ↔ depot cycle.
+function isDeliveryType(t: string): boolean {
+  return t === 'TRUCK' || t === 'LORRY' || t === 'SALOON'
+    || t === 'LORRY & TRAILER' || t === 'CANTER' || t === 'PICKUP'
+}
 
 function lerp(a: number, b: number, t: number) { return a + (b - a) * t }
 function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)) }
@@ -393,14 +397,19 @@ const UNLOAD_MIN_TRACTOR  = () => randInt(15, 25)   // offload cane at the mill
 // Depot offload scales with load: ~30 min base + 3 min/tonne.
 const OFFLOAD_MIN_DELIVERY = (cargoKg: number) => Math.round(30 + (cargoKg / 1000) * 3)
 
-// Legal max payload per type (kg): tractors 20 t, trucks & lorries 36 t. The
-// mill always leaves a 10 t safety allowance, so a vehicle is never loaded above
-// (max − 10 t) — a tractor tops out at 10 t, a truck/lorry at 26 t.
-export const MAX_PAYLOAD_KG: Record<string, number> = { TRACTOR: 20_000, TRUCK: 36_000, LORRY: 36_000, SALOON: 500 }
+// Legal max payload per type (kg): tractors 20 t, trucks & lorries 36 t, a
+// lorry & trailer rig 45 t, a canter ~8 t, a pickup ~1.5 t. Bulk haulers leave
+// a 10 t safety allowance; lighter vehicles (canter/pickup) can't spare 10 t,
+// so `plannedLoadKg` floors the usable cap at half the max instead.
+export const MAX_PAYLOAD_KG: Record<string, number> = {
+  TRACTOR: 20_000, TRUCK: 36_000, LORRY: 36_000, SALOON: 500,
+  'LORRY & TRAILER': 45_000, CANTER: 8_000, PICKUP: 1_500,
+}
 const PAYLOAD_ALLOWANCE_KG = 10_000
 function plannedLoadKg(vehicleType: string): number {
-  const cap = (MAX_PAYLOAD_KG[vehicleType] ?? 20_000) - PAYLOAD_ALLOWANCE_KG
-  return randInt(Math.round(cap * 0.80), cap)   // ≤ (max − 10 t), never overloaded
+  const max = MAX_PAYLOAD_KG[vehicleType] ?? 20_000
+  const cap = Math.max(max - PAYLOAD_ALLOWANCE_KG, Math.round(max * 0.5))
+  return randInt(Math.round(cap * 0.80), cap)   // never overloaded
 }
 
 /** Profile-aware load planner. Aquamist loads are crates/pallets of bottled
@@ -929,9 +938,10 @@ function parkAt(s: VehicleSimState, lat: number, lng: number): void {
 // top of tickLogistics) — used only to plan an ETA, not to drive movement.
 function typicalSpeedKmh(vehicleType: string): number {
   if (vehicleType === 'SALOON') return 78   // light passenger car — quickest of the fleet
+  if (vehicleType === 'PICKUP') return 70   // light utility — nimble, faster than the haulers
   const tractor = vehicleType === 'TRACTOR'
-  const lorry   = vehicleType === 'LORRY'
-  return tractor ? 60 * 0.55 : 62 * (lorry ? 0.85 : 1)
+  const lorry   = vehicleType === 'LORRY' || vehicleType === 'LORRY & TRAILER'  // heavy rigs run slower
+  return tractor ? 60 * 0.55 : 62 * (lorry ? 0.85 : 1)   // CANTER falls through at 62
 }
 
 function setLeg(s: VehicleSimState, from: [number, number], to: [number, number]): void {
