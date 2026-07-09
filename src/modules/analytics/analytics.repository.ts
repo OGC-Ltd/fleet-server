@@ -1,4 +1,5 @@
 ﻿import { prisma } from '../../lib/prisma.js'
+import { getSimFleetVehicleIds } from '../../lib/sim-fleet.js'
 import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics.schema.js'
 
 // A delivery counts as "interrupted"/delayed when it took materially longer than
@@ -215,16 +216,45 @@ const toTonnes = (kg: number) => Math.round(kg / 100) / 10
  * ferried (Σ CargoManifest.arrivalWeightKg) and distance (Σ Trip.mileageKm).
  * Derived from real Trip + CargoManifest rows — a driver with no trips renders
  * as zeros, never fabricated.
+ *
+ * The roster is the ACTIVE DRIVING WORKFORCE: users currently assigned to a
+ * live-fleet vehicle — the same assignment join the fleet snapshot uses, so
+ * the Drivers page and the Maintenance vehicle grid always show the same
+ * people. (Role-based selection alone diverges: the seed deals roles and
+ * vehicle assignments out independently, so most assigned drivers hold no
+ * driver role.) Falls back to role-holders if the org has no assignments.
  */
 export async function driversList(orgId: string) {
-  const drivers = await prisma.user.findMany({
-    where: {
-      organisationId: orgId,
-      deletedAt: null,
-      userRoles: { some: { revokedAt: null, role: { slug: { in: DRIVER_ROLE_SLUGS } } } },
+  // Mirror findFleetSnapshot's assignment join EXACTLY (take 1 active
+  // assignment per vehicle) so the roster is precisely the set of names the
+  // vehicle grid displays — vehicles with extra active relief assignments
+  // would otherwise add drivers the grid never shows.
+  const simFleetIds = await getSimFleetVehicleIds()
+  const fleet = await prisma.vehicle.findMany({
+    where: { organisationId: orgId, id: { in: simFleetIds } },
+    select: {
+      assignments: {
+        where: { unassignedAt: null },
+        select: { user: { select: { id: true, fullName: true, status: true, driverRatingScore: true } } },
+        take: 1,
+      },
     },
-    select: { id: true, fullName: true, status: true, driverRatingScore: true },
+    orderBy: { name: 'asc' },
   })
+  // One row per driver even if they crew several vehicles.
+  const byId = new Map(fleet.flatMap(v => v.assignments).map(a => [a.user.id, a.user]))
+  let drivers = [...byId.values()]
+
+  if (drivers.length === 0) {
+    drivers = await prisma.user.findMany({
+      where: {
+        organisationId: orgId,
+        deletedAt: null,
+        userRoles: { some: { revokedAt: null, role: { slug: { in: DRIVER_ROLE_SLUGS } } } },
+      },
+      select: { id: true, fullName: true, status: true, driverRatingScore: true },
+    })
+  }
   const driverIds = drivers.map(d => d.id)
 
   const tripAgg = await prisma.trip.groupBy({

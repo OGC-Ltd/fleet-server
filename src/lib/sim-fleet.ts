@@ -33,6 +33,11 @@ export interface OrgFleetComposition {
 export const SIM_FLEET_COMPOSITION: OrgFleetComposition[] = [
   { orgCode: 'SUKARI',   types: [['TRACTOR', 10], ['TRUCK', 10], ['LORRY', 10]] },
   { orgCode: 'AQUAMIST', types: [['SALOON', 4],  ['TRUCK', 3],  ['LORRY', 3]] },
+  // Direct-delivery orgs added 2026-07 — see DIRECT_PROFILES in
+  // controltech.simulator.ts for each org's HQ / customers / products.
+  { orgCode: 'MENENGAI', types: [['TRUCK', 8],  ['LORRY', 7]] },   // 15 — edible oils, Nakuru
+  { orgCode: 'TIMSALES', types: [['TRUCK', 10], ['LORRY', 10]] },  // 20 — timber, Elburgon
+  { orgCode: 'KABRAS',   types: [['TRUCK', 13], ['LORRY', 12]] },  // 25 — sugar, Malava
 ]
 
 export const SIM_FLEET_SIZE = SIM_FLEET_COMPOSITION

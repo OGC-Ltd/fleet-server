@@ -23,7 +23,12 @@ async function main() {
   const stopNotificationWorker = startNotificationWorker()
   const stopAlertsWorker       = startAlertsWorker()
   const stopSimEventsWorker    = startSimEventsWorker()
-  const poller                 = startPoller()
+  // API-only mode (POLL_ENABLED=false): serve reads off the DB without running
+  // the sim — see config/env.ts.
+  const poller = env.POLL_ENABLED
+    ? startPoller()
+    : { stop: () => {}, flush: async () => {} }
+  if (!env.POLL_ENABLED) logger.warn('POLL_ENABLED=false — telemetry poller/sim NOT started (API-only instance)')
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received')

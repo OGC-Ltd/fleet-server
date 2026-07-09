@@ -117,6 +117,8 @@ const GARAGES: [number, number, string][] = [
   [-4.0510, 39.6600, 'Mombasa Coastal Garage'],    // near Mombasa Depot
   [-3.3600, 40.0250, 'Watamu Marine & Motors'],    // near Watamu Depot
   [-1.2110, 36.6620, 'Kikuyu Auto Garage'],        // near the Aquamist plant
+  [ 0.2870, 34.7480, 'Kakamega Truck Garage'],     // near the Kabras mill (Malava)
+  [-0.3900, 35.8160, 'Elburgon Motors'],           // near the Timsales mill
 ]
 
 // ─── Aquamist Limited — direct-to-customer routing profile ─────────────────
@@ -124,67 +126,177 @@ const GARAGES: [number, number, string][] = [
 // straight to a customer. Customers reside in different parts of Nairobi,
 // Kisumu, Nakuru, and Mombasa.
 
-export type RoutingProfile = 'SUKARI' | 'AQUAMIST'
+export type RoutingProfile = 'SUKARI' | 'AQUAMIST' | 'MENENGAI' | 'TIMSALES' | 'KABRAS'
 
-// Aquamist bottling plant / HQ — exact coordinates (Kiambu County, NW of Nairobi).
-const AQUAMIST_HQ: [number, number, string] =
-  [-1.2060044099698617, 36.65702647381419, 'Aquamist Plant']
-
-// Customer delivery points — [lat, lng, name] — spread across different parts
-// of the four supply cities. Saloon cars only serve the Nairobi-area customers
-// (within SALOON_RANGE_KM of the plant); trucks and lorries serve all of them.
-const AQUAMIST_CUSTOMERS: [number, number, string][] = [
-  // Nairobi — different parts of the city
-  [-1.2683, 36.8110, 'Customer — Westlands, Nairobi'],
-  [-1.3197, 36.7062, 'Customer — Karen, Nairobi'],
-  [-1.2906, 36.7870, 'Customer — Kilimani, Nairobi'],
-  [-1.3081, 36.8330, 'Customer — South B, Nairobi'],
-  [-1.2230, 36.8991, 'Customer — Kasarani, Nairobi'],
-  [-1.2076, 36.7811, 'Customer — Ruaka, Nairobi'],
-  // Kisumu
-  [-0.1057, 34.7448, 'Customer — Milimani, Kisumu'],
-  [-0.0810, 34.7720, 'Customer — Kondele, Kisumu'],
-  [-0.0570, 34.7900, 'Customer — Mamboleo, Kisumu'],
-  // Nakuru
-  [-0.2963, 36.0517, 'Customer — Milimani, Nakuru'],
-  [-0.2789, 36.0894, 'Customer — Section 58, Nakuru'],
-  [-0.3070, 36.1470, 'Customer — Lanet, Nakuru'],
-  // Mombasa
-  [-4.0202, 39.7076, 'Customer — Nyali, Mombasa'],
-  [-3.9909, 39.7276, 'Customer — Bamburi, Mombasa'],
-  [-4.0842, 39.6650, 'Customer — Likoni, Mombasa'],
-]
-
-// Saloons handle nearby residential drops only — customers within this radius
-// of the plant (covers the Nairobi metro; the upcountry/coast cities are
-// truck/lorry territory).
-const SALOON_RANGE_KM = 60
-
-function aquamistCustomersFor(vehicleType: string): [number, number, string][] {
-  if (vehicleType !== 'SALOON') return AQUAMIST_CUSTOMERS
-  return AQUAMIST_CUSTOMERS.filter(
-    c => haversineApproxKm(AQUAMIST_HQ[0], AQUAMIST_HQ[1], c[0], c[1]) <= SALOON_RANGE_KM,
-  )
-}
-
-// Product catalogue — still & sparkling water packaged in different bottle
-// volumes, plus juice (product 2). A random product is drawn per dispatch and
-// carried through to the trip's cargo manifest.
+// Legacy alias — kept so older imports keep compiling; direct-delivery cargo
+// kinds are open-ended strings now that several orgs each bring a catalogue.
 export type AquamistCargoKind = 'STILL_WATER' | 'SPARKLING_WATER' | 'JUICE'
 
-const AQUAMIST_PRODUCTS: { kind: AquamistCargoKind; desc: string }[] = [
-  { kind: 'STILL_WATER',     desc: 'Still water — 500 ml PET bottles' },
-  { kind: 'STILL_WATER',     desc: 'Still water — 1 L PET bottles' },
-  { kind: 'STILL_WATER',     desc: 'Still water — 5 L bottles' },
-  { kind: 'STILL_WATER',     desc: 'Still water — 10 L bottles' },
-  { kind: 'STILL_WATER',     desc: 'Still water — 20 L dispenser bottles' },
-  { kind: 'SPARKLING_WATER', desc: 'Sparkling water — 330 ml glass bottles' },
-  { kind: 'SPARKLING_WATER', desc: 'Sparkling water — 750 ml glass bottles' },
-  { kind: 'SPARKLING_WATER', desc: 'Sparkling water — 1 L PET bottles' },
-  { kind: 'JUICE',           desc: 'Juice — 300 ml bottles' },
-  { kind: 'JUICE',           desc: 'Juice — 1 L tetra packs' },
-  { kind: 'JUICE',           desc: 'Juice — 5 L catering packs' },
-]
+/**
+ * Direct-delivery organisation profile — HQ → customer runs with a product
+ * catalogue (the cycle Aquamist pioneered). Every org except Sukari (whose
+ * tractor/farm/mill cycle is bespoke) is described by one of these, so adding
+ * an organisation to the simulation = adding a config entry here + seeding it.
+ */
+export interface DirectDeliveryOrg {
+  hq:           [number, number, string]
+  customers:    [number, number, string][]
+  products:     { kind: string; desc: string }[]
+  /** Bulk order weight range for trucks/lorries, kg. */
+  bulkLoadKg:   [number, number]
+  /** Boot-load weight range for saloons, kg (only used if the org seeds saloons). */
+  saloonLoadKg: [number, number]
+}
+
+// Saloons handle nearby residential drops only — customers within this radius
+// of the org's HQ; farther cities are truck/lorry territory.
+const SALOON_RANGE_KM = 60
+
+const DIRECT_PROFILES: Partial<Record<RoutingProfile, DirectDeliveryOrg>> = {
+  // Aquamist Limited — bottled water & juice, plant → customers (no depots).
+  AQUAMIST: {
+    hq: [-1.2060044099698617, 36.65702647381419, 'Aquamist Plant'],
+    customers: [
+      // Nairobi — different parts of the city
+      [-1.2683, 36.8110, 'Customer — Westlands, Nairobi'],
+      [-1.3197, 36.7062, 'Customer — Karen, Nairobi'],
+      [-1.2906, 36.7870, 'Customer — Kilimani, Nairobi'],
+      [-1.3081, 36.8330, 'Customer — South B, Nairobi'],
+      [-1.2230, 36.8991, 'Customer — Kasarani, Nairobi'],
+      [-1.2076, 36.7811, 'Customer — Ruaka, Nairobi'],
+      // Kisumu
+      [-0.1057, 34.7448, 'Customer — Milimani, Kisumu'],
+      [-0.0810, 34.7720, 'Customer — Kondele, Kisumu'],
+      [-0.0570, 34.7900, 'Customer — Mamboleo, Kisumu'],
+      // Nakuru
+      [-0.2963, 36.0517, 'Customer — Milimani, Nakuru'],
+      [-0.2789, 36.0894, 'Customer — Section 58, Nakuru'],
+      [-0.3070, 36.1470, 'Customer — Lanet, Nakuru'],
+      // Mombasa
+      [-4.0202, 39.7076, 'Customer — Nyali, Mombasa'],
+      [-3.9909, 39.7276, 'Customer — Bamburi, Mombasa'],
+      [-4.0842, 39.6650, 'Customer — Likoni, Mombasa'],
+    ],
+    products: [
+      { kind: 'STILL_WATER',     desc: 'Still water — 500 ml PET bottles' },
+      { kind: 'STILL_WATER',     desc: 'Still water — 1 L PET bottles' },
+      { kind: 'STILL_WATER',     desc: 'Still water — 5 L bottles' },
+      { kind: 'STILL_WATER',     desc: 'Still water — 10 L bottles' },
+      { kind: 'STILL_WATER',     desc: 'Still water — 20 L dispenser bottles' },
+      { kind: 'SPARKLING_WATER', desc: 'Sparkling water — 330 ml glass bottles' },
+      { kind: 'SPARKLING_WATER', desc: 'Sparkling water — 750 ml glass bottles' },
+      { kind: 'SPARKLING_WATER', desc: 'Sparkling water — 1 L PET bottles' },
+      { kind: 'JUICE',           desc: 'Juice — 300 ml bottles' },
+      { kind: 'JUICE',           desc: 'Juice — 1 L tetra packs' },
+      { kind: 'JUICE',           desc: 'Juice — 5 L catering packs' },
+    ],
+    bulkLoadKg:   [8_000, 24_000],
+    saloonLoadKg: [180, 450],
+  },
+
+  // Menengai Co-op — edible oils & fats from the Nakuru refinery to
+  // distributors and supermarket DCs across the country.
+  MENENGAI: {
+    hq: [-0.3078, 36.0559, 'Menengai Refinery, Nakuru'],
+    customers: [
+      [-1.2864, 36.8172, 'Distributor — CBD, Nairobi'],
+      [-1.3080, 36.8510, 'Distributor — Industrial Area, Nairobi'],
+      [-1.0388, 37.0834, 'Supermarket DC — Thika'],
+      [-0.7167, 36.4333, 'Supermarket DC — Naivasha'],
+      [ 0.5143, 35.2698, 'Wholesaler — Eldoret'],
+      [-0.0917, 34.7679, 'Distributor — Kisumu'],
+      [-0.4201, 36.9476, 'Wholesaler — Nyeri'],
+      [-0.6817, 34.7666, 'Distributor — Kisii'],
+      [-4.0435, 39.6682, 'Distributor — Mombasa'],
+      [-0.5300, 37.4568, 'Wholesaler — Embu'],
+    ],
+    products: [
+      { kind: 'EDIBLE_OIL', desc: 'Cooking oil — 20 L jerricans' },
+      { kind: 'EDIBLE_OIL', desc: 'Cooking oil — 10 L jerricans' },
+      { kind: 'EDIBLE_OIL', desc: 'Cooking oil — 3 L bottles, cartons' },
+      { kind: 'EDIBLE_OIL', desc: 'Cooking oil — 1 L bottles, cartons' },
+      { kind: 'EDIBLE_OIL', desc: 'Cooking fat — 17 kg tubs' },
+      { kind: 'EDIBLE_OIL', desc: 'Cooking fat — 2 kg tubs, cartons' },
+      { kind: 'EDIBLE_OIL', desc: 'Margarine — 1 kg tubs, cartons' },
+      { kind: 'EDIBLE_OIL', desc: 'Baking fat — 10 kg cartons' },
+      { kind: 'EDIBLE_OIL', desc: 'Laundry soap — 800 g bars, cartons' },
+    ],
+    bulkLoadKg:   [8_000, 24_000],
+    saloonLoadKg: [180, 450],
+  },
+
+  // TimSales Ltd — timber & building materials from the Elburgon mill to
+  // builders' depots, timber yards, and construction sites.
+  TIMSALES: {
+    hq: [-0.3872, 35.8103, 'Timsales Mill, Elburgon'],
+    customers: [
+      [-1.3080, 36.8510, 'Builders Depot — Industrial Area, Nairobi'],
+      [-1.1487, 36.9608, 'Hardware — Ruiru'],
+      [-1.0388, 37.0834, 'Builders Depot — Thika'],
+      [-0.3031, 36.0800, 'Timber Yard — Nakuru'],
+      [ 0.5143, 35.2698, 'Builders Depot — Eldoret'],
+      [-0.3677, 35.2831, 'Hardware — Kericho'],
+      [-0.0917, 34.7679, 'Timber Yard — Kisumu'],
+      [-0.7167, 36.4333, 'Construction Site — Naivasha'],
+      [ 0.0167, 37.0733, 'Hardware — Nanyuki'],
+      [-1.5220, 37.2650, 'Construction Site — Machakos'],
+    ],
+    products: [
+      { kind: 'TIMBER', desc: 'Cypress timber — 4×2 sawn lengths' },
+      { kind: 'TIMBER', desc: 'Pine timber — 6×1 sawn lengths' },
+      { kind: 'TIMBER', desc: 'Treated blue gum posts' },
+      { kind: 'TIMBER', desc: 'Plywood sheets — 18 mm' },
+      { kind: 'TIMBER', desc: 'Block boards — 25 mm' },
+      { kind: 'TIMBER', desc: 'MDF boards — 12 mm' },
+      { kind: 'TIMBER', desc: 'Flush doors — semi-solid' },
+      { kind: 'TIMBER', desc: 'Fascia boards — cypress' },
+      { kind: 'TIMBER', desc: 'Tongue & groove ceiling boards' },
+    ],
+    bulkLoadKg:   [10_000, 26_000],
+    saloonLoadKg: [180, 450],
+  },
+
+  // Kabras Sugar Ltd — milled sugar from Malava (Kakamega) to wholesalers
+  // across western Kenya and Nairobi. Kind PROCESSED_SUGAR keeps the bulk
+  // manifest path (and is harmless where no silos exist for the org).
+  KABRAS: {
+    hq: [0.4457, 34.8560, 'Kabras Sugar Mill, Malava'],
+    customers: [
+      [ 0.2827, 34.7519, 'Wholesaler — Kakamega Town'],
+      [ 0.5635, 34.5606, 'Distributor — Bungoma'],
+      [ 0.6167, 34.7667, 'Wholesaler — Webuye'],
+      [ 0.3350, 34.4870, 'Wholesaler — Mumias'],
+      [ 0.5143, 35.2698, 'Distributor — Eldoret'],
+      [ 1.0157, 35.0062, 'Distributor — Kitale'],
+      [-0.0917, 34.7679, 'Wholesaler — Kisumu'],
+      [-0.6817, 34.7666, 'Distributor — Kisii'],
+      [-0.3031, 36.0800, 'Distributor — Nakuru'],
+      [-1.2864, 36.8172, 'Wholesaler — Nairobi CBD'],
+    ],
+    products: [
+      { kind: 'PROCESSED_SUGAR', desc: 'Kabras Premium — 1 kg packets, 24-pack bales' },
+      { kind: 'PROCESSED_SUGAR', desc: 'Kabras Premium — 2 kg packets, 12-pack bales' },
+      { kind: 'PROCESSED_SUGAR', desc: 'Kabras Sugar — 50 kg bags' },
+      { kind: 'PROCESSED_SUGAR', desc: 'Kabras Sugar — 25 kg bags' },
+      { kind: 'PROCESSED_SUGAR', desc: 'Industrial sugar — 50 kg bags' },
+      { kind: 'PROCESSED_SUGAR', desc: 'Brown sugar — 1 kg packets, bales' },
+    ],
+    bulkLoadKg:   [10_000, 26_000],
+    saloonLoadKg: [180, 450],
+  },
+}
+
+/** The direct-delivery config for a profile, or null for Sukari's bespoke cycle. */
+function directProfileOf(profile: RoutingProfile): DirectDeliveryOrg | null {
+  return DIRECT_PROFILES[profile] ?? null
+}
+
+function directCustomersFor(org: DirectDeliveryOrg, vehicleType: string): [number, number, string][] {
+  if (vehicleType !== 'SALOON') return org.customers
+  return org.customers.filter(
+    c => haversineApproxKm(org.hq[0], org.hq[1], c[0], c[1]) <= SALOON_RANGE_KM,
+  )
+}
 
 function isTractorType(t: string): boolean { return t === 'TRACTOR' }
 // SALOON is a delivery type too — only Aquamist seeds saloons, and its whole
@@ -296,9 +408,10 @@ function plannedLoadKg(vehicleType: string): number {
  *  load for trucks/lorries — rather than the Sukari bulk-haul formula (whose
  *  10 t allowance would go negative on a 500 kg saloon). */
 function plannedLoadFor(s: VehicleSimState): number {
-  if (s.profile !== 'AQUAMIST') return plannedLoadKg(s.vehicleType)
-  if (s.vehicleType === 'SALOON') return randInt(180, 450)      // crates in the boot & back seat
-  return randInt(8_000, 24_000)                                  // palletised bulk order
+  const direct = directProfileOf(s.profile)
+  if (!direct) return plannedLoadKg(s.vehicleType)
+  const [lo, hi] = s.vehicleType === 'SALOON' ? direct.saloonLoadKg : direct.bulkLoadKg
+  return randInt(lo, hi)
 }
 
 // Fleet-wide fuel-theft budget — at most a few siphoning incidents per day so
@@ -468,8 +581,12 @@ export interface TripEvent {
   cargoDesc?:    string   // product description (Aquamist) — manifest text
 }
 
-/** Cargo kinds across both organisation profiles. */
-export type SimCargoKind = 'SUGARCANE' | 'PROCESSED_SUGAR' | AquamistCargoKind
+/** Cargo kinds across all organisation profiles. */
+export type SimCargoKind =
+  | 'SUGARCANE' | 'PROCESSED_SUGAR'          // Sukari bulk haulage (+ Kabras sugar)
+  | AquamistCargoKind                        // bottled water & juice
+  | 'EDIBLE_OIL'                             // Menengai oils & fats
+  | 'TIMBER'                                 // TimSales timber & boards
 
 export interface TheftEvent {
   atMs:        number
@@ -546,23 +663,23 @@ export function initVehicleState(
   vehicleType: string = 'TRUCK',
   profile: RoutingProfile = 'SUKARI',
 ): VehicleSimState {
-  const aquamist = profile === 'AQUAMIST'
-  const tractor  = !aquamist && isTractorType(vehicleType)
+  const direct   = directProfileOf(profile)
+  const tractor  = !direct && isTractorType(vehicleType)
   const delivery = isDeliveryType(vehicleType)
 
   // Every vehicle starts the simulation parked AT ITS ORGANISATION — Sukari
   // tractors at the dedicated parking, other Sukari vehicles on the mill
-  // premises, Aquamist vehicles at the bottling plant. Support (non-logistics)
-  // vehicles get a small deterministic yard offset so they don't stack on one
-  // pixel. All are engine-off, FULL tank, and healthy: no movement and no alerts
-  // until operations begin and vehicles are dispatched.
-  const home: [number, number, string] = aquamist ? AQUAMIST_HQ : tractor ? PARKING : SUKARI
+  // premises, direct-delivery orgs' vehicles at their HQ/plant. Support
+  // (non-logistics) vehicles get a small deterministic yard offset so they
+  // don't stack on one pixel. All are engine-off, FULL tank, and healthy: no
+  // movement and no alerts until operations begin and vehicles are dispatched.
+  const home: [number, number, string] = direct ? direct.hq : tractor ? PARKING : SUKARI
   const lat = home[0] + (tractor ? 0 : ((index % 8) - 4) * 0.0009)
   const lng = home[1] + (tractor ? 0 : ((Math.floor(index / 8) % 8) - 4) * 0.0009)
 
   // Outbound destination pool used once the vehicle is dispatched.
-  const dest: [number, number, string] = aquamist
-    ? aquamistCustomersFor(vehicleType)[index % aquamistCustomersFor(vehicleType).length]!
+  const dest: [number, number, string] = direct
+    ? directCustomersFor(direct, vehicleType)[index % directCustomersFor(direct, vehicleType).length]!
     : tractor ? SUGARCANE_FARMS[index % SUGARCANE_FARMS.length]!
     : delivery ? SUGAR_DEPOTS[index % SUGAR_DEPOTS.length]!
     : home
@@ -785,8 +902,10 @@ export function tickVehicle(s: VehicleSimState): void {
 
 /** Resolve a coordinate back to a known place name for trip records. */
 function placeName(lat: number, lng: number): string {
-  const pools: [number, number, string][] =
-    [SUKARI, AQUAMIST_HQ, ...SUGARCANE_FARMS, ...SUGAR_DEPOTS, ...AQUAMIST_CUSTOMERS, ...GARAGES]
+  const pools: [number, number, string][] = [
+    SUKARI, ...SUGARCANE_FARMS, ...SUGAR_DEPOTS, ...GARAGES,
+    ...Object.values(DIRECT_PROFILES).flatMap(p => [p.hq, ...p.customers]),
+  ]
   let best = `${lat.toFixed(4)}, ${lng.toFixed(4)}`
   let bestKm = 5   // only match within 5 km
   for (const [pLat, pLng, name] of pools) {
@@ -924,10 +1043,11 @@ function completeTrip(
   s.tripBeganAtMs = 0
 }
 
-// Home base: Aquamist vehicles → the bottling plant; Sukari tractors → the
+// Home base: direct-delivery orgs → their HQ/plant; Sukari tractors → the
 // dedicated parking; Sukari trucks/lorries → the mill premises.
 function homeBaseOf(s: VehicleSimState): [number, number, string] {
-  if (s.profile === 'AQUAMIST') return AQUAMIST_HQ
+  const direct = directProfileOf(s.profile)
+  if (direct) return direct.hq
   return s.vehicleType === 'TRACTOR' ? PARKING : SUKARI
 }
 
@@ -1081,16 +1201,16 @@ function planDay(s: VehicleSimState, tractor: boolean): void {
   if (s.weekStartKey !== wk) {
     s.weekStartKey     = wk
     s.tripsThisWeek    = 0
-    // Sukari trucks/lorries: 0–4 depot runs / week. Aquamist trucks/lorries:
-    // 1–4 customer deliveries / week — always at least one, so the beverage
-    // fleet never sits idle for a whole week.
-    s.weeklyTripTarget = s.profile === 'AQUAMIST' ? randInt(1, 4) : randInt(0, 4)
+    // Sukari trucks/lorries: 0–4 depot runs / week. Direct-delivery orgs'
+    // trucks/lorries: 1–4 customer deliveries / week — always at least one,
+    // so those fleets never sit idle for a whole week.
+    s.weeklyTripTarget = directProfileOf(s.profile) ? randInt(1, 4) : randInt(0, 4)
   }
 
   s.tripsToday      = 0
-  // Tractors: 0–3 farm hauls / day. Aquamist saloons: 1–4 residential customer
-  // drops / day around Nairobi.
-  s.dailyTripTarget = s.profile === 'AQUAMIST' && s.vehicleType === 'SALOON'
+  // Tractors: 0–3 farm hauls / day. Direct-delivery saloons: 1–4 residential
+  // customer drops / day near their HQ.
+  s.dailyTripTarget = directProfileOf(s.profile) && s.vehicleType === 'SALOON'
     ? randInt(1, 4)
     : randInt(0, 3)
 
@@ -1127,23 +1247,24 @@ function dispatch(s: VehicleSimState, tractor: boolean, now: Date): void {
     s.cargoWeightKg = 0                            // empty run out to the farm
     beginTrip(s, placeName(s.lat, s.lng))
     s.phase = 'TO_FARM'
-  } else if (s.profile === 'AQUAMIST') {
-    // Direct-to-customer beverage delivery — no depots. Saloons run several
-    // small residential drops a day (daily quota); trucks/lorries take bulk
-    // orders across Nairobi, Kisumu, Nakuru, and Mombasa (weekly quota).
+  } else if (directProfileOf(s.profile)) {
+    // Direct-to-customer delivery — no depots. Saloons run several small
+    // residential drops a day (daily quota); trucks/lorries take bulk orders
+    // across the org's customer cities (weekly quota).
+    const org      = directProfileOf(s.profile)!
     const saloon = s.vehicleType === 'SALOON'
     const quotaMet = saloon ? s.tripsToday >= s.dailyTripTarget
                             : s.tripsThisWeek >= s.weeklyTripTarget
     if (quotaMet) { s.phase = idle; return }
-    const pool     = aquamistCustomersFor(s.vehicleType)
+    const pool     = directCustomersFor(org, s.vehicleType)
     const customer = pool[randInt(0, pool.length - 1)]!
-    const product  = AQUAMIST_PRODUCTS[randInt(0, AQUAMIST_PRODUCTS.length - 1)]!
+    const product  = org.products[randInt(0, org.products.length - 1)]!
     refuelFull(s)                                  // leave the plant full
-    setLeg(s, [AQUAMIST_HQ[0], AQUAMIST_HQ[1]], [customer[0], customer[1]])
+    setLeg(s, [org.hq[0], org.hq[1]], [customer[0], customer[1]])
     s.cargoWeightKg = plannedLoadFor(s)            // crates / pallets of product
     s.cargoKind     = product.kind
     s.cargoDesc     = product.desc
-    beginTrip(s, AQUAMIST_HQ[2])
+    beginTrip(s, org.hq[2])
     s.phase = 'TO_DEPOT'                           // reused leg: outbound loaded delivery
   } else {
     if (s.tripsThisWeek >= s.weeklyTripTarget) { s.phase = idle; return }
@@ -1301,8 +1422,9 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
       parkAt(s, s.destLat, s.destLng)   // parked (off-road) at the depot / customer
       if (nowMs >= s.phaseEndsAtMs) {
         const saloon = s.vehicleType === 'SALOON'
-        const kind: SimCargoKind = s.profile === 'AQUAMIST'
-          ? ((s.cargoKind || 'STILL_WATER') as SimCargoKind)
+        const direct = directProfileOf(s.profile)
+        const kind: SimCargoKind = direct
+          ? ((s.cargoKind || direct.products[0]!.kind) as SimCargoKind)
           : 'PROCESSED_SUGAR'
         completeTrip(s, placeName(s.destLat, s.destLng), kind, s.cargoWeightKg ?? 0)
         s.cargoWeightKg = 0

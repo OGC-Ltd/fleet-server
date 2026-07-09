@@ -14,6 +14,17 @@ const schema = z.object({
 
   AUTH_BYPASS: z.string().optional().default('false').transform(v => v === 'true'),
 
+  // Set to 'false' to run this instance API-only (no telemetry poller / sim).
+  // Use for a local dev server reading a DB that another deployment is already
+  // simulating into — two concurrent sims write conflicting positions and
+  // duplicate trips.
+  POLL_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  // Comma-separated org codes this instance simulates (e.g.
+  // "MENENGAI,TIMSALES,KABRAS"). Unset = all orgs in SIM_FLEET_COMPOSITION.
+  // Lets two deployments split the sim fleet org-wise over one shared DB.
+  SIM_ORGS: z.string().optional(),
+
   CORS_ORIGIN: z.string().default('*'),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
   RATE_LIMIT_MAX: z.coerce.number().default(100),
