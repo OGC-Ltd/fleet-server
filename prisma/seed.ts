@@ -65,8 +65,13 @@ const LAST_NAMES = [
   'Njeru','Kirui','Kariuki','Sang','Kiema','Rotich','Muthoni','Mutai',
 ]
 
-const VEHICLE_TYPES  = ['BUS','TRUCK','AMBULANCE','TRACTOR','TANKER','PICKUP','VAN','LORRY','MINIBUS','TIPPER']
-const PLATE_PREFIXES = ['KBV','KDL','KDD','KCY','KBQ','KCA','KDB','KBA','KCX','KBZ','KCZ','KDE','KDF','KDG','KDH']
+// Fixed fleet composition — 40 lorry & trailer / 40 canter / 20 pickup.
+// [type, count, platePrefix, plateBase, kmpl choices, tank choices (litres)]
+const FLEET_COMPOSITION: [string, number, string, number, number[], number[]][] = [
+  ['LORRY & TRAILER', 40, 'KDL', 600, [1.8, 2.0, 2.2, 2.5], [300, 350, 400]],
+  ['CANTER',          40, 'KDC', 700, [5.0, 5.5, 6.0, 6.5], [100, 120]],
+  ['PICKUP',          20, 'KDP', 800, [8.0, 9.0, 10.0],     [70, 80]],
+]
 const PLATE_SUFFIXES = ['A','B','C','D','E','F','G','H','J','K','L','M','N','P','Q','R','S','T','U','V']
 const GPS_VENDORS    = ['Queclink','Teltonika','CalAmp','Meitrack','Controltech']
 const CARGO_DESCS    = [
@@ -276,7 +281,7 @@ async function main() {
   }
   console.log(`  ✓ ${allVehicleGroups.length} vehicle groups`)
 
-  // ── 9. Vehicles (100) ─────────────────────────────────────────────────────
+  // ── 9. Vehicles (100) — 40 LORRY & TRAILER / 40 CANTER / 20 PICKUP ────────
   console.log('→ Vehicles')
   const vehicleRows: {
     organisationId: string; vehicleGroupId: string; name: string;
@@ -284,22 +289,22 @@ async function main() {
     fuelEfficiencyKmpl: number; tankCapacityLitres: number
   }[] = []
 
-  let plateSeq = 100
-  for (let i = 0; i < 100; i++) {
-    const vg     = pick(allVehicleGroups, i)
-    const prefix = pick(PLATE_PREFIXES, i)
-    const suffix = pick(PLATE_SUFFIXES, i)
-    const plate  = `${prefix} ${plateSeq++}${suffix}`
-    vehicleRows.push({
-      organisationId:     org.id,
-      vehicleGroupId:     vg.id,
-      name:               `${pick(vgDefs, i)} ${plate}`,
-      registrationPlate:  plate,
-      deviceId:           `DEV_${plate.replace(/\s+/g, '_')}`,
-      vehicleType:        pick(VEHICLE_TYPES, i),
-      fuelEfficiencyKmpl: pick([2.5, 3.0, 4.0, 5.0, 1.8, 2.0, 6.0, 3.5, 4.5, 2.2], i),
-      tankCapacityLitres: pick([80, 120, 200, 300, 400, 60, 100, 150, 250, 350], i),
-    })
+  let vi = 0
+  for (const [type, count, prefix, plateBase, kmpls, tanks] of FLEET_COMPOSITION) {
+    for (let t = 0; t < count; t++, vi++) {
+      const vg    = pick(allVehicleGroups, vi)
+      const plate = `${prefix} ${plateBase + t}${pick(PLATE_SUFFIXES, t)}`
+      vehicleRows.push({
+        organisationId:     org.id,
+        vehicleGroupId:     vg.id,
+        name:               `${type} ${plate}`,
+        registrationPlate:  plate,
+        deviceId:           `DEV_${plate.replace(/\s+/g, '_')}`,
+        vehicleType:        type,
+        fuelEfficiencyKmpl: pick(kmpls, t),
+        tankCapacityLitres: pick(tanks, t),
+      })
+    }
   }
   await prisma.vehicle.createMany({ data: vehicleRows })
   const vehicles = await prisma.vehicle.findMany()
