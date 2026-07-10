@@ -93,22 +93,44 @@ const round1 = (n: number) => Math.round(n * 10) / 10
 // clock fast-forwards through many simulated hours per poll cycle, so only
 // the LAST tick of a haul actually gets checked against the alert threshold —
 // counting alert rows would silently miss almost every in-transit overspeed.
-const OVERSPEED_TRIP_THRESHOLD     = 5
-const OVERSPEED_PENALTY_PER_EXCESS = 0.05
-const CLEAN_TRIP_HEAL              = 0.02
+const OVERSPEED_TRIP_THRESHOLD = 5     // ticks over the limit before a trip counts as an overspeeding case
+const OVERSPEED_CASE_PENALTY   = 0.15  // flat deduction per overspeeding case
+const CLEAN_TRIP_HEAL          = 0.02
 const RATING_MAX = 5.0
 const RATING_MIN = 1.0
+
+// Fuel theft costs the driver 0.76 rating points PERMANENTLY: the score drops
+// immediately when the theft is persisted, and the clean-trip heal below can
+// never climb back above (5.0 − 0.76 × lifetime thefts), so the deduction is
+// not slowly healed away.
+const FUEL_THEFT_PENALTY = 0.76
 
 async function updateDriverRatingForTrip(driverId: string | null, overspeedTicks: number): Promise<void> {
   if (!driverId) return
 
+  // An overspeeding case (a trip with sustained speeding) costs a flat 0.15;
+  // a clean trip heals a little — but never above the theft-capped ceiling.
   const delta = overspeedTicks > OVERSPEED_TRIP_THRESHOLD
-    ? -OVERSPEED_PENALTY_PER_EXCESS * (overspeedTicks - OVERSPEED_TRIP_THRESHOLD)
+    ? -OVERSPEED_CASE_PENALTY
     : CLEAN_TRIP_HEAL
 
+  // Ceiling = RATING_MAX minus the driver's permanent theft penalties, so a
+  // heal can recover overspeed dings but never a fuel-theft deduction.
+  await prisma.$executeRaw`
+    UPDATE users u
+       SET driver_rating_score = GREATEST(0, LEAST(
+             ${RATING_MAX} - ${FUEL_THEFT_PENALTY} * (SELECT count(*) FROM fuel_thefts ft WHERE ft.driver_id = u.id),
+             GREATEST(${RATING_MIN}, driver_rating_score + ${delta})))
+     WHERE id = ${driverId}
+  `
+}
+
+/** Immediate, permanent −0.76 for a persisted fuel-theft incident. */
+async function applyFuelTheftRatingPenalty(driverId: string | null): Promise<void> {
+  if (!driverId) return
   await prisma.$executeRaw`
     UPDATE users
-       SET driver_rating_score = LEAST(${RATING_MAX}, GREATEST(${RATING_MIN}, driver_rating_score + ${delta}))
+       SET driver_rating_score = GREATEST(0, driver_rating_score - ${FUEL_THEFT_PENALTY})
      WHERE id = ${driverId}
   `
 }
@@ -191,9 +213,14 @@ export async function persistSimEvents(
 
   if (fuelTheft) {
     const f = fuelTheft
+    // Attribute the theft to the assigned driver (same cached meta the trip
+    // path uses) — without it the Drivers page can never count the incident,
+    // and the rating penalty below has no one to charge.
+    const driverId = vehicleMeta?.driverId ?? null
     await prisma.fuelTheft.create({
       data: {
         vehicleId,
+        driverId,
         reportingPeriodId,
         beganAt:            new Date(f.atMs),
         detectedAt:         new Date(f.atMs),
@@ -205,6 +232,7 @@ export async function persistSimEvents(
         finalSpeedKmh:      round1(f.speedKmh),
       },
     })
+    await applyFuelTheftRatingPenalty(driverId)
   }
 
   if (refuel) {

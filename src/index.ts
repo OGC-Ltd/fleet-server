@@ -9,6 +9,9 @@ import { startAlertsWorker }        from './lib/workers/alerts.worker.js'
 import { startSimEventsWorker }     from './lib/workers/sim-events.worker.js'
 import { stopPushDispatcher }       from './lib/push-dispatcher.js'
 import { startCacheWarmer } from './lib/warm-cache.js'
+import { warmRoadRoutes } from './lib/road-routes.js'
+import { startAiInsightWarmer } from './modules/dashboard/ai-insight.js'
+import { staticRoutePairs } from './providers/controltech/controltech.simulator.js'
 
 async function main() {
   await connectDB()
@@ -28,6 +31,12 @@ async function main() {
   // on the remote database (each pooler round trip costs ~1s) — see
   // lib/warm-cache.ts.
   const stopCacheWarmer = startCacheWarmer()
+  // Pre-resolve the fleet's road polylines (one-time per pair, disk-cached) so
+  // vehicles follow real roads from the first tick — see lib/road-routes.ts.
+  void warmRoadRoutes(staticRoutePairs())
+  // Hourly AI operations brief per org (dashboard/ai-insight.ts) — generated
+  // in the background so the endpoint always answers from memory.
+  const stopAiInsightWarmer = startAiInsightWarmer()
   // API-only mode (POLL_ENABLED=false): serve reads off the DB without running
   // the sim — see config/env.ts.
   const poller = env.POLL_ENABLED
@@ -45,6 +54,7 @@ async function main() {
     stopAlertsWorker()
     stopSimEventsWorker()
     stopCacheWarmer()
+    stopAiInsightWarmer()
     await stopPushDispatcher().catch((err) => logger.warn({ err }, 'Push worker thread shutdown failed'))
     server.close(async () => {
       await disconnectDB()

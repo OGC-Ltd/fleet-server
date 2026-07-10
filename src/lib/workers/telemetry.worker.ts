@@ -9,6 +9,7 @@
 import { eventBus }              from '../event-bus.js'
 import { logger }                from '../logger.js'
 import { emitDashboardPosition } from '../sse.js'
+import { deriveFeedEvents } from '../feed-events.js'
 
 export interface DashboardPositionPayload {
   vehicleId:    string
@@ -65,7 +66,7 @@ export interface DashboardPositionPayload {
 }
 
 export function startTelemetryWorker(): () => void {
-  const unsub = eventBus.subscribe('telemetry:processed', ({ frame, orgId, vehicleId, vehicleName, plate, tankCapacityMl }) => {
+  const unsub = eventBus.subscribe('telemetry:processed', ({ frame, orgId, vehicleId, vehicleName, plate, tankCapacityMl, driverName }) => {
     try {
       const fuelLevelPct = (frame.fuelLevelMl != null && tankCapacityMl)
         ? Math.round((frame.fuelLevelMl / tankCapacityMl) * 100)
@@ -114,6 +115,20 @@ export function startTelemetryWorker(): () => void {
         },
       }
       emitDashboardPosition(orgId, payload)
+      // Human live-feed items (dispatch / arrival / offload / alerts) derived
+      // from phase transitions between consecutive frames — see feed-events.
+      deriveFeedEvents(orgId, {
+        vehicleId,
+        plate,
+        driverName,
+        capturedAt:    payload.capturedAt,
+        speedKmh:      payload.speedKmh,
+        cargoWeightKg: payload.cargoWeightKg,
+        cargoDesc:     payload.cargoDesc,
+        phase:         payload.phase ?? null,
+        leg:           payload.leg ?? null,
+        flags:         payload.flags,
+      })
     } catch (err) {
       logger.warn({ err, deviceId: frame.deviceId }, 'telemetry.worker: failed to emit dashboard position')
     }

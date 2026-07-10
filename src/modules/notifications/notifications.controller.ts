@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express'
 import { pushService }              from './notifications.service.js'
-import { registerDashboardClient, emitDashboardHeartbeat, replayDashboardPositions } from '../../lib/sse.js'
+import { registerDashboardClient, emitDashboardHeartbeat, replayDashboardPositions, replayDashboardFeed } from '../../lib/sse.js'
 import { sendSuccess, sendError }   from '../../core/response/response.js'
 import { logger }                   from '../../lib/logger.js'
 
@@ -38,7 +38,9 @@ export async function dashboardStream(req: Request, res: Response) {
   // Replay the fleet's last-known positions so this client is in sync with
   // every other open browser immediately, not after the next poll tick.
   const replayed = replayDashboardPositions(orgId, res)
-  logger.debug({ orgId, replayed }, 'Dashboard SSE client connected')
+  // …and the recent activity feed, so the Live Feed panel has history.
+  const feedReplayed = replayDashboardFeed(orgId, res)
+  logger.debug({ orgId, replayed, feedReplayed }, 'Dashboard SSE client connected')
 
   const cleanup   = registerDashboardClient(orgId, res)
   const heartbeat = setInterval(() => {

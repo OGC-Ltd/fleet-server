@@ -46,6 +46,7 @@ export interface TelemetryProcessedEvent {
   vehicleName:     string
   plate:           string
   tankCapacityMl?: number   // used by telemetry.worker to compute fuelLevelPct
+  driverName?:     string | null   // assigned driver, for the live feed
 }
 
 // Published by the poller instead of awaiting syncFrameAlerts() inline — lets

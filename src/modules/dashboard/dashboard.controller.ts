@@ -1,6 +1,7 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import { prisma } from '../../lib/prisma.js'
+import { getAiInsight } from './ai-insight.js'
 import { getDashboardSummary } from './dashboard.service.js'
 import { getRouteWeather } from './dashboard.weather.js'
 
@@ -25,5 +26,14 @@ export const getWeather: RequestHandler = async (req, res, next) => {
       orgCodeCache.set(orgId, code)
     }
     sendSuccess(res, await getRouteWeather(code))
+  } catch (err) { next(err) }
+}
+
+// AI-generated fleet operations brief (see ai-insight.ts). Falls back to
+// { configured: false } while no OPENAI_API_KEY is set.
+export const getAiInsightHandler: RequestHandler = async (req, res, next) => {
+  try {
+    const data = await getAiInsight(req.params['orgId'] as string)
+    sendSuccess(res, data)
   } catch (err) { next(err) }
 }
