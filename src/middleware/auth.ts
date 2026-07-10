@@ -10,22 +10,45 @@ interface SupabaseJwtPayload {
   exp: number
 }
 
+type AuthUser = NonNullable<Awaited<ReturnType<typeof lookupUserByEmail>>>
+
+// Short-TTL in-memory session cache — the user lookup used to hit the remote
+// DB (~1s per round trip on the pooler) on EVERY request, which put a
+// multi-second floor under every API call regardless of endpoint caching.
+// A just-suspended/terminated user can keep access for at most USER_CACHE_MS.
+const USER_CACHE_MS = 60_000
+const userCache = new Map<string, { user: AuthUser; fetchedAt: number }>()
+const BYPASS_KEY = 'auth-bypass' // no '@' — can never collide with an email key
+
+const readUserCache = (key: string): AuthUser | null => {
+  const hit = userCache.get(key)
+  return hit && Date.now() - hit.fetchedAt < USER_CACHE_MS ? hit.user : null
+}
+
+const lookupUserByEmail = (email: string) =>
+  prisma.user.findFirst({
+    where: { email, deletedAt: null },
+    select: { id: true, organisationId: true, email: true, fullName: true, status: true },
+  })
+
 /**
  * Verifies the Bearer JWT (Supabase-signed), then resolves the matching
- * User in our DB and attaches it to req.user.
- *
- * BOTTLENECK: This performs a DB lookup on every request.
- * Mitigation: Add Redis session cache keyed on JWT `sub` with a short TTL (60s).
+ * User in our DB (via the 60s in-memory cache above) and attaches it to
+ * req.user.
  */
 export const authenticate: RequestHandler = async (req, _res, next) => {
   try {
     // Auth bypass: auto-attach the first active user — for development/single-org use
     if (env.AUTH_BYPASS) {
-      const user = await prisma.user.findFirst({
-        where: { status: 'ACTIVE', deletedAt: null },
-        select: { id: true, organisationId: true, email: true, fullName: true, status: true },
-      })
-      if (!user) throw new UnauthorizedError('No active user found (AUTH_BYPASS mode)')
+      let user = readUserCache(BYPASS_KEY)
+      if (!user) {
+        user = await prisma.user.findFirst({
+          where: { status: 'ACTIVE', deletedAt: null },
+          select: { id: true, organisationId: true, email: true, fullName: true, status: true },
+        })
+        if (!user) throw new UnauthorizedError('No active user found (AUTH_BYPASS mode)')
+        userCache.set(BYPASS_KEY, { user, fetchedAt: Date.now() })
+      }
       req.user = user
       return next()
     }
@@ -36,12 +59,12 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
     const token = header.slice(7)
     const payload = jwt.verify(token, env.SUPABASE_JWT_SECRET) as SupabaseJwtPayload
 
-    const user = await prisma.user.findFirst({
-      where: { email: payload.email, deletedAt: null },
-      select: { id: true, organisationId: true, email: true, fullName: true, status: true },
-    })
-
-    if (!user) throw new UnauthorizedError('User account not found')
+    let user = readUserCache(payload.email)
+    if (!user) {
+      user = await lookupUserByEmail(payload.email)
+      if (!user) throw new UnauthorizedError('User account not found')
+      userCache.set(payload.email, { user, fetchedAt: Date.now() })
+    }
     if (user.status === 'SUSPENDED') throw new ForbiddenError('Account suspended')
     if (user.status === 'TERMINATED') throw new ForbiddenError('Account terminated')
 

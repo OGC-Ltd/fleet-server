@@ -307,6 +307,15 @@ function isDeliveryType(t: string): boolean {
     || t === 'LORRY & TRAILER' || t === 'CANTER' || t === 'PICKUP'
 }
 
+/** Vehicles on the farm → factory raw-cane cycle: tractors, plus Sukari's
+ *  designated cane haulers (each assigned to a farm — Nyondo / Oyani). The
+ *  mill's inbound cane supply must always flow, so the assignment is by duty,
+ *  not vehicle type — Sukari's lorry & trailer rigs ferry cane while its
+ *  canters/pickups deliver processed sugar out to the depots. */
+function runsFarmCycle(s: VehicleSimState): boolean {
+  return isTractorType(s.vehicleType) || s.caneHauler
+}
+
 function lerp(a: number, b: number, t: number) { return a + (b - a) * t }
 function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)) }
 function jitter(base: number, delta: number) { return base + (Math.random() * 2 - 1) * delta }
@@ -349,11 +358,13 @@ function deliveryConsumptionL100(cargoWeightKg: number | null): number {
 const OVERSPEED_CONSUMPTION_MULTIPLIER = 1.35
 
 // ─── simulation clock ───────────────────────────────────────────────────────
-// The sim runs SIM_SCALE× faster than real time (10 real minutes = 1 sim hour),
-// so journeys and daily cycles are observable in minutes rather than hours. The
-// clock is paused across downtime: each cycle advances by the REAL elapsed time
+// The sim runs at SIM_SCALE× real time. It used to run 6× so full daily cycles
+// were observable in minutes, but that generated ~12× more trips/manifests per
+// real day than the current half-speed setting; the product owner asked for
+// 60 real minutes = 30 sim minutes to keep data volume down. The clock is
+// paused across downtime: each cycle advances by the REAL elapsed time
 // (capped) × SIM_SCALE, and the current sim time is persisted for exact resume.
-const SIM_SCALE          = 6            // 60 sim-min / 10 real-min
+export const SIM_SCALE   = 0.5          // 30 sim-min / 60 real-min
 const MAX_REAL_STEP_MS   = 5 * 60_000   // cap per-cycle real delta → downtime pauses the sim
 let _simNowMs        = Date.now()
 let _lastRealMs      = Date.now()
@@ -370,7 +381,10 @@ export function advanceSimClock(): void {
   const realDelta = Math.min(now - _lastRealMs, MAX_REAL_STEP_MS)
   _lastRealMs = now
   const simDelta   = realDelta * SIM_SCALE
-  _simNowMs       += simDelta
+  // Keep the clock integral: a fractional SIM_SCALE (0.5×) times an odd real
+  // delta yields fractional ms, and the persisted sim_clock_ms is a BigInt
+  // column — BigInt() throws on non-integers. Sub-ms truncation is noise.
+  _simNowMs        = Math.round(_simNowMs + simDelta)
   _simHoursPerTick = simDelta / 3_600_000
 }
 export function simNow(): number { return _simNowMs }
@@ -488,6 +502,9 @@ export interface VehicleSimState {
   vehicleType:      string                    // TRACTOR, TRUCK, LORRY, SALOON, TANKER, …
   profile:          RoutingProfile             // which organisation's cycle this vehicle runs
   legDirection:     'outbound' | 'inbound'     // outbound = away from the home base
+  parkSlot:         number                     // per-org parking bay index (see parkingBayOffset)
+  caneHauler:       boolean                    // runs the farm → factory raw-cane cycle (see runsFarmCycle)
+  assignedFarm:     string                     // farm this cane hauler ferries from ('' = pick any in range)
 
   // geofence test — fence centre & radius assigned to this vehicle
   fenceLat:         number
@@ -671,25 +688,33 @@ export function initVehicleState(
   tankCapacityLitres: number,
   vehicleType: string = 'TRUCK',
   profile: RoutingProfile = 'SUKARI',
+  parkSlot: number = index,
 ): VehicleSimState {
   const direct   = directProfileOf(profile)
-  const tractor  = !direct && isTractorType(vehicleType)
+  // Sukari's lorry & trailer rigs are the designated cane haulers: they run
+  // the farm → factory raw-sugarcane cycle, each assigned to a farm (Nyondo /
+  // Oyani, alternating by bay), so the mill's inbound cane supply always
+  // flows. The rest of the Sukari fleet delivers processed sugar to depots.
+  const caneHauler   = !direct && profile === 'SUKARI' && vehicleType === 'LORRY & TRAILER'
+  const assignedFarm = caneHauler ? SUGARCANE_FARMS[parkSlot % SUGARCANE_FARMS.length]![2] : ''
+  const tractor  = !direct && (isTractorType(vehicleType) || caneHauler)
   const delivery = isDeliveryType(vehicleType)
 
   // Every vehicle starts the simulation parked AT ITS ORGANISATION — Sukari
-  // tractors at the dedicated parking, other Sukari vehicles on the mill
-  // premises, direct-delivery orgs' vehicles at their HQ/plant. Support
-  // (non-logistics) vehicles get a small deterministic yard offset so they
-  // don't stack on one pixel. All are engine-off, FULL tank, and healthy: no
-  // movement and no alerts until operations begin and vehicles are dispatched.
+  // cane vehicles at the dedicated parking, other Sukari vehicles on the mill
+  // premises, direct-delivery orgs' vehicles at their HQ/plant — in its own
+  // deterministic parking bay (see parkingBayOffset) so nothing stacks. All
+  // are engine-off, FULL tank, and healthy: no movement and no alerts until
+  // operations begin and vehicles are dispatched.
   const home: [number, number, string] = direct ? direct.hq : tractor ? PARKING : SUKARI
-  const lat = home[0] + (tractor ? 0 : ((index % 8) - 4) * 0.0009)
-  const lng = home[1] + (tractor ? 0 : ((Math.floor(index / 8) % 8) - 4) * 0.0009)
+  const [bayLat, bayLng] = parkingBayOffset(parkSlot, home[0])
+  const lat = home[0] + bayLat
+  const lng = home[1] + bayLng
 
   // Outbound destination pool used once the vehicle is dispatched.
   const dest: [number, number, string] = direct
     ? directCustomersFor(direct, vehicleType)[index % directCustomersFor(direct, vehicleType).length]!
-    : tractor ? SUGARCANE_FARMS[index % SUGARCANE_FARMS.length]!
+    : tractor ? (SUGARCANE_FARMS.find(f => f[2] === assignedFarm) ?? SUGARCANE_FARMS[index % SUGARCANE_FARMS.length]!)
     : delivery ? SUGAR_DEPOTS[index % SUGAR_DEPOTS.length]!
     : home
 
@@ -725,6 +750,9 @@ export function initVehicleState(
     vehicleType,
     profile,
     legDirection:    'outbound',
+    parkSlot,
+    caneHauler,
+    assignedFarm,
     fenceLat:        home[0],
     fenceLng:        home[1],
     fenceRadiusM:    1500,
@@ -869,7 +897,7 @@ export function tickVehicle(s: VehicleSimState): void {
     return   // skip scenario movement for this tick
   }
 
-  const tractor  = s.vehicleType === 'TRACTOR'
+  const tractor  = runsFarmCycle(s)   // TRACTOR type, or a designated cane hauler
   const delivery  = isDeliveryType(s.vehicleType)
 
   if (tractor || delivery) {
@@ -925,11 +953,36 @@ function placeName(lat: number, lng: number): string {
 }
 
 /** Park the vehicle at a fixed point (engine off, small GPS drift). */
+// ─── deterministic parking bays ─────────────────────────────────────────────
+// Parked vehicles used to sit on the exact base coordinate ±6 m of random
+// jitter — the whole fleet stacked into one marker (and wiggled every tick).
+// Instead each vehicle owns a stable bay derived from its per-org parkSlot:
+// concentric rings of 8 around the parking point, ~30 m apart, rotated a
+// little per ring so bays don't line up radially. A 30-vehicle yard spans
+// ~120 m — reads as one cluster zoomed out, every vehicle distinct zoomed in,
+// and a parked marker never moves between ticks.
+const BAYS_PER_RING = 8
+const BAY_RING_M    = 30          // radial distance between rings
+const BAY_INNER_M   = 28          // radius of the innermost ring
+const M_PER_DEG_LAT = 111_320
+
+/** [latOffset, lngOffset] in degrees for a vehicle's parking bay. */
+function parkingBayOffset(slot: number, atLat: number): [number, number] {
+  const ring  = Math.floor(slot / BAYS_PER_RING)
+  const angle = ((slot % BAYS_PER_RING) / BAYS_PER_RING) * 2 * Math.PI + ring * 0.4363
+  const radiusM = BAY_INNER_M + ring * BAY_RING_M
+  return [
+    (radiusM * Math.cos(angle)) / M_PER_DEG_LAT,
+    (radiusM * Math.sin(angle)) / (M_PER_DEG_LAT * Math.cos(atLat * Math.PI / 180)),
+  ]
+}
+
 function parkAt(s: VehicleSimState, lat: number, lng: number): void {
   s.speedKmh = 0
   s.engineOn = false
-  s.lat = lat + jitter(0, 0.00006)
-  s.lng = lng + jitter(0, 0.00006)
+  const [dLat, dLng] = parkingBayOffset(s.parkSlot, lat)
+  s.lat = lat + dLat
+  s.lng = lng + dLng
   s.batteryV = clamp(jitter(12.6, 0.15), 12.0, 13.0)
 }
 
@@ -1058,7 +1111,7 @@ function completeTrip(
 function homeBaseOf(s: VehicleSimState): [number, number, string] {
   const direct = directProfileOf(s.profile)
   if (direct) return direct.hq
-  return s.vehicleType === 'TRACTOR' ? PARKING : SUKARI
+  return runsFarmCycle(s) ? PARKING : SUKARI
 }
 
 /** Consumption (L/100 km) for a delivery leg — a saloon car burns car-like
@@ -1211,18 +1264,20 @@ function planDay(s: VehicleSimState, tractor: boolean): void {
   if (s.weekStartKey !== wk) {
     s.weekStartKey     = wk
     s.tripsThisWeek    = 0
-    // Sukari trucks/lorries: 0–4 depot runs / week. Direct-delivery orgs'
-    // trucks/lorries: 1–4 customer deliveries / week — always at least one,
-    // so those fleets never sit idle for a whole week.
-    s.weeklyTripTarget = directProfileOf(s.profile) ? randInt(1, 4) : randInt(0, 4)
+    // Sukari trucks/lorries: 3–6 depot runs / week. Direct-delivery orgs'
+    // trucks/lorries: 2–5 customer deliveries / week. Never zero — a vehicle
+    // with no planned work parks the utilization governor's problem on the
+    // rest of the fleet. These are organic plans; the governor tops them up
+    // whenever the org's active share drops below UTILIZATION_FLOOR.
+    s.weeklyTripTarget = directProfileOf(s.profile) ? randInt(2, 5) : randInt(3, 6)
   }
 
   s.tripsToday      = 0
-  // Tractors: 0–3 farm hauls / day. Direct-delivery saloons: 1–4 residential
+  // Tractors: 1–3 farm hauls / day. Direct-delivery saloons: 2–5 residential
   // customer drops / day near their HQ.
   s.dailyTripTarget = directProfileOf(s.profile) && s.vehicleType === 'SALOON'
-    ? randInt(1, 4)
-    : randInt(0, 3)
+    ? randInt(2, 5)
+    : randInt(1, 3)
 
   // Don't yank a vehicle that's mid-haul (or already off getting fixed) when
   // the calendar day rolls over.
@@ -1239,19 +1294,30 @@ function planDay(s: VehicleSimState, tractor: boolean): void {
  * The vehicle always leaves the premises on a FULL tank and is never loaded
  * above (legal max − 10 t). Tractors depart from their current position (parking
  * on the first run, the mill between runs); trucks/lorries always from the mill.
+ *
+ * `force` is the utilization governor's path (governFleetUtilization): it
+ * overrides the Sunday/evening rest and tops up the trip quota so the org's
+ * active share never falls below the floor. A service-due vehicle still goes
+ * to the garage first — that run counts as activity too.
  */
-function dispatch(s: VehicleSimState, tractor: boolean, now: Date): void {
+function dispatch(s: VehicleSimState, tractor: boolean, now: Date, force = false): void {
   const idle = tractor ? 'AT_PARKING' as const : 'AT_INDUSTRY' as const
 
-  if (isSunday(now))                    { s.phase = 'SUNDAY'; return }
+  if (!force && isSunday(now))          { s.phase = 'SUNDAY'; return }
   if (s.odometer >= s.nextServiceOdoKm || isDueSoonOrOverdue(s)) { redirectToGarage(s); return }
-  // Stop dispatching in the late evening — crews go home; vehicle stays put.
-  if (hourOfDay(now) >= 18) { s.phase = idle; return }
+  // Stop organic dispatches in the late evening — crews go home; the governor
+  // runs the night shift with whoever it needs to hold the floor.
+  if (!force && hourOfDay(now) >= 22) { s.phase = idle; return }
 
   if (tractor) {
-    if (s.tripsToday >= s.dailyTripTarget) { s.phase = idle; return }
+    if (s.tripsToday >= s.dailyTripTarget) {
+      if (!force) { s.phase = idle; return }
+      s.dailyTripTarget = s.tripsToday + 1   // governor top-up
+    }
+    // A cane hauler always works ITS farm (Nyondo / Oyani assignment from
+    // initVehicleState); unassigned tractors take any farm in range.
     const farms = farmsInRange()
-    const farm  = farms[randInt(0, farms.length - 1)]!
+    const farm  = farms.find(f => f[2] === s.assignedFarm) ?? farms[randInt(0, farms.length - 1)]!
     refuelFull(s)                                  // leave the premises full
     setLeg(s, [s.lat, s.lng], [farm[0], farm[1]])  // depart from current position
     s.cargoWeightKg = 0                            // empty run out to the farm
@@ -1265,7 +1331,11 @@ function dispatch(s: VehicleSimState, tractor: boolean, now: Date): void {
     const saloon = s.vehicleType === 'SALOON'
     const quotaMet = saloon ? s.tripsToday >= s.dailyTripTarget
                             : s.tripsThisWeek >= s.weeklyTripTarget
-    if (quotaMet) { s.phase = idle; return }
+    if (quotaMet) {
+      if (!force) { s.phase = idle; return }
+      if (saloon) s.dailyTripTarget  = s.tripsToday + 1      // governor top-up
+      else        s.weeklyTripTarget = s.tripsThisWeek + 1
+    }
     const pool     = directCustomersFor(org, s.vehicleType)
     const customer = pool[randInt(0, pool.length - 1)]!
     const product  = org.products[randInt(0, org.products.length - 1)]!
@@ -1277,7 +1347,10 @@ function dispatch(s: VehicleSimState, tractor: boolean, now: Date): void {
     beginTrip(s, org.hq[2])
     s.phase = 'TO_DEPOT'                           // reused leg: outbound loaded delivery
   } else {
-    if (s.tripsThisWeek >= s.weeklyTripTarget) { s.phase = idle; return }
+    if (s.tripsThisWeek >= s.weeklyTripTarget) {
+      if (!force) { s.phase = idle; return }
+      s.weeklyTripTarget = s.tripsThisWeek + 1   // governor top-up
+    }
     const depot = SUGAR_DEPOTS[randInt(0, SUGAR_DEPOTS.length - 1)]!
     refuelFull(s)                                  // leave the premises full
     setLeg(s, [SUKARI[0], SUKARI[1]], [depot[0], depot[1]])
@@ -1377,7 +1450,11 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
     case 'LOADING':
       parkAt(s, s.destLat, s.destLng)   // parked (off-road) at the farm
       if (nowMs >= s.phaseEndsAtMs) {
-        s.cargoWeightKg = plannedLoadKg('TRACTOR')   // cane, ≤ max − 10 t
+        // Cane load sized to the hauling vehicle — a lorry & trailer rig
+        // carries far more cane than a tractor.
+        s.cargoWeightKg = plannedLoadKg(s.vehicleType)   // cane, ≤ max − allowance
+        s.cargoKind     = 'SUGARCANE'
+        s.cargoDesc     = 'Raw sugarcane'
         setLeg(s, [s.destLat, s.destLng], [SUKARI[0], SUKARI[1]])   // to the mill
         s.phase = 'TO_INDUSTRY'
       }
@@ -1400,8 +1477,10 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
       if (nowMs >= s.phaseEndsAtMs) {
         completeTrip(s, SUKARI[2], 'SUGARCANE', s.cargoWeightKg ?? 0)
         s.cargoWeightKg = 0
+        s.cargoKind = ''
+        s.cargoDesc = ''
         s.tripsToday++
-        if (s.tripsToday < s.dailyTripTarget && hourOfDay(now) < 18 && !isSunday(now)) {
+        if (s.tripsToday < s.dailyTripTarget && hourOfDay(now) < 22 && !isSunday(now)) {
           dispatch(s, true, now)          // straight out to the next farm (leaves full)
         } else {
           setLeg(s, [SUKARI[0], SUKARI[1]], [PARKING[0], PARKING[1]])   // back to parking for the day
@@ -1443,12 +1522,16 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
         if (saloon) s.tripsToday++
         else        s.tripsThisWeek++
         if (!saloon) refuelFull(s)   // trucks/lorries refuel at the drop point for the return leg
-        // Overnight at a far/late destination, otherwise deadhead back home.
-        // Saloons never sleep over at a customer's residence — they always
-        // return to the plant the same day.
-        const destFarKm = haversineApproxKm(home[0], home[1], s.destLat, s.destLng)
-        if (!saloon && (hourOfDay(now) >= 16 || destFarKm > 180)) {
+        // Trucks/lorries take a timed driver-rest + paperwork stop at the
+        // drop point (longer after a long haul), then head straight home.
+        // This used to be an overnight sleep until 06:00 for any far/late
+        // destination — which parked most of the "active" fleet for hours
+        // and defeated the ≥80 % utilization floor. Saloons never dwell at
+        // a customer's residence.
+        if (!saloon) {
+          const destFarKm = haversineApproxKm(home[0], home[1], s.destLat, s.destLng)
           s.phase = 'DWELL'
+          s.phaseEndsAtMs = nowMs + (destFarKm > 180 ? randInt(60, 120) : randInt(30, 60)) * MIN_MS
         } else {
           setLeg(s, [s.destLat, s.destLng], [home[0], home[1]])
           s.phase = 'TO_INDUSTRY'
@@ -1459,8 +1542,10 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
 
     case 'DWELL':
       parkAt(s, s.destLat, s.destLng)
-      // Head back home the next morning.
-      if (hourOfDay(now) >= 6 && hourOfDay(now) < 16) {
+      // Rest over — deadhead back home. (States persisted before DWELL was
+      // timed have phaseEndsAtMs from an older phase or 0 — both depart
+      // immediately, which is the right recovery.)
+      if (nowMs >= s.phaseEndsAtMs) {
         setLeg(s, [s.destLat, s.destLng], [home[0], home[1]])
         s.phase = 'TO_INDUSTRY'
       }
@@ -1469,6 +1554,51 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
     default:
       s.phase = tractor ? 'AT_PARKING' : 'AT_INDUSTRY'
   }
+}
+
+// ─── fleet-utilization governor ─────────────────────────────────────────────
+// A real haulage fleet doesn't sit in the yard: at least UTILIZATION_FLOOR of
+// every org's logistics vehicles should be out working (hauling, loading /
+// offloading, resting mid-route, returning, or at the garage) at any moment.
+// The per-vehicle plans above (quotas, evening rest, Sundays) still decide
+// which vehicles rest and when trips happen organically; this governor runs
+// once per tick after all vehicles have ticked and force-dispatches idle
+// vehicles whenever an org's active share drops below the floor.
+
+export const UTILIZATION_FLOOR = 0.8
+
+const IDLE_PHASES: ReadonlySet<LogiPhase> = new Set(['AT_PARKING', 'AT_INDUSTRY', 'DONE', 'SUNDAY'])
+
+/** Top up dispatches so every org meets the floor. Returns how many vehicles
+ *  were sent out. Support (non-logistics) assets never dispatch. */
+export function governFleetUtilization(states: Iterable<VehicleSimState>): number {
+  // Group logistics vehicles by routing profile — the org whose cycle they run.
+  const byProfile = new Map<RoutingProfile, VehicleSimState[]>()
+  for (const s of states) {
+    if (!isTractorType(s.vehicleType) && !isDeliveryType(s.vehicleType)) continue
+    const fleet = byProfile.get(s.profile) ?? []
+    fleet.push(s)
+    byProfile.set(s.profile, fleet)
+  }
+
+  const now = simDate()
+  let dispatched = 0
+  for (const fleet of byProfile.values()) {
+    const idle    = fleet.filter(s => IDLE_PHASES.has(s.phase))
+    const active  = fleet.length - idle.length
+    let   deficit = Math.ceil(fleet.length * UTILIZATION_FLOOR) - active
+    if (deficit <= 0) continue
+
+    // Random pick order so the resting slots rotate across the fleet instead
+    // of always falling on the same vehicles.
+    idle.sort(() => Math.random() - 0.5)
+    for (const s of idle) {
+      if (deficit <= 0) break
+      dispatch(s, runsFarmCycle(s), now, true)
+      if (!IDLE_PHASES.has(s.phase)) { dispatched++; deficit-- }
+    }
+  }
+  return dispatched
 }
 
 // ─── render state → Controltech wire packet ────────────────────────────────

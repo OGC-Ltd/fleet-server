@@ -8,6 +8,7 @@ import { startNotificationWorker }  from './lib/workers/notification.worker.js'
 import { startAlertsWorker }        from './lib/workers/alerts.worker.js'
 import { startSimEventsWorker }     from './lib/workers/sim-events.worker.js'
 import { stopPushDispatcher }       from './lib/push-dispatcher.js'
+import { startCacheWarmer } from './lib/warm-cache.js'
 
 async function main() {
   await connectDB()
@@ -23,6 +24,10 @@ async function main() {
   const stopNotificationWorker = startNotificationWorker()
   const stopAlertsWorker       = startAlertsWorker()
   const stopSimEventsWorker    = startSimEventsWorker()
+  // Keep the analytics/maintenance read caches hot so those pages never wait
+  // on the remote database (each pooler round trip costs ~1s) — see
+  // lib/warm-cache.ts.
+  const stopCacheWarmer = startCacheWarmer()
   // API-only mode (POLL_ENABLED=false): serve reads off the DB without running
   // the sim — see config/env.ts.
   const poller = env.POLL_ENABLED
@@ -39,6 +44,7 @@ async function main() {
     stopNotificationWorker()
     stopAlertsWorker()
     stopSimEventsWorker()
+    stopCacheWarmer()
     await stopPushDispatcher().catch((err) => logger.warn({ err }, 'Push worker thread shutdown failed'))
     server.close(async () => {
       await disconnectDB()

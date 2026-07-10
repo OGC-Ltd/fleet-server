@@ -26,7 +26,7 @@ import dashboardRoutes from './modules/dashboard/dashboard.routes.js'
 import { notificationsOrgRouter } from './modules/notifications/notifications.router.js'
 import * as notificationsCtrl from './modules/notifications/notifications.controller.js'
 import { authenticate, requireOrgAccess } from './middleware/auth.js'
-import { simNow } from './providers/controltech/controltech.simulator.js'
+import { simNow, SIM_SCALE } from './providers/controltech/controltech.simulator.js'
 import { prisma } from './lib/prisma.js'
 import * as roleCtrl from './modules/roles/role.controller.js'
 import { listQuerySchema } from './modules/roles/role.schema.js'
@@ -61,21 +61,30 @@ export function createApp() {
   // real-world sample time so the client can advance locally at `scale`×.
   // No auth: this is display-only metadata, not user or org data.
   app.get(`${v1}/sim-clock`, (_req, res) => {
-    sendSuccess(res, { simMs: simNow(), realMs: Date.now(), scale: 6 })
+    sendSuccess(res, { simMs: simNow(), realMs: Date.now(), scale: SIM_SCALE })
   })
 
   // Bootstrap — returns the full organisation roster (for the dashboard's
   // org switcher) plus a default selection, in auth-bypass mode. Ordered by
   // creation so the first-seeded org (Sukari) stays the default.
+  // The roster effectively never changes at runtime, and every client blocks
+  // its first data fetch on this call — cache it in memory (60s TTL) so it
+  // doesn't pay a remote-DB round trip per request.
+  let bootstrapCache: { data: unknown; fetchedAt: number } | null = null
   app.get(`${v1}/bootstrap`, async (_req, res) => {
     try {
+      if (bootstrapCache && Date.now() - bootstrapCache.fetchedAt < 60_000) {
+        return sendSuccess(res, bootstrapCache.data)
+      }
       const orgs = await prisma.organisation.findMany({
         select:  { id: true, name: true, code: true },
         orderBy: { createdAt: 'asc' },
       })
       const first = orgs[0]
       if (!first) return sendError(res, 503, 'No organisation configured')
-      sendSuccess(res, { orgId: first.id, orgName: first.name, orgs })
+      const data = { orgId: first.id, orgName: first.name, orgs }
+      bootstrapCache = { data, fetchedAt: Date.now() }
+      sendSuccess(res, data)
     } catch { sendError(res, 500, 'Bootstrap failed') }
   })
 
