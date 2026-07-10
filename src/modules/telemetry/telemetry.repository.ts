@@ -73,6 +73,13 @@ export async function findFleetSnapshot(orgId: string) {
   // payload carries `_sim.leg` means the snapshot ignores any competing writer's
   // old-format telemetry on the shared DB — the dashboard reflects only this
   // server's simulation (correct positions + journey legs).
+  //
+  // LATERAL per vehicle (not DISTINCT ON over the whole table): each vehicle
+  // walks its (vehicle_id, captured_at) index newest-first and stops at the
+  // first new-code ping — normally the very first row, since this server
+  // writes `_sim.leg` on every ping it persists. The old DISTINCT ON form
+  // joined + JSON-filtered every telemetry row ever recorded and took ~40s
+  // on the remote pooler, growing with table size.
   interface PingRow {
     vehicle_id: string
     lat: number | null; lng: number | null; heading_deg: number | null
@@ -83,20 +90,24 @@ export async function findFleetSnapshot(orgId: string) {
     odometer_km: number | null; maintenance: unknown; phase: string | null
   }
   const pings = await prisma.$queryRaw<PingRow[]>`
-    SELECT DISTINCT ON (t.vehicle_id)
-      t.vehicle_id,
-      t.lat, t.lng, t.heading_deg, t.speed_kmh, t.engine_on,
-      t.fuel_level_ml, t.fuel_used_ml, t.cargo_weight_kg, t.captured_at,
-      r.payload->'_sim'->'leg' AS leg,
-      r.payload->'_sim'->>'cargoDesc' AS cargo_desc,
-      (r.payload->>'odometer_km')::float AS odometer_km,
-      r.payload->'_sim'->'maintenance' AS maintenance,
-      r.payload->'_sim'->>'phase' AS phase
-    FROM vehicle_telemetries t
-    JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
-    WHERE t.vehicle_id IN (${Prisma.join(vehicleIds)})
-      AND r.payload->'_sim'->'leg' IS NOT NULL
-    ORDER BY t.vehicle_id, t.captured_at DESC
+    SELECT p.* FROM unnest(ARRAY[${Prisma.join(vehicleIds)}]::text[]) AS v(id)
+    CROSS JOIN LATERAL (
+      SELECT
+        t.vehicle_id,
+        t.lat, t.lng, t.heading_deg, t.speed_kmh, t.engine_on,
+        t.fuel_level_ml, t.fuel_used_ml, t.cargo_weight_kg, t.captured_at,
+        r.payload->'_sim'->'leg' AS leg,
+        r.payload->'_sim'->>'cargoDesc' AS cargo_desc,
+        (r.payload->>'odometer_km')::float AS odometer_km,
+        r.payload->'_sim'->'maintenance' AS maintenance,
+        r.payload->'_sim'->>'phase' AS phase
+      FROM vehicle_telemetries t
+      JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
+      WHERE t.vehicle_id = v.id
+        AND r.payload->'_sim'->'leg' IS NOT NULL
+      ORDER BY t.captured_at DESC
+      LIMIT 1
+    ) p
   `
   const pingByVehicle = new Map(pings.map(p => [p.vehicle_id, p]))
 
@@ -307,6 +318,60 @@ export async function findVehicleGarageVisits(orgId: string, vehicleId: string) 
     severityScore:   v.severityScore,
     itemsFixed:      v.itemsFixed as { name: string; replaced: boolean }[],
   }))
+}
+
+export interface OrgVehicleMaintenance {
+  /** Every vehicle id in the org — membership check for the per-vehicle endpoints. */
+  vehicleIds: string[]
+  services:   Record<string, ReturnType<typeof mapServiceRecord>[]>
+  visits:     Record<string, ReturnType<typeof mapGarageVisit>[]>
+}
+
+const mapServiceRecord = (r: { id: string; servicedAt: Date; odometerKm: number; previousServiceOdoKm: number | null; nextServiceOdoKm: number | null }) => ({
+  id:                   r.id,
+  servicedAt:           r.servicedAt.toISOString(),
+  odometerKm:           r.odometerKm,
+  previousServiceOdoKm: r.previousServiceOdoKm,
+  nextServiceOdoKm:     r.nextServiceOdoKm,
+  kmCovered:            r.previousServiceOdoKm != null ? r.odometerKm - r.previousServiceOdoKm : null,
+})
+
+const mapGarageVisit = (v: { id: string; garageName: string; garageLat: number; garageLng: number; enteredAt: Date; exitedAt: Date; durationMinutes: number; odometerKm: number; severityScore: number; itemsFixed: unknown }) => ({
+  id:              v.id,
+  garageName:      v.garageName,
+  garageLat:       v.garageLat,
+  garageLng:       v.garageLng,
+  enteredAt:       v.enteredAt.toISOString(),
+  exitedAt:        v.exitedAt.toISOString(),
+  durationMinutes: v.durationMinutes,
+  odometerKm:      v.odometerKm,
+  severityScore:   v.severityScore,
+  itemsFixed:      v.itemsFixed as { name: string; replaced: boolean }[],
+})
+
+/** Service history + garage visits for EVERY vehicle in the org, grouped by
+ *  vehicle — the batched source the maintenance cache warms so the per-vehicle
+ *  endpoints (rows shaped exactly like findVehicleServiceHistory /
+ *  findVehicleGarageVisits, newest first) never wait on the remote DB. */
+export async function findOrgVehicleMaintenance(orgId: string): Promise<OrgVehicleMaintenance> {
+  const [vehicles, serviceRecords, garageVisits] = await Promise.all([
+    prisma.vehicle.findMany({ where: { organisationId: orgId }, select: { id: true } }),
+    prisma.vehicleServiceRecord.findMany({
+      where:   { vehicle: { organisationId: orgId } },
+      orderBy: { servicedAt: 'desc' },
+    }),
+    prisma.vehicleGarageVisit.findMany({
+      where:   { vehicle: { organisationId: orgId } },
+      orderBy: { enteredAt: 'desc' },
+    }),
+  ])
+
+  const services: OrgVehicleMaintenance['services'] = {}
+  for (const r of serviceRecords) (services[r.vehicleId] ??= []).push(mapServiceRecord(r))
+  const visits: OrgVehicleMaintenance['visits'] = {}
+  for (const v of garageVisits) (visits[v.vehicleId] ??= []).push(mapGarageVisit(v))
+
+  return { vehicleIds: vehicles.map(v => v.id), services, visits }
 }
 
 /** All currently-open (unresolved) alerts for an org — used to seed the

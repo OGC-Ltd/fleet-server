@@ -10,6 +10,7 @@
 
 import { findSilos, findLatestPerVehicle } from './dashboard.repository.js'
 import type { FleetRow } from './dashboard.repository.js'
+import { createWarmCache } from '../../lib/warm-cache.js'
 
 // Sugar-logistics carriers: tractors haul raw cane, lorries/canters processed sugar.
 const SUGAR_CARRIERS = new Set(['TRACTOR', 'TRUCK', 'LORRY', 'LORRY & TRAILER', 'CANTER'])
@@ -41,17 +42,20 @@ function chipStatus(v: FleetRow): 'ok' | 'warning' | 'critical' {
   return 'ok'
 }
 
-// Short in-process cache — decouples client poll rate (and multiple browser
-// tabs) from DB load. Telemetry only changes each ~30 s poll cycle anyway.
-const SUMMARY_TTL_MS = 10_000
-const summaryCache = new Map<string, { ts: number; data: Awaited<ReturnType<typeof computeDashboardSummary>> }>()
+// Warmed cache (lib/warm-cache.ts) — the old 10s TTL cache still BLOCKED the
+// request on the ~0.7s recompute whenever it expired, so most 30s header polls
+// paid the remote-DB round trip. Now requests always return from memory and
+// the warmer keeps every org fresh in the background; the header's inTransit
+// figure is overridden live from the SSE stream client-side anyway, and the
+// 5-min sensor-freshness window dwarfs the sweep interval.
+const summaryCache = createWarmCache<Awaited<ReturnType<typeof computeDashboardSummary>>>({
+  name: 'dashboard-summary',
+  compute: (orgId) => computeDashboardSummary(orgId),
+  warmKeysFor: (orgId) => [orgId],
+})
 
 export async function getDashboardSummary(orgId: string) {
-  const hit = summaryCache.get(orgId)
-  if (hit && Date.now() - hit.ts < SUMMARY_TTL_MS) return hit.data
-  const data = await computeDashboardSummary(orgId)
-  summaryCache.set(orgId, { ts: Date.now(), data })
-  return data
+  return summaryCache.get(orgId)
 }
 
 async function computeDashboardSummary(orgId: string) {

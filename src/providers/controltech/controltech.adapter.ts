@@ -33,7 +33,7 @@ import { env }             from '../../config/env.js'
 import { getSimFleetVehicles } from '../../lib/sim-fleet.js'
 import type { TelemetryProvider, VehicleTelemetryFrame, DoorStatus, NetworkType } from '../telemetry-provider.js'
 import type { CtDeviceSnapshot }   from './controltech.types.js'
-import { initVehicleState, tickVehicle, renderSnapshot, initSimClock, advanceSimClock, simNow } from './controltech.simulator.js'
+import { initVehicleState, tickVehicle, renderSnapshot, initSimClock, advanceSimClock, simNow, governFleetUtilization } from './controltech.simulator.js'
 import type { VehicleSimState, RoutingProfile } from './controltech.simulator.js'
 
 // ─── normaliser — CtDeviceSnapshot → VehicleTelemetryFrame ────────────────
@@ -154,7 +154,14 @@ export class ControltechMockAdapter implements TelemetryProvider {
     const savedByDevice = new Map(saved.map(r => [r.deviceId, r.state as unknown as SimEntry]))
     let hydrated = 0, coldStarted = 0
 
+    // Parking bays are numbered PER ORG (0, 1, 2 … in fleet order, which is
+    // deterministic) so every org's yard fills from the innermost ring —
+    // `idx` is global across orgs and would leave inner rings empty.
+    const slotCounters = new Map<string, number>()
+
     vehicles.forEach((v, idx) => {
+      const parkSlot = slotCounters.get(v.orgCode) ?? 0
+      slotCounters.set(v.orgCode, parkSlot + 1)
       this.orgByDevice.set(v.deviceId, v.organisationId)
       const tankLitres = v.tankCapacityLitres ?? 200
       const prior      = savedByDevice.get(v.deviceId)
@@ -175,7 +182,7 @@ export class ControltechMockAdapter implements TelemetryProvider {
         // instead of `undefined` — otherwise the very next renderSnapshot()
         // throws on the missing field for every vehicle hydrated from an
         // older save.
-        const defaults = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType, profile)
+        const defaults = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType, profile, parkSlot)
         // `profile` is pinned AFTER the prior spread — states persisted before
         // the org-aware fleet existed have no profile key (fine, defaults win),
         // but a stale/wrong persisted value must never override the vehicle's
@@ -183,7 +190,7 @@ export class ControltechMockAdapter implements TelemetryProvider {
         this.states.set(v.deviceId, { ...defaults, ...prior, profile, tankCapacityMl: tankLitres * 1000 })
         hydrated++
       } else {
-        const state = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType, profile)
+        const state = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType, profile, parkSlot)
         this.states.set(v.deviceId, { ...state, tankCapacityMl: tankLitres * 1000 })
         coldStarted++
       }
@@ -224,6 +231,15 @@ export class ControltechMockAdapter implements TelemetryProvider {
       }
     }
 
+    // Keep ≥80 % of every org's fleet out working — force-dispatches idle
+    // vehicles when an org drops below the floor. Runs after the tick so the
+    // count reflects trips that just completed; the dispatched vehicles start
+    // moving on the next tick.
+    const dispatched = governFleetUtilization(this.states.values())
+    if (dispatched > 0) {
+      logger.debug({ dispatched }, 'Utilization governor dispatched idle vehicles')
+    }
+
     // Snapshot the advanced state so a restart resumes from here. Fire-and-forget
     // so a slow DB never delays telemetry delivery to the poller.
     void this.persist()
@@ -255,7 +271,7 @@ export class ControltechMockAdapter implements TelemetryProvider {
               updated_at      = EXCLUDED.updated_at
       `
       await prisma.$executeRaw`
-        INSERT INTO simulation_meta (id, last_tick_at, sim_clock_ms) VALUES ('singleton', ${now}, ${BigInt(simNow())})
+        INSERT INTO simulation_meta (id, last_tick_at, sim_clock_ms) VALUES ('singleton', ${now}, ${BigInt(Math.round(simNow()))})
         ON CONFLICT (id) DO UPDATE SET last_tick_at = EXCLUDED.last_tick_at, sim_clock_ms = EXCLUDED.sim_clock_ms
       `
     } catch (err) {

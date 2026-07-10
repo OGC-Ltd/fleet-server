@@ -64,6 +64,24 @@ function dashboardKey(orgId: string) {
   return `${orgId}:dashboard`
 }
 
+// Last position payload per vehicle, per org — replayed to a newly connected
+// dashboard client so its map reflects the fleet as of the LAST poll tick
+// immediately, instead of waiting up to a full tick (30 s) for fresh events.
+// This closes the window where two browsers opened moments apart disagree.
+const lastPositions = new Map<string, Map<string, unknown>>()
+
+/** Write the org's cached per-vehicle positions straight to one client. */
+export function replayDashboardPositions(orgId: string, res: Response): number {
+  const positions = lastPositions.get(orgId)
+  if (!positions?.size) return 0
+  for (const data of positions.values()) {
+    try {
+      res.write(`event: position\ndata: ${JSON.stringify(data, bigIntReplacer)}\n\n`)
+    } catch { /* client disconnected mid-replay */ }
+  }
+  return positions.size
+}
+
 function broadcastDashboard(orgId: string, event: string, data: unknown) {
   const key     = dashboardKey(orgId)
   const clients = registry.get(key)
@@ -87,6 +105,11 @@ export function registerDashboardClient(orgId: string, res: Response): () => voi
 
 /** Vehicle position + state snapshot — powers the live map markers. */
 export function emitDashboardPosition(orgId: string, data: unknown) {
+  const vehicleId = (data as { vehicleId?: string } | null)?.vehicleId
+  if (vehicleId) {
+    if (!lastPositions.has(orgId)) lastPositions.set(orgId, new Map())
+    lastPositions.get(orgId)!.set(vehicleId, data)
+  }
   broadcastDashboard(orgId, 'position', data)
 }
 
