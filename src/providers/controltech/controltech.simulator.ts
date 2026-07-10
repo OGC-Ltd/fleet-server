@@ -30,6 +30,7 @@
  */
 
 import type { CtDeviceSnapshot } from './controltech.types.js'
+import { getRoadPath, pointAlongPath } from '../../lib/road-routes.js'
 
 // ─── scenario catalogue ────────────────────────────────────────────────────
 
@@ -358,13 +359,14 @@ function deliveryConsumptionL100(cargoWeightKg: number | null): number {
 const OVERSPEED_CONSUMPTION_MULTIPLIER = 1.35
 
 // ─── simulation clock ───────────────────────────────────────────────────────
-// The sim runs at SIM_SCALE× real time. It used to run 6× so full daily cycles
-// were observable in minutes, but that generated ~12× more trips/manifests per
-// real day than the current half-speed setting; the product owner asked for
-// 60 real minutes = 30 sim minutes to keep data volume down. The clock is
+// The sim runs at SIM_SCALE× real time. It originally ran 6× so full daily
+// cycles were observable in minutes, but that generated ~6× the trip data and
+// pushed record dates weeks ahead of the calendar (rebased 2026-07-10). At
+// 1× the sim tracks the real calendar permanently — record dates never drift
+// — while still generating far less data than the old 6× clock. The clock is
 // paused across downtime: each cycle advances by the REAL elapsed time
 // (capped) × SIM_SCALE, and the current sim time is persisted for exact resume.
-export const SIM_SCALE   = 0.5          // 30 sim-min / 60 real-min
+export const SIM_SCALE   = 1.0          // real time — sim dates track the calendar
 const MAX_REAL_STEP_MS   = 5 * 60_000   // cap per-cycle real delta → downtime pauses the sim
 let _simNowMs        = Date.now()
 let _lastRealMs      = Date.now()
@@ -439,7 +441,10 @@ function plannedLoadFor(s: VehicleSimState): number {
 
 // Fleet-wide fuel-theft budget — at most a few siphoning incidents per day so
 // the dashboard isn't flooded with critical fuel alerts.
-const MAX_THEFTS_PER_DAY = 3
+// Kept deliberately rare — the dataset was trimmed to one incident per org on
+// 2026-07-10 and the product owner wants theft to stay an exceptional event,
+// not a daily statistic (each one permanently costs the driver 0.76 rating).
+const MAX_THEFTS_PER_DAY = 1
 let theftsToday = 0
 let theftDayKey = ''
 function theftBudgetAvailable(): boolean {
@@ -1008,7 +1013,11 @@ function setLeg(s: VehicleSimState, from: [number, number], to: [number, number]
   // the occasional overspeed roll both push the actual arrival later or
   // earlier than this plan, which is exactly what "late/early" measures.
   s.legBeganAtMs = simNow()
-  const totalKm  = haversineApproxKm(from[0], from[1], to[0], to[1])
+  // Plan the ETA over the actual ROAD distance when the route is cached
+  // (see lib/road-routes) — straight-line distance understates real legs by
+  // 30–60 % in this terrain and made every ETA optimistic.
+  const totalKm = getRoadPath(from[0], from[1], to[0], to[1])?.totalKm
+    ?? haversineApproxKm(from[0], from[1], to[0], to[1])
   // A few legs are genuinely tiny intra-facility hops (e.g. TO_PARKING is
   // only the mill-to-parking ~250m) — distance/speed alone can compute a
   // planned duration under 30s there, which rounds the departure and
@@ -1040,11 +1049,25 @@ function advanceLeg(s: VehicleSimState, targetKmh: number, drainPer100: number):
   s.prevFuelLevelMl = s.fuelLevelMl
   s.fuelLevelMl = Math.max(s.fuelLevelMl - drain, 0)
 
-  const total    = haversineApproxKm(s.originLat, s.originLng, s.destLat, s.destLng)
-  const progress = Math.min(s.routeProgressKm / Math.max(total, 1), 1)
-  s.lat = lerp(s.originLat, s.destLat, progress) + jitter(0, 0.0002)
-  s.lng = lerp(s.originLng, s.destLng, progress) + jitter(0, 0.0002)
-  s.headingDeg = bearingDeg(s.originLat, s.originLng, s.destLat, s.destLng)
+  // Follow the actual ROAD between origin and destination when the route
+  // polyline is cached (lib/road-routes; a cache miss falls back to the old
+  // straight line and self-heals within a tick or two once the background
+  // fetch lands) — no more cutting across farmland, forests and lakes.
+  const road = getRoadPath(s.originLat, s.originLng, s.destLat, s.destLng)
+  let progress: number
+  if (road) {
+    progress = Math.min(s.routeProgressKm / Math.max(road.totalKm, 0.1), 1)
+    const p = pointAlongPath(road, s.routeProgressKm)
+    s.lat = p.lat + jitter(0, 0.00005)   // GPS noise, ~5 m — stays on the carriageway
+    s.lng = p.lng + jitter(0, 0.00005)
+    s.headingDeg = p.headingDeg
+  } else {
+    const total = haversineApproxKm(s.originLat, s.originLng, s.destLat, s.destLng)
+    progress = Math.min(s.routeProgressKm / Math.max(total, 1), 1)
+    s.lat = lerp(s.originLat, s.destLat, progress) + jitter(0, 0.0002)
+    s.lng = lerp(s.originLng, s.destLng, progress) + jitter(0, 0.0002)
+    s.headingDeg = bearingDeg(s.originLat, s.originLng, s.destLat, s.destLng)
+  }
   s.engineOn = true
   s.batteryV = jitter(13.8, 0.2)
 
@@ -1556,6 +1579,32 @@ export function tickLogistics(s: VehicleSimState, tractor: boolean): void {
   }
 }
 
+// ─── static road-route warm-up pairs ────────────────────────────────────────
+// Every regularly-driven origin→destination pair in the fleet's universe —
+// mill ↔ depots/farms/parking, each direct org's HQ ↔ its customers, and
+// garages ↔ home bases — in BOTH directions (one-way streets make A→B and
+// B→A different roads). index.ts feeds these to warmRoadRoutes at boot, so
+// the road-path cache converges once and everything after is offline. Legs
+// with dynamic origins (a hauler departing its exact parking bay, a mid-route
+// garage redirect) resolve lazily with a straight-line fallback for a tick.
+export function staticRoutePairs(): [number, number, number, number][] {
+  const pairs: [number, number, number, number][] = []
+  const both = (a: [number, number, string], b: [number, number, string]) => {
+    pairs.push([a[0], a[1], b[0], b[1]], [b[0], b[1], a[0], a[1]])
+  }
+  both(SUKARI, PARKING)
+  for (const f of SUGARCANE_FARMS) { both(SUKARI, f); both(PARKING, f) }
+  for (const d of SUGAR_DEPOTS) both(SUKARI, d)
+  for (const org of Object.values(DIRECT_PROFILES)) {
+    for (const c of org.customers) both(org.hq, c)
+  }
+  for (const g of GARAGES) {
+    both(SUKARI, g)
+    for (const org of Object.values(DIRECT_PROFILES)) both(org.hq, g)
+  }
+  return pairs
+}
+
 // ─── fleet-utilization governor ─────────────────────────────────────────────
 // A real haulage fleet doesn't sit in the yard: at least UTILIZATION_FLOOR of
 // every org's logistics vehicles should be out working (hauling, loading /
@@ -1661,7 +1710,10 @@ export function renderSnapshot(s: VehicleSimState): CtDeviceSnapshot {
       // complete back-and-forth trips. `moving` is false when parked at an
       // endpoint (farm / depot / parking / mill) — where travel is off-road.
       leg: (() => {
-        const totalKm   = haversineApproxKm(s.originLat, s.originLng, s.destLat, s.destLng)
+        // Road distance when the polyline is cached, so covered/total and the
+        // progress bar reflect the path the vehicle actually drives.
+        const totalKm   = getRoadPath(s.originLat, s.originLng, s.destLat, s.destLng)?.totalKm
+          ?? haversineApproxKm(s.originLat, s.originLng, s.destLat, s.destLng)
         const coveredKm = Math.min(s.routeProgressKm, totalKm)
         return {
           fromLat: +s.originLat.toFixed(6), fromLng: +s.originLng.toFixed(6), from: placeName(s.originLat, s.originLng),

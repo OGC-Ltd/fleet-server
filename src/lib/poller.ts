@@ -69,6 +69,7 @@ interface DeviceMeta {
   // few minutes of staleness here is an acceptable tradeoff for cutting 2
   // DB round-trips per vehicle per poll cycle.
   driverId:        string | null
+  driverName:      string | null
 }
 
 let deviceCache   = new Map<string, DeviceMeta>()
@@ -86,7 +87,7 @@ async function refreshCache(): Promise<void> {
       tankCapacityLitres: true,
       assignments: {
         where: { unassignedAt: null },
-        select: { userId: true },
+        select: { userId: true, user: { select: { fullName: true } } },
         take: 1,
       },
     },
@@ -98,6 +99,7 @@ async function refreshCache(): Promise<void> {
     plate:          r.registrationPlate,
     tankCapacityMl: (r.tankCapacityLitres ?? 200) * 1000,
     driverId:       r.assignments[0]?.userId ?? null,
+    driverName:     r.assignments[0]?.user.fullName ?? null,
   }]))
   cacheLoadedAt = Date.now()
 }
@@ -213,6 +215,7 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
           vehicleName:    meta.vehicleName,
           plate:          meta.plate,
           tankCapacityMl: meta.tankCapacityMl,
+          driverName:     meta.driverName,
         })
 
         // 3. Determine which flags are currently active

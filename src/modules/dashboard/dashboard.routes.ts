@@ -6,7 +6,8 @@ const router = Router({ mergeParams: true })
 
 router.use(authenticate, requireOrgAccess)
 
-router.get('/summary', ctrl.getSummary)
-router.get('/weather', ctrl.getWeather)
+router.get('/summary',    ctrl.getSummary)
+router.get('/weather',    ctrl.getWeather)
+router.get('/ai-insight', ctrl.getAiInsightHandler)
 
 export default router

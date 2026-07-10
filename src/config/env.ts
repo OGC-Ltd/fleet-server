@@ -25,6 +25,11 @@ const schema = z.object({
   // Lets two deployments split the sim fleet org-wise over one shared DB.
   SIM_ORGS: z.string().optional(),
 
+  // Fleet AI Insight (dashboard/ai-insight.ts). Unset key = the endpoint
+  // reports { configured: false } and clients fall back to the local summary.
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_MODEL:   z.string().default('gpt-5-nano'),
+
   CORS_ORIGIN: z.string().default('*'),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
   RATE_LIMIT_MAX: z.coerce.number().default(100),

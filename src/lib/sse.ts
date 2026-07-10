@@ -103,6 +103,38 @@ export function registerDashboardClient(orgId: string, res: Response): () => voi
   }
 }
 
+// Live-feed ring buffer — GLOBAL across organisations: the feed panel shows
+// the whole platform's activity (every org's dispatches, arrivals, alerts),
+// so items are buffered once and broadcast to every org's dashboard channel.
+// Replayed to new clients so the panel has history on page load.
+const FEED_BUFFER_MAX = 60
+const globalFeed: unknown[] = []
+
+/** Human activity-feed item (dispatch/arrival/offload/alert …) — powers the
+ *  Live Feed panel. `orgId` tags the item; delivery is to ALL orgs' clients. */
+export function emitDashboardFeed(orgId: string, item: unknown) {
+  const stamped = { ...(item as Record<string, unknown>), orgId }
+  globalFeed.push(stamped)
+  if (globalFeed.length > FEED_BUFFER_MAX) globalFeed.splice(0, globalFeed.length - FEED_BUFFER_MAX)
+  const payload = `event: feed\ndata: ${JSON.stringify(stamped, bigIntReplacer)}\n\n`
+  for (const [key, clients] of registry) {
+    if (!key.endsWith(':dashboard')) continue
+    for (const client of clients) {
+      try { client.res.write(payload) } catch { /* client disconnected */ }
+    }
+  }
+}
+
+/** Write the buffered feed history (all orgs) straight to one client. */
+export function replayDashboardFeed(_orgId: string, res: Response): number {
+  for (const item of globalFeed) {
+    try {
+      res.write(`event: feed\ndata: ${JSON.stringify(item, bigIntReplacer)}\n\n`)
+    } catch { /* client disconnected mid-replay */ }
+  }
+  return globalFeed.length
+}
+
 /** Vehicle position + state snapshot — powers the live map markers. */
 export function emitDashboardPosition(orgId: string, data: unknown) {
   const vehicleId = (data as { vehicleId?: string } | null)?.vehicleId

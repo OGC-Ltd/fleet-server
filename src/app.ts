@@ -27,6 +27,7 @@ import { notificationsOrgRouter } from './modules/notifications/notifications.ro
 import * as notificationsCtrl from './modules/notifications/notifications.controller.js'
 import { authenticate, requireOrgAccess } from './middleware/auth.js'
 import { simNow, SIM_SCALE } from './providers/controltech/controltech.simulator.js'
+import { getRoadPathAsync } from './lib/road-routes.js'
 import { prisma } from './lib/prisma.js'
 import * as roleCtrl from './modules/roles/role.controller.js'
 import { listQuerySchema } from './modules/roles/role.schema.js'
@@ -62,6 +63,18 @@ export function createApp() {
   // No auth: this is display-only metadata, not user or org data.
   app.get(`${v1}/sim-clock`, (_req, res) => {
     sendSuccess(res, { simMs: simNow(), realMs: Date.now(), scale: SIM_SCALE })
+  })
+
+  // Road polyline between two points — powers the map's dashed A→B route
+  // line so it hugs the actual roads the vehicle drives (same cache the
+  // simulator moves vehicles along; see lib/road-routes). No auth: public
+  // OpenStreetMap-derived geometry, no org or user data.
+  app.get(`${v1}/road-path`, async (req, res) => {
+    const num = (k: string) => Number(req.query[k])
+    const [aLat, aLng, bLat, bLng] = [num('fromLat'), num('fromLng'), num('toLat'), num('toLng')]
+    if ([aLat, aLng, bLat, bLng].some(Number.isNaN)) return sendError(res, 400, 'fromLat/fromLng/toLat/toLng required')
+    const path = await getRoadPathAsync(aLat, aLng, bLat, bLng)
+    sendSuccess(res, { coords: path?.coords ?? null, totalKm: path?.totalKm ?? null })
   })
 
   // Bootstrap — returns the full organisation roster (for the dashboard's
