@@ -153,6 +153,10 @@ model User {
   licenceNumber  String?    @map("licence_number")
   employeeId     String?    @map("employee_id")
   status         UserStatus @default(ACTIVE)
+  // bcrypt hash for local auth (scripts/set-password.ts sets it).
+  // NULL = account cannot log in (all pre-2026-07 accounts start this way —
+  // auth previously lived in Supabase and its user pool was never populated).
+  passwordHash   String?    @map("password_hash")
   createdAt      DateTime   @default(now()) @map("created_at")
   updatedAt      DateTime   @updatedAt @map("updated_at")
   deletedAt      DateTime?  @map("deleted_at") // soft delete — preserves FK integrity on trips

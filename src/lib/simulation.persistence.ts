@@ -116,11 +116,13 @@ async function updateDriverRatingForTrip(driverId: string | null, overspeedTicks
 
   // Ceiling = RATING_MAX minus the driver's permanent theft penalties, so a
   // heal can recover overspeed dings but never a fuel-theft deduction.
+  // ::float8 casts are load-bearing: next to count(*) (bigint), Postgres
+  // would otherwise infer the untyped params as bigint and reject "0.76".
   await prisma.$executeRaw`
     UPDATE users u
        SET driver_rating_score = GREATEST(0, LEAST(
-             ${RATING_MAX} - ${FUEL_THEFT_PENALTY} * (SELECT count(*) FROM fuel_thefts ft WHERE ft.driver_id = u.id),
-             GREATEST(${RATING_MIN}, driver_rating_score + ${delta})))
+             ${RATING_MAX}::float8 - ${FUEL_THEFT_PENALTY}::float8 * (SELECT count(*) FROM fuel_thefts ft WHERE ft.driver_id = u.id),
+             GREATEST(${RATING_MIN}::float8, driver_rating_score + ${delta}::float8)))
      WHERE id = ${driverId}
   `
 }

@@ -36,6 +36,7 @@ export function makeUser(overrides: Partial<User> = {}): User {
     licenceNumber: null,
     employeeId: null,
     status: 'ACTIVE',
+    passwordHash: null,
     createdAt: now(),
     updatedAt: now(),
     deletedAt: null,
