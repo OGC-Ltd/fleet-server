@@ -4,9 +4,10 @@ import { env } from '../config/env.js'
 import { UnauthorizedError, ForbiddenError } from '../core/errors/errors.js'
 import { prisma } from '../lib/prisma.js'
 
-interface SupabaseJwtPayload {
-  sub: string      // Supabase auth user ID
+interface AccessTokenPayload {
+  sub: string      // user id (users.id)
   email: string
+  typ: 'access' | 'refresh'
   exp: number
 }
 
@@ -32,9 +33,9 @@ const lookupUserByEmail = (email: string) =>
   })
 
 /**
- * Verifies the Bearer JWT (Supabase-signed), then resolves the matching
- * User in our DB (via the 60s in-memory cache above) and attaches it to
- * req.user.
+ * Verifies the Bearer JWT (signed by auth.service with JWT_SECRET), then
+ * resolves the matching User in our DB (via the 60s in-memory cache above)
+ * and attaches it to req.user.
  */
 export const authenticate: RequestHandler = async (req, _res, next) => {
   try {
@@ -57,7 +58,9 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
     if (!header?.startsWith('Bearer ')) throw new UnauthorizedError('Missing Bearer token')
 
     const token = header.slice(7)
-    const payload = jwt.verify(token, env.SUPABASE_JWT_SECRET) as SupabaseJwtPayload
+    const payload = jwt.verify(token, env.JWT_SECRET) as AccessTokenPayload
+    // A refresh token is NOT a credential for API calls
+    if (payload.typ !== 'access') throw new UnauthorizedError('Invalid token')
 
     let user = readUserCache(payload.email)
     if (!user) {

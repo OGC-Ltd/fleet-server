@@ -8,9 +8,8 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   DIRECT_URL: z.string().min(1),
 
-  SUPABASE_URL: z.string().url(),
-  SUPABASE_ANON_KEY: z.string().min(1),
-  SUPABASE_JWT_SECRET: z.string().min(32),
+  // HS256 signing secret for the app's own access/refresh JWTs (auth.service.ts)
+  JWT_SECRET: z.string().min(32),
 
   AUTH_BYPASS: z.string().optional().default('false').transform(v => v === 'true'),
 
@@ -39,7 +38,25 @@ const schema = z.object({
   OPENWEATHER_API_KEY: z.string().optional().default(''),
 })
 
-const parsed = schema.safeParse(process.env)
+// Production must talk to the real (remote) database endpoint. localhost URLs
+// are the SSH-tunnel entrance used from dev machines outside the VPC — booting
+// prod against one means the tunnel config leaked into a deployment.
+const isLocalDbUrl = (url: string) => /@(localhost|127\.0\.0\.1)[:/]/.test(url)
+
+const guarded = schema.superRefine((cfg, ctx) => {
+  if (cfg.NODE_ENV !== 'production') return
+  for (const key of ['DATABASE_URL', 'DIRECT_URL'] as const) {
+    if (isLocalDbUrl(cfg[key])) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [key],
+        message: 'points at localhost (SSH tunnel) — production must use the remote RDS endpoint',
+      })
+    }
+  }
+})
+
+const parsed = guarded.safeParse(process.env)
 
 if (!parsed.success) {
   console.error('❌  Invalid environment variables:\n', parsed.error.flatten().fieldErrors)
