@@ -85,6 +85,7 @@ async function computeDashboardSummary(orgId: string) {
     inTransitVehicles
       .filter(v => SUGAR_CARRIERS.has(v.vehicleType) && (v.cargoWeightKg ?? 0) > 0)
       .reduce((a, v) => a + (v.cargoWeightKg as number) / 1000, 0),
+    1,
   )
   const inTransit = {
     vehicleCount: inTransitVehicles.length,

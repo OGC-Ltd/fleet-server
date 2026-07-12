@@ -361,7 +361,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   for (const d of drivers) {
     const dTrips = tripsByDriver.get(d.id) ?? []
     const dThefts = theftsByDriver.get(d.id) ?? []
-    const rating = Math.round((d.driverRatingScore ?? 0) * 10) / 10
+    const rating = Math.floor((d.driverRatingScore ?? 0) * 10) / 10
 
     // ── Roster row: lifetime aggregates ──
     let lifetimeKm = 0, lifetimeKg = 0
@@ -534,7 +534,7 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
       id:            driver.id,
       fullName:      driver.fullName,
       status:        driver.status,
-      rating:        Math.round((driver.driverRatingScore ?? 0) * 10) / 10,
+      rating:        Math.floor((driver.driverRatingScore ?? 0) * 10) / 10,
       licenceNumber: driver.licenceNumber,
       employeeId:    driver.employeeId,
     },
