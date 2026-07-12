@@ -165,7 +165,13 @@ function draw(data: ReportData, pageH: number): { doc: PDFKit.PDFDocument; conte
   // ── bar-list card + donut card ──
   const leftW = Math.round(inner * 0.56)
   const rightW = inner - leftW - GAP
-  const hBars = barListCard(doc, data.bars, M, y, leftW, true)
+  // The donut card is sized to the bar card — but with only a few bar rows
+  // (e.g. an org with 3 product lines) that card is too short for the ring,
+  // whose draw guard then skips it (and the big center % with it). Give the
+  // pair a floor tall enough for a legible donut + legend.
+  const donutLegendH = data.donut.data.segments.length * 22 + 10
+  const donutMinH = PAD * 2 + 30 + donutLegendH + 132
+  const hBars = barListCard(doc, data.bars, M, y, leftW, donutMinH)
   const hDonut = donutCard(doc, data.donut, M + leftW + GAP, y, rightW, hBars)
   y += Math.max(hBars, hDonut) + GAP
 
@@ -246,9 +252,9 @@ function cardTitle(doc: PDFKit.PDFDocument, x: number, y: number, w: number, tit
   }
 }
 
-function barListCard(doc: PDFKit.PDFDocument, s: ReportData['bars'], x: number, y: number, w: number, draw: boolean): number {
+function barListCard(doc: PDFKit.PDFDocument, s: ReportData['bars'], x: number, y: number, w: number, minH = 0): number {
   const rowH = 29
-  const h = PAD * 2 + 18 + s.rows.length * rowH
+  const h = Math.max(minH, PAD * 2 + 18 + s.rows.length * rowH)
   card(doc, x, y, w, h)
   cardTitle(doc, x, y, w, s.title, s.note)
   let ry = y + PAD + 22
