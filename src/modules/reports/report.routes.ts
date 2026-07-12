@@ -28,4 +28,8 @@ router.post('/engine-sessions', ingestLimiter, validateBody(createEngineSessionS
 router.get('/summaries', validateQuery(listSummaryQuerySchema), ctrl.listSummaries)
 router.post('/summaries/refresh/:periodId', ctrl.refreshSummaries)
 
+// Branded PDF reports (analytics | drivers | maintenance) — the downloadable
+// counterparts of the three dashboard pages, drawn server-side.
+router.get('/reports/pdf/:kind', ctrl.downloadPdfReport)
+
 export default router

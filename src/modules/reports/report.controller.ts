@@ -1,6 +1,8 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
+import { BadRequestError } from '../../core/errors/errors.js'
 import * as service from './report.service.js'
+import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery } from './report.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -54,5 +56,23 @@ export const refreshSummaries: RequestHandler = async (req, res, next) => {
   try {
     const result = await service.refreshSummaries(p(req, 'orgId'), p(req, 'periodId'))
     sendSuccess(res, result)
+  } catch (err) { next(err) }
+}
+
+// ── Branded PDF reports ───────────────────────────────────────────────────────
+
+export const downloadPdfReport: RequestHandler = async (req, res, next) => {
+  try {
+    const kind = p(req, 'kind') as PdfReportKind
+    if (!PDF_REPORT_KINDS.includes(kind)) {
+      throw new BadRequestError(`Unknown report kind '${kind}' — expected one of: ${PDF_REPORT_KINDS.join(', ')}`)
+    }
+    // Trailing window; clamped to the same 366-day ceiling the history API uses.
+    const days = Math.min(366, Math.max(1, Number(req.query.days) || 30))
+    const { buffer, filename } = await generateReportPdf(p(req, 'orgId'), kind, days)
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    res.setHeader('Content-Length', String(buffer.length))
+    res.send(buffer)
   } catch (err) { next(err) }
 }
