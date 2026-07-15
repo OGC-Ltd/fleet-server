@@ -3,6 +3,7 @@ import { createApp } from './app.js'
 import { connectDB, disconnectDB } from './lib/prisma.js'
 import { logger } from './lib/logger.js'
 import { startPoller } from './lib/poller.js'
+import { startDbFollower } from './lib/db-follower.js'
 import { startTelemetryWorker }     from './lib/workers/telemetry.worker.js'
 import { startNotificationWorker }  from './lib/workers/notification.worker.js'
 import { startAlertsWorker }        from './lib/workers/alerts.worker.js'
@@ -43,12 +44,16 @@ async function main() {
     ? startPoller()
     : { stop: () => {}, flush: async () => {} }
   if (!env.POLL_ENABLED) logger.warn('POLL_ENABLED=false — telemetry poller/sim NOT started (API-only instance)')
+  // API-only instances re-emit live positions + feed off the shared DB
+  // (read-only) so a dev dashboard still gets a live map — see lib/db-follower.
+  const stopDbFollower = !env.POLL_ENABLED && env.FOLLOW_DB ? startDbFollower() : () => {}
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received')
     poller.stop()
     // Freeze the simulation exactly where it is so the next start resumes it.
     await poller.flush().catch((err) => logger.warn({ err }, 'Simulation flush failed on shutdown'))
+    stopDbFollower()
     stopTelemetryWorker()
     stopNotificationWorker()
     stopAlertsWorker()
