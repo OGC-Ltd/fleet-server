@@ -19,6 +19,13 @@ const schema = z.object({
   // duplicate trips.
   POLL_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
 
+  // API-only instances only (POLL_ENABLED=false): tail the shared DB's latest
+  // telemetry (written by the deployment that DOES run the sim) and re-emit
+  // dashboard SSE (positions + live feed) locally, read-only — otherwise the
+  // local /live stream is silent and the dev dashboard shows a frozen map and
+  // an empty feed. Set 'false' for a truly passive API instance.
+  FOLLOW_DB: z.string().optional().default('true').transform(v => v === 'true'),
+
   // Comma-separated org codes this instance simulates (e.g.
   // "MENENGAI,TIMSALES,KABRAS"). Unset = all orgs in SIM_FLEET_COMPOSITION.
   // Lets two deployments split the sim fleet org-wise over one shared DB.

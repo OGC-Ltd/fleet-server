@@ -122,6 +122,8 @@ export function startTelemetryWorker(): () => void {
         plate,
         driverName,
         capturedAt:    payload.capturedAt,
+        lat:           payload.lat,
+        lng:           payload.lng,
         speedKmh:      payload.speedKmh,
         cargoWeightKg: payload.cargoWeightKg,
         cargoDesc:     payload.cargoDesc,

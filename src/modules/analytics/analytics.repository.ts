@@ -13,6 +13,14 @@ import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics
 // between trips, not within a trip window.)
 const INTERRUPTED_RATIO = 2.0
 
+// Fleet operating timezone — analytics buckets by KENYAN calendar day, not UTC
+// day (a 01:00 EAT trip belongs to that day, not the previous UTC one). Kenya
+// observes no DST, so the fixed offset and whole-day ms arithmetic are safe.
+const FLEET_TZ_OFFSET = '+03:00'
+const fleetDayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Nairobi' })
+/** YYYY-MM-DD of `d` in the fleet's timezone. */
+const fleetDayKey = (d: Date) => fleetDayFmt.format(d)
+
 /**
  * Deliveries dashboard aggregate over the trailing `days` window: everything
  * derived from the real persisted Trip + CargoManifest + VehicleAlert rows —
@@ -20,18 +28,31 @@ const INTERRUPTED_RATIO = 2.0
  * interrupted deliveries, and distance covered (with per-day/week/month means).
  */
 export async function deliveriesAnalytics(orgId: string, q: DeliveriesQuery) {
-  // The simulation clock runs ahead of real wall-clock time, so anchor the
-  // trailing window to the latest trip (the newest data the dashboard shows)
-  // rather than `new Date()` — otherwise the most recent sim days get chopped.
-  let to = q.to
-  if (!to) {
+  // The window is exactly `q.days` CALENDAR days in the fleet's timezone, the
+  // newest being the current day — 7d = today + the 6 days before it. The old
+  // rolling `to − N×24h` timestamp range touched N+1 calendar dates (an "8
+  // active days" 7d filter), and quiet days were dropped entirely (a "5 active
+  // days" one); now every window day is returned, zeroed when nothing ran.
+  //
+  // Anchor: the LATER of wall-clock now and the newest trip — the sim clock
+  // can run ahead of real time, and anchoring to plain `new Date()` would chop
+  // the sim's most recent days; a fleet that's been idle still anchors to
+  // today so the window ends on the current day.
+  let anchor = q.to ?? new Date()
+  if (!q.to) {
     const latest = await prisma.trip.aggregate({
       where: { vehicle: { organisationId: orgId } },
       _max:  { beganAt: true },
     })
-    to = latest._max.beganAt ?? new Date()
+    if (latest._max.beganAt && latest._max.beganAt > anchor) anchor = latest._max.beganAt
   }
-  const from = new Date(to.getTime() - q.days * 86_400_000)
+  const anchorDayStart = new Date(`${fleetDayKey(anchor)}T00:00:00${FLEET_TZ_OFFSET}`)
+  const from = new Date(anchorDayStart.getTime() - (q.days - 1) * 86_400_000)
+  const to   = new Date(anchorDayStart.getTime() + 86_400_000 - 1)
+  // Every calendar day in the window, oldest→newest (Kenya has no DST, so
+  // whole-day arithmetic in ms is safe).
+  const windowDays = Array.from({ length: q.days }, (_, i) =>
+    fleetDayKey(new Date(from.getTime() + i * 86_400_000)))
 
   const trips = await prisma.trip.findMany({
     where:  { vehicle: { organisationId: orgId }, beganAt: { gte: from, lte: to } },
@@ -59,7 +80,7 @@ export async function deliveriesAnalytics(orgId: string, q: DeliveriesQuery) {
     const kg      = t.cargoManifest?.arrivalWeightKg ?? 0
     const km      = t.mileageKm ?? 0
     const depot   = t.finalLocation ?? 'Unknown'
-    const dayKey  = t.beganAt.toISOString().slice(0, 10)
+    const dayKey  = fleetDayKey(t.beganAt)
 
     const expectedHours = t.avgSpeedKmh && t.avgSpeedKmh > 0 && km ? km / t.avgSpeedKmh : null
     const isInterrupted = expectedHours != null && t.durationSeconds / 3600 > expectedHours * INTERRUPTED_RATIO
@@ -69,13 +90,16 @@ export async function deliveriesAnalytics(orgId: string, q: DeliveriesQuery) {
     bump(depots, depot, kg)
     const d = byDay.get(dayKey) ?? { trips: 0, kg: 0, km: 0, timely: 0 }
     d.trips += 1; d.kg += kg; d.km += km; if (!isInterrupted) d.timely += 1; byDay.set(dayKey, d)
-    byWeekday[t.beganAt.getUTCDay()] += 1
+    // Weekday of the fleet-timezone day (dayKey parses as UTC midnight).
+    byWeekday[new Date(`${dayKey}T00:00:00Z`).getUTCDay()] += 1
     totalKm += km; totalKg += kg
   }
 
   const t1 = (kg: number) => Math.round(kg / 100) / 10 // kg → tonnes, 1 dp
-  const activeDays = byDay.size || 1
-  const perDayKm   = totalKm / activeDays
+  // Days that actually saw trips — byDay only accumulates active days; the
+  // zero-filled series below is presentation, not activity.
+  const activeDays = byDay.size
+  const perDayKm   = totalKm / (activeDays || 1)
 
   return {
     totals: {
@@ -89,8 +113,12 @@ export async function deliveriesAnalytics(orgId: string, q: DeliveriesQuery) {
       .sort((a, b) => b.tonnes - a.tonnes),
     depots: [...depots].map(([depot, v]) => ({ depot, trips: v.trips, tonnes: t1(v.kg) }))
       .sort((a, b) => b.tonnes - a.tonnes),
-    byDay: [...byDay].map(([day, v]) => ({ day, trips: v.trips, tonnes: t1(v.kg), distanceKm: Math.round(v.km), timely: v.timely }))
-      .sort((a, b) => a.day.localeCompare(b.day)),
+    // One entry per window day, oldest→newest, zeroed where nothing ran — the
+    // charts always plot exactly `windowDays` days.
+    byDay: windowDays.map((day) => {
+      const v = byDay.get(day)
+      return { day, trips: v?.trips ?? 0, tonnes: t1(v?.kg ?? 0), distanceKm: Math.round(v?.km ?? 0), timely: v?.timely ?? 0 }
+    }),
     byWeekday: byWeekday.map((trips, weekday) => ({ weekday, trips })), // weekday 0=Sun
     deliveries: { total: trips.length, timely: trips.length - interrupted, interrupted },
     distance: {
@@ -209,6 +237,25 @@ const OVERSPEED_LIMIT_KMH = 80
 
 // kg → tonnes, 1 dp (shared with deliveriesAnalytics' presentation).
 const toTonnes = (kg: number) => Math.round(kg / 100) / 10
+
+// ── conduct-based suspension policy ─────────────────────────────────────────
+// SUSPENDED is COMPUTED, never read from the seeded employment column: a
+// driver is suspended only when their lifetime record crosses BOTH lines at
+// once — at least SUSPEND_THEFT_CASES fuel-theft cases AND overspeeding on at
+// least SUSPEND_OVERSPEED_RATE of their trips (the rate is what matters — 30
+// cases per 100 trips is the same offence as 3 in 10). Either offence alone
+// is not enough. Hard employment states (TERMINATED, …) still pass through;
+// a seeded SUSPENDED that the record doesn't justify reads as ACTIVE.
+const SUSPEND_THEFT_CASES    = 2
+const SUSPEND_OVERSPEED_RATE = 0.30
+
+function conductStatus(dbStatus: string, trips: number, fuelTheftCases: number, overspeedingCases: number): string {
+  if (dbStatus !== 'ACTIVE' && dbStatus !== 'SUSPENDED') return dbStatus
+  const overspeedRate = trips > 0 ? overspeedingCases / trips : 0
+  return fuelTheftCases >= SUSPEND_THEFT_CASES && overspeedRate >= SUSPEND_OVERSPEED_RATE
+    ? 'SUSPENDED'
+    : 'ACTIVE'
+}
 
 export interface DriverRosterRow {
   id:                string
@@ -345,14 +392,20 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     arr.push(th.beganAt); theftsByDriver.set(th.driverId, arr)
   }
 
-  // Lifetime overspeeding cases per driver: attribute each org overspeeding
-  // alert to the trip (matching vehicle + time window) running when it fired.
-  const overspeedByDriver = new Map<string, number>()
+  // Lifetime overspeeding cases per driver: a case is a TRIP during which at
+  // least one overspeeding alert fired (matching vehicle + time window) — one
+  // trip counts once however many alerts it raised, so the count is bounded
+  // by trips and `cases / trips` reads as "share of trips oversped" (the
+  // suspension policy's 30-per-100-trips line).
+  const overspeedTripsByDriver = new Map<string, Set<TripRow>>()
   for (const a of alerts) {
     const hit = (tripsByVehicle.get(a.vehicleId) ?? []).find(t =>
       t.driverId && a.triggeredAt >= t.beganAt && (t.endedAt == null || a.triggeredAt <= t.endedAt),
     )
-    if (hit?.driverId) overspeedByDriver.set(hit.driverId, (overspeedByDriver.get(hit.driverId) ?? 0) + 1)
+    if (hit?.driverId) {
+      const set = overspeedTripsByDriver.get(hit.driverId) ?? new Set<TripRow>()
+      set.add(hit); overspeedTripsByDriver.set(hit.driverId, set)
+    }
   }
 
   const roster: DriverRosterRow[] = []
@@ -369,16 +422,20 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       lifetimeKm += t.mileageKm ?? 0
       lifetimeKg += t.cargoManifest?.arrivalWeightKg ?? 0
     }
+    // Employment status escalated by lifetime conduct (see conductStatus) —
+    // the roster badge and the detail header both use this derived value.
+    const lifetimeOverspeed = overspeedTripsByDriver.get(d.id)?.size ?? 0
+    const status = conductStatus(d.status, dTrips.length, dThefts.length, lifetimeOverspeed)
     roster.push({
       id:                d.id,
       fullName:          d.fullName,
-      status:            d.status,
+      status,
       rating,
       trips:             dTrips.length,
       tonnes:            toTonnes(lifetimeKg),
       mileageKm:         Math.round(lifetimeKm),
       fuelTheftCases:    dThefts.length,
-      overspeedingCases: overspeedByDriver.get(d.id) ?? 0,
+      overspeedingCases: lifetimeOverspeed,
     })
 
     // ── Detail: trailing window anchored to the driver's latest trip ──
@@ -408,25 +465,21 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       }
     }
 
-    // Windowed overspeeding: alerts that fired during one of the driver's
-    // windowed trips (each alert counted once).
-    const windowVehicleIds = [...new Set(windowTrips.map(t => t.vehicleId))]
-    let overspeedingCases = 0
-    for (const vid of windowVehicleIds) {
-      for (const a of alerts) {
-        if (a.vehicleId !== vid) continue
-        if (a.triggeredAt < from || a.triggeredAt > to) continue
-        if (windowTrips.some(t => t.vehicleId === vid && a.triggeredAt >= t.beganAt && t.endedAt != null && a.triggeredAt <= t.endedAt)) {
-          overspeedingCases += 1
-        }
-      }
-    }
+    // Windowed overspeeding: trips in the window during which at least one
+    // alert fired — same one-case-per-trip semantics as the lifetime count.
+    const overspeedingCases = windowTrips.filter(t =>
+      alerts.some(a =>
+        a.vehicleId === t.vehicleId &&
+        a.triggeredAt >= t.beganAt &&
+        t.endedAt != null && a.triggeredAt <= t.endedAt,
+      ),
+    ).length
 
     details[d.id] = {
       driver: {
         id:            d.id,
         fullName:      d.fullName,
-        status:        d.status,
+        status,        // conduct-derived — matches the roster badge
         rating,
         licenceNumber: d.licenceNumber,
         employeeId:    d.employeeId,
@@ -524,8 +577,9 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
       where:  { organisationId: orgId, vehicleId: { in: vehicleIds }, type: 'overspeeding', triggeredAt: { gte: from, lte: to } },
       select: { vehicleId: true, triggeredAt: true },
     })
-    overspeedingCases = alerts.filter(a =>
-      trips.some(t => t.vehicleId === a.vehicleId && a.triggeredAt >= t.beganAt && a.triggeredAt <= t.endedAt),
+    // One case per TRIP that oversped, not per alert — matches driversOverview.
+    overspeedingCases = trips.filter(t =>
+      alerts.some(a => a.vehicleId === t.vehicleId && a.triggeredAt >= t.beganAt && a.triggeredAt <= t.endedAt),
     ).length
   }
 

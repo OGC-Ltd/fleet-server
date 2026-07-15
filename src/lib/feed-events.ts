@@ -20,6 +20,8 @@ interface FeedSource {
   plate:         string
   driverName?:   string | null
   capturedAt:    string
+  lat:           number | null
+  lng:           number | null
   speedKmh:      number | null
   cargoWeightKg: number | null
   cargoDesc:     string | null
@@ -38,8 +40,15 @@ const prev = new Map<string, PrevState>()
 
 const OVERSPEED_FEED_COOLDOWN_MS = 10 * 60_000
 
-const pad = (n: number) => String(n).padStart(2, '0')
-const clock = (ms: number) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}` }
+// Clock strings are baked into the feed TEXT, so they must be minted in the
+// fleet's operating timezone — bare getHours() uses the server's TZ, and the
+// production box runs UTC, stamping every event 3 h behind Kenyan wall time.
+// (Clients render the standalone `time` field from `ts` in their own TZ.)
+const FLEET_TZ = 'Africa/Nairobi'
+const clockFmt = new Intl.DateTimeFormat('en-GB', {
+  timeZone: FLEET_TZ, hour: '2-digit', minute: '2-digit', hour12: false,
+})
+const clock = (ms: number) => clockFmt.format(ms)
 const tonnes = (kg: number | null) => kg && kg > 0 ? `${(kg / 1000).toFixed(1)}t ` : ''
 
 let feedSeq = 0
@@ -104,13 +113,15 @@ export function deriveFeedEvents(orgId: string, p: FeedSource): void {
     st.lastOverspeedFeedAt = now
     items.push({
       type: 'warning',
-      text: `ALERT: ${who} detected at ${Math.round(p.speedKmh ?? 0)} km/h en route to ${to}. Speed limit 80 km/h. Driver notified.`,
+      // No "Driver notified." claim — no notify/escalate mechanism exists yet.
+      text: `ALERT: ${who} detected at ${Math.round(p.speedKmh ?? 0)} km/h en route to ${to}. Speed limit 80 km/h.`,
     })
   }
   if (p.flags.fuelInconsistency && !st.fuelInconsistency) {
     items.push({
       type: 'critical',
-      text: `CRITICAL: ${who} — sudden fuel level drop detected near ${from === 'base' ? to : from}. Possible theft. Security alerted.`,
+      // Same as above: no "Security alerted." until an escalation path exists.
+      text: `CRITICAL: ${who} — sudden fuel level drop detected near ${from === 'base' ? to : from}. Possible theft.`,
     })
   }
 
@@ -125,6 +136,11 @@ export function deriveFeedEvents(orgId: string, p: FeedSource): void {
       time:      at,
       ts:        new Date(now).toISOString(),
       vehicleId: p.vehicleId,
+      // Position at the moment of the event — the feed is global across orgs,
+      // so clients can't resolve coordinates from their own org's fleet list
+      // (powers the WhatsApp share's maps pin).
+      lat:       p.lat,
+      lng:       p.lng,
       ...item,
     })
   }

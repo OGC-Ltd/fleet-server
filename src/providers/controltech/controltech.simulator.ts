@@ -393,6 +393,14 @@ export function simNow(): number { return _simNowMs }
 export function simDate(): Date { return new Date(_simNowMs) }
 function simHoursThisTick(): number { return _simHoursPerTick }
 
+/** Sim-clock epoch → REAL wall-clock epoch. The sim clock can sit offset from
+ *  real time (it resumes from a persisted value) and advances at SIM_SCALE×,
+ *  so a sim instant maps to `real now + (its sim-time distance ÷ SIM_SCALE)`.
+ *  Use for every timestamp exposed to clients as a clock time (leg ETAs …). */
+export function simToRealMs(simMs: number): number {
+  return Math.round(Date.now() + (simMs - _simNowMs) / SIM_SCALE)
+}
+
 // ─── wall-clock helpers — the logistics cycle is driven by the SIM clock ──────
 function dayKey(d = simDate()): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -1722,8 +1730,14 @@ export function renderSnapshot(s: VehicleSimState): CtDeviceSnapshot {
           coveredKm: +coveredKm.toFixed(1),
           totalKm:   +totalKm.toFixed(1),
           moving:    s.speedKmh > 0 && s.engineOn,
-          beganAtMs:        s.legBeganAtMs,
-          plannedArrivalMs: s.legPlannedArrivalMs,
+          // REAL wall-clock epochs, converted from the internal sim-clock
+          // values: the sim clock can sit offset from real time (it resumes
+          // from a persisted value), so raw sim epochs rendered as clock
+          // times read wrong — a truck dispatched at 07:02 with a 1 h leg
+          // must show ETA 08:02. Dividing the sim-time distance by SIM_SCALE
+          // maps it to the real seconds the leg actually takes.
+          beganAtMs:        simToRealMs(s.legBeganAtMs),
+          plannedArrivalMs: simToRealMs(s.legPlannedArrivalMs),
         }
       })(),
       events: {

@@ -28,6 +28,7 @@ import * as notificationsCtrl from './modules/notifications/notifications.contro
 import { authenticate, requireOrgAccess } from './middleware/auth.js'
 import { simNow, SIM_SCALE } from './providers/controltech/controltech.simulator.js'
 import { getRoadPathAsync } from './lib/road-routes.js'
+import { reverseGeocode } from './lib/geocode.js'
 import { prisma } from './lib/prisma.js'
 import * as roleCtrl from './modules/roles/role.controller.js'
 import { listQuerySchema } from './modules/roles/role.schema.js'
@@ -75,6 +76,18 @@ export function createApp() {
     if ([aLat, aLng, bLat, bLng].some(Number.isNaN)) return sendError(res, 400, 'fromLat/fromLng/toLat/toLng required')
     const path = await getRoadPathAsync(aLat, aLng, bLat, bLng)
     sendSuccess(res, { coords: path?.coords ?? null, totalKm: path?.totalKm ?? null })
+  })
+
+  // Nearest named place for a coordinate — powers the dashboard's human
+  // location labels (e.g. the driver card's 📍 line). No auth: public
+  // OpenStreetMap-derived data, no org or user data. Cached server-side per
+  // ~1.1 km grid cell — see lib/geocode.
+  app.get(`${v1}/reverse-geocode`, async (req, res) => {
+    const lat = Number(req.query.lat)
+    const lng = Number(req.query.lng)
+    if (Number.isNaN(lat) || Number.isNaN(lng)) return sendError(res, 400, 'lat/lng required')
+    const place = await reverseGeocode(lat, lng)
+    sendSuccess(res, { place })
   })
 
   // Bootstrap — returns the full organisation roster (for the dashboard's

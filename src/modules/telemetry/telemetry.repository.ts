@@ -88,6 +88,7 @@ export async function findFleetSnapshot(orgId: string) {
     cargo_desc: string | null
     captured_at: Date; leg: unknown
     odometer_km: number | null; maintenance: unknown; phase: string | null
+    last_moved_at: Date | null
   }
   const pings = await prisma.$queryRaw<PingRow[]>`
     SELECT p.* FROM unnest(ARRAY[${Prisma.join(vehicleIds)}]::text[]) AS v(id)
@@ -100,7 +101,14 @@ export async function findFleetSnapshot(orgId: string) {
         r.payload->'_sim'->>'cargoDesc' AS cargo_desc,
         (r.payload->>'odometer_km')::float AS odometer_km,
         r.payload->'_sim'->'maintenance' AS maintenance,
-        r.payload->'_sim'->>'phase' AS phase
+        r.payload->'_sim'->>'phase' AS phase,
+        -- Newest ping with actual movement — powers the "stationary for …"
+        -- readout on parked vehicles (same index walk, newest-first, stops at
+        -- the first moving row).
+        (SELECT t2.captured_at FROM vehicle_telemetries t2
+          WHERE t2.vehicle_id = v.id AND t2.speed_kmh > 0
+          ORDER BY t2.captured_at DESC
+          LIMIT 1) AS last_moved_at
       FROM vehicle_telemetries t
       JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
       WHERE t.vehicle_id = v.id
@@ -139,6 +147,8 @@ export async function findFleetSnapshot(orgId: string) {
         cargoWeightKg:  ping?.cargo_weight_kg ?? null,
         cargoDesc:      ping?.cargo_desc ?? null,
         capturedAt:     ping?.captured_at?.toISOString() ?? null,
+        // Newest moving ping — clients render "stationary for now − this".
+        lastMovedAt:    ping?.last_moved_at?.toISOString() ?? null,
         lowFuel,
         fuelLevelPct,
         leg:            ping?.leg ?? null,
