@@ -147,6 +147,13 @@ function sameAlertSet(prev: Set<AlertType>, current: AlertType[]): boolean {
 // ─── single poll cycle ─────────────────────────────────────────────────────
 // Guard prevents a slow cycle from overlapping with the next interval tick.
 
+// Hard ceiling on one cycle. Normal cycles run 5–100 s; if the pooler drops a
+// pg connection mid-cycle the cycle's promise can hang forever (Jul 2026: the
+// in-flight guard then skipped every tick for 3 days while the process stayed
+// alive, so pm2 never restarted it). The watchdog abandons the cycle and
+// re-arms the guard so the next tick can start.
+const CYCLE_TIMEOUT_MS = 5 * 60_000
+
 let isPolling = false
 
 async function runOnePollCycle(provider: TelemetryProvider): Promise<void> {
@@ -155,7 +162,41 @@ async function runOnePollCycle(provider: TelemetryProvider): Promise<void> {
     return
   }
   isPolling = true
-  try { await _runOnePollCycle(provider) } finally { isPolling = false }
+  const t0 = Date.now()
+
+  const cycle = _runOnePollCycle(provider).then(
+    () => 'settled' as const,
+    (err) => {
+      logger.error({ err, provider: provider.name }, 'Poll cycle failed')
+      return 'settled' as const
+    },
+  )
+
+  // unref: a pending watchdog must not keep the process alive after stop().
+  let watchdogTimer!: NodeJS.Timeout
+  const watchdog = new Promise<'timeout'>((resolve) => {
+    watchdogTimer = setTimeout(() => resolve('timeout'), CYCLE_TIMEOUT_MS).unref()
+  })
+
+  const outcome = await Promise.race([cycle, watchdog])
+  clearTimeout(watchdogTimer)
+
+  if (outcome === 'timeout') {
+    logger.error(
+      { provider: provider.name, timeoutMs: CYCLE_TIMEOUT_MS },
+      'Poll cycle exceeded watchdog timeout — abandoning it and re-arming the poller',
+    )
+    // If the abandoned cycle ever settles, its only remaining continuation is
+    // this log line — it can no longer touch isPolling (this call has already
+    // reset it, and a later cycle may own the guard by then).
+    void cycle.then(() =>
+      logger.warn(
+        { provider: provider.name, durationMs: Date.now() - t0 },
+        'Abandoned poll cycle eventually settled',
+      ),
+    )
+  }
+  isPolling = false
 }
 
 async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
