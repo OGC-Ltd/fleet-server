@@ -14,21 +14,34 @@ import { logger } from '../../lib/logger.js'
 
 interface Loc { name: string; lat: number; lng: number }
 
-// Route hubs — Sukari plant plus the depots the fleet delivers to.
-const LOCATIONS: Loc[] = [
-  { name: 'Sukari HQ', lat:  0.3358, lng: 34.4928 },
-  { name: 'Kisumu',    lat: -0.0917, lng: 34.7679 },
-  { name: 'Nakuru',    lat: -0.3031, lng: 36.0800 },
-  { name: 'Nairobi',   lat: -1.2921, lng: 36.8219 },
-  { name: 'Eldoret',   lat:  0.5143, lng: 35.2698 },
-  { name: 'Mombasa',   lat: -4.0435, lng: 39.6682 },
-]
+// Route hubs per organisation — the org's plant/HQ plus the towns its fleet
+// delivers to. Keyed by org code; unknown orgs fall back to Sukari's set.
+const LOCATIONS_BY_ORG: Record<string, Loc[]> = {
+  SUKARI: [
+    { name: 'Sukari HQ', lat:  0.3358, lng: 34.4928 },
+    { name: 'Kisumu',    lat: -0.0917, lng: 34.7679 },
+    { name: 'Nakuru',    lat: -0.3031, lng: 36.0800 },
+    { name: 'Nairobi',   lat: -1.2921, lng: 36.8219 },
+    { name: 'Eldoret',   lat:  0.5143, lng: 35.2698 },
+    { name: 'Mombasa',   lat: -4.0435, lng: 39.6682 },
+  ],
+  // Aquamist has no depots — weather covers the plant + the four customer cities.
+  AQUAMIST: [
+    { name: 'Aquamist Plant', lat: -1.2060044099698617, lng: 36.65702647381419 },
+    { name: 'Nairobi',        lat: -1.2921, lng: 36.8219 },
+    { name: 'Kisumu',         lat: -0.0917, lng: 34.7679 },
+    { name: 'Nakuru',         lat: -0.3031, lng: 36.0800 },
+    { name: 'Mombasa',        lat: -4.0435, lng: 39.6682 },
+  ],
+}
+const DEFAULT_ORG_CODE = 'SUKARI'
 
 const OWM = 'https://api.openweathermap.org/data/2.5'
 const CACHE_TTL_MS = 15 * 60_000
 const DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
-let cache: { ts: number; data: unknown } | null = null
+// One cache entry per org code — the location sets differ.
+const cache = new Map<string, { ts: number; data: unknown }>()
 
 // EPA breakpoints — PM2.5 (µg/m³) → US AQI (0–500).
 function pm25ToUsAqi(pm: number): number {
@@ -92,21 +105,29 @@ async function fetchLocation(loc: Loc, key: string) {
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
-export async function getRouteWeather() {
-  if (cache && Date.now() - cache.ts < CACHE_TTL_MS) return cache.data
+export async function getRouteWeather(orgCode: string = DEFAULT_ORG_CODE) {
+  const code   = LOCATIONS_BY_ORG[orgCode] ? orgCode : DEFAULT_ORG_CODE
+  const cached = cache.get(code)
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.data
 
   const key = env.OPENWEATHER_API_KEY
   if (!key) return { locations: [], error: 'OPENWEATHER_API_KEY not configured' }
 
-  const results   = await Promise.allSettled(LOCATIONS.map(l => fetchLocation(l, key)))
+  const locs      = LOCATIONS_BY_ORG[code]!
+  const results   = await Promise.allSettled(locs.map(l => fetchLocation(l, key)))
   const locations = results
     .filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof fetchLocation>>> => r.status === 'fulfilled')
     .map(r => r.value)
 
   const failed = results.length - locations.length
-  if (failed > 0) logger.warn({ failed }, 'Some weather locations failed to fetch')
+  if (failed > 0) {
+    const reasons = results
+      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      .map(r => (r.reason instanceof Error ? r.reason.message : String(r.reason)))
+    logger.warn({ failed, reasons }, 'Some weather locations failed to fetch')
+  }
 
   const data = { locations }
-  if (locations.length > 0) cache = { ts: Date.now(), data } // don't cache a total failure
+  if (locations.length > 0) cache.set(code, { ts: Date.now(), data }) // don't cache a total failure
   return data
 }

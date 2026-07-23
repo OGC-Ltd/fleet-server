@@ -9,7 +9,11 @@ function createPrismaClient() {
   // max: bound the pg pool a little above the default (10) so the 30 s telemetry
   // poller and interactive API/SSE traffic don't starve each other for
   // connections over the remote pooler. Kept under Supabase's default pool size.
-  const adapter = new PrismaPg({ connectionString: env.DATABASE_URL, max: 14 })
+  // query_timeout: client-side pg timeout so a query on a connection the
+  // pooler silently dropped rejects instead of pending forever (a server-side
+  // statement_timeout can't fire once the socket is dead). Worst normal
+  // queries run ~5–10 s, so 60 s only catches genuinely stuck ones.
+  const adapter = new PrismaPg({ connectionString: env.DATABASE_URL, max: 14, query_timeout: 60_000 })
   return new PrismaClient({ adapter })
 }
 

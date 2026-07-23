@@ -64,6 +64,24 @@ function dashboardKey(orgId: string) {
   return `${orgId}:dashboard`
 }
 
+// Last position payload per vehicle, per org — replayed to a newly connected
+// dashboard client so its map reflects the fleet as of the LAST poll tick
+// immediately, instead of waiting up to a full tick (30 s) for fresh events.
+// This closes the window where two browsers opened moments apart disagree.
+const lastPositions = new Map<string, Map<string, unknown>>()
+
+/** Write the org's cached per-vehicle positions straight to one client. */
+export function replayDashboardPositions(orgId: string, res: Response): number {
+  const positions = lastPositions.get(orgId)
+  if (!positions?.size) return 0
+  for (const data of positions.values()) {
+    try {
+      res.write(`event: position\ndata: ${JSON.stringify(data, bigIntReplacer)}\n\n`)
+    } catch { /* client disconnected mid-replay */ }
+  }
+  return positions.size
+}
+
 function broadcastDashboard(orgId: string, event: string, data: unknown) {
   const key     = dashboardKey(orgId)
   const clients = registry.get(key)
@@ -85,8 +103,45 @@ export function registerDashboardClient(orgId: string, res: Response): () => voi
   }
 }
 
+// Live-feed ring buffer — GLOBAL across organisations: the feed panel shows
+// the whole platform's activity (every org's dispatches, arrivals, alerts),
+// so items are buffered once and broadcast to every org's dashboard channel.
+// Replayed to new clients so the panel has history on page load.
+const FEED_BUFFER_MAX = 60
+const globalFeed: unknown[] = []
+
+/** Human activity-feed item (dispatch/arrival/offload/alert …) — powers the
+ *  Live Feed panel. `orgId` tags the item; delivery is to ALL orgs' clients. */
+export function emitDashboardFeed(orgId: string, item: unknown) {
+  const stamped = { ...(item as Record<string, unknown>), orgId }
+  globalFeed.push(stamped)
+  if (globalFeed.length > FEED_BUFFER_MAX) globalFeed.splice(0, globalFeed.length - FEED_BUFFER_MAX)
+  const payload = `event: feed\ndata: ${JSON.stringify(stamped, bigIntReplacer)}\n\n`
+  for (const [key, clients] of registry) {
+    if (!key.endsWith(':dashboard')) continue
+    for (const client of clients) {
+      try { client.res.write(payload) } catch { /* client disconnected */ }
+    }
+  }
+}
+
+/** Write the buffered feed history (all orgs) straight to one client. */
+export function replayDashboardFeed(_orgId: string, res: Response): number {
+  for (const item of globalFeed) {
+    try {
+      res.write(`event: feed\ndata: ${JSON.stringify(item, bigIntReplacer)}\n\n`)
+    } catch { /* client disconnected mid-replay */ }
+  }
+  return globalFeed.length
+}
+
 /** Vehicle position + state snapshot — powers the live map markers. */
 export function emitDashboardPosition(orgId: string, data: unknown) {
+  const vehicleId = (data as { vehicleId?: string } | null)?.vehicleId
+  if (vehicleId) {
+    if (!lastPositions.has(orgId)) lastPositions.set(orgId, new Map())
+    lastPositions.get(orgId)!.set(vehicleId, data)
+  }
   broadcastDashboard(orgId, 'position', data)
 }
 
@@ -98,4 +153,9 @@ export function emitDashboardAlert(orgId: string, data: unknown) {
 /** Keep long-lived SSE connections alive across proxy timeouts. */
 export function emitDashboardHeartbeat(orgId: string) {
   broadcastDashboard(orgId, 'heartbeat', { ts: new Date().toISOString() })
+}
+
+/** Lifecycle notice (refuel, vehicle back online, etc.) — powers the notification inbox. */
+export function emitDashboardNotice(orgId: string, data: unknown) {
+  broadcastDashboard(orgId, 'notice', data)
 }

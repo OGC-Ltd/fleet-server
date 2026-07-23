@@ -29,11 +29,12 @@
 import { prisma }          from '../../lib/prisma.js'
 import { Prisma }          from '../../../generated/prisma/client.js'
 import { logger }          from '../../lib/logger.js'
+import { env }             from '../../config/env.js'
 import { getSimFleetVehicles } from '../../lib/sim-fleet.js'
 import type { TelemetryProvider, VehicleTelemetryFrame, DoorStatus, NetworkType } from '../telemetry-provider.js'
 import type { CtDeviceSnapshot }   from './controltech.types.js'
-import { initVehicleState, tickVehicle, renderSnapshot, initSimClock, advanceSimClock, simNow } from './controltech.simulator.js'
-import type { VehicleSimState }    from './controltech.simulator.js'
+import { initVehicleState, tickVehicle, renderSnapshot, initSimClock, advanceSimClock, simNow, governFleetUtilization } from './controltech.simulator.js'
+import type { VehicleSimState, RoutingProfile } from './controltech.simulator.js'
 
 // ─── normaliser — CtDeviceSnapshot → VehicleTelemetryFrame ────────────────
 // Shared by both mock and future live adapters.
@@ -52,18 +53,20 @@ export function normaliseCtSnapshot(
   const fuelUsedMl  = raw.fuel_used_ml ?? 0
   const fuelLevelMl = raw.fuel_level_ml ?? null
 
+  // Sensor channels are powered by the engine — no alerts fire when engine is off.
+  const engineOn = raw.engine_on === 1
   const flags = {
-    overspeeding:        raw.speed_kmh > SPEED_LIMIT_KMH,
-    fuelInconsistency:   fuelUsedMl < -FUEL_INCONSISTENCY_THRESHOLD_ML,  // large negative delta
-    doorOpenWhileMoving: raw.door_state !== 0 && raw.speed_kmh > 5,
-    lowFuel:             fuelLevelMl != null && fuelLevelMl < tankCapacityMl * LOW_FUEL_PCT,
-    engineIdling:        raw.engine_on === 1 && raw.speed_kmh < 2,
-    outsideGeofence:     (raw as unknown as Record<string, unknown>)['_sim'] != null
+    overspeeding:        engineOn && raw.speed_kmh > SPEED_LIMIT_KMH,
+    fuelInconsistency:   engineOn && fuelUsedMl < -FUEL_INCONSISTENCY_THRESHOLD_ML,
+    doorOpenWhileMoving: engineOn && raw.door_state !== 0 && raw.speed_kmh > 5,
+    lowFuel:             engineOn && fuelLevelMl != null && fuelLevelMl < tankCapacityMl * LOW_FUEL_PCT,
+    engineIdling:        engineOn && raw.speed_kmh < 2,
+    outsideGeofence:     engineOn && (raw as unknown as Record<string, unknown>)['_sim'] != null
                            ? Boolean(((raw as unknown as Record<string, unknown>)['_sim'] as Record<string, unknown>)['outsideFence'])
                            : false,
-    lowBattery:          raw.battery_v < 11.5,
-    highEngineTemp:      raw.engine_temp_c != null && raw.engine_temp_c > HIGH_ENGINE_TEMP_C,
-    lowOil:              raw.oil_level_pct != null && raw.oil_level_pct < LOW_OIL_PCT,
+    lowBattery:          engineOn && raw.battery_v < 11.5,
+    highEngineTemp:      engineOn && raw.engine_temp_c != null && raw.engine_temp_c > HIGH_ENGINE_TEMP_C,
+    lowOil:              engineOn && raw.oil_level_pct != null && raw.oil_level_pct < LOW_OIL_PCT,
   }
 
   return {
@@ -123,13 +126,27 @@ export class ControltechMockAdapter implements TelemetryProvider {
    * the simulation pause on stop and resume exactly where it left off.
    */
   private async init(): Promise<void> {
-    // Only the live-simulation fleet (5 tractors, 8 trucks, 7 lorries) is ticked;
-    // the rest of the org's vehicles remain in the DB but idle. See lib/sim-fleet.
-    const [vehicles, saved, meta] = await Promise.all([
+    // Only the live-simulation fleet is ticked — per-org compositions in
+    // lib/sim-fleet; the rest of each org's vehicles remain in the DB but idle.
+    const [allVehicles, saved, meta] = await Promise.all([
       getSimFleetVehicles(),
       prisma.simulationState.findMany(),
       prisma.simulationMeta.findUnique({ where: { id: 'singleton' }, select: { simClockMs: true } }),
     ])
+
+    // SIM_ORGS (comma-separated org codes) restricts which orgs THIS instance
+    // simulates — lets a dev server tick only newly added orgs while another
+    // deployment keeps simulating the rest against the same DB, with no
+    // double-writing. Unset = simulate every org in the composition. The
+    // fleet SNAPSHOT is deliberately not filtered (see lib/sim-fleet).
+    const simOrgs = env.SIM_ORGS
+      ? new Set(env.SIM_ORGS.split(',').map(s => s.trim().toUpperCase()).filter(Boolean))
+      : null
+    const vehicles = simOrgs ? allVehicles.filter(v => simOrgs.has(v.orgCode)) : allVehicles
+    if (simOrgs) {
+      logger.warn({ simOrgs: [...simOrgs], ticked: vehicles.length, excluded: allVehicles.length - vehicles.length },
+        'SIM_ORGS set — simulating a subset of the fleet')
+    }
 
     // Resume the sim clock from where it paused (or start at real "now").
     initSimClock(meta?.simClockMs != null ? Number(meta.simClockMs) : null)
@@ -137,17 +154,43 @@ export class ControltechMockAdapter implements TelemetryProvider {
     const savedByDevice = new Map(saved.map(r => [r.deviceId, r.state as unknown as SimEntry]))
     let hydrated = 0, coldStarted = 0
 
+    // Parking bays are numbered PER ORG (0, 1, 2 … in fleet order, which is
+    // deterministic) so every org's yard fills from the innermost ring —
+    // `idx` is global across orgs and would leave inner rings empty.
+    const slotCounters = new Map<string, number>()
+
     vehicles.forEach((v, idx) => {
+      const parkSlot = slotCounters.get(v.orgCode) ?? 0
+      slotCounters.set(v.orgCode, parkSlot + 1)
       this.orgByDevice.set(v.deviceId, v.organisationId)
       const tankLitres = v.tankCapacityLitres ?? 200
       const prior      = savedByDevice.get(v.deviceId)
+      // Routing profile — which organisation's logistics cycle this vehicle
+      // runs. Direct-delivery orgs use their own org code as the profile key
+      // (see DIRECT_PROFILES in the simulator); anything unknown falls back to
+      // the Sukari haulage cycle.
+      const DIRECT_ORG_CODES = ['AQUAMIST', 'MENENGAI', 'TIMSALES', 'KABRAS'] as const
+      const profile = (DIRECT_ORG_CODES as readonly string[]).includes(v.orgCode)
+        ? (v.orgCode as RoutingProfile)
+        : 'SUKARI' as const
 
       if (prior && typeof prior.lat === 'number') {
         // Resume: trust the persisted state, refresh derived tank capacity.
-        this.states.set(v.deviceId, { ...prior, tankCapacityMl: tankLitres * 1000 })
+        // Defaults are spread FIRST and prior OVER them, so any field added to
+        // VehicleSimState after this row was last persisted (e.g. the garage-
+        // redirect / maintenanceResetOdoKm fields) gets a sane fallback
+        // instead of `undefined` — otherwise the very next renderSnapshot()
+        // throws on the missing field for every vehicle hydrated from an
+        // older save.
+        const defaults = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType, profile, parkSlot)
+        // `profile` is pinned AFTER the prior spread — states persisted before
+        // the org-aware fleet existed have no profile key (fine, defaults win),
+        // but a stale/wrong persisted value must never override the vehicle's
+        // actual organisation.
+        this.states.set(v.deviceId, { ...defaults, ...prior, profile, tankCapacityMl: tankLitres * 1000 })
         hydrated++
       } else {
-        const state = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType)
+        const state = initVehicleState(v.deviceId, idx, tankLitres, v.vehicleType, profile, parkSlot)
         this.states.set(v.deviceId, { ...state, tankCapacityMl: tankLitres * 1000 })
         coldStarted++
       }
@@ -178,12 +221,23 @@ export class ControltechMockAdapter implements TelemetryProvider {
         // One-shot lifecycle events have now been copied into the frame; clear
         // them so each completed trip / theft / refuel is persisted exactly once
         // and never re-snapshotted to the DB on the next persist().
-        state.eventTripCompleted = null
-        state.eventFuelTheft     = null
-        state.eventRefuel        = null
+        state.eventTripCompleted       = null
+        state.eventFuelTheft           = null
+        state.eventRefuel             = null
+        state.eventServiceCompleted    = null
+        state.eventGarageVisitCompleted = null
       } catch (err) {
         logger.warn({ err, deviceId: state.deviceId }, 'Simulator tick failed — skipping device')
       }
+    }
+
+    // Keep ≥80 % of every org's fleet out working — force-dispatches idle
+    // vehicles when an org drops below the floor. Runs after the tick so the
+    // count reflects trips that just completed; the dispatched vehicles start
+    // moving on the next tick.
+    const dispatched = governFleetUtilization(this.states.values())
+    if (dispatched > 0) {
+      logger.debug({ dispatched }, 'Utilization governor dispatched idle vehicles')
     }
 
     // Snapshot the advanced state so a restart resumes from here. Fire-and-forget
@@ -217,7 +271,7 @@ export class ControltechMockAdapter implements TelemetryProvider {
               updated_at      = EXCLUDED.updated_at
       `
       await prisma.$executeRaw`
-        INSERT INTO simulation_meta (id, last_tick_at, sim_clock_ms) VALUES ('singleton', ${now}, ${BigInt(simNow())})
+        INSERT INTO simulation_meta (id, last_tick_at, sim_clock_ms) VALUES ('singleton', ${now}, ${BigInt(Math.round(simNow()))})
         ON CONFLICT (id) DO UPDATE SET last_tick_at = EXCLUDED.last_tick_at, sim_clock_ms = EXCLUDED.sim_clock_ms
       `
     } catch (err) {

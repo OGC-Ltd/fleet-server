@@ -2,8 +2,13 @@
  * Telemetry poller — fetches frames from the configured provider every
  * POLL_INTERVAL_MS, feeds them into the existing `processTelemetry` ingest
  * pipeline, and publishes typed events to the fleet event bus so downstream
- * workers (telemetry.worker, notification.worker) can react without coupling
- * to this module.
+ * workers (telemetry.worker, notification.worker, alerts.worker,
+ * sim-events.worker) can react without coupling to this module.
+ *
+ * The alert-row bookkeeping (syncFrameAlerts) and sim-event persistence
+ * (persistSimEvents) are NOT called directly here — they're published as
+ * events and picked up by alerts.worker/sim-events.worker off the poll
+ * cycle's critical path (see event-bus.ts's 'alerts:sync'/'simEvents:persist').
  *
  * Swapping providers:
  *   Change the `provider` argument to `startPoller`.  Nothing else changes.
@@ -14,9 +19,8 @@ import { prisma }                from './prisma.js'
 import { processTelemetry }      from '../modules/ingest/ingest.service.js'
 import { eventBus }              from './event-bus.js'
 import type { AlertType }        from './event-bus.js'
-import { syncFrameAlerts }       from './alerts.js'
-import { persistSimEvents }      from './simulation.persistence.js'
 import type { SimEvents }        from './simulation.persistence.js'
+import { emitDashboardNotice }   from './sse.js'
 import { ControltechMockAdapter } from '../providers/controltech/controltech.adapter.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
 
@@ -59,6 +63,13 @@ interface DeviceMeta {
   vehicleName:     string
   plate:           string
   tankCapacityMl:  number
+  // Currently-assigned driver, folded into this same 5-min cache so
+  // processTelemetry/persistSimEvents don't each re-query vehicleAssignment
+  // per frame per cycle. Driver reassignment is a rare admin action, so a
+  // few minutes of staleness here is an acceptable tradeoff for cutting 2
+  // DB round-trips per vehicle per poll cycle.
+  driverId:        string | null
+  driverName:      string | null
 }
 
 let deviceCache   = new Map<string, DeviceMeta>()
@@ -74,6 +85,11 @@ async function refreshCache(): Promise<void> {
       name:               true,
       registrationPlate:  true,
       tankCapacityLitres: true,
+      assignments: {
+        where: { unassignedAt: null },
+        select: { userId: true, user: { select: { fullName: true } } },
+        take: 1,
+      },
     },
   })
   deviceCache   = new Map(rows.map(r => [r.deviceId, {
@@ -82,6 +98,8 @@ async function refreshCache(): Promise<void> {
     vehicleName:    r.name,
     plate:          r.registrationPlate,
     tankCapacityMl: (r.tankCapacityLitres ?? 200) * 1000,
+    driverId:       r.assignments[0]?.userId ?? null,
+    driverName:     r.assignments[0]?.user.fullName ?? null,
   }]))
   cacheLoadedAt = Date.now()
 }
@@ -98,6 +116,7 @@ const FLAG_KEYS: Array<keyof VehicleTelemetryFrame['flags'] & AlertType> = [
   'fuelInconsistency',
   'doorOpenWhileMoving',
   'lowFuel',
+  'engineIdling',
   'outsideGeofence',
   'lowBattery',
   'highEngineTemp',
@@ -113,6 +132,11 @@ const prevActiveMap = new Map<string, Set<AlertType>>()
 // re-arm window so a recurring issue notifies at most once per hour.
 const lastNotifiedAt = new Map<string, number>()
 
+// Tracks which halt-causing flags were active last cycle per vehicle.
+// When all three clear and the engine is back on we emit a "back on road" notice.
+const haltFlagsPrev  = new Map<string, Set<AlertType>>()
+const HALT_FLAGS: AlertType[] = ['lowFuel', 'highEngineTemp', 'lowOil']
+
 /** True if the previously-active alert set equals the current active list. */
 function sameAlertSet(prev: Set<AlertType>, current: AlertType[]): boolean {
   if (prev.size !== current.length) return false
@@ -123,6 +147,13 @@ function sameAlertSet(prev: Set<AlertType>, current: AlertType[]): boolean {
 // ─── single poll cycle ─────────────────────────────────────────────────────
 // Guard prevents a slow cycle from overlapping with the next interval tick.
 
+// Hard ceiling on one cycle. Normal cycles run 5–100 s; if the pooler drops a
+// pg connection mid-cycle the cycle's promise can hang forever (Jul 2026: the
+// in-flight guard then skipped every tick for 3 days while the process stayed
+// alive, so pm2 never restarted it). The watchdog abandons the cycle and
+// re-arms the guard so the next tick can start.
+const CYCLE_TIMEOUT_MS = 5 * 60_000
+
 let isPolling = false
 
 async function runOnePollCycle(provider: TelemetryProvider): Promise<void> {
@@ -131,7 +162,41 @@ async function runOnePollCycle(provider: TelemetryProvider): Promise<void> {
     return
   }
   isPolling = true
-  try { await _runOnePollCycle(provider) } finally { isPolling = false }
+  const t0 = Date.now()
+
+  const cycle = _runOnePollCycle(provider).then(
+    () => 'settled' as const,
+    (err) => {
+      logger.error({ err, provider: provider.name }, 'Poll cycle failed')
+      return 'settled' as const
+    },
+  )
+
+  // unref: a pending watchdog must not keep the process alive after stop().
+  let watchdogTimer!: NodeJS.Timeout
+  const watchdog = new Promise<'timeout'>((resolve) => {
+    watchdogTimer = setTimeout(() => resolve('timeout'), CYCLE_TIMEOUT_MS).unref()
+  })
+
+  const outcome = await Promise.race([cycle, watchdog])
+  clearTimeout(watchdogTimer)
+
+  if (outcome === 'timeout') {
+    logger.error(
+      { provider: provider.name, timeoutMs: CYCLE_TIMEOUT_MS },
+      'Poll cycle exceeded watchdog timeout — abandoning it and re-arming the poller',
+    )
+    // If the abandoned cycle ever settles, its only remaining continuation is
+    // this log line — it can no longer touch isPolling (this call has already
+    // reset it, and a later cycle may own the guard by then).
+    void cycle.then(() =>
+      logger.warn(
+        { provider: provider.name, durationMs: Date.now() - t0 },
+        'Abandoned poll cycle eventually settled',
+      ),
+    )
+  }
+  isPolling = false
 }
 
 async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
@@ -152,7 +217,10 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
       if (!meta) { skipped++; return }
 
       try {
-        // 1. Persist to DB + emit per-vehicle SSE (existing ingest pipeline)
+        // 1. Persist to DB + emit per-vehicle SSE (existing ingest pipeline).
+        //    Pre-resolved {vehicleId, driverId} from the device cache skips
+        //    the vehicle + assignment lookups processTelemetry would otherwise
+        //    make itself — 2 fewer round-trips per vehicle per cycle.
         await processTelemetry(meta.orgId, {
           deviceId:      frame.deviceId,
           capturedAt:    frame.capturedAt,
@@ -177,7 +245,7 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
             signalStrengthPct:  frame.signalStrengthPct,
             flags:              frame.flags,
           },
-        })
+        }, { vehicleId: meta.vehicleId, driverId: meta.driverId })
         processed++
 
         // 2. Publish processed event for workers (dashboard SSE, etc.)
@@ -188,6 +256,7 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
           vehicleName:    meta.vehicleName,
           plate:          meta.plate,
           tankCapacityMl: meta.tankCapacityMl,
+          driverName:     meta.driverName,
         })
 
         // 3. Determine which flags are currently active
@@ -199,24 +268,60 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
         //    the DB already holds exactly the right open rows, so we skip 3
         //    queries/vehicle/cycle. This is the main lever that keeps the poll
         //    cycle fast at 100 vehicles over a remote pooler.
+        //
+        //    Published to the event bus (alerts.worker) instead of awaited
+        //    here: this frame's turn in the concurrency-bounded loop above
+        //    completes as soon as the fast path (upsert + SSE emit) is done,
+        //    instead of blocking on alert-row bookkeeping before the next
+        //    vehicle in the batch gets its turn.
         const prevActive = prevActiveMap.get(meta.vehicleId)
         const alertsChanged = prevActive === undefined || !sameAlertSet(prevActive, activeAlertTypes)
         if (alertsChanged) {
-          await syncFrameAlerts(meta.orgId, meta.vehicleId, frame, activeAlertTypes).catch(
-            err => logger.warn({ err, deviceId: frame.deviceId }, 'syncFrameAlerts failed'),
-          )
+          eventBus.publish('alerts:sync', {
+            orgId:       meta.orgId,
+            vehicleId:   meta.vehicleId,
+            deviceId:    frame.deviceId,
+            frame,
+            activeTypes: activeAlertTypes,
+          })
         }
 
         // 4b. Persist simulation lifecycle events (completed trips, fuel theft,
-        //     self-heal refuels) surfaced on the frame. Awaited inside the
-        //     bounded concurrency like the alert write, and a no-op on cycles
-        //     where nothing transitioned.
+        //     self-heal refuels) surfaced on the frame. Also published to the
+        //     event bus (sim-events.worker) rather than awaited — a trip
+        //     completion writes a Trip + CargoManifest (+ driver rating
+        //     update), which is exactly the kind of multi-round-trip work
+        //     that shouldn't hold up the poll cycle's per-vehicle turn.
         const simEvents = (frame.rawPayload as { _sim?: { events?: SimEvents } } | undefined)?._sim?.events
         if (simEvents) {
-          await persistSimEvents(meta.orgId, meta.vehicleId, simEvents).catch(
-            err => logger.warn({ err, deviceId: frame.deviceId }, 'persistSimEvents failed'),
-          )
+          eventBus.publish('simEvents:persist', {
+            orgId:     meta.orgId,
+            vehicleId: meta.vehicleId,
+            deviceId:  frame.deviceId,
+            events:    simEvents,
+            vehicleMeta: {
+              plate:       meta.plate,
+              vehicleName: meta.vehicleName,
+              driverId:    meta.driverId,
+            },
+          })
         }
+
+        // 4c. Detect halt-flag clearing → emit "vehicle back on road" notice
+        const activeHalts = new Set(HALT_FLAGS.filter(f => frame.flags[f as keyof typeof frame.flags]))
+        const prevHalts   = haltFlagsPrev.get(meta.vehicleId) ?? new Set<AlertType>()
+        const justCleared = [...prevHalts].filter(f => !activeHalts.has(f))
+        if (justCleared.length > 0 && frame.engineOn) {
+          emitDashboardNotice(meta.orgId, {
+            noticeType:    'vehicleOnline',
+            vehicleId:     meta.vehicleId,
+            plate:         meta.plate,
+            vehicleName:   meta.vehicleName,
+            resolvedFlags: justCleared,
+            capturedAt:    frame.capturedAt.toISOString(),
+          })
+        }
+        haltFlagsPrev.set(meta.vehicleId, activeHalts)
 
         // 5. Emit SSE+Push ONLY for flags that are newly active this cycle
         //    (rising-edge detection — prevents flooding the feed every 30 s

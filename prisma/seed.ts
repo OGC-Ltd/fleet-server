@@ -1,6 +1,12 @@
 /**
- * Seed script — Sukari Industries Limited (single organisation)
- * ~200 records per transactional entity; clears all tables first.
+ * Seed script — two organisations; clears all tables first.
+ *
+ *  1. Sukari Industries Limited (SUKARI) — sugar logistics.
+ *     ~200 records per transactional entity.
+ *  2. Aquamist Limited (AQUAMIST) — still/sparkling water in different bottle
+ *     volumes + juice, delivered from the bottling plant DIRECTLY to customers
+ *     in different parts of Nairobi, Kisumu, Nakuru, and Mombasa (no depots).
+ *     10 vehicles: 4 saloon cars, 3 trucks, 3 lorries.
  *
  * Run: npm run seed
  */
@@ -59,8 +65,13 @@ const LAST_NAMES = [
   'Njeru','Kirui','Kariuki','Sang','Kiema','Rotich','Muthoni','Mutai',
 ]
 
-const VEHICLE_TYPES  = ['BUS','TRUCK','AMBULANCE','TRACTOR','TANKER','PICKUP','VAN','LORRY','MINIBUS','TIPPER']
-const PLATE_PREFIXES = ['KBV','KDL','KDD','KCY','KBQ','KCA','KDB','KBA','KCX','KBZ','KCZ','KDE','KDF','KDG','KDH']
+// Fixed fleet composition — 40 lorry & trailer / 40 canter / 20 pickup.
+// [type, count, platePrefix, plateBase, kmpl choices, tank choices (litres)]
+const FLEET_COMPOSITION: [string, number, string, number, number[], number[]][] = [
+  ['LORRY & TRAILER', 40, 'KDL', 600, [1.8, 2.0, 2.2, 2.5], [300, 350, 400]],
+  ['CANTER',          40, 'KDC', 700, [5.0, 5.5, 6.0, 6.5], [100, 120]],
+  ['PICKUP',          20, 'KDP', 800, [8.0, 9.0, 10.0],     [70, 80]],
+]
 const PLATE_SUFFIXES = ['A','B','C','D','E','F','G','H','J','K','L','M','N','P','Q','R','S','T','U','V']
 const GPS_VENDORS    = ['Queclink','Teltonika','CalAmp','Meitrack','Controltech']
 const CARGO_DESCS    = [
@@ -189,7 +200,16 @@ async function main() {
 
   for (let i = 0; i < 200; i++) {
     const fn = pick(FIRST_NAMES, i)
-    const ln = pick(LAST_NAMES,  i)
+    // Both name pools have 40 entries; indexing both by the same `i` made
+    // the (first, last) combination repeat every 40 users — with 200 users
+    // that's 5 exact-duplicate full names, and since vehicle assignments
+    // are spread across all 200 distinct user rows, those duplicate-named
+    // users would land on different vehicles and look like the same
+    // driver assigned twice. Offsetting the last-name index by how many
+    // full 40-cycles of first names have elapsed keeps every (fn, ln) pair
+    // unique across all 200 users (5 cycles × 40 last names is well within
+    // the 40-name pool's range before it would wrap and repeat a pair).
+    const ln = pick(LAST_NAMES, i + Math.floor(i / FIRST_NAMES.length))
     userRows.push({
       organisationId: org.id,
       fullName:       `${fn} ${ln}`,
@@ -261,7 +281,7 @@ async function main() {
   }
   console.log(`  ✓ ${allVehicleGroups.length} vehicle groups`)
 
-  // ── 9. Vehicles (100) ─────────────────────────────────────────────────────
+  // ── 9. Vehicles (100) — 40 LORRY & TRAILER / 40 CANTER / 20 PICKUP ────────
   console.log('→ Vehicles')
   const vehicleRows: {
     organisationId: string; vehicleGroupId: string; name: string;
@@ -269,22 +289,22 @@ async function main() {
     fuelEfficiencyKmpl: number; tankCapacityLitres: number
   }[] = []
 
-  let plateSeq = 100
-  for (let i = 0; i < 100; i++) {
-    const vg     = pick(allVehicleGroups, i)
-    const prefix = pick(PLATE_PREFIXES, i)
-    const suffix = pick(PLATE_SUFFIXES, i)
-    const plate  = `${prefix} ${plateSeq++}${suffix}`
-    vehicleRows.push({
-      organisationId:     org.id,
-      vehicleGroupId:     vg.id,
-      name:               `${pick(vgDefs, i)} ${plate}`,
-      registrationPlate:  plate,
-      deviceId:           `DEV_${plate.replace(/\s+/g, '_')}`,
-      vehicleType:        pick(VEHICLE_TYPES, i),
-      fuelEfficiencyKmpl: pick([2.5, 3.0, 4.0, 5.0, 1.8, 2.0, 6.0, 3.5, 4.5, 2.2], i),
-      tankCapacityLitres: pick([80, 120, 200, 300, 400, 60, 100, 150, 250, 350], i),
-    })
+  let vi = 0
+  for (const [type, count, prefix, plateBase, kmpls, tanks] of FLEET_COMPOSITION) {
+    for (let t = 0; t < count; t++, vi++) {
+      const vg    = pick(allVehicleGroups, vi)
+      const plate = `${prefix} ${plateBase + t}${pick(PLATE_SUFFIXES, t)}`
+      vehicleRows.push({
+        organisationId:     org.id,
+        vehicleGroupId:     vg.id,
+        name:               `${type} ${plate}`,
+        registrationPlate:  plate,
+        deviceId:           `DEV_${plate.replace(/\s+/g, '_')}`,
+        vehicleType:        type,
+        fuelEfficiencyKmpl: pick(kmpls, t),
+        tankCapacityLitres: pick(tanks, t),
+      })
+    }
   }
   await prisma.vehicle.createMany({ data: vehicleRows })
   const vehicles = await prisma.vehicle.findMany()
@@ -724,6 +744,313 @@ async function main() {
   }
   await prisma.vehiclePeriodSummary.createMany({ data: vpsRows })
   console.log(`  ✓ ${vpsRows.length} vehicle period summaries`)
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AQUAMIST LIMITED — second organisation
+  //
+  // Bottled-beverage producer: still water and sparkling water packaged in
+  // bottles of different volumes, plus juice (product 2). NO depots — the fleet
+  // supplies customers residing in different parts of Nairobi, Kisumu, Nakuru,
+  // and Mombasa directly from the bottling plant.
+  //
+  // Live-sim fleet: 10 vehicles — 4 saloon cars (small residential drops around
+  // Nairobi), 3 trucks and 3 lorries (bulk orders to all four cities). See
+  // src/lib/sim-fleet.ts + the AQUAMIST routing profile in the simulator.
+  // ═══════════════════════════════════════════════════════════════════════════
+  console.log('\n🌱  Seeding — Aquamist Limited\n')
+
+  // Bottling plant / HQ — exact coordinates (Kiambu County, NW of Nairobi).
+  const AQ_HQ: [number, number, string] = [-1.2060044099698617, 36.65702647381419, 'Aquamist Plant']
+
+  // Customer delivery points across different parts of the four supply cities.
+  const AQ_CUSTOMERS: [number, number, string][] = [
+    [-1.2683, 36.8110, 'Customer — Westlands, Nairobi'],
+    [-1.3197, 36.7062, 'Customer — Karen, Nairobi'],
+    [-1.2906, 36.7870, 'Customer — Kilimani, Nairobi'],
+    [-1.3081, 36.8330, 'Customer — South B, Nairobi'],
+    [-1.2230, 36.8991, 'Customer — Kasarani, Nairobi'],
+    [-1.2076, 36.7811, 'Customer — Ruaka, Nairobi'],
+    [-0.1057, 34.7448, 'Customer — Milimani, Kisumu'],
+    [-0.0810, 34.7720, 'Customer — Kondele, Kisumu'],
+    [-0.0570, 34.7900, 'Customer — Mamboleo, Kisumu'],
+    [-0.2963, 36.0517, 'Customer — Milimani, Nakuru'],
+    [-0.2789, 36.0894, 'Customer — Section 58, Nakuru'],
+    [-0.3070, 36.1470, 'Customer — Lanet, Nakuru'],
+    [-4.0202, 39.7076, 'Customer — Nyali, Mombasa'],
+    [-3.9909, 39.7276, 'Customer — Bamburi, Mombasa'],
+    [-4.0842, 39.6650, 'Customer — Likoni, Mombasa'],
+  ]
+
+  // Product catalogue — water & sparkling water in different bottle volumes,
+  // and juice. Mirrors AQUAMIST_PRODUCTS in the simulator.
+  const AQ_PRODUCTS = [
+    'Still water — 500 ml PET bottles',
+    'Still water — 1 L PET bottles',
+    'Still water — 5 L bottles',
+    'Still water — 10 L bottles',
+    'Still water — 20 L dispenser bottles',
+    'Sparkling water — 330 ml glass bottles',
+    'Sparkling water — 750 ml glass bottles',
+    'Sparkling water — 1 L PET bottles',
+    'Juice — 300 ml bottles',
+    'Juice — 1 L tetra packs',
+    'Juice — 5 L catering packs',
+  ]
+
+  // ── A1. Organisation ────────────────────────────────────────────────────
+  console.log('→ Organisation')
+  const aqOrg = await prisma.organisation.create({
+    data: { name: 'Aquamist Limited', code: 'AQUAMIST' },
+  })
+  console.log(`  ✓ ${aqOrg.name}  (${aqOrg.id})`)
+
+  // ── A2. Roles (10) — reuse the generic fleet role definitions ────────────
+  console.log('→ Roles')
+  const aqRoles: { id: string }[] = []
+  for (const rd of roleDefs.slice(0, 10)) {
+    const role = await prisma.role.create({ data: { organisationId: aqOrg.id, ...rd } })
+    aqRoles.push({ id: role.id })
+  }
+  console.log(`  ✓ ${aqRoles.length} roles`)
+
+  // ── A3. Role permissions — fleet_manager gets all, others 8 each ─────────
+  console.log('→ Role permissions')
+  const aqRpRows: { roleId: string; permissionId: string }[] = []
+  for (const perm of permissions) aqRpRows.push({ roleId: aqRoles[0]!.id, permissionId: perm.id })
+  for (let ri = 1; ri < aqRoles.length; ri++) {
+    const start  = (ri * 7) % permissions.length
+    const subset = [...permissions.slice(start), ...permissions.slice(0, start)].slice(0, 8)
+    for (const perm of subset) aqRpRows.push({ roleId: aqRoles[ri]!.id, permissionId: perm.id })
+  }
+  await prisma.rolePermission.createMany({ data: aqRpRows, skipDuplicates: true })
+  console.log(`  ✓ ${aqRpRows.length} role permissions`)
+
+  // ── A4. Users (40) ────────────────────────────────────────────────────────
+  console.log('→ Users')
+  const aqUserRows: {
+    organisationId: string; fullName: string; email: string; phone: string;
+    licenceNumber: string | null; employeeId: string; status: 'ACTIVE'|'SUSPENDED'|'TERMINATED'
+  }[] = []
+  for (let i = 0; i < 40; i++) {
+    const fn = pick(FIRST_NAMES, i + 11)
+    const ln = pick(LAST_NAMES, i + 23)
+    aqUserRows.push({
+      organisationId: aqOrg.id,
+      fullName:       `${fn} ${ln}`,
+      email:          `${fn.toLowerCase()}.${ln.toLowerCase()}${i}@aquamist.co.ke`,
+      phone:          `+2547${String(20_000_000 + i).slice(1)}`,
+      licenceNumber:  i < 24 ? `DLAQUA${String(1000 + i).padStart(4, '0')}` : null,
+      employeeId:     `AQUA-EMP-${String(1000 + i).padStart(4, '0')}`,
+      status:         pick(['ACTIVE','ACTIVE','ACTIVE','ACTIVE','SUSPENDED'] as const, i),
+    })
+  }
+  await prisma.user.createMany({ data: aqUserRows })
+  const aqUsers = await prisma.user.findMany({ where: { organisationId: aqOrg.id }, select: { id: true } })
+  console.log(`  ✓ ${aqUsers.length} users`)
+
+  // ── A5. User roles ────────────────────────────────────────────────────────
+  const aqUrRows = aqUsers.map((u, ui) => ({ userId: u.id, roleId: pick(aqRoles, ui).id }))
+  await prisma.userRole.createMany({ data: aqUrRows, skipDuplicates: true })
+  console.log(`  ✓ ${aqUrRows.length} user roles`)
+
+  // ── A6. Ingest API keys (10) ──────────────────────────────────────────────
+  const aqAkRows = Array.from({ length: 10 }, (_, i) => ({
+    organisationId: aqOrg.id,
+    label:          `${pick(GPS_VENDORS, i)} Device #${i + 1} (Aquamist)`,
+    keyHash:        sha256(`flt_aquamist_${String(i).padStart(3, '0')}_secret_${i}`),
+    isActive:       true,
+    expiresAt:      null as Date | null,
+  }))
+  await prisma.ingestApiKey.createMany({ data: aqAkRows })
+  console.log(`  ✓ ${aqAkRows.length} ingest API keys`)
+
+  // ── A7. Vehicle groups (3) ────────────────────────────────────────────────
+  console.log('→ Vehicle groups')
+  const aqVgDefs = ['RESIDENTIAL DELIVERY', 'BULK WATER DELIVERY', 'JUICE DELIVERY']
+  const aqGroups: { id: string }[] = []
+  for (const gName of aqVgDefs) {
+    const vg = await prisma.vehicleGroup.create({
+      data: { organisationId: aqOrg.id, name: gName, code: `AQUAMIST_${gName.replace(/\s+/g, '_')}` },
+    })
+    aqGroups.push({ id: vg.id })
+  }
+  console.log(`  ✓ ${aqGroups.length} vehicle groups`)
+
+  // ── A8. Vehicles (10) — 4 SALOON / 3 TRUCK / 3 LORRY ─────────────────────
+  console.log('→ Vehicles')
+  const aqFleetDefs: { type: string; group: number; kmpl: number; tank: number }[] = [
+    { type: 'SALOON', group: 0, kmpl: 12.0, tank: 50  },
+    { type: 'SALOON', group: 0, kmpl: 11.5, tank: 50  },
+    { type: 'SALOON', group: 0, kmpl: 12.5, tank: 55  },
+    { type: 'SALOON', group: 2, kmpl: 11.0, tank: 50  },
+    { type: 'TRUCK',  group: 1, kmpl: 3.0,  tank: 200 },
+    { type: 'TRUCK',  group: 1, kmpl: 3.5,  tank: 200 },
+    { type: 'TRUCK',  group: 2, kmpl: 3.2,  tank: 250 },
+    { type: 'LORRY',  group: 1, kmpl: 2.5,  tank: 300 },
+    { type: 'LORRY',  group: 1, kmpl: 2.8,  tank: 300 },
+    { type: 'LORRY',  group: 2, kmpl: 2.6,  tank: 350 },
+  ]
+  const aqVehicleRows = aqFleetDefs.map((d, i) => {
+    const plate = `KDN ${200 + i}${pick(PLATE_SUFFIXES, i + 3)}`
+    return {
+      organisationId:     aqOrg.id,
+      vehicleGroupId:     aqGroups[d.group]!.id,
+      name:               `${d.type} ${plate}`,
+      registrationPlate:  plate,
+      deviceId:           `DEV_${plate.replace(/\s+/g, '_')}`,
+      vehicleType:        d.type,
+      fuelEfficiencyKmpl: d.kmpl,
+      tankCapacityLitres: d.tank,
+    }
+  })
+  await prisma.vehicle.createMany({ data: aqVehicleRows })
+  const aqVehicles = await prisma.vehicle.findMany({ where: { organisationId: aqOrg.id } })
+  console.log(`  ✓ ${aqVehicles.length} vehicles (4 saloon / 3 truck / 3 lorry)`)
+
+  // ── A9. Reporting periods (reuse the same calendar) ───────────────────────
+  const aqPeriodIds: string[] = []
+  for (const pd of periodDefs) {
+    const rp = await prisma.reportingPeriod.create({
+      data: {
+        organisationId: aqOrg.id,
+        label:          pd.label,
+        periodStart:    new Date(pd.start),
+        periodEnd:      new Date(pd.end),
+        periodType:     pd.type,
+      },
+    })
+    aqPeriodIds.push(rp.id)
+  }
+  console.log(`  ✓ ${aqPeriodIds.length} reporting periods`)
+
+  // ── A10. Routes — plant → every customer delivery point ──────────────────
+  console.log('→ Routes')
+  const aqRouteIds: string[] = []
+  for (const [cLat, cLng, cName] of AQ_CUSTOMERS) {
+    const dLat = (cLat - AQ_HQ[0]) * 111
+    const dLng = (cLng - AQ_HQ[1]) * 111 * Math.cos((cLat * Math.PI) / 180)
+    const distanceKm = Math.round(Math.sqrt(dLat * dLat + dLng * dLng) * 1.25)   // ×1.25 road factor
+    const route = await prisma.route.create({
+      data: {
+        organisationId:  aqOrg.id,
+        name:            `${AQ_HQ[2]} → ${cName}`,
+        originName:      AQ_HQ[2],
+        originLat:       AQ_HQ[0],
+        originLng:       AQ_HQ[1],
+        destinationName: cName,
+        destinationLat:  cLat,
+        destinationLng:  cLng,
+        distanceKm,
+        isActive:        true,
+      },
+    })
+    aqRouteIds.push(route.id)
+  }
+  console.log(`  ✓ ${aqRouteIds.length} routes`)
+
+  // ── A11. Geofences — plant + one customer zone per city ──────────────────
+  const aqGeoDefs: [string, number, number, number][] = [
+    ['Aquamist Plant Perimeter',      AQ_HQ[0], AQ_HQ[1], 800],
+    ['Nairobi Customer Zone',         -1.2864,  36.8172,  15_000],
+    ['Kisumu Customer Zone',          -0.0917,  34.7679,  10_000],
+    ['Nakuru Customer Zone',          -0.3031,  36.0800,  10_000],
+    ['Mombasa Customer Zone',         -4.0435,  39.6682,  12_000],
+  ]
+  await prisma.geofence.createMany({
+    data: aqGeoDefs.map(([name, lat, lng, r]) => ({
+      organisationId: aqOrg.id,
+      name,
+      type:           'CIRCLE' as const,
+      mode:           'ALLOWLIST' as const,
+      centerLat:      lat,
+      centerLng:      lng,
+      radiusM:        r,
+      polygonCoords:  Prisma.JsonNull,
+      isActive:       true,
+    })),
+  })
+  console.log(`  ✓ ${aqGeoDefs.length} geofences`)
+
+  // ── A12. Vehicle assignments — a primary driver per vehicle ──────────────
+  const aqVaRows = aqVehicles.map((v, i) => ({
+    vehicleId:      v.id,
+    userId:         pick(aqUsers, i).id,
+    assignmentType: 'PRIMARY' as const,
+    assignedAt:     addD(new Date('2026-01-05T06:00:00Z'), i),
+    unassignedAt:   null as Date | null,
+    notes:          null as string | null,
+  }))
+  await prisma.vehicleAssignment.createMany({ data: aqVaRows })
+  console.log(`  ✓ ${aqVaRows.length} vehicle assignments`)
+
+  // ── A13. Trips (60) + cargo manifests — plant → customer deliveries ──────
+  console.log('→ Trips & manifests')
+  const aqWeekStart = new Date('2026-06-08T05:30:00Z')
+  let aqTripCount = 0
+  for (let i = 0; i < 60; i++) {
+    const vehicle  = pick(aqVehicles, i)
+    const saloon   = vehicle.vehicleType === 'SALOON'
+    // Saloons only serve the Nairobi-area customers (first 6); trucks/lorries any.
+    const customer = saloon ? pick(AQ_CUSTOMERS.slice(0, 6), i) : pick(AQ_CUSTOMERS, i)
+    const beganAt  = addH(addD(aqWeekStart, i % 7), 1 + (i * 2) % 10)
+    const distKm   = saloon ? pick([18, 24, 30, 36, 22, 28], i) : pick([30, 280, 160, 500, 40, 300, 170, 520], i)
+    const avgKmh   = saloon ? pick([48, 55, 60, 52], i) : pick([50, 62, 58, 55], i)
+    const durSec   = Math.round((distKm / avgKmh) * 3600) + pick([1200, 1800, 2400, 3000], i)
+    const weightKg = saloon ? pick([220, 300, 380, 450, 260, 340], i) : pick([9000, 14000, 18000, 22000, 11000, 16000], i)
+    const trip = await prisma.trip.create({
+      data: {
+        vehicleId:          vehicle.id,
+        driverId:           pick(aqUsers, i).id,
+        reportingPeriodId:  pick(aqPeriodIds, i),
+        routeId:            i % 4 === 0 ? null : pick(aqRouteIds, i),
+        beganAt,
+        endedAt:            addH(beganAt, durSec / 3600),
+        initialLocation:    AQ_HQ[2],
+        finalLocation:      customer[2],
+        durationSeconds:    durSec,
+        mileageKm:          distKm,
+        avgSpeedKmh:        avgKmh,
+        maxSpeedKmh:        avgKmh + pick([15, 25, 30, 20], i),
+        consumedMl:         saloon ? distKm * 90 : distKm * 380,
+        initialFuelLevelMl: saloon ? 50_000 : 250_000,
+        finalFuelLevelMl:   (saloon ? 50_000 : 250_000) - (saloon ? distKm * 90 : distKm * 380),
+      },
+      select: { id: true },
+    })
+    await prisma.cargoManifest.create({
+      data: {
+        tripId:            trip.id,
+        cargoType:         'PACKAGED',
+        description:       pick(AQ_PRODUCTS, i),
+        declaredWeightKg:  weightKg,
+        departureWeightKg: weightKg,
+        arrivalWeightKg:   pick([0, weightKg * 0.02], i),   // fully offloaded (± crate returns)
+        weightVarianceKg:  0,
+      },
+    })
+    aqTripCount++
+  }
+  console.log(`  ✓ ${aqTripCount} trips + manifests`)
+
+  // ── A14. Fuel fillings (20) — at the plant before dispatch ───────────────
+  const aqFfRows = Array.from({ length: 20 }, (_, i) => {
+    const vehicle = pick(aqVehicles, i)
+    const saloon  = vehicle.vehicleType === 'SALOON'
+    const tankMl  = (vehicle.tankCapacityLitres ?? 200) * 1000
+    const startMl = Math.round(tankMl * pick([0.25, 0.35, 0.45, 0.30], i))
+    return {
+      vehicleId:          vehicle.id,
+      reportingPeriodId:  pick(aqPeriodIds, i),
+      filledAt:           addH(addD(new Date('2026-06-08T05:00:00Z'), i % 7), (i * 3) % 12),
+      location:           saloon ? 'Kikuyu Total Station' : AQ_HQ[2],
+      initialFuelLevelMl: startMl,
+      filledMl:           tankMl - startMl,
+      finalFuelLevelMl:   tankMl,
+      mileageAtFillKm:    pick([4000, 9000, 15000, 22000, 6000], i) + i * 3,
+    }
+  })
+  await prisma.fuelFilling.createMany({ data: aqFfRows })
+  console.log(`  ✓ ${aqFfRows.length} fuel fillings`)
 
   // ── summary ───────────────────────────────────────────────────────────────
   const counts = await Promise.all([

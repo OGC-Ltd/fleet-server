@@ -8,11 +8,33 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   DIRECT_URL: z.string().min(1),
 
-  SUPABASE_URL: z.string().url(),
-  SUPABASE_ANON_KEY: z.string().min(1),
-  SUPABASE_JWT_SECRET: z.string().min(32),
+  // HS256 signing secret for the app's own access/refresh JWTs (auth.service.ts)
+  JWT_SECRET: z.string().min(32),
 
   AUTH_BYPASS: z.string().optional().default('false').transform(v => v === 'true'),
+
+  // Set to 'false' to run this instance API-only (no telemetry poller / sim).
+  // Use for a local dev server reading a DB that another deployment is already
+  // simulating into — two concurrent sims write conflicting positions and
+  // duplicate trips.
+  POLL_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  // API-only instances only (POLL_ENABLED=false): tail the shared DB's latest
+  // telemetry (written by the deployment that DOES run the sim) and re-emit
+  // dashboard SSE (positions + live feed) locally, read-only — otherwise the
+  // local /live stream is silent and the dev dashboard shows a frozen map and
+  // an empty feed. Set 'false' for a truly passive API instance.
+  FOLLOW_DB: z.string().optional().default('true').transform(v => v === 'true'),
+
+  // Comma-separated org codes this instance simulates (e.g.
+  // "MENENGAI,TIMSALES,KABRAS"). Unset = all orgs in SIM_FLEET_COMPOSITION.
+  // Lets two deployments split the sim fleet org-wise over one shared DB.
+  SIM_ORGS: z.string().optional(),
+
+  // Fleet AI Insight (dashboard/ai-insight.ts). Unset key = the endpoint
+  // reports { configured: false } and clients fall back to the local summary.
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_MODEL:   z.string().default('gpt-5-nano'),
 
   CORS_ORIGIN: z.string().default('*'),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
@@ -23,7 +45,25 @@ const schema = z.object({
   OPENWEATHER_API_KEY: z.string().optional().default(''),
 })
 
-const parsed = schema.safeParse(process.env)
+// Production must talk to the real (remote) database endpoint. localhost URLs
+// are the SSH-tunnel entrance used from dev machines outside the VPC — booting
+// prod against one means the tunnel config leaked into a deployment.
+const isLocalDbUrl = (url: string) => /@(localhost|127\.0\.0\.1)[:/]/.test(url)
+
+const guarded = schema.superRefine((cfg, ctx) => {
+  if (cfg.NODE_ENV !== 'production') return
+  for (const key of ['DATABASE_URL', 'DIRECT_URL'] as const) {
+    if (isLocalDbUrl(cfg[key])) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [key],
+        message: 'points at localhost (SSH tunnel) — production must use the remote RDS endpoint',
+      })
+    }
+  }
+})
+
+const parsed = guarded.safeParse(process.env)
 
 if (!parsed.success) {
   console.error('❌  Invalid environment variables:\n', parsed.error.flatten().fieldErrors)

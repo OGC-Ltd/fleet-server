@@ -1,52 +1,84 @@
-import { createClient } from '@supabase/supabase-js'
+import bcrypt from 'bcryptjs'
+import jwt from 'jsonwebtoken'
 import { env } from '../../config/env.js'
 import { UnauthorizedError } from '../../core/errors/errors.js'
 import { prisma } from '../../lib/prisma.js'
 import type { LoginDto, RefreshDto } from './auth.schema.js'
 
-const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY)
+// Self-contained auth: credentials live in users.password_hash (bcrypt) and
+// tokens are HS256 JWTs signed with JWT_SECRET. Response shape is unchanged
+// from the old Supabase-backed implementation, so no client changes.
+const ACCESS_TTL_S = 60 * 60 // 1 hour
+const REFRESH_TTL_S = 30 * 24 * 60 * 60 // 30 days
+
+export interface TokenPayload {
+  sub: string // user id
+  email: string
+  typ: 'access' | 'refresh'
+}
+
+const issueTokens = (user: { id: string; email: string }) => ({
+  accessToken: jwt.sign(
+    { sub: user.id, email: user.email, typ: 'access' } satisfies TokenPayload,
+    env.JWT_SECRET,
+    { expiresIn: ACCESS_TTL_S },
+  ),
+  refreshToken: jwt.sign(
+    { sub: user.id, email: user.email, typ: 'refresh' } satisfies TokenPayload,
+    env.JWT_SECRET,
+    { expiresIn: REFRESH_TTL_S },
+  ),
+  expiresIn: ACCESS_TTL_S,
+})
+
+const userSelect = {
+  id: true,
+  organisationId: true,
+  email: true,
+  fullName: true,
+  status: true,
+} as const
 
 export async function login(dto: LoginDto) {
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email: dto.email,
-    password: dto.password,
-  })
-
-  if (error || !data.session) throw new UnauthorizedError(error?.message ?? 'Invalid credentials')
-
-  // Resolve the user record in our DB so the client has their internal ID
   const user = await prisma.user.findFirst({
     where: { email: dto.email, deletedAt: null },
-    select: { id: true, organisationId: true, email: true, fullName: true, status: true },
+    select: { ...userSelect, passwordHash: true },
   })
 
-  if (!user) throw new UnauthorizedError('No fleet account associated with this email')
+  // One generic message for unknown email / no password set / wrong password —
+  // a distinct "no such account" reply would let callers enumerate emails.
+  if (!user?.passwordHash) throw new UnauthorizedError('Invalid credentials')
+  const valid = await bcrypt.compare(dto.password, user.passwordHash)
+  if (!valid) throw new UnauthorizedError('Invalid credentials')
+
   if (user.status !== 'ACTIVE') throw new UnauthorizedError(`Account ${user.status.toLowerCase()}`)
 
-  return {
-    accessToken: data.session.access_token,
-    refreshToken: data.session.refresh_token,
-    expiresIn: data.session.expires_in,
-    user,
-  }
+  const { passwordHash: _ph, ...safeUser } = user
+  return { ...issueTokens(user), user: safeUser }
 }
 
 export async function refresh(dto: RefreshDto) {
-  const { data, error } = await supabase.auth.refreshSession({ refresh_token: dto.refreshToken })
-
-  if (error || !data.session) throw new UnauthorizedError(error?.message ?? 'Invalid refresh token')
-
-  return {
-    accessToken: data.session.access_token,
-    refreshToken: data.session.refresh_token,
-    expiresIn: data.session.expires_in,
+  let payload: TokenPayload
+  try {
+    payload = jwt.verify(dto.refreshToken, env.JWT_SECRET) as TokenPayload
+  } catch {
+    throw new UnauthorizedError('Invalid refresh token')
   }
+  if (payload.typ !== 'refresh') throw new UnauthorizedError('Invalid refresh token')
+
+  // Re-check the account on every refresh so a suspended/terminated/deleted
+  // user is locked out within one access-token lifetime.
+  const user = await prisma.user.findFirst({
+    where: { id: payload.sub, deletedAt: null },
+    select: userSelect,
+  })
+  if (!user) throw new UnauthorizedError('Invalid refresh token')
+  if (user.status !== 'ACTIVE') throw new UnauthorizedError(`Account ${user.status.toLowerCase()}`)
+
+  return issueTokens(user)
 }
 
-export async function logout(accessToken: string) {
-  // Sign out the specific session represented by this token
-  const client = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
-    global: { headers: { Authorization: `Bearer ${accessToken}` } },
-  })
-  await client.auth.signOut()
+export async function logout(_accessToken: string) {
+  // Stateless JWTs — nothing to invalidate server-side. The client discards
+  // its tokens; the access token ages out within ACCESS_TTL_S.
 }
