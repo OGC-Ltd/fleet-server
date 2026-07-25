@@ -1,6 +1,4 @@
 import { prisma } from '../../lib/prisma.js'
-import { Prisma } from '../../../generated/prisma/client.js'
-import { getSimFleetVehicleIds } from '../../lib/sim-fleet.js'
 
 /** All silos for an org, grouped by sugar type then name (powers the storage KPI). */
 export async function findSilos(orgId: string) {
@@ -37,11 +35,8 @@ export interface FleetRow {
  * pooled connection) instead of scanning the whole telemetry table.
  */
 export async function findLatestPerVehicle(orgId: string): Promise<FleetRow[]> {
-  // Scope to the live-simulation fleet (20 vehicles) and to NEW-CODE telemetry
-  // (raw carries _sim.leg), so the KPIs reflect this server's simulation and
-  // ignore any competing writer on the shared DB.
-  const simFleetIds = await getSimFleetVehicleIds()
-  if (simFleetIds.length === 0) return []
+  // The live fleet is every ACTIVE vehicle in the org (Controltech registry
+  // via sync:vehicles) — vehicles without telemetry yet read as engine-off.
   return prisma.$queryRaw<FleetRow[]>`
     SELECT
       v.id                         AS "vehicleId",
@@ -62,7 +57,7 @@ export async function findLatestPerVehicle(orgId: string): Promise<FleetRow[]> {
       SELECT tt.lat, tt.lng, tt.speed_kmh, tt.engine_on, tt.fuel_level_ml, tt.cargo_weight_kg, tt.captured_at
       FROM vehicle_telemetries tt
       JOIN vehicle_telemetry_raws rr ON rr.telemetry_id = tt.id
-      WHERE tt.vehicle_id = v.id AND rr.payload->'_sim'->'leg' IS NOT NULL
+      WHERE tt.vehicle_id = v.id
       ORDER BY tt.captured_at DESC
       LIMIT 1
     ) t ON true
@@ -73,7 +68,7 @@ export async function findLatestPerVehicle(orgId: string): Promise<FleetRow[]> {
       WHERE va.vehicle_id = v.id AND va.unassigned_at IS NULL
       LIMIT 1
     ) drv ON true
-    WHERE v.organisation_id = ${orgId} AND v.id IN (${Prisma.join(simFleetIds)})
+    WHERE v.organisation_id = ${orgId} AND v.is_active = true
     ORDER BY v.name
   `
 }

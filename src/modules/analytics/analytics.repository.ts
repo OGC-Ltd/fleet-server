@@ -297,14 +297,12 @@ export interface DriversOverview {
  * source behind /analytics/drivers, /analytics/drivers/:id and the
  * /analytics/drivers/overview endpoint the Drivers page consumes.
  *
- * The roster is the ACTIVE DRIVING WORKFORCE: users currently assigned to a
- * live-fleet vehicle — the same assignment join the fleet snapshot uses, so
- * the Drivers page and the Maintenance vehicle grid always show the same
- * people. Falls back to role-holders if the org has no assignments. Lifetime
- * aggregates (trips, tonnes, mileage, theft/overspeed cases) come from real
- * Trip + CargoManifest + FuelTheft + VehicleAlert rows; each driver's detail
- * covers a trailing `days` window anchored to that driver's latest trip (the
- * sim clock runs ahead of wall-clock time), mirroring deliveriesAnalytics.
+ * The roster is the org's DRIVER REGISTRY — every user holding a driver role,
+ * synced from the Controltech EA API by sync:drivers. Lifetime aggregates
+ * (trips, tonnes, mileage, theft/overspeed cases) come from real Trip +
+ * CargoManifest + FuelTheft + VehicleAlert rows, so a driver with no recorded
+ * activity yet reports honest zeroes; each driver's detail covers a trailing
+ * `days` window anchored to that driver's latest trip.
  *
  * The DB round trip is the expensive part (remote pooler), so everything is
  * fetched in 3 parallel queries after the roster lookup and aggregated in JS
@@ -312,40 +310,23 @@ export interface DriversOverview {
  * never wait on the database.
  */
 export async function driversOverview(orgId: string, days: number): Promise<DriversOverview> {
-  // Mirror findFleetSnapshot's assignment join EXACTLY (take 1 active
-  // assignment per vehicle) so the roster is precisely the set of names the
-  // vehicle grid displays — vehicles with extra active relief assignments
-  // would otherwise add drivers the grid never shows.
+  // The roster is the org's DRIVER REGISTRY (synced from Controltech EA by
+  // sync:drivers), not just whoever happens to be out on a dispatch right now
+  // — a driver between dispatches is still on the workforce. Employment
+  // standing rides along on `status`, which the grid badges.
   const userSelect = {
     id: true, fullName: true, status: true, driverRatingScore: true,
     licenceNumber: true, employeeId: true,
   } as const
-  const simFleetIds = await getSimFleetVehicleIds()
-  const fleet = await prisma.vehicle.findMany({
-    where: { organisationId: orgId, id: { in: simFleetIds } },
-    select: {
-      assignments: {
-        where: { unassignedAt: null },
-        select: { user: { select: userSelect } },
-        take: 1,
-      },
+  const drivers = await prisma.user.findMany({
+    where: {
+      organisationId: orgId,
+      deletedAt: null,
+      userRoles: { some: { revokedAt: null, role: { slug: { in: DRIVER_ROLE_SLUGS } } } },
     },
-    orderBy: { name: 'asc' },
+    select:  userSelect,
+    orderBy: { fullName: 'asc' },
   })
-  // One row per driver even if they crew several vehicles.
-  const byId = new Map(fleet.flatMap(v => v.assignments).map(a => [a.user.id, a.user]))
-  let drivers = [...byId.values()]
-
-  if (drivers.length === 0) {
-    drivers = await prisma.user.findMany({
-      where: {
-        organisationId: orgId,
-        deletedAt: null,
-        userRoles: { some: { revokedAt: null, role: { slug: { in: DRIVER_ROLE_SLUGS } } } },
-      },
-      select: userSelect,
-    })
-  }
   const driverIds = drivers.map(d => d.id)
 
   // Everything both the roster and the per-driver details need, in one round

@@ -31,6 +31,13 @@ const schema = z.object({
   // Lets two deployments split the sim fleet org-wise over one shared DB.
   SIM_ORGS: z.string().optional(),
 
+  // Controltech EA — the live vehicle/telemetry provider (factorysuite).
+  // There is no on-prem GPS hardware: vehicles and their live data are
+  // provisioned entirely by this API. Used by sync:vehicles and the live
+  // telemetry adapter.
+  CONTROLTECH_API_URL: z.string().optional().default('https://factorysuite.org/api/external/v1'),
+  CONTROLTECH_API_KEY: z.string().optional().default(''),
+
   // Fleet AI Insight (dashboard/ai-insight.ts). Unset key = the endpoint
   // reports { configured: false } and clients fall back to the local summary.
   OPENAI_API_KEY: z.string().optional(),
