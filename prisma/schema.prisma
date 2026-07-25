@@ -93,6 +93,7 @@ model Organisation {
   pushSubscriptions PushSubscription[]
   alerts            VehicleAlert[]
   silos             Silo[]
+  providerAlerts    ProviderAlert[]
 
   @@map("organisations")
 }
@@ -314,6 +315,7 @@ model Vehicle {
   geofences          VehicleGeofence[]
   geofenceViolations GeofenceViolation[]
   alerts             VehicleAlert[]
+  providerAlerts     ProviderAlert[]
 
   @@index([organisationId])
   @@index([vehicleGroupId])
@@ -898,4 +900,38 @@ model SimulationMeta {
   simClockMs BigInt?  @map("sim_clock_ms")   // simulated-time epoch ms (6× real; paused across downtime)
 
   @@map("simulation_meta")
+}
+
+/// Operational alert raised by the Controltech EA platform (dispatch/driver
+/// governance: overdue tractors, driver swaps, blocked drivers, HOTO
+/// discrepancies). Distinct from VehicleAlert, which is derived from OUR
+/// telemetry flags and requires a vehicle: a provider alert is delivered
+/// pre-composed, may concern people rather than a vehicle, and is keyed by the
+/// provider's own id so a webhook redelivery is idempotent.
+model ProviderAlert {
+  id             String    @id @default(cuid())
+  /// Controltech alert UUID — dedupe key for webhook retries + backfill.
+  externalId     String    @unique @map("external_id")
+  organisationId String    @map("organisation_id")
+  /// Vehicle named in the alert, when its plate resolves to our registry.
+  vehicleId      String?   @map("vehicle_id")
+  type           String    // TRACTOR_OVERDUE, DRIVER_BLOCKED, …
+  severity       String    // info | warning | critical — mapped from `type`
+  message        String
+  /// Provider-side id of the related record (dispatch, driver, …).
+  relatedId      String?   @map("related_id")
+  plate          String?   // plate parsed out of the message, if any
+  acknowledged   Boolean   @default(false)
+  createdAt      DateTime  @map("created_at")     // provider's timestamp
+  receivedAt     DateTime  @default(now()) @map("received_at")
+  /// 'webhook' when pushed to us, 'backfill' when pulled by sync:alerts.
+  source         String    @default("webhook")
+  raw            Json?
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  vehicle      Vehicle?     @relation(fields: [vehicleId], references: [id])
+
+  @@index([organisationId, createdAt])
+  @@index([vehicleId, createdAt])
+  @@map("provider_alerts")
 }

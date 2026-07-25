@@ -33,6 +33,7 @@
     "seed:admins": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/seed-admins.ts",
     "sync:vehicles": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-vehicles.ts",
     "sync:drivers": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-drivers.ts",
+    "sync:alerts": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-alerts.ts",
     "seed:silos": "tsx prisma/seed-silos.ts"
   },
   "devDependencies": {
