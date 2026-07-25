@@ -12,6 +12,7 @@ import { stopPushDispatcher }       from './lib/push-dispatcher.js'
 import { startCacheWarmer } from './lib/warm-cache.js'
 import { warmRoadRoutes } from './lib/road-routes.js'
 import { startAiInsightWarmer } from './modules/dashboard/ai-insight.js'
+import { seedFeedFromStoredAlerts } from './modules/webhooks/controltech-alerts.service.js'
 import { staticRoutePairs } from './providers/controltech/controltech.simulator.js'
 
 async function main() {
@@ -38,6 +39,11 @@ async function main() {
   // Hourly AI operations brief per org (dashboard/ai-insight.ts) — generated
   // in the background so the endpoint always answers from memory.
   const stopAiInsightWarmer = startAiInsightWarmer()
+  // The live-feed buffer is in-memory, so a restart would blank the Operations
+  // feed even though the alerts are stored. Replay the most recent ones so the
+  // panel is populated for the first client that connects.
+  void seedFeedFromStoredAlerts().catch((err) =>
+    logger.warn({ err }, 'Could not seed the live feed from stored alerts'))
   // API-only mode (POLL_ENABLED=false): serve reads off the DB without running
   // the sim — see config/env.ts.
   const poller = env.POLL_ENABLED
