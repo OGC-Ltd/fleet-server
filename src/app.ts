@@ -16,6 +16,7 @@ import tripRoutes from './modules/trips/trip.routes.js'
 import fuelRoutes from './modules/fuel/fuel.routes.js'
 import reportRoutes from './modules/reports/report.routes.js'
 import ingestRoutes from './modules/ingest/ingest.routes.js'
+import webhookRoutes from './modules/webhooks/webhooks.routes.js'
 import telemetryRoutes from './modules/telemetry/telemetry.routes.js'
 import routeRoutes from './modules/routes/route.routes.js'
 import geofenceRoutes from './modules/geofences/geofence.routes.js'
@@ -46,7 +47,13 @@ export function createApp() {
   app.use(helmet())
   app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }))
   app.use(compression())
-  app.use(express.json({ limit: '1mb' }))
+  // Keep the raw bytes alongside the parsed body: webhook HMAC signatures are
+  // computed over exactly what was sent, and re-serialising the parsed object
+  // would change key order/whitespace and invalidate the signature.
+  app.use(express.json({
+    limit: '1mb',
+    verify: (req, _res, buf) => { (req as { rawBody?: Buffer }).rawBody = buf },
+  }))
   app.use(express.urlencoded({ extended: true }))
 
   app.use(globalLimiter)
@@ -124,6 +131,13 @@ export function createApp() {
   const orgBase = `${v1}/organisations/:orgId`
 
   app.use(`${v1}/ingest`, ingestRoutes)
+
+  // Provider callbacks (Controltech EA alerts) — push replaces polling.
+  // Deliberately mounted at the ROOT, not under /api/v1: the URL registered
+  // with Controltech is http://<host>/webhook/rai (nginx proxies /webhook/ to
+  // this process). Authenticated by HMAC signature or shared secret; see
+  // middleware/webhookAuth.
+  app.use('/webhook', webhookRoutes)
 
   app.use(`${orgBase}/users`, userRoutes)
   app.use(`${orgBase}/roles`, roleRoutes)
