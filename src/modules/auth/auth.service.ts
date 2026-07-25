@@ -17,19 +17,26 @@ export interface TokenPayload {
   typ: 'access' | 'refresh'
 }
 
-const issueTokens = (user: { id: string; email: string }) => ({
-  accessToken: jwt.sign(
-    { sub: user.id, email: user.email, typ: 'access' } satisfies TokenPayload,
-    env.JWT_SECRET,
-    { expiresIn: ACCESS_TTL_S },
-  ),
-  refreshToken: jwt.sign(
-    { sub: user.id, email: user.email, typ: 'refresh' } satisfies TokenPayload,
-    env.JWT_SECRET,
-    { expiresIn: REFRESH_TTL_S },
-  ),
-  expiresIn: ACCESS_TTL_S,
-})
+// Accounts synced from the Controltech driver registry carry no email (the
+// provider holds none) and therefore cannot hold a session — the token subject
+// is the email, and login only ever matches a non-null one.
+const issueTokens = (user: { id: string; email: string | null }) => {
+  if (!user.email) throw new UnauthorizedError('Account cannot sign in')
+  const email = user.email
+  return {
+    accessToken: jwt.sign(
+      { sub: user.id, email, typ: 'access' } satisfies TokenPayload,
+      env.JWT_SECRET,
+      { expiresIn: ACCESS_TTL_S },
+    ),
+    refreshToken: jwt.sign(
+      { sub: user.id, email, typ: 'refresh' } satisfies TokenPayload,
+      env.JWT_SECRET,
+      { expiresIn: REFRESH_TTL_S },
+    ),
+    expiresIn: ACCESS_TTL_S,
+  }
+}
 
 const userSelect = {
   id: true,

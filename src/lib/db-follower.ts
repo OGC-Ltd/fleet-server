@@ -21,7 +21,6 @@
 import { prisma } from './prisma.js'
 import { Prisma } from '../../generated/prisma/client.js'
 import { logger } from './logger.js'
-import { getSimFleetVehicleIds } from './sim-fleet.js'
 import { emitDashboardPosition } from './sse.js'
 import { deriveFeedEvents } from './feed-events.js'
 import type { DashboardPositionPayload } from './workers/telemetry.worker.js'
@@ -42,9 +41,8 @@ let metaLoadedAt = 0
 
 async function getMeta(): Promise<Map<string, VehicleMeta>> {
   if (Date.now() - metaLoadedAt < META_TTL_MS && metaCache.size > 0) return metaCache
-  const simFleetIds = await getSimFleetVehicleIds()
   const rows = await prisma.vehicle.findMany({
-    where: { id: { in: simFleetIds } },
+    where: { isActive: true },
     select: {
       id: true,
       organisationId: true,
@@ -110,6 +108,8 @@ async function runOneCycle(): Promise<void> {
           t.vehicle_id, t.device_id, t.captured_at,
           t.lat, t.lng, t.heading_deg, t.speed_kmh, t.engine_on,
           t.fuel_level_ml, t.cargo_weight_kg,
+          -- _sim.* are legacy simulator extras; live Controltech pings
+          -- return NULL here and the dashboard degrades gracefully.
           r.payload->'_sim'->'leg'        AS leg,
           r.payload->'_sim'->>'cargoDesc' AS cargo_desc,
           r.payload->'_sim'->>'phase'     AS phase,
@@ -120,7 +120,6 @@ async function runOneCycle(): Promise<void> {
         FROM vehicle_telemetries t
         JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
         WHERE t.vehicle_id = v.id
-          AND r.payload->'_sim'->'leg' IS NOT NULL
         ORDER BY t.captured_at DESC
         LIMIT 1
       ) p

@@ -148,10 +148,21 @@ model User {
   id             String     @id @default(cuid())
   organisationId String     @map("organisation_id")
   fullName       String     @map("full_name")
-  email          String     @unique
+  // NULL for people synced from the Controltech EA driver registry — the
+  // provider holds no email addresses and drivers don't log in. Postgres
+  // permits many NULLs under a unique index, so logins stay unaffected.
+  email          String?    @unique
   phone          String?
   licenceNumber  String?    @map("licence_number")
   employeeId     String?    @map("employee_id")
+  // Controltech EA driver UUID — the stable upsert key for sync:drivers.
+  externalId     String?    @unique @map("external_id")
+  // Provider's DUTY state (ON_DUTY / OFF_DUTY / TERMINATED) — distinct from
+  // `status`, which is employment standing in our own RBAC model.
+  dutyStatus     String?    @map("duty_status")
+  // Provider's driver class (TRACTOR / TRUCK / COMPANY_VEHICLE) — the vehicle
+  // type this driver is licensed to operate.
+  driverType     String?    @map("driver_type")
   status         UserStatus @default(ACTIVE)
   // bcrypt hash for local auth (scripts/set-password.ts sets it).
   // NULL = account cannot log in (all pre-2026-07 accounts start this way —
@@ -267,8 +278,20 @@ model Vehicle {
   vehicleGroupId     String   @map("vehicle_group_id")
   name               String
   registrationPlate  String   @unique @map("registration_plate")
-  deviceId           String   @unique @map("device_id") // GPS/FLS hardware identifier — ingest key
-  vehicleType        String   @map("vehicle_type")      // BUS, AMBULANCE, TRACTOR, WINCH, etc.
+  // Telemetry ingest key. There is no on-prem GPS hardware — vehicles are
+  // provisioned by the Controltech EA API and polled per-vehicle, so this
+  // holds the provider's vehicle UUID (same value as externalId).
+  deviceId           String   @unique @map("device_id")
+  // Controltech EA vehicle UUID — the stable upsert key for sync:vehicles.
+  externalId         String?  @unique @map("external_id")
+  vehicleType        String   @map("vehicle_type")      // TRACTOR, TRUCK, COMPANY_VEHICLE, …
+  // Registry status as reported by the provider (AVAILABLE / DISPATCHED /
+  // DECOMMISSIONED). Operational status (moving, idling, …) comes from
+  // telemetry, not this column.
+  status             String?
+  // False when the provider decommissions or drops the vehicle — kept as a row
+  // for history (trips/alerts FK it) but excluded from the live fleet.
+  isActive           Boolean  @default(true) @map("is_active")
   fuelEfficiencyKmpl Float?   @map("fuel_efficiency_kmpl")
   tankCapacityLitres Float?   @map("tank_capacity_litres")
   createdAt          DateTime @default(now()) @map("created_at")

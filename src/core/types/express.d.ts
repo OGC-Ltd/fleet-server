@@ -7,7 +7,8 @@ declare global {
       user?: {
         id: string
         organisationId: string
-        email: string
+        /** NULL for provider-synced drivers, who never sign in. */
+        email: string | null
         fullName: string
         status: UserStatus
       }

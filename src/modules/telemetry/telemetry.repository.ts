@@ -1,7 +1,6 @@
 import { prisma } from '../../lib/prisma.js'
 import { Prisma } from '../../../generated/prisma/client.js'
 import { ALERT_SOURCE } from '../../lib/alerts.js'
-import { getSimFleetVehicleIds } from '../../lib/sim-fleet.js'
 import type { TelemetryListQuery } from './telemetry.schema.js'
 
 export async function findPings(vehicleId: string, orgId: string, q: TelemetryListQuery) {
@@ -47,10 +46,11 @@ export async function findLatest(vehicleId: string, orgId: string) {
 
 /** Latest telemetry snapshot for every vehicle in an org — powers the initial map render. */
 export async function findFleetSnapshot(orgId: string) {
-  // Scope the map to the live-simulation fleet (org-aware — see lib/sim-fleet).
-  const simFleetIds = await getSimFleetVehicleIds()
+  // The live fleet is every ACTIVE vehicle in the org — the registry synced
+  // from the Controltech EA API (sync:vehicles). Vehicles the provider has
+  // decommissioned/dropped stay in the DB for history but leave the fleet.
   const vehicles = await prisma.vehicle.findMany({
-    where: { organisationId: orgId, id: { in: simFleetIds } },
+    where: { organisationId: orgId, isActive: true },
     select: {
       id: true,
       name: true,
@@ -69,17 +69,11 @@ export async function findFleetSnapshot(orgId: string) {
   const vehicleIds = vehicles.map(v => v.id)
   if (vehicleIds.length === 0) return []
 
-  // Latest NEW-CODE ping per vehicle in ONE query. Filtering to pings whose raw
-  // payload carries `_sim.leg` means the snapshot ignores any competing writer's
-  // old-format telemetry on the shared DB — the dashboard reflects only this
-  // server's simulation (correct positions + journey legs).
-  //
-  // LATERAL per vehicle (not DISTINCT ON over the whole table): each vehicle
-  // walks its (vehicle_id, captured_at) index newest-first and stops at the
-  // first new-code ping — normally the very first row, since this server
-  // writes `_sim.leg` on every ping it persists. The old DISTINCT ON form
-  // joined + JSON-filtered every telemetry row ever recorded and took ~40s
-  // on the remote pooler, growing with table size.
+  // Latest ping per vehicle in ONE query. LATERAL per vehicle (not DISTINCT ON
+  // over the whole table): each vehicle walks its (vehicle_id, captured_at)
+  // index newest-first and stops at the first row. The `_sim.*` extractions
+  // below are legacy simulator extras — live Controltech pings simply return
+  // NULL for them and the clients degrade gracefully (no journey leg/phase).
   interface PingRow {
     vehicle_id: string
     lat: number | null; lng: number | null; heading_deg: number | null
@@ -112,7 +106,6 @@ export async function findFleetSnapshot(orgId: string) {
       FROM vehicle_telemetries t
       JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
       WHERE t.vehicle_id = v.id
-        AND r.payload->'_sim'->'leg' IS NOT NULL
       ORDER BY t.captured_at DESC
       LIMIT 1
     ) p
@@ -122,11 +115,14 @@ export async function findFleetSnapshot(orgId: string) {
   return vehicles.map((v) => {
       const ping            = pingByVehicle.get(v.id)
       const fuelLevelMl     = ping?.fuel_level_ml ?? null
-      const tankCapacityMl  = (v.tankCapacityLitres ?? 200) * 1000
-      const lowFuel         = fuelLevelMl != null && fuelLevelMl < tankCapacityMl * 0.20
-      const fuelLevelPct    = fuelLevelMl != null
+      // Tank capacity comes from the provider's registry. When it hasn't been
+      // provisioned we report NO percentage rather than inventing one against
+      // an assumed tank — clients render "—".
+      const tankCapacityMl  = v.tankCapacityLitres != null ? v.tankCapacityLitres * 1000 : null
+      const fuelLevelPct    = fuelLevelMl != null && tankCapacityMl != null
         ? Math.round((fuelLevelMl / tankCapacityMl) * 100)
         : null
+      const lowFuel         = fuelLevelPct != null && fuelLevelPct < 20
       const maintenance = ping?.maintenance as
         { nextServiceOdoKm: number; inMaintenance: boolean; maintenanceEndsAtMs: number | null; resetOdoKm: number; garageLat: number | null; garageLng: number | null } | null | undefined
 
