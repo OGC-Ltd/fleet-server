@@ -36,12 +36,6 @@ export interface OrgFleetComposition {
 // filter selects nothing and the org's fleet silently vanishes from the sim.
 export const SIM_FLEET_COMPOSITION: OrgFleetComposition[] = [
   { orgCode: 'SUKARI',   types: [['LORRY & TRAILER', 15], ['CANTER', 10], ['PICKUP', 5]] },
-  { orgCode: 'AQUAMIST', types: [['LORRY & TRAILER', 5],  ['PICKUP', 3],  ['CANTER', 2]] },
-  // Direct-delivery orgs added 2026-07 — see DIRECT_PROFILES in
-  // controltech.simulator.ts for each org's HQ / customers / products.
-  { orgCode: 'MENENGAI', types: [['CANTER', 6],  ['LORRY & TRAILER', 5],  ['PICKUP', 4]] },                // 15 — edible oils, Nakuru
-  { orgCode: 'TIMSALES', types: [['LORRY & TRAILER', 10], ['CANTER', 6],  ['PICKUP', 4]] },                // 20 — timber, Elburgon
-  { orgCode: 'KABRAS',   types: [['TRUCK', 7], ['CANTER', 6], ['LORRY & TRAILER', 5], ['PICKUP', 4], ['LORRY', 3]] }, // 25 — sugar, Malava
 ]
 
 export const SIM_FLEET_SIZE = SIM_FLEET_COMPOSITION

@@ -25,14 +25,6 @@ const LOCATIONS_BY_ORG: Record<string, Loc[]> = {
     { name: 'Eldoret',   lat:  0.5143, lng: 35.2698 },
     { name: 'Mombasa',   lat: -4.0435, lng: 39.6682 },
   ],
-  // Aquamist has no depots — weather covers the plant + the four customer cities.
-  AQUAMIST: [
-    { name: 'Aquamist Plant', lat: -1.2060044099698617, lng: 36.65702647381419 },
-    { name: 'Nairobi',        lat: -1.2921, lng: 36.8219 },
-    { name: 'Kisumu',         lat: -0.0917, lng: 34.7679 },
-    { name: 'Nakuru',         lat: -0.3031, lng: 36.0800 },
-    { name: 'Mombasa',        lat: -4.0435, lng: 39.6682 },
-  ],
 }
 const DEFAULT_ORG_CODE = 'SUKARI'
 
