@@ -151,6 +151,33 @@ export async function ingestAlerts(
   return result
 }
 
+/**
+ * Seed the live feed from alerts already in the database.
+ *
+ * The feed buffer is in-memory, so a restart empties it and the panel goes
+ * blank even though hundreds of real alerts are stored. This replays the most
+ * recent ones (oldest → newest, so clients that prepend end up newest-first)
+ * into the buffer at startup. Nothing is broadcast to a client that already
+ * has them: replayDashboardFeed serves the buffer on connect.
+ *
+ * Called once at boot — see src/index.ts.
+ */
+export async function seedFeedFromStoredAlerts(limit = 40): Promise<number> {
+  const rows = await prisma.providerAlert.findMany({
+    orderBy: { createdAt: 'desc' },
+    take:    limit,
+    select:  {
+      id: true, organisationId: true, type: true, severity: true,
+      message: true, plate: true, vehicleId: true, createdAt: true,
+    },
+  })
+  // Oldest first so the buffer's order matches live arrival order. No banner:
+  // these are history being restored, not incidents happening now.
+  for (const row of rows.reverse()) publishToFeed(row.organisationId, row, { banner: false })
+  logger.info({ seeded: rows.length }, 'Live feed seeded from stored provider alerts')
+  return rows.length
+}
+
 interface FeedRow {
   id:        string
   type:      string
@@ -168,7 +195,7 @@ const clockFmt = new Intl.DateTimeFormat('en-GB', {
   timeZone: FLEET_TZ, hour: '2-digit', minute: '2-digit', hour12: false,
 })
 
-function publishToFeed(orgId: string, row: FeedRow): void {
+function publishToFeed(orgId: string, row: FeedRow, { banner = true } = {}): void {
   const ms = row.createdAt.getTime()
   emitDashboardFeed(orgId, {
     id:        `pa-${row.id}`,
@@ -183,7 +210,7 @@ function publishToFeed(orgId: string, row: FeedRow): void {
   })
 
   // Critical alerts also raise a banner/toast on the dashboard.
-  if (row.severity === 'critical') {
+  if (banner && row.severity === 'critical') {
     emitDashboardAlert(orgId, {
       alertType:   row.type,
       severity:    'CRITICAL',
