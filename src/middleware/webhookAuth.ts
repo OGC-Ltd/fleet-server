@@ -63,5 +63,31 @@ export const webhookAuth: RequestHandler = (req, _res, next) => {
   const provided = req.headers['x-webhook-secret']
   if (typeof provided === 'string' && safeEqual(secret, provided)) return next()
 
+  logRejection(req, secret)
   return next(new UnauthorizedError('Missing or invalid webhook credentials'))
+}
+
+/**
+ * Diagnostic for a rejected delivery: which auth-ish headers the caller sent
+ * and what we would have accepted. Values are truncated — enough to identify
+ * the scheme (hex vs base64 HMAC, bearer token, custom header name) without
+ * writing a credential to the log.
+ */
+function logRejection(req: { headers: Record<string, unknown>; rawBody?: Buffer }, secret: string): void {
+  const raw  = req.rawBody ?? Buffer.alloc(0)
+  const clip = (v: unknown) => {
+    const s = String(v ?? '')
+    return s.length <= 12 ? s : `${s.slice(0, 8)}…(${s.length})`
+  }
+  const authish = Object.entries(req.headers)
+    .filter(([k]) => /signature|auth|secret|hmac|token|api[-_]?key|sign/i.test(k))
+    .map(([k, v]) => `${k}=${clip(v)}`)
+
+  logger.warn({
+    headerNames: Object.keys(req.headers),
+    authHeaders: authish.length > 0 ? authish : '(none)',
+    bodyBytes:   raw.length,
+    expectedHex:    clip(createHmac('sha256', secret).update(raw).digest('hex')),
+    expectedBase64: clip(createHmac('sha256', secret).update(raw).digest('base64')),
+  }, 'Webhook delivery REJECTED — no accepted credential matched')
 }
