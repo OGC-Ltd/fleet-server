@@ -39,29 +39,83 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB)
 }
 
+// Headers a sender may carry an HMAC signature in. The provider's exact
+// convention isn't documented, so accept the common ones rather than forcing
+// a contract negotiation before any alert can land.
+const SIGNATURE_HEADERS = [
+  'x-signature',
+  'x-hub-signature-256',
+  'x-webhook-signature',
+  'x-factory-signature',
+  'x-factorysuite-signature',
+  'x-rai-signature',
+  'x-signature-256',
+] as const
+
+// Headers a sender may carry the shared secret VERBATIM in.
+const SECRET_HEADERS = [
+  'x-webhook-secret',
+  'x-factory-suite-hook',
+  'x-factorysuite-hook',
+  'x-hook-secret',
+  'x-api-key',
+  'x-webhook-token',
+] as const
+
+const header = (req: { headers: Record<string, unknown> }, name: string): string | null => {
+  const v = req.headers[name]
+  return typeof v === 'string' && v.length > 0 ? v : null
+}
+
+/** Strip a `sha256=` / `hmac-sha256=` style prefix and normalise. */
+function normaliseSignature(sig: string): string {
+  const s = sig.trim()
+  const eq = s.indexOf('=')
+  return (eq > 0 && eq < 16 ? s.slice(eq + 1) : s).trim()
+}
+
 export const webhookAuth: RequestHandler = (req, _res, next) => {
-  const secret = env.CONTROLTECH_WEBHOOK_SECRET
+  // FACTORY_SUITE_HOOK is the provider's name for it; the older variable is
+  // still honoured so an un-migrated deployment keeps working.
+  const secret = env.FACTORY_SUITE_HOOK || env.CONTROLTECH_WEBHOOK_SECRET
   if (!secret) {
     // Fail closed: an unset secret must never mean "allow anyone to inject
     // alerts into the operations feed".
-    logger.error('CONTROLTECH_WEBHOOK_SECRET is not set — rejecting webhook delivery')
+    logger.error('FACTORY_SUITE_HOOK is not set — rejecting webhook delivery')
     return next(new UnauthorizedError('Webhook receiver is not configured'))
   }
 
-  const signature = req.headers['x-signature'] ?? req.headers['x-hub-signature-256']
-  if (typeof signature === 'string' && signature.length > 0) {
-    const raw = (req as { rawBody?: Buffer }).rawBody
-    if (!raw) return next(new UnauthorizedError('Raw body unavailable for signature check'))
-    const expected = createHmac('sha256', secret).update(raw).digest('hex')
-    const received = signature.startsWith('sha256=') ? signature.slice(7) : signature
-    if (!safeEqual(expected, received.trim().toLowerCase())) {
-      return next(new UnauthorizedError('Invalid webhook signature'))
+  // 1. HMAC over the raw body, in hex or base64, under any known header.
+  const raw = (req as { rawBody?: Buffer }).rawBody ?? Buffer.alloc(0)
+  const expectedHex    = createHmac('sha256', secret).update(raw).digest('hex')
+  const expectedBase64 = createHmac('sha256', secret).update(raw).digest('base64')
+
+  for (const name of SIGNATURE_HEADERS) {
+    const sig = header(req, name)
+    if (!sig) continue
+    const received = normaliseSignature(sig)
+    if (safeEqual(expectedHex, received.toLowerCase()) || safeEqual(expectedBase64, received)) {
+      return next()
     }
-    return next()
+    // A present-but-wrong signature is a hard failure: don't fall through to
+    // the weaker shared-secret path, or a bad signature could be bypassed by
+    // also sending the secret in the clear.
+    logRejection(req, secret)
+    return next(new UnauthorizedError('Invalid webhook signature'))
   }
 
-  const provided = req.headers['x-webhook-secret']
-  if (typeof provided === 'string' && safeEqual(secret, provided)) return next()
+  // 2. The shared secret sent verbatim, under any known header.
+  for (const name of SECRET_HEADERS) {
+    const provided = header(req, name)
+    if (provided && safeEqual(secret, provided.trim())) return next()
+  }
+
+  // 3. Authorization: Bearer <secret> (or the bare secret).
+  const auth = header(req, 'authorization')
+  if (auth) {
+    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : auth.trim()
+    if (safeEqual(secret, token)) return next()
+  }
 
   logRejection(req, secret)
   return next(new UnauthorizedError('Missing or invalid webhook credentials'))

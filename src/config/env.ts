@@ -38,11 +38,12 @@ const schema = z.object({
   CONTROLTECH_API_URL: z.string().optional().default('https://factorysuite.org/api/external/v1'),
   CONTROLTECH_API_KEY: z.string().optional().default(''),
 
-  // Shared secret for the inbound alert webhook (POST /api/v1/webhooks/
-  // controltech/alerts). The provider either signs the raw body with it
-  // (X-Signature: sha256=<hex>) or sends it as X-Webhook-Secret. UNSET =
+  // Shared signing secret for the inbound alert webhook (POST /webhook/rai).
+  // FACTORY_SUITE_HOOK is the canonical name (it is what the provider calls
+  // it); CONTROLTECH_WEBHOOK_SECRET is accepted as a legacy alias. UNSET =
   // the receiver rejects every delivery, so alerts can't be spoofed into the
   // operations feed.
+  FACTORY_SUITE_HOOK:         z.string().optional().default(''),
   CONTROLTECH_WEBHOOK_SECRET: z.string().optional().default(''),
 
   // Fleet AI Insight (dashboard/ai-insight.ts). Unset key = the endpoint
