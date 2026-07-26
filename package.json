@@ -35,6 +35,7 @@
     "sync:drivers": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-drivers.ts",
     "sync:wialon": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-wialon.ts",
     "sync:geofences": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-geofences.ts",
+    "geofence:assign": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/geofence-assign.ts",
     "sync:alerts": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-alerts.ts",
     "seed:silos": "tsx prisma/seed-silos.ts"
   },
