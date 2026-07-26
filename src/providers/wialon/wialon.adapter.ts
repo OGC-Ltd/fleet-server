@@ -149,6 +149,10 @@ export class WialonLiveAdapter implements TelemetryProvider {
  */
 function toFrame(unitId: number, unitName: string, p: WialonPosition | null | undefined): VehicleTelemetryFrame | null {
   if (!p || !Number.isFinite(p.y) || !Number.isFinite(p.x)) return null
+  // A frame without a usable timestamp is unwritable (capturedAt is part of
+  // the telemetry key) — reject it here rather than at the database.
+  const capturedAt = new Date((p.t ?? NaN) * 1000)
+  if (Number.isNaN(capturedAt.getTime())) return null
 
   const speedKmh = p.s ?? null
 
@@ -156,7 +160,7 @@ function toFrame(unitId: number, unitName: string, p: WialonPosition | null | un
     deviceId:   wialonDeviceId(unitId),
     // `pos.t` is unix SECONDS, and it is the moment the DEVICE reported —
     // never "now". A nine-day-old fix must stay nine days old.
-    capturedAt: new Date(p.t * 1000),
+    capturedAt,
 
     lat:        p.y,
     lng:        p.x,

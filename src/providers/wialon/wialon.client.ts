@@ -177,9 +177,16 @@ export class WialonClient {
     const out: Array<{ unitId: number; pos: WialonPosition }> = []
     for (const e of res.events ?? []) {
       const pos = e.d?.pos
-      if (pos && Number.isFinite(pos.y) && Number.isFinite(pos.x)) {
-        out.push({ unitId: e.i, pos })
-      }
+      if (!pos || !Number.isFinite(pos.y) || !Number.isFinite(pos.x)) continue
+
+      // Unlike search_items, an avl_evts position often omits `t`. The
+      // response's top-level `tm` is when Wialon registered the batch, so it
+      // stands in — without it every delta produced an Invalid Date and was
+      // rejected at the database.
+      const t = Number.isFinite(pos.t) ? pos.t : res.tm
+      if (!Number.isFinite(t)) continue     // no defensible timestamp — drop it
+
+      out.push({ unitId: e.i, pos: { ...pos, t: t as number } })
     }
     return out
   }
