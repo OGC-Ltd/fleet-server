@@ -19,6 +19,7 @@
  */
 
 import { logger } from '../../lib/logger.js'
+import type { WialonSensor } from './wialon.sensors.js'
 
 const DEFAULT_BASE = 'https://hst-api.wialon.com'
 
@@ -58,6 +59,10 @@ export interface WialonUnit {
   hw?:  string | number           // hardware type
   pos?: WialonPosition | null     // LAST KNOWN position; may be weeks old
   flds?: Record<string, { n: string; v: string }>
+  /** Configured sensors (fuel probes, ignition, voltages) — see wialon.sensors. */
+  sens?: Record<string, WialonSensor>
+  /** Last message; `p` holds the raw parameter values the sensors read. */
+  lmsg?: { t?: number; p?: Record<string, unknown> } | null
 }
 
 export class WialonClient {
@@ -122,9 +127,12 @@ export class WialonClient {
   }
 
   /**
-   * Every unit the account can see, with its last known position.
+   * Every unit the account can see, with its last known position, its
+   * configured sensors, and the last message's raw parameters.
    *
-   * flags: 1 base | 8 custom fields | 0x400 last position.
+   * flags: 1 base | 8 custom fields | 0x400 last position + last message
+   *        | 0x1000 sensors. The sensors and `lmsg.p` are what make a fuel
+   *        reading possible — see wialon.sensors.
    */
   async listUnits(): Promise<WialonUnit[]> {
     const res = await this.call<{ items?: WialonUnit[]; totalItemsCount?: number }>(
@@ -132,7 +140,7 @@ export class WialonClient {
       {
         spec: { itemsType: 'avl_unit', propName: 'sys_name', propValueMask: '*', sortType: 'sys_name' },
         force: 1,
-        flags: 1 | 8 | 0x400,
+        flags: 1 | 8 | 0x400 | 0x1000,
         from: 0,
         to: 0xFFFFFFFF,
       },

@@ -28,6 +28,7 @@ import pg from 'pg'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { PrismaClient } from '../generated/prisma/client.js'
 import { WialonClient, positionToTelemetry, type WialonUnit } from '../src/providers/wialon/wialon.client.js'
+import { tankCapacityOf } from '../src/providers/wialon/wialon.sensors.js'
 
 const pool    = new pg.Pool({ connectionString: process.env.DIRECT_URL })
 const adapter = new PrismaPg(pool)
@@ -78,7 +79,7 @@ async function main() {
   })
 
   let created = 0, updated = 0, failed = 0
-  let pings = 0, noPosition = 0, stale = 0
+  let pings = 0, noPosition = 0, stale = 0, withTank = 0
   const seen: string[] = []
   const now = Date.now()
 
@@ -94,7 +95,13 @@ async function main() {
       vehicleType:       VEHICLE_TYPE,
       status:            u.pos ? 'TRACKING' : 'NO_SIGNAL',
       isActive:          true,
+      // Tank size is not a Wialon field — the operator writes it into the fuel
+      // sensor's NAME, e.g. "Main Tank Fuel Level Qty (450L)". It is the only
+      // source available, and without it no fuel PERCENTAGE can be computed.
+      tankCapacityLitres: tankCapacityOf(u.sens),
     }
+
+    if (data.tankCapacityLitres != null) withTank++
 
     let vehicleId: string
     try {
@@ -161,6 +168,7 @@ async function main() {
 
   console.log(`\n  ✓ vehicles: created ${created}, updated ${updated}, failed ${failed}`)
   console.log(`  ✓ positions: ${pings} new pings written, ${noPosition} units have never reported`)
+  console.log(`  ✓ tank capacity resolved from the fuel sensor name for ${withTank} units`)
   if (stale > 0) console.log(`    · ${stale} of those fixes are over 30 days old — they will show on the map as long-stale`)
   if (gone.count > 0) console.log(`  ✓ deactivated ${gone.count} units no longer in Wialon`)
 

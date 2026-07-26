@@ -32,6 +32,7 @@ import { logger } from '../../lib/logger.js'
 import { env } from '../../config/env.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../telemetry-provider.js'
 import { WialonClient, type WialonPosition } from './wialon.client.js'
+import { readFuel } from './wialon.sensors.js'
 
 /** Mirrors sync-wialon.ts — the device key a Wialon unit is registered under. */
 export const wialonDeviceId = (unitId: number): string => `wialon:${unitId}`
@@ -46,6 +47,19 @@ export class WialonLiveAdapter implements TelemetryProvider {
 
   /** unitId → name, for the raw payload. Refreshed on each full reconcile. */
   private unitNames = new Map<number, string>()
+
+  /**
+   * unitId → last calibrated fuel reading, in millilitres.
+   *
+   * Fuel comes from the unit's sensors and the last message's raw parameters,
+   * which only the full `search_items` sweep returns — an `avl_evts` delta
+   * carries position alone. Since the fleet snapshot reads the NEWEST
+   * telemetry row, emitting null on every delta would blank the fuel gauge two
+   * seconds after each reconcile refreshed it. The last known reading is
+   * therefore carried forward, which is ordinary last-known-value telemetry
+   * semantics: it is a real measurement, at most one reconcile interval old.
+   */
+  private lastFuelMl = new Map<number, number>()
 
   /**
    * A full `search_items` sweep runs on init and then periodically, so a unit
@@ -92,6 +106,11 @@ export class WialonLiveAdapter implements TelemetryProvider {
 
     for (const u of units) {
       this.unitNames.set(u.id, u.nm)
+
+      // Calibrated fuel from the probe's own table — see wialon.sensors.
+      const fuel = readFuel(u.sens, u.lmsg?.p)
+      if (fuel) this.lastFuelMl.set(u.id, Math.round(fuel.litres * 1000))
+
       if (!u.pos) { neverReported++; continue }
 
       const seen = this.lastFixAt.get(u.id)
@@ -100,7 +119,7 @@ export class WialonLiveAdapter implements TelemetryProvider {
       if (seen != null && u.pos.t <= seen) { unchanged++; continue }
       this.lastFixAt.set(u.id, u.pos.t)
 
-      const frame = toFrame(u.id, u.nm, u.pos)
+      const frame = toFrame(u.id, u.nm, u.pos, this.lastFuelMl.get(u.id) ?? null)
       if (frame) frames.push(frame)
     }
 
@@ -126,7 +145,7 @@ export class WialonLiveAdapter implements TelemetryProvider {
       if (seen != null && pos.t <= seen) { unchanged++; continue }
       this.lastFixAt.set(unitId, pos.t)
 
-      const frame = toFrame(unitId, this.unitNames.get(unitId) ?? String(unitId), pos)
+      const frame = toFrame(unitId, this.unitNames.get(unitId) ?? String(unitId), pos, this.lastFuelMl.get(unitId) ?? null)
       if (frame) frames.push(frame)
     }
 
@@ -147,7 +166,12 @@ export class WialonLiveAdapter implements TelemetryProvider {
  * battery, engine temperature and oil are NOT in the position payload, so they
  * stay null rather than being invented — the dashboard renders "—" for them.
  */
-function toFrame(unitId: number, unitName: string, p: WialonPosition | null | undefined): VehicleTelemetryFrame | null {
+function toFrame(
+  unitId: number,
+  unitName: string,
+  p: WialonPosition | null | undefined,
+  fuelLevelMl: number | null,
+): VehicleTelemetryFrame | null {
   if (!p || !Number.isFinite(p.y) || !Number.isFinite(p.x)) return null
   // A frame without a usable timestamp is unwritable (capturedAt is part of
   // the telemetry key) — reject it here rather than at the database.
@@ -175,7 +199,9 @@ function toFrame(unitId: number, unitName: string, p: WialonPosition | null | un
     // idling analytics.
     engineOn:   (speedKmh ?? 0) > 0,
 
-    fuelLevelMl:        null,
+    // Calibrated probe reading; null when the unit has no fuel sensor or no
+    // calibration table — never a raw ADC value.
+    fuelLevelMl,
     fuelUsedMl:         null,
     cargoWeightKg:      null,
     batteryVoltageV:    null,
