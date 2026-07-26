@@ -46,7 +46,8 @@ export interface ControltechAlert {
   message:      string
   relatedId?:   string | null
   acknowledged?: boolean | null
-  createdAt:    string
+  /** NULL on webhook deliveries — only the REST backfill populates it. */
+  createdAt?:   string | null
 }
 
 // Kenyan plate formats seen in the fleet: KBU 123A, KTCB 814H, KHMA 603F.
@@ -103,7 +104,9 @@ export async function ingestAlerts(
 
     const plate     = extractPlate(a.message)
     const severity  = severityOf(a.type)
-    const createdAt = new Date(a.createdAt)
+    // Live webhook alerts carry no timestamp — they ARE happening now, so the
+    // receive time is the honest stand-in.
+    const createdAt = a.createdAt ? new Date(a.createdAt) : new Date()
 
     const vehicle = plate
       ? await prisma.vehicle.findFirst({
