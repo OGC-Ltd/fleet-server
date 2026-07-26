@@ -113,13 +113,16 @@ async function evaluateGeofences(
   speedKmh: number | null,
 ) {
   const fences = await prisma.vehicleGeofence.findMany({
-    where: { vehicleId },
+    // Only ENFORCED fences are evaluated. Definitions imported from the
+    // provider land inactive, so syncing zones can never silently start
+    // raising violations across the fleet.
+    where: { vehicleId, geofence: { isActive: true } },
     include: {
       geofence: {
         select: {
           id: true, type: true, mode: true,
           centerLat: true, centerLng: true, radiusM: true, polygonCoords: true,
-          organisationId: true,
+          widthM: true, organisationId: true,
         },
       },
     },
@@ -133,6 +136,10 @@ async function evaluateGeofences(
     if (fence.type === 'CIRCLE') {
       if (fence.centerLat == null || fence.centerLng == null || fence.radiusM == null) continue
       geometry = { type: 'CIRCLE', centerLat: fence.centerLat, centerLng: fence.centerLng, radiusM: fence.radiusM }
+    } else if (fence.type === 'LINE') {
+      // Corridor — polygonCoords holds the centre-line, widthM its width.
+      if (!fence.polygonCoords || fence.widthM == null) continue
+      geometry = { type: 'LINE', pathCoords: fence.polygonCoords as [number, number][], widthM: fence.widthM }
     } else {
       if (!fence.polygonCoords) continue
       geometry = { type: 'POLYGON', polygonCoords: fence.polygonCoords as [number, number][] }
