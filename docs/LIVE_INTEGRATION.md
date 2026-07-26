@@ -414,10 +414,26 @@ pm2 logs fleet-server --lines 200 --nostream | grep "do not map yet"
 1. ~~Registry sync (vehicles, drivers, assignments)~~ — done
 2. ~~Alert + dispatch + movement webhook~~ — done
 3. ~~EAT timestamp handling~~ — done
-4. **Wialon adapter + `sync:wialon-units`** → live positions on the map for Kasulu
+4. ~~Wialon registry (`npm run sync:wialon`) + live poller~~ — **done, running**
 5. **Trip segmentation worker** → unlocks Analytics, Drivers, reports, maintenance
-6. Wialon notifications → richer event feed
+6. Wialon notifications → speeding/geofence events into the feed
 7. Retranslator → own the raw stream before scaling
 
-Steps 1–3 are in production. Step 4 is what makes the map live; step 5 is what
-makes the analytics real.
+Steps 1–4 are in production: Kasulu's 224 units are registered, 205 carry
+positions, and the poller refreshes them every 30 s (~17 moving units per
+cycle, ~0.5 s). Step 5 is what makes the analytics real — everything on the
+Analytics, Drivers and Maintenance pages still reads honest zeroes until
+`trips` populate.
+
+**Poller facts worth knowing**
+
+* `POLL_ENABLED=true` is set on the REMOTE box only. Exactly one deployment
+  may poll the shared database.
+* `startPoller()` takes a REQUIRED provider — it used to default to the mock
+  simulator, which would now overwrite real fleet data.
+* Only fixes whose `pos.t` advanced are emitted. Without that guard the poller
+  would write ~224 duplicate rows every 30 s and make dormant vehicles look
+  like they were reporting continuously.
+* No alert flags are raised from Wialon telemetry — the position payload has
+  no speed limits, fuel or door channels, so raising them would be fabricated.
+  Wialon Notifications (step 6) is the correct source.
