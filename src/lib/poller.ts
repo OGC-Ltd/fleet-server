@@ -14,6 +14,7 @@
  *   Change the `provider` argument to `startPoller`.  Nothing else changes.
  */
 
+import { env }                   from '../config/env.js'
 import { logger }                from './logger.js'
 import { prisma }                from './prisma.js'
 import { processTelemetry }      from '../modules/ingest/ingest.service.js'
@@ -23,7 +24,8 @@ import type { SimEvents }        from './simulation.persistence.js'
 import { emitDashboardNotice }   from './sse.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
 
-const POLL_INTERVAL_MS = 30_000   // 30 seconds
+// Configurable via POLL_INTERVAL_MS — see config/env.ts.
+const POLL_INTERVAL_MS = env.POLL_INTERVAL_MS
 
 // Minimum gap before the SAME vehicle+alert is allowed to notify again. The
 // rising-edge map already suppresses a continuously-active flag; this stops a
