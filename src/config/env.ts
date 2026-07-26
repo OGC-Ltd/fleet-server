@@ -38,6 +38,11 @@ const schema = z.object({
   CONTROLTECH_API_URL: z.string().optional().default('https://factorysuite.org/api/external/v1'),
   CONTROLTECH_API_KEY: z.string().optional().default(''),
 
+  // Wialon Hosting — the GPS/telemetry provider for KASULU (Tanzania).
+  // Sukari's data comes from Controltech instead; the two do not overlap.
+  WIALON_API_URL: z.string().optional().default('https://hst-api.wialon.com'),
+  WIALON_TOKEN:   z.string().optional().default(''),
+
   // Shared signing secret for the inbound alert webhook (POST /webhook/rai).
   // FACTORY_SUITE_HOOK is the canonical name (it is what the provider calls
   // it); CONTROLTECH_WEBHOOK_SECRET is accepted as a legacy alias. UNSET =
