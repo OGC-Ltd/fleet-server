@@ -261,13 +261,58 @@ KASULU. Write a `sync:wialon-units` script mirroring `sync:vehicles`.
 Do **not** try to fuzzy-match plates across providers. If a vehicle ever needs
 to exist in both, add an explicit mapping column rather than guessing.
 
-### 5.5 Notifications as a second webhook (optional, later)
+### 5.5 Notifications — receiver READY, blocked on ACL
 
-Wialon notifications with the *Send a request* action POST to a URL with
-`%TAGS%` substituted. Point them at the **existing** `/webhook/rai` — it is
-already authenticated, idempotent and feeds the Live Feed. Add a payload branch
-in `webhooks.controller.ts`. This is hours of work, not a project, and gives
-speeding / geofence / ignition events without inferring them.
+Wialon computes speeding, geofence entry/exit, idling and sensor rules against
+each unit's own calibrated limits. Its *Send a request* action can POST those
+to `/webhook/rai`, and **our receiving half is built, deployed and verified**
+(`wialon-notifications.service.ts`).
+
+**We cannot switch it on.** The API token has view + driver rights only:
+`resource/get_notification_data` → `error 7`, and the notifications ACL bit
+(`0x100000`) is not set on the resource. ControlTech must either grant that
+right on the service account, or create the rules themselves.
+
+Ask them to configure each rule's action as:
+
+```
+Action:  Send a request
+Method:  POST
+URL:     http://32.198.44.105/webhook/rai
+Headers: Content-Type: application/json
+         X-Webhook-Secret: <FACTORY_SUITE_HOOK value>
+Body:
+{
+  "notification": "%NOTIFICATION%",
+  "unit":         "%UNIT%",
+  "unitId":       "%UNIT_ID%",
+  "time":         "%CURR_TIME%",
+  "lat":          "%LAT%",
+  "lng":          "%LON%",
+  "speed":        "%SPEED%",
+  "zone":         "%ZONE%",
+  "driver":       "%DRIVER%",
+  "location":     "%LOCATION%"
+}
+```
+
+Every field is optional — a template may omit any of them and the delivery is
+still accepted. Only `notification` is required, and it is also the marker the
+receiver uses to tell a Wialon notification from a Controltech event.
+
+Behaviour worth knowing:
+
+* **Wialon does NOT retry a failed request** (unlike Controltech, which retries
+  then drops). A rejected delivery is gone, so parsing is deliberately
+  permissive.
+* Notifications carry **no stable id**, so one is synthesised from rule name +
+  unit + trigger minute — a duplicate POST for the same trigger is idempotent,
+  while the same rule can fire again later.
+* Wialon sends **no severity**, so it is inferred from the rule NAME:
+  sos/panic/crash/theft → critical; enter/exit/ignition/start/stop → info;
+  anything else → warning. Name rules descriptively.
+* The vehicle is matched on `%UNIT_ID%` where present, otherwise on `%UNIT%`
+  against the registration plate (which for Kasulu IS the Wialon unit name).
 
 ### 5.6 Retranslator — do this before scaling past a pilot
 
