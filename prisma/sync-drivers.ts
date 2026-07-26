@@ -32,6 +32,7 @@ import pg from 'pg'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { PrismaClient } from '../generated/prisma/client.js'
 import type { Prisma, UserStatus } from '../generated/prisma/client.js'
+import { parseProviderTime } from '../src/lib/provider-time.js'
 
 const pool    = new pg.Pool({ connectionString: process.env.DIRECT_URL })
 const adapter = new PrismaPg(pool)
@@ -205,9 +206,10 @@ async function main() {
     const vehicleId = vehicleIdByPlate.get(norm(dp.vehicleNumberPlate))
     if (!vehicleId) { unmatchedVehicle++; continue }
 
-    const assignedAt = dp.dispatchTime ? new Date(dp.dispatchTime) : null
+    // Offsetless EAT timestamps — see src/lib/provider-time.ts.
+    const assignedAt = parseProviderTime(dp.dispatchTime)
     if (!assignedAt || Number.isNaN(assignedAt.getTime())) continue
-    const returnedAt = dp.actualReturnTime ? new Date(dp.actualReturnTime) : null
+    const returnedAt = parseProviderTime(dp.actualReturnTime)
     const isOpen = returnedAt == null && dp.status !== 'COMPLETED'
 
     // One assignment row per dispatch, keyed by the dispatch id in `notes` so

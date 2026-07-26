@@ -25,6 +25,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { emitDashboardFeed, emitDashboardAlert } from '../../lib/sse.js'
+import { parseProviderTimeOr } from '../../lib/provider-time.js'
 
 /** Provider factoryCode → our organisation code (mirrors the sync scripts). */
 const FACTORY_TO_ORG: Record<string, string> = {
@@ -105,8 +106,9 @@ export async function ingestAlerts(
     const plate     = extractPlate(a.message)
     const severity  = severityOf(a.type)
     // Live webhook alerts carry no timestamp — they ARE happening now, so the
-    // receive time is the honest stand-in.
-    const createdAt = a.createdAt ? new Date(a.createdAt) : new Date()
+    // receive time is the honest stand-in. Backfilled ones carry an offsetless
+    // EAT stamp (see lib/provider-time).
+    const createdAt = parseProviderTimeOr(a.createdAt)
 
     const vehicle = plate
       ? await prisma.vehicle.findFirst({
@@ -124,7 +126,7 @@ export async function ingestAlerts(
       relatedId:    a.relatedId ?? null,
       plate,
       acknowledged: a.acknowledged ?? false,
-      createdAt:    Number.isNaN(createdAt.getTime()) ? new Date() : createdAt,
+      createdAt,
       source,
       raw:          a as unknown as object,
     }
@@ -135,11 +137,12 @@ export async function ingestAlerts(
     })
 
     if (existing) {
-      // A redelivery may carry an updated acknowledged flag; nothing else about
-      // a provider alert changes. Never re-emit — the feed already has it.
+      // A redelivery may carry an updated acknowledged flag. `createdAt` is
+      // rewritten too so a re-sync repairs rows stored before the EAT parsing
+      // fix. Never re-emit — the feed already has it.
       await prisma.providerAlert.update({
         where: { externalId: a.id },
-        data:  { acknowledged: data.acknowledged },
+        data:  { acknowledged: data.acknowledged, createdAt: data.createdAt },
       })
       result.updated++
       continue
