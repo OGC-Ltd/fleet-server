@@ -45,6 +45,7 @@ enum FuelEventType {
 enum GeofenceType {
   CIRCLE  // defined by centerLat + centerLng + radiusM
   POLYGON // defined by polygonCoords (GeoJSON ring)
+  LINE    // corridor: polygonCoords is the centre-line, widthM its width
 }
 
 /// Controls whether the fence is an allowed zone or a forbidden zone.
@@ -428,14 +429,21 @@ model Geofence {
   id             String     @id @default(cuid())
   organisationId String     @map("organisation_id")
   name           String                          // "Nairobi CBD Delivery Zone"
-  type           GeofenceType                    // CIRCLE | POLYGON
+  type           GeofenceType                    // CIRCLE | POLYGON | LINE
   mode           FenceMode  @default(ALLOWLIST) @map("mode") // ALLOWLIST | BLOCKLIST
+  /// Provider's own zone id (e.g. "wialon:zone:14") — upsert key for syncs.
+  externalId     String?    @unique @map("external_id")
   // Circle geometry
   centerLat      Float?     @map("center_lat")
   centerLng      Float?     @map("center_lng")
   radiusM        Int?       @map("radius_m")
-  // Polygon geometry — GeoJSON LinearRing [[lng,lat],...] stored as Json
+  // Polygon geometry — GeoJSON LinearRing [[lng,lat],...] stored as Json.
+  // Also holds a LINE fence's centre-line path, same [[lng,lat],…] ordering.
   polygonCoords  Json?      @map("polygon_coords")
+  /// LINE (corridor) only: full width in metres. A vehicle is inside when it
+  /// is within widthM/2 of the centre-line — how Wialon models haulage roads,
+  /// drains and rivers.
+  widthM         Float?     @map("width_m")
   isActive       Boolean    @default(true) @map("is_active")
   createdAt      DateTime   @default(now()) @map("created_at")
   updatedAt      DateTime   @updatedAt @map("updated_at")
