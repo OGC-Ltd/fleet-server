@@ -21,7 +21,6 @@ import { eventBus }              from './event-bus.js'
 import type { AlertType }        from './event-bus.js'
 import type { SimEvents }        from './simulation.persistence.js'
 import { emitDashboardNotice }   from './sse.js'
-import { ControltechMockAdapter } from '../providers/controltech/controltech.adapter.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
 
 const POLL_INTERVAL_MS = 30_000   // 30 seconds
@@ -385,7 +384,13 @@ export interface PollerHandle {
   flush: () => Promise<void>
 }
 
-export function startPoller(provider: TelemetryProvider = new ControltechMockAdapter()): PollerHandle {
+/**
+ * The provider is REQUIRED. It used to default to the mock Controltech
+ * simulator, which is now retired — with the production database live, a
+ * defaulted `startPoller()` would have quietly resumed writing simulated
+ * positions over real fleet data. Callers must name the provider they mean.
+ */
+export function startPoller(provider: TelemetryProvider): PollerHandle {
   logger.info({ provider: provider.name, intervalMs: POLL_INTERVAL_MS }, 'Telemetry poller starting')
 
   void runOnePollCycle(provider)
