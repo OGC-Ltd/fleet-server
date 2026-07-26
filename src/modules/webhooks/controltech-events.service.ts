@@ -18,6 +18,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { emitDashboardFeed } from '../../lib/sse.js'
+import { parseProviderTime, parseProviderTimeOr } from '../../lib/provider-time.js'
 
 /** Provider factoryCode → our organisation code (mirrors the sync scripts). */
 const FACTORY_TO_ORG: Record<string, string> = { NDHIWA: 'SUKARI' }
@@ -68,8 +69,8 @@ export async function handleDispatch(d: DispatchEvent): Promise<boolean> {
   const organisationId = await resolveOrgId(d.factoryCode)
   if (!organisationId) return false
 
-  const at = d.dispatchTime ? new Date(d.dispatchTime) : new Date()
-  const when = Number.isNaN(at.getTime()) ? new Date() : at
+  // Provider timestamps are offsetless EAT — see lib/provider-time.
+  const when = parseProviderTimeOr(d.dispatchTime)
 
   const vehicle = await prisma.vehicle.findFirst({
     where: { organisationId, registrationPlate: norm(d.vehicleNumberPlate) },
@@ -88,13 +89,12 @@ export async function handleDispatch(d: DispatchEvent): Promise<boolean> {
   if (vehicle && drivers.length === 1) {
     const marker = `controltech:dispatch:${d.id}`
     const existing = await prisma.vehicleAssignment.findFirst({ where: { notes: marker }, select: { id: true } })
-    const returned = d.actualReturnTime ? new Date(d.actualReturnTime) : null
     const payload = {
       vehicleId:      vehicle.id,
       userId:         drivers[0]!.id,
       assignmentType: 'PRIMARY' as const,
       assignedAt:     when,
-      unassignedAt:   returned && !Number.isNaN(returned.getTime()) ? returned : null,
+      unassignedAt:   parseProviderTime(d.actualReturnTime),
       notes:          marker,
     }
     if (existing) await prisma.vehicleAssignment.update({ where: { id: existing.id }, data: payload })
@@ -120,8 +120,7 @@ export async function handleMovement(m: MovementEvent): Promise<boolean> {
   const organisationId = await resolveOrgId(m.factoryCode)
   if (!organisationId) return false
 
-  const at = m.timestamp ? new Date(m.timestamp) : new Date()
-  const when = Number.isNaN(at.getTime()) ? new Date() : at
+  const when = parseProviderTimeOr(m.timestamp)
 
   const exiting = (m.direction ?? '').toUpperCase() === 'EXIT'
   const who     = m.driverName ? ` · ${m.driverName}` : ''
