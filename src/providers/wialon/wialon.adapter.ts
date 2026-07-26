@@ -4,19 +4,19 @@
  * Plugs into the existing poller unchanged: `startPoller(new WialonLiveAdapter())`.
  * Everything downstream — persistence, SSE, the map — is provider-agnostic.
  *
- * ## Why `core/search_items` and not `avl_evts`
+ * ## Deltas, with a periodic full reconcile
  *
- * `avl_evts` is the event-driven route: subscribe with `core/update_data_flags`,
- * then long-poll every ~2 s for deltas. It is the right end state for a large
- * fleet, but it needs its own ~2 s loop, which does not fit the platform's
- * 30 s poll cycle, and its response contents depend entirely on the subscribed
- * flags — a common source of silent empty payloads.
+ * At a fast cadence (POLL_INTERVAL_MS, 2 s in production) refetching all 224
+ * units every tick would be enormously wasteful, so the normal path is
+ * `avl_evts`: subscribe once via `core/update_data_flags`, then each call
+ * returns only what changed. That loop also keeps the session alive, which
+ * Wialon drops after roughly five minutes idle.
  *
- * At 224 units one `search_items` call per cycle returns every last-known
- * position in a single request, keeps the session warm (the same thing the
- * `avl_evts` loop does), and needs no subscription state to get out of sync.
- * Move to `avl_evts` when unit count or cadence demands it; the frame mapping
- * below is unchanged by that switch.
+ * `avl_evts` returns strictly what the session is subscribed to, so a wrong or
+ * lost subscription shows up as silence rather than an error. To make that
+ * survivable, a full `search_items` sweep still runs every RECONCILE_EVERY_MS:
+ * it re-subscribes, picks up units that never emitted an event, and doubles as
+ * the recovery path after a session lapse.
  *
  * ## Only genuinely new fixes are emitted
  *
@@ -31,7 +31,7 @@
 import { logger } from '../../lib/logger.js'
 import { env } from '../../config/env.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../telemetry-provider.js'
-import { WialonClient, type WialonUnit } from './wialon.client.js'
+import { WialonClient, type WialonPosition } from './wialon.client.js'
 
 /** Mirrors sync-wialon.ts — the device key a Wialon unit is registered under. */
 export const wialonDeviceId = (unitId: number): string => `wialon:${unitId}`
@@ -43,6 +43,18 @@ export class WialonLiveAdapter implements TelemetryProvider {
   /** unitId → last emitted fix time (unix seconds). */
   private readonly lastFixAt = new Map<number, number>()
   private initialised = false
+
+  /** unitId → name, for the raw payload. Refreshed on each full reconcile. */
+  private unitNames = new Map<number, string>()
+
+  /**
+   * A full `search_items` sweep runs on init and then periodically, so a unit
+   * that never emits an event (new device, missed subscription, session
+   * re-established) still gets picked up. Between sweeps `avl_evts` carries
+   * the deltas — the whole point of the fast cadence.
+   */
+  private lastReconcileAt = 0
+  private static readonly RECONCILE_EVERY_MS = 2 * 60_000
 
   constructor(
     token: string = env.WIALON_TOKEN || process.env['access_token'] || '',
@@ -62,29 +74,68 @@ export class WialonLiveAdapter implements TelemetryProvider {
   async fetchAll(): Promise<VehicleTelemetryFrame[]> {
     if (!this.initialised) await this.init()
 
+    const dueReconcile = Date.now() - this.lastReconcileAt >= WialonLiveAdapter.RECONCILE_EVERY_MS
+    return dueReconcile ? this.reconcileAll() : this.pollDeltas()
+  }
+
+  /**
+   * Full sweep: every unit's last-known position, and re-subscribe so
+   * `avl_evts` keeps delivering. Also the recovery path — if the session
+   * lapsed, the client re-authenticates and the subscription is rebuilt here.
+   */
+  private async reconcileAll(): Promise<VehicleTelemetryFrame[]> {
     const units = await this.client.listUnits()
+    this.lastReconcileAt = Date.now()
+
     const frames: VehicleTelemetryFrame[] = []
-    let unchanged = 0
-    let neverReported = 0
+    let unchanged = 0, neverReported = 0
 
     for (const u of units) {
+      this.unitNames.set(u.id, u.nm)
       if (!u.pos) { neverReported++; continue }
 
-      const fixAt = u.pos.t
       const seen = this.lastFixAt.get(u.id)
       // First sight of a unit still emits, so a restart re-seeds the map from
       // the last known position rather than waiting for the device to move.
-      if (seen != null && fixAt <= seen) { unchanged++; continue }
-      this.lastFixAt.set(u.id, fixAt)
+      if (seen != null && u.pos.t <= seen) { unchanged++; continue }
+      this.lastFixAt.set(u.id, u.pos.t)
 
-      const frame = toFrame(u)
+      const frame = toFrame(u.id, u.nm, u.pos)
       if (frame) frames.push(frame)
     }
 
+    // A subscription only lives as long as the session, so renew it here.
+    await this.client.subscribePositions(units.map(u => u.id)).catch(err =>
+      logger.warn({ err }, 'Wialon position subscription failed — deltas may be empty until the next reconcile'))
+
     logger.debug(
-      { provider: this.name, units: units.length, moved: frames.length, unchanged, neverReported },
+      { provider: this.name, mode: 'reconcile', units: units.length, moved: frames.length, unchanged, neverReported },
       'Wialon poll',
     )
+    return frames
+  }
+
+  /** Fast path: only what changed since the last call. */
+  private async pollDeltas(): Promise<VehicleTelemetryFrame[]> {
+    const events = await this.client.pollEvents()
+    const frames: VehicleTelemetryFrame[] = []
+    let unchanged = 0
+
+    for (const { unitId, pos } of events) {
+      const seen = this.lastFixAt.get(unitId)
+      if (seen != null && pos.t <= seen) { unchanged++; continue }
+      this.lastFixAt.set(unitId, pos.t)
+
+      const frame = toFrame(unitId, this.unitNames.get(unitId) ?? String(unitId), pos)
+      if (frame) frames.push(frame)
+    }
+
+    if (frames.length > 0 || unchanged > 0) {
+      logger.debug(
+        { provider: this.name, mode: 'delta', events: events.length, moved: frames.length, unchanged },
+        'Wialon poll',
+      )
+    }
     return frames
   }
 }
@@ -96,14 +147,13 @@ export class WialonLiveAdapter implements TelemetryProvider {
  * battery, engine temperature and oil are NOT in the position payload, so they
  * stay null rather than being invented — the dashboard renders "—" for them.
  */
-function toFrame(u: WialonUnit): VehicleTelemetryFrame | null {
-  const p = u.pos
+function toFrame(unitId: number, unitName: string, p: WialonPosition | null | undefined): VehicleTelemetryFrame | null {
   if (!p || !Number.isFinite(p.y) || !Number.isFinite(p.x)) return null
 
   const speedKmh = p.s ?? null
 
   return {
-    deviceId:   wialonDeviceId(u.id),
+    deviceId:   wialonDeviceId(unitId),
     // `pos.t` is unix SECONDS, and it is the moment the DEVICE reported —
     // never "now". A nine-day-old fix must stay nine days old.
     capturedAt: new Date(p.t * 1000),
@@ -151,6 +201,6 @@ function toFrame(u: WialonUnit): VehicleTelemetryFrame | null {
       lowOil:              false,
     },
 
-    rawPayload: { source: 'wialon', unitId: u.id, name: u.nm, pos: p },
+    rawPayload: { source: 'wialon', unitId, name: unitName, pos: p },
   }
 }

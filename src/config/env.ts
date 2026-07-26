@@ -43,6 +43,13 @@ const schema = z.object({
   WIALON_API_URL: z.string().optional().default('https://hst-api.wialon.com'),
   WIALON_TOKEN:   z.string().optional().default(''),
 
+  // Telemetry poll cadence. Wialon's avl_evts is designed to be called every
+  // couple of seconds — that both delivers updates and keeps the session
+  // alive (it lapses after ~5 min idle). Lower = finer tracks; the adapter
+  // only emits genuinely new fixes, so the write load follows the devices,
+  // not this interval.
+  POLL_INTERVAL_MS: z.coerce.number().optional().default(30_000),
+
   // Shared signing secret for the inbound alert webhook (POST /webhook/rai).
   // FACTORY_SUITE_HOOK is the canonical name (it is what the provider calls
   // it); CONTROLTECH_WEBHOOK_SECRET is accepted as a legacy alias. UNSET =

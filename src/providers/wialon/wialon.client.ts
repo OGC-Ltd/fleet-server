@@ -141,6 +141,71 @@ export class WialonClient {
   }
 
   /**
+   * Subscribe this session to position updates for the given units.
+   *
+   * `avl_evts` returns ONLY what the session is subscribed to — an empty
+   * response almost always means the flags are wrong rather than that nothing
+   * moved. mode 1 = add these units to the current subscription.
+   *
+   * flags 0x400 = last known position, matching what listUnits() requests.
+   */
+  async subscribePositions(unitIds: number[]): Promise<void> {
+    if (unitIds.length === 0) return
+    await this.call('core/update_data_flags', {
+      spec: [{ type: 'col', data: unitIds, flags: 1 | 0x400, mode: 1 }],
+    })
+  }
+
+  /**
+   * Everything that changed since the previous call.
+   *
+   * Also serves as the session keepalive — Wialon drops an idle session after
+   * roughly five minutes, and a steady `avl_evts` loop is the documented way
+   * to hold it open.
+   *
+   * Shape: `{ tm, events: [{ i: unitId, t: 'm'|'u'|'d', d: { pos } }] }`.
+   * Only `u` (unit data changed) carries a position we care about; `m` is a
+   * raw message and `d` a deletion.
+   */
+  async pollEvents(): Promise<Array<{ unitId: number; pos: WialonPosition }>> {
+    // NOTE: avl_evts is its OWN endpoint — /avl_evts?sid=… — not an
+    // ajax.html service. Calling it as `svc=avl_evts` returns error 2
+    // ("invalid service name").
+    const sid = await this.login()
+    const res = await this.fetchEvents(sid)
+
+    const out: Array<{ unitId: number; pos: WialonPosition }> = []
+    for (const e of res.events ?? []) {
+      const pos = e.d?.pos
+      if (pos && Number.isFinite(pos.y) && Number.isFinite(pos.x)) {
+        out.push({ unitId: e.i, pos })
+      }
+    }
+    return out
+  }
+
+  /** GET /avl_evts, re-authenticating once if the session has lapsed. */
+  private async fetchEvents(sid: string, retry = true): Promise<{
+    tm?: number
+    events?: Array<{ i: number; t: string; d?: { pos?: WialonPosition } }>
+    error?: number
+  }> {
+    const res = await fetch(`${this.baseUrl}/avl_evts?sid=${encodeURIComponent(sid)}`)
+    if (!res.ok) throw new Error(`Wialon avl_evts responded HTTP ${res.status}`)
+    const body = await res.json() as { error?: number; events?: unknown }
+
+    if (typeof body.error === 'number' && body.error !== 0) {
+      if (body.error === 1 && retry) {
+        this.sid = null
+        logger.warn('Wialon session expired during avl_evts — re-authenticating')
+        return this.fetchEvents(await this.login(), false)
+      }
+      throw new WialonError(body.error, 'avl_evts')
+    }
+    return body as { tm?: number; events?: Array<{ i: number; t: string; d?: { pos?: WialonPosition } }> }
+  }
+
+  /**
    * Render dates/reports in the fleet's timezone rather than the API default
    * of UTC. Only affects Wialon-side formatting (reports); raw `pos.t` values
    * are always unix seconds and unambiguous.
