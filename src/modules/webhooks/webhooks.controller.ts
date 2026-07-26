@@ -3,10 +3,12 @@ import { logger } from '../../lib/logger.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { ingestAlerts, type ControltechAlert } from './controltech-alerts.service.js'
 import { handleDispatch, handleMovement } from './controltech-events.service.js'
+import { ingestWialonNotifications } from './wialon-notifications.service.js'
 import {
   controltechAlertSchema,
   controltechDispatchSchema,
   controltechMovementSchema,
+  wialonNotificationSchema,
   unwrapEvent,
 } from './webhooks.schema.js'
 
@@ -33,7 +35,17 @@ export async function controltechAlerts(req: Request, res: Response, next: NextF
     let dispatches = 0
     let movements  = 0
 
+    const wialonNotifications: Parameters<typeof ingestWialonNotifications>[0] = []
+
     for (const item of items) {
+      // Wialon's "Send a request" action posts a `notification` field. It has
+      // no event envelope of its own, so the field itself is the marker.
+      const wn = wialonNotificationSchema.safeParse(item)
+      if (wn.success && (kind.startsWith('wialon') || !kind)) {
+        wialonNotifications.push(wn.data)
+        continue
+      }
+
       // Prefer the declared event name; fall back to shape-sniffing so a
       // renamed event still lands somewhere sensible.
       if (kind.startsWith('dispatch')) {
@@ -52,6 +64,9 @@ export async function controltechAlerts(req: Request, res: Response, next: NextF
     }
 
     const result = alerts.length > 0 ? await ingestAlerts(alerts, 'webhook') : null
+    const wialon = wialonNotifications.length > 0
+      ? await ingestWialonNotifications(wialonNotifications)
+      : null
 
     if (unmapped.length > 0) {
       logger.info(
@@ -59,8 +74,11 @@ export async function controltechAlerts(req: Request, res: Response, next: NextF
         'Webhook event received that we do not map yet',
       )
     }
-    if (result || dispatches || movements) {
-      logger.info({ event, dispatches, movements, ...(result ?? {}) }, 'Controltech webhook processed')
+    if (result || dispatches || movements || wialon) {
+      logger.info(
+        { event, dispatches, movements, wialon, ...(result ?? {}) },
+        'Provider webhook processed',
+      )
     }
 
     sendSuccess(res, {
@@ -69,6 +87,7 @@ export async function controltechAlerts(req: Request, res: Response, next: NextF
       alerts:   alerts.length,
       dispatches,
       movements,
+      wialonNotifications: wialon?.created ?? 0,
       ignored:  unmapped.length,
       ...(result ?? {}),
     })
