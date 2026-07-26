@@ -20,7 +20,10 @@ export const webhookEnvelopeSchema = z.union([
   z.array(z.unknown()),
 ])
 
-/** The alert body we can actually map (see controltech-alerts.service). */
+/** The alert body we can actually map (see controltech-alerts.service).
+ *  `createdAt` is NULLABLE: the webhook sends null on live alerts (only the
+ *  REST backfill populates it), so requiring it silently dropped every pushed
+ *  alert. The receive time stands in when it's absent. */
 export const controltechAlertSchema = z.object({
   id:           z.string().min(1),
   factoryCode:  z.string().min(1),
@@ -28,10 +31,37 @@ export const controltechAlertSchema = z.object({
   message:      z.string().min(1),
   relatedId:    z.string().nullish(),
   acknowledged: z.boolean().nullish(),
-  createdAt:    z.string().min(1),
+  createdAt:    z.string().nullish(),
 })
 
 export type ControltechAlertInput = z.infer<typeof controltechAlertSchema>
+
+/** A dispatch record — a unit leaving with a driver. Same shape as the REST
+ *  /dispatches resource, so the two paths normalise identically. */
+export const controltechDispatchSchema = z.object({
+  id:                   z.string().min(1),
+  factoryCode:          z.string().min(1),
+  vehicleNumberPlate:   z.string().min(1),
+  driverName:           z.string().min(1),
+  vehicleType:          z.string().nullish(),
+  destinationOrPurpose: z.string().nullish(),
+  status:               z.string().nullish(),
+  dispatchTime:         z.string().nullish(),
+  expectedReturnTime:   z.string().nullish(),
+  actualReturnTime:     z.string().nullish(),
+})
+
+/** A gate movement — a unit crossing the factory gate. Carries NO coordinates:
+ *  this is a checkpoint crossing, not GPS. */
+export const controltechMovementSchema = z.object({
+  id:                 z.string().min(1),
+  factoryCode:        z.string().min(1),
+  vehicleNumberPlate: z.string().min(1),
+  driverName:         z.string().nullish(),
+  direction:          z.string().nullish(),   // EXIT | ENTRY
+  destination:        z.string().nullish(),
+  timestamp:          z.string().nullish(),
+})
 
 /** Event name → the payload we care about, wherever the sender put it. */
 export function unwrapEvent(body: unknown): { event: string | null; items: unknown[] } {
