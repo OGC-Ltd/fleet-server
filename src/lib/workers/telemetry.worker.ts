@@ -10,6 +10,7 @@ import { eventBus }              from '../event-bus.js'
 import { logger }                from '../logger.js'
 import { emitDashboardPosition } from '../sse.js'
 import { deriveFeedEvents } from '../feed-events.js'
+import { trackZonePresence } from '../zone-presence.js'
 
 export interface DashboardPositionPayload {
   vehicleId:    string
@@ -115,6 +116,15 @@ export function startTelemetryWorker(): () => void {
         },
       }
       emitDashboardPosition(orgId, payload)
+
+      // Zone arrivals/departures against the org's named geofences. This is
+      // the Live Feed's only narrative for a GPS-only provider like Wialon,
+      // whose frames carry no phase to derive from — see zone-presence.
+      void trackZonePresence({
+        orgId, vehicleId, plate, driverName,
+        lat: payload.lat, lng: payload.lng, capturedAt: payload.capturedAt,
+      }).catch(err => logger.warn({ err, vehicleId }, 'Zone presence tracking failed'))
+
       // Human live-feed items (dispatch / arrival / offload / alerts) derived
       // from phase transitions between consecutive frames — see feed-events.
       deriveFeedEvents(orgId, {
