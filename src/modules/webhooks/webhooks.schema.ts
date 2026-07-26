@@ -63,6 +63,31 @@ export const controltechMovementSchema = z.object({
   timestamp:          z.string().nullish(),
 })
 
+/**
+ * A Wialon notification delivered by its "Send a request" action.
+ *
+ * Wialon does not publish a JSON contract — the operator authors the body in
+ * the notification's own template, substituting `%TAGS%` at trigger time. The
+ * shape below is the template documented in docs/LIVE_INTEGRATION.md; every
+ * field is optional because a template can legitimately omit any of them, and
+ * rejecting a delivery would lose the event (Wialon does not retry).
+ */
+export const wialonNotificationSchema = z.object({
+  notification: z.string().min(1),          // %NOTIFICATION% — the rule's name
+  unit:         z.string().nullish(),       // %UNIT%
+  unitId:       z.union([z.string(), z.number()]).nullish(),
+  time:         z.string().nullish(),       // %CURR_TIME% / %MSG_TIME%
+  lat:          z.coerce.number().nullish(), // %LAT%
+  lng:          z.coerce.number().nullish(), // %LON%
+  speed:        z.coerce.number().nullish(), // %SPEED%
+  zone:         z.string().nullish(),        // %ZONE%
+  driver:       z.string().nullish(),        // %DRIVER%
+  location:     z.string().nullish(),        // %LOCATION%
+  text:         z.string().nullish(),        // free-form message
+})
+
+export type WialonNotificationInput = z.infer<typeof wialonNotificationSchema>
+
 /** Event name → the payload we care about, wherever the sender put it. */
 export function unwrapEvent(body: unknown): { event: string | null; items: unknown[] } {
   if (Array.isArray(body)) return { event: null, items: body }
