@@ -139,6 +139,9 @@ export async function findFleetSnapshot(orgId: string) {
         speedKmh:       ping?.speed_kmh    ?? null,
         engineOn:       ping?.engine_on    ?? false,
         fuelLevelMl,
+        // Capacity travels with the snapshot so the card can render the fuel
+        // gauge as "44 / 95 L", not just a bare percentage.
+        tankCapacityLitres: v.tankCapacityLitres ?? null,
         fuelUsedMl:     ping?.fuel_used_ml ?? null,
         cargoWeightKg:  ping?.cargo_weight_kg ?? null,
         cargoDesc:      ping?.cargo_desc ?? null,
