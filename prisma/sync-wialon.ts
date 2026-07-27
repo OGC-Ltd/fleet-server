@@ -29,6 +29,7 @@ import { PrismaPg } from '@prisma/adapter-pg'
 import { PrismaClient } from '../generated/prisma/client.js'
 import { WialonClient, positionToTelemetry, type WialonUnit } from '../src/providers/wialon/wialon.client.js'
 import { tankCapacityOf } from '../src/providers/wialon/wialon.sensors.js'
+import { classifyUnit } from '../src/providers/wialon/wialon.vehicle-type.js'
 
 const pool    = new pg.Pool({ connectionString: process.env.DIRECT_URL })
 const adapter = new PrismaPg(pool)
@@ -51,8 +52,6 @@ const GROUP_NAME = 'TRACKED UNITS'
  */
 const plateOf = (u: WialonUnit): string => u.nm.trim()
 
-/** Wialon does not classify units, so don't pretend to know the body type. */
-const VEHICLE_TYPE = 'UNSPECIFIED'
 
 async function main() {
   if (!TOKEN) throw new Error('WIALON_TOKEN (or access_token) is not set')
@@ -92,7 +91,9 @@ async function main() {
       vehicleGroupId:    group.id,
       name:              u.nm.trim(),
       registrationPlate: plateOf(u),
-      vehicleType:       VEHICLE_TYPE,
+      // Wialon has no body-type field; classified from the operator's declared
+      // TYPE where present, else the equipment code in the unit name.
+      vehicleType:       classifyUnit(u.nm, u.flds),
       status:            u.pos ? 'TRACKING' : 'NO_SIGNAL',
       isActive:          true,
       // Tank size is not a Wialon field — the operator writes it into the fuel
