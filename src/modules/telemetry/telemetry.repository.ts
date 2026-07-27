@@ -81,7 +81,7 @@ export async function findFleetSnapshot(orgId: string) {
     fuel_level_ml: number | null; fuel_used_ml: number | null; cargo_weight_kg: number | null
     cargo_desc: string | null
     captured_at: Date; leg: unknown
-    odometer_km: number | null; maintenance: unknown; phase: string | null
+    odometer_km: number | null; engine_hours: number | null; maintenance: unknown; phase: string | null
     last_moved_at: Date | null
   }
   const pings = await prisma.$queryRaw<PingRow[]>`
@@ -94,6 +94,7 @@ export async function findFleetSnapshot(orgId: string) {
         r.payload->'_sim'->'leg' AS leg,
         r.payload->'_sim'->>'cargoDesc' AS cargo_desc,
         (r.payload->>'odometer_km')::float AS odometer_km,
+        (r.payload->>'engine_hours')::float AS engine_hours,
         r.payload->'_sim'->'maintenance' AS maintenance,
         r.payload->'_sim'->>'phase' AS phase,
         -- Newest ping with actual movement — powers the "stationary for …"
@@ -152,6 +153,7 @@ export async function findFleetSnapshot(orgId: string) {
         fuelLevelPct,
         leg:            ping?.leg ?? null,
         odometerKm:          ping?.odometer_km ?? null,
+        engineHours:         ping?.engine_hours ?? null,
         nextServiceOdoKm:    maintenance?.nextServiceOdoKm ?? null,
         inMaintenance:       maintenance?.inMaintenance ?? false,
         maintenanceEndsAtMs: maintenance?.maintenanceEndsAtMs ?? null,
