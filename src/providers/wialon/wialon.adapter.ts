@@ -68,6 +68,9 @@ export class WialonLiveAdapter implements TelemetryProvider {
    */
   private lastOdometerKm = new Map<number, number>()
 
+  /** unitId → engine-hours counter. Carried forward like fuel and mileage. */
+  private lastEngineHours = new Map<number, number>()
+
   /**
    * A full `search_items` sweep runs on init and then periodically, so a unit
    * that never emits an event (new device, missed subscription, session
@@ -119,6 +122,9 @@ export class WialonLiveAdapter implements TelemetryProvider {
       if (fuel) this.lastFuelMl.set(u.id, Math.round(fuel.litres * 1000))
       // Wialon's own mileage counter — the vehicle's running total.
       if (typeof u.cnm_km === 'number' && u.cnm_km > 0) this.lastOdometerKm.set(u.id, u.cnm_km)
+      // Engine hours matter more than distance for plant and tractors, which
+      // work without travelling far.
+      if (typeof u.cneh === 'number' && u.cneh > 0) this.lastEngineHours.set(u.id, u.cneh)
 
       if (!u.pos) { neverReported++; continue }
 
@@ -128,7 +134,7 @@ export class WialonLiveAdapter implements TelemetryProvider {
       if (seen != null && u.pos.t <= seen) { unchanged++; continue }
       this.lastFixAt.set(u.id, u.pos.t)
 
-      const frame = toFrame(u.id, u.nm, u.pos, this.lastFuelMl.get(u.id) ?? null, this.lastOdometerKm.get(u.id) ?? null)
+      const frame = toFrame(u.id, u.nm, u.pos, this.lastFuelMl.get(u.id) ?? null, this.lastOdometerKm.get(u.id) ?? null, this.lastEngineHours.get(u.id) ?? null)
       if (frame) frames.push(frame)
     }
 
@@ -154,7 +160,7 @@ export class WialonLiveAdapter implements TelemetryProvider {
       if (seen != null && pos.t <= seen) { unchanged++; continue }
       this.lastFixAt.set(unitId, pos.t)
 
-      const frame = toFrame(unitId, this.unitNames.get(unitId) ?? String(unitId), pos, this.lastFuelMl.get(unitId) ?? null, this.lastOdometerKm.get(unitId) ?? null)
+      const frame = toFrame(unitId, this.unitNames.get(unitId) ?? String(unitId), pos, this.lastFuelMl.get(unitId) ?? null, this.lastOdometerKm.get(unitId) ?? null, this.lastEngineHours.get(unitId) ?? null)
       if (frame) frames.push(frame)
     }
 
@@ -181,6 +187,7 @@ function toFrame(
   p: WialonPosition | null | undefined,
   fuelLevelMl: number | null,
   odometerKm: number | null,
+  engineHours: number | null,
 ): VehicleTelemetryFrame | null {
   if (!p || !Number.isFinite(p.y) || !Number.isFinite(p.x)) return null
   // A frame without a usable timestamp is unwritable (capturedAt is part of
@@ -243,6 +250,6 @@ function toFrame(
 
     // odometer_km rides in the raw payload because that is where the fleet
     // snapshot reads it from (telemetry.repository's LATERAL join).
-    rawPayload: { source: 'wialon', unitId, name: unitName, pos: p, odometer_km: odometerKm },
+    rawPayload: { source: 'wialon', unitId, name: unitName, pos: p, odometer_km: odometerKm, engine_hours: engineHours },
   }
 }
