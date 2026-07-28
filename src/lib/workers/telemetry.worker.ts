@@ -11,6 +11,7 @@ import { logger }                from '../logger.js'
 import { emitDashboardPosition } from '../sse.js'
 import { deriveFeedEvents } from '../feed-events.js'
 import { trackZonePresence, assignedZoneStatus } from '../zone-presence.js'
+import { connectionStatus } from '../connection-state.js'
 import { noteMovement, movementState } from '../movement-state.js'
 import type { MovementState } from '../movement-state.js'
 import type { AssignedZoneStatus } from '../zone-presence.js'
@@ -21,6 +22,12 @@ export interface DashboardPositionPayload {
   zones?:       AssignedZoneStatus
   /** Current moving/resting run — see lib/movement-state. */
   movement?:    MovementState | null
+  /**
+   * The PROVIDER's connection verdict for this tracker (Wialon `netconn`), or
+   * null when the poller has no current answer. Distinct from "has reported
+   * recently" — see lib/connection-state.
+   */
+  connectionOnline?: boolean | null
   vehicleId:    string
   vehicleName:  string
   plate:        string
@@ -147,6 +154,12 @@ export function startTelemetryWorker(): () => void {
           noteMovement(vehicleId, frame.speedKmh, frame.capturedAt.getTime(), ignitionKnown ? frame.engineOn : null),
           movementState(vehicleId, null, frame.capturedAt.getTime())
         ),
+        // The provider's connection verdict, carried so a live frame refreshes
+        // it rather than leaving the client on the value from its first paint.
+        // A unit emitting a frame is very nearly always online — the value of
+        // sending it here is that it stays in step with the snapshot's field
+        // instead of the client having two sources for one fact.
+        connectionOnline: connectionStatus(frame.deviceId)?.online ?? null,
       }
       emitDashboardPosition(orgId, payload)
 

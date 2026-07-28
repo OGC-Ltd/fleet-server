@@ -33,6 +33,7 @@ import { env } from '../../config/env.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../telemetry-provider.js'
 import { WialonClient, type WialonPosition } from './wialon.client.js'
 import { readFuel, readIgnition } from './wialon.sensors.js'
+import { noteConnection, connectionCounts } from '../../lib/connection-state.js'
 
 /** Mirrors sync-wialon.ts — the device key a Wialon unit is registered under. */
 export const wialonDeviceId = (unitId: number): string => `wialon:${unitId}`
@@ -127,6 +128,14 @@ export class WialonLiveAdapter implements TelemetryProvider {
     for (const u of units) {
       this.unitNames.set(u.id, u.nm)
 
+      // Wialon's own connection verdict, recorded for EVERY unit — this must
+      // happen before the `!u.pos` and unchanged-fix skips below, because an
+      // offline unit is precisely one that emits no frame, and it is the one
+      // whose connection state we most need. See lib/connection-state.
+      if (typeof u.netconn === 'number') {
+        noteConnection(String(u.id), u.netconn === 1)
+      }
+
       // Calibrated fuel from the probe's own table — see wialon.sensors.
       const fuel = readFuel(u.sens, u.lmsg?.p)
       if (fuel) this.lastFuelMl.set(u.id, Math.round(fuel.litres * 1000))
@@ -157,7 +166,8 @@ export class WialonLiveAdapter implements TelemetryProvider {
       logger.warn({ err }, 'Wialon position subscription failed — deltas may be empty until the next reconcile'))
 
     logger.debug(
-      { provider: this.name, mode: 'reconcile', units: units.length, moved: frames.length, unchanged, neverReported },
+      { provider: this.name, mode: 'reconcile', units: units.length, moved: frames.length, unchanged, neverReported,
+        connection: connectionCounts() },
       'Wialon poll',
     )
     return frames
