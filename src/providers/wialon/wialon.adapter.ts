@@ -132,8 +132,10 @@ export class WialonLiveAdapter implements TelemetryProvider {
       // happen before the `!u.pos` and unchanged-fix skips below, because an
       // offline unit is precisely one that emits no frame, and it is the one
       // whose connection state we most need. See lib/connection-state.
+      // Keyed by the SAME deviceId the Vehicle row carries (`wialon:<id>`),
+      // not the bare unit id — that is what the snapshot looks up.
       if (typeof u.netconn === 'number') {
-        noteConnection(String(u.id), u.netconn === 1)
+        noteConnection(wialonDeviceId(u.id), u.netconn === 1)
       }
 
       // Calibrated fuel from the probe's own table — see wialon.sensors.
