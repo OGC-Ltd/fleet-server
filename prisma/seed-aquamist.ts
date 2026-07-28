@@ -14,7 +14,7 @@
  * bottle volumes, plus juice, delivered from the bottling plant DIRECTLY to
  * customers in Nairobi, Kisumu, Nakuru, and Mombasa (no depots). Live-sim fleet:
  * 10 vehicles — 4 saloon cars, 3 trucks, 3 lorries (see src/lib/sim-fleet.ts and
- * the AQUAMIST routing profile in controltech.simulator.ts).
+ * the AQUAMIST routing profile in raifactorysuite.simulator.ts).
  *
  * Run: npm run seed:aquamist
  */
@@ -51,7 +51,7 @@ const LAST_NAMES = [
   'Ndegwa','Nekesa','Gathua','Simiyu','Njenga','Chebet','Mugambi','Koech',
   'Njeru','Kirui','Kariuki','Sang','Kiema','Rotich','Muthoni','Mutai',
 ]
-const GPS_VENDORS    = ['Queclink','Teltonika','CalAmp','Meitrack','Controltech']
+const GPS_VENDORS    = ['Queclink','Teltonika','CalAmp','Meitrack','RaiFactorySuite']
 const PLATE_SUFFIXES = ['A','B','C','D','E','F','G','H','J','K','L','M','N','P','Q','R','S','T','U','V']
 const RESOURCES = ['vehicle','trip','fuel_theft','fuel_filling','user','route',
                    'geofence','report','ingest_key','assignment','engine_session','cargo']

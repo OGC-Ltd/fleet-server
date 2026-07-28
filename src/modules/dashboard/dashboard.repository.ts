@@ -35,7 +35,7 @@ export interface FleetRow {
  * pooled connection) instead of scanning the whole telemetry table.
  */
 export async function findLatestPerVehicle(orgId: string): Promise<FleetRow[]> {
-  // The live fleet is every ACTIVE vehicle in the org (Controltech registry
+  // The live fleet is every ACTIVE vehicle in the org (RaiFactorySuite registry
   // via sync:vehicles) — vehicles without telemetry yet read as engine-off.
   return prisma.$queryRaw<FleetRow[]>`
     SELECT

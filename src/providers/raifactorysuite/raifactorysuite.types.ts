@@ -1,15 +1,15 @@
 /**
- * Controltech EA raw API wire types.
+ * RaiFactorySuite raw API wire types.
  *
- * These mirror the actual JSON shape returned by the Controltech REST endpoint
+ * These mirror the actual JSON shape returned by the RaiFactorySuite REST endpoint
  * GET /api/v2/devices/snapshot.  When integrating the live service, the
- * ControltechLiveAdapter should decode the HTTP response into these types
+ * RaiFactorySuiteLiveAdapter should decode the HTTP response into these types
  * before passing them to the shared normaliser.
  */
 
 export type CtDoorState = 0 | 1 | 2   // 0 = closed, 1 = open, 2 = ajar
 
-export interface CtDeviceSnapshot {
+export interface RfsDeviceSnapshot {
   imei:            string           // primary device identifier
   device_id:       string           // human-readable alias (maps to our deviceId)
   timestamp_utc:   string           // ISO-8601 capture time
@@ -53,6 +53,6 @@ export interface CtApiResponse {
     organisation_code: string
     poll_time_utc:     string
     device_count:      number
-    devices:           CtDeviceSnapshot[]
+    devices:           RfsDeviceSnapshot[]
   }
 }

@@ -6,7 +6,7 @@
  * we do not hold. Its "Send a request" action POSTs the result to a URL, so
  * those become alerts here without us inferring anything.
  *
- * Delivery is FIRE AND FORGET: unlike Controltech, Wialon does not retry a
+ * Delivery is FIRE AND FORGET: unlike RaiFactorySuite, Wialon does not retry a
  * failed request. A rejected delivery is an event lost forever, so the parsing
  * here is deliberately permissive and anything usable is kept.
  *
@@ -18,7 +18,7 @@
 import { createHash } from 'crypto'
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
-import { emitDashboardFeed, emitDashboardAlert } from '../../lib/sse.js'
+import { eventBus } from '../../lib/event-bus.js'
 import { parseProviderTimeOr } from '../../lib/provider-time.js'
 import { wialonDeviceId } from '../../providers/wialon/wialon.adapter.js'
 import type { WialonNotificationInput } from './webhooks.schema.js'
@@ -46,11 +46,6 @@ async function resolveOrgId(): Promise<string | null> {
   orgIdCache = org?.id ?? null
   return orgIdCache
 }
-
-const FLEET_TZ = 'Africa/Nairobi'
-const clockFmt = new Intl.DateTimeFormat('en-GB', {
-  timeZone: FLEET_TZ, hour: '2-digit', minute: '2-digit', hour12: false,
-})
 
 export interface WialonNotifyResult { created: number; duplicate: number; skipped: number }
 
@@ -117,24 +112,23 @@ export async function ingestWialonNotifications(
     })
     out.created++
 
-    emitDashboardFeed(organisationId, {
+    // Feed + banner + Web Push all fan out from notification.worker — see
+    // raifactorysuite-alerts.service for why this no longer emits directly.
+    // Only genuinely NEW rows get here (the dedupe above returns early), so
+    // `notify` is always on: a Wialon notification is a rule the operator
+    // deliberately configured, and it is delivered once with no retry.
+    eventBus.publish('provider:alert', {
+      orgId:     organisationId,
       id:        `wn-${row.id}`,
-      time:      clockFmt.format(at),
-      ts:        at.toISOString(),
-      type:      severity,
-      text:      message,
       source:    'wialon',
       alertType: n.notification.trim(),
+      severity,
+      text:      message,
+      at,
       plate,
       vehicleId: vehicle?.id ?? null,
+      notify:    true,
     })
-
-    if (severity === 'critical') {
-      emitDashboardAlert(organisationId, {
-        alertType: n.notification.trim(), severity: 'CRITICAL', title: message,
-        plate, vehicleId: vehicle?.id ?? null, triggeredAt: at.toISOString(), source: 'wialon',
-      })
-    }
   }
 
   return out

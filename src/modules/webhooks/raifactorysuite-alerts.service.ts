@@ -1,5 +1,5 @@
 /**
- * Controltech EA alert intake — shared by the webhook receiver
+ * RaiFactorySuite alert intake — shared by the webhook receiver
  * (webhooks.controller) and the sync:alerts backfill script.
  *
  * The provider pushes pre-composed operational alerts about dispatch and
@@ -24,7 +24,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
-import { emitDashboardFeed, emitDashboardAlert } from '../../lib/sse.js'
+import { eventBus } from '../../lib/event-bus.js'
 import { parseProviderTimeOr } from '../../lib/provider-time.js'
 
 /** Provider factoryCode → our organisation code (mirrors the sync scripts). */
@@ -40,7 +40,7 @@ const SEVERITY_BY_TYPE: Record<string, 'info' | 'warning' | 'critical'> = {
   DRIVER_ASSIGNMENT_CHANGED: 'info',
 }
 
-export interface ControltechAlert {
+export interface RaiFactorySuiteAlert {
   id:           string
   factoryCode:  string
   type:         string
@@ -89,7 +89,7 @@ export interface IngestResult {
  *               history so a one-off catch-up doesn't flood the feed.
  */
 export async function ingestAlerts(
-  alerts: ControltechAlert[],
+  alerts: RaiFactorySuiteAlert[],
   source: 'webhook' | 'backfill' = 'webhook',
   emit = true,
 ): Promise<IngestResult> {
@@ -157,32 +157,11 @@ export async function ingestAlerts(
   return result
 }
 
-/**
- * Seed the live feed from alerts already in the database.
- *
- * The feed buffer is in-memory, so a restart empties it and the panel goes
- * blank even though hundreds of real alerts are stored. This replays the most
- * recent ones (oldest → newest, so clients that prepend end up newest-first)
- * into the buffer at startup. Nothing is broadcast to a client that already
- * has them: replayDashboardFeed serves the buffer on connect.
- *
- * Called once at boot — see src/index.ts.
- */
-export async function seedFeedFromStoredAlerts(limit = 40): Promise<number> {
-  const rows = await prisma.providerAlert.findMany({
-    orderBy: { createdAt: 'desc' },
-    take:    limit,
-    select:  {
-      id: true, organisationId: true, type: true, severity: true,
-      message: true, plate: true, vehicleId: true, createdAt: true,
-    },
-  })
-  // Oldest first so the buffer's order matches live arrival order. No banner:
-  // these are history being restored, not incidents happening now.
-  for (const row of rows.reverse()) publishToFeed(row.organisationId, row, { banner: false })
-  logger.info({ seeded: rows.length }, 'Live feed seeded from stored provider alerts')
-  return rows.length
-}
+/* seedFeedFromStoredAlerts lived here. It pre-warmed a single in-memory feed
+ * ring shared by every organisation. That ring is gone: each SSE client now
+ * replays its OWN org's history from the durable store on connect (see
+ * lib/sse.ts's replayDashboardFeed), which survives restarts and cannot be
+ * crowded out by a busier organisation. */
 
 interface FeedRow {
   id:        string
@@ -194,37 +173,27 @@ interface FeedRow {
   createdAt: Date
 }
 
-// The Live Feed panel renders { time, type, text }; `ts`/`plate`/`alertType`
-// ride along for clients that want to deep-link or filter.
-const FLEET_TZ = 'Africa/Nairobi'
-const clockFmt = new Intl.DateTimeFormat('en-GB', {
-  timeZone: FLEET_TZ, hour: '2-digit', minute: '2-digit', hour12: false,
-})
-
-function publishToFeed(orgId: string, row: FeedRow, { banner = true } = {}): void {
-  const ms = row.createdAt.getTime()
-  emitDashboardFeed(orgId, {
+/**
+ * Hand the alert to the event bus rather than to the SSE emitters directly.
+ *
+ * This used to call emitDashboardFeed/emitDashboardAlert itself, which meant a
+ * provider alert reached an OPEN browser tab and nothing else — a
+ * DRIVER_BLOCKED critical never produced a Web Push, so anyone with the tab
+ * closed never heard about it. notification.worker now owns the fan-out for
+ * both alert families (feed, banner, push), and this module's only job is to
+ * describe what happened.
+ */
+function publishToFeed(orgId: string, row: FeedRow, { notify = true } = {}): void {
+  eventBus.publish('provider:alert', {
+    orgId,
     id:        `pa-${row.id}`,
-    time:      clockFmt.format(ms),
-    ts:        row.createdAt.toISOString(),
-    type:      row.severity,          // info | warning | critical
-    text:      row.message,           // the provider's own wording
-    source:    'controltech',
+    source:    'controltech',   // stored value — see provider_alerts.source
     alertType: row.type,
+    severity:  row.severity as 'info' | 'warning' | 'critical',
+    text:      row.message,     // the provider's own wording
+    at:        row.createdAt,
     plate:     row.plate,
     vehicleId: row.vehicleId,
+    notify,
   })
-
-  // Critical alerts also raise a banner/toast on the dashboard.
-  if (banner && row.severity === 'critical') {
-    emitDashboardAlert(orgId, {
-      alertType:   row.type,
-      severity:    'CRITICAL',
-      title:       row.message,
-      plate:       row.plate,
-      vehicleId:   row.vehicleId,
-      triggeredAt: row.createdAt.toISOString(),
-      source:      'controltech',
-    })
-  }
 }

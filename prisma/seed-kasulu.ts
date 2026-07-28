@@ -2,7 +2,7 @@
  * Additive seed — Kasulu Ltd (KASULU).
  *
  * Minimal by design: the org row + role/permission scaffolding ONLY. Vehicles,
- * drivers, and telemetry arrive from the real Controltech EA API integration —
+ * drivers, and telemetry arrive from the real RaiFactorySuite API integration —
  * nothing is mocked here.
  *
  * NON-destructive and idempotent: if the KASULU code already exists the script
@@ -89,7 +89,7 @@ async function main() {
   await prisma.rolePermission.createMany({ data: rpRows, skipDuplicates: true })
   console.log(`  ✓ ${roles.length} roles, ${rpRows.length} role permissions`)
 
-  console.log(`\n✅  ${ORG_NAME} seeded — fleet/driver data comes from the Controltech EA integration.\n`)
+  console.log(`\n✅  ${ORG_NAME} seeded — fleet/driver data comes from the RaiFactorySuite integration.\n`)
 }
 
 main()

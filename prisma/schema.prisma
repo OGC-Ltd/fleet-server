@@ -95,6 +95,7 @@ model Organisation {
   alerts            VehicleAlert[]
   silos             Silo[]
   providerAlerts    ProviderAlert[]
+  notifications     Notification[]
 
   @@map("organisations")
 }
@@ -150,14 +151,14 @@ model User {
   id             String     @id @default(cuid())
   organisationId String     @map("organisation_id")
   fullName       String     @map("full_name")
-  // NULL for people synced from the Controltech EA driver registry — the
+  // NULL for people synced from the RaiFactorySuite driver registry — the
   // provider holds no email addresses and drivers don't log in. Postgres
   // permits many NULLs under a unique index, so logins stay unaffected.
   email          String?    @unique
   phone          String?
   licenceNumber  String?    @map("licence_number")
   employeeId     String?    @map("employee_id")
-  // Controltech EA driver UUID — the stable upsert key for sync:drivers.
+  // RaiFactorySuite driver UUID — the stable upsert key for sync:drivers.
   externalId     String?    @unique @map("external_id")
   // Provider's DUTY state (ON_DUTY / OFF_DUTY / TERMINATED) — distinct from
   // `status`, which is employment standing in our own RBAC model.
@@ -236,7 +237,7 @@ model UserRole {
 model IngestApiKey {
   id             String    @id @default(cuid())
   organisationId String    @map("organisation_id")
-  label          String                           // human name e.g. "Controltech Webhook"
+  label          String                           // human name e.g. "RaiFactorySuite Webhook"
   keyHash        String    @unique @map("key_hash") // SHA-256(rawKey) — raw key shown once at creation
   isActive       Boolean   @default(true) @map("is_active")
   createdAt      DateTime  @default(now()) @map("created_at")
@@ -281,10 +282,10 @@ model Vehicle {
   name               String
   registrationPlate  String   @unique @map("registration_plate")
   // Telemetry ingest key. There is no on-prem GPS hardware — vehicles are
-  // provisioned by the Controltech EA API and polled per-vehicle, so this
+  // provisioned by the RaiFactorySuite API and polled per-vehicle, so this
   // holds the provider's vehicle UUID (same value as externalId).
   deviceId           String   @unique @map("device_id")
-  // Controltech EA vehicle UUID — the stable upsert key for sync:vehicles.
+  // RaiFactorySuite vehicle UUID — the stable upsert key for sync:vehicles.
   externalId         String?  @unique @map("external_id")
   vehicleType        String   @map("vehicle_type")      // TRACTOR, TRUCK, COMPANY_VEHICLE, …
   // Registry status as reported by the provider (AVAILABLE / DISPATCHED /
@@ -317,6 +318,7 @@ model Vehicle {
   geofenceViolations GeofenceViolation[]
   alerts             VehicleAlert[]
   providerAlerts     ProviderAlert[]
+  notifications      Notification[]
 
   @@index([organisationId])
   @@index([vehicleGroupId])
@@ -646,7 +648,7 @@ model EngineHourSession {
 }
 
 /// A completed scheduled service — one row per real MAINTENANCE-phase
-/// completion in the simulator (see controltech.simulator.ts's `eventServiceCompleted`).
+/// completion in the simulator (see raifactorysuite.simulator.ts's `eventServiceCompleted`).
 /// This is the durable record the Maintenance page's per-vehicle service
 /// history report reads from; nothing here is derived/fabricated at read time.
 model VehicleServiceRecord {
@@ -882,12 +884,12 @@ model VehiclePeriodSummary {
 }
 
 // ---------------------------------------------------------------------------
-// SIMULATION — persisted state for the Controltech mock so the simulation can
+// SIMULATION — persisted state for the RaiFactorySuite mock so the simulation can
 // pause on server stop and resume exactly where it left off on restart.
 // ---------------------------------------------------------------------------
 
 /// One row per simulated device holding the full VehicleSimState as JSON.
-/// Written each poll cycle by ControltechMockAdapter and read on boot to
+/// Written each poll cycle by RaiFactorySuiteMockAdapter and read on boot to
 /// hydrate the in-memory simulator. Not part of the domain model — purely an
 /// implementation detail of the mock telemetry provider.
 model SimulationState {
@@ -910,7 +912,7 @@ model SimulationMeta {
   @@map("simulation_meta")
 }
 
-/// Operational alert raised by the Controltech EA platform (dispatch/driver
+/// Operational alert raised by the RaiFactorySuite platform (dispatch/driver
 /// governance: overdue tractors, driver swaps, blocked drivers, HOTO
 /// discrepancies). Distinct from VehicleAlert, which is derived from OUR
 /// telemetry flags and requires a vehicle: a provider alert is delivered
@@ -918,7 +920,7 @@ model SimulationMeta {
 /// provider's own id so a webhook redelivery is idempotent.
 model ProviderAlert {
   id             String    @id @default(cuid())
-  /// Controltech alert UUID — dedupe key for webhook retries + backfill.
+  /// RaiFactorySuite alert UUID — dedupe key for webhook retries + backfill.
   externalId     String    @unique @map("external_id")
   organisationId String    @map("organisation_id")
   /// Vehicle named in the alert, when its plate resolves to our registry.
@@ -942,4 +944,52 @@ model ProviderAlert {
   @@index([organisationId, createdAt])
   @@index([vehicleId, createdAt])
   @@map("provider_alerts")
+}
+
+/// Durable Live Feed history — every item the operations feed has ever shown,
+/// whatever produced it.
+///
+/// Distinct from ProviderAlert and VehicleAlert, which are SOURCE records: one
+/// is what RaiFactorySuite told us, the other is what our telemetry flags
+/// raised. This is the PRESENTATION record — the notification as the operator
+/// saw it — and it is the only one of the three that also captures narration
+/// with no source row at all (zone arrivals/departures, dispatch narration).
+///
+/// It exists because the feed was previously a 60-item in-memory ring buffer,
+/// global across organisations and wiped by every restart. Nothing could read
+/// notification history back, and nothing expired it.
+///
+/// Retention: swept by the BullMQ `notifications:prune` job after
+/// NOTIFICATION_RETENTION_DAYS (see lib/queues/retention.ts).
+model Notification {
+  id             String   @id @default(cuid())
+  /// The feed id its emitter minted (`pa-`, `wn-`, `dp-`, `mv-`, `zn-`,
+  /// `feed-`). UNIQUE, so a webhook redelivery or a reconcile pass that
+  /// re-surfaces the same alert updates one row instead of duplicating the
+  /// feed — the same idempotency ProviderAlert.externalId gives the source.
+  feedId         String   @unique @map("feed_id")
+  organisationId String   @map("organisation_id")
+  vehicleId      String?  @map("vehicle_id")
+  /// Which pipeline produced it: controltech | wialon | telemetry | zone.
+  source         String
+  /// Emitter's own type string (TRACTOR_OVERDUE, MOVEMENT_EXIT, ZONE_ENTRY …).
+  alertType      String?  @map("alert_type")
+  /// info | success | warning | critical — matches the feed's `type` field.
+  severity       String
+  /// The wording shown in the feed, verbatim.
+  text           String
+  plate          String?
+  /// When the event HAPPENED (provider/device time), not when we stored it.
+  /// The retention sweep and the feed both order by this.
+  occurredAt     DateTime @map("occurred_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  vehicle      Vehicle?     @relation(fields: [vehicleId], references: [id])
+
+  /// Serves the org-scoped history endpoint (newest first).
+  @@index([organisationId, occurredAt])
+  /// Serves the retention sweep, which scans by age ACROSS organisations.
+  @@index([occurredAt])
+  @@map("notifications")
 }

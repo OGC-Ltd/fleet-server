@@ -3,6 +3,50 @@ import { pushService }              from './notifications.service.js'
 import { registerDashboardClient, emitDashboardHeartbeat, replayDashboardPositions, replayDashboardFeed } from '../../lib/sse.js'
 import { sendSuccess, sendError }   from '../../core/response/response.js'
 import { logger }                   from '../../lib/logger.js'
+import { getNotifications }         from '../../lib/notifications/notification.reader.js'
+
+// ─── GET /api/v1/organisations/:orgId/notifications ───────────────────────
+// Notification history. Served from the Redis cache when it can answer in
+// full, otherwise from Postgres (which also re-warms the cache) — see
+// lib/notifications/notification.reader.
+//
+// Query: ?limit=1..200 (default 50)  ?before=<ISO timestamp> to page back.
+//
+// Until this existed there was no way to read notification history at all:
+// clients had the live SSE stream and a 60-item in-memory buffer, and a
+// restart or a reload past that window simply lost it.
+
+export async function listNotifications(req: Request, res: Response) {
+  const { orgId } = req.params as { orgId: string }
+  const { limit, before } = req.query as { limit?: string; before?: string }
+
+  const parsedLimit = limit ? Number(limit) : undefined
+  if (parsedLimit !== undefined && !Number.isFinite(parsedLimit)) {
+    return sendError(res, 400, 'limit must be a number')
+  }
+
+  let beforeDate: Date | undefined
+  if (before) {
+    beforeDate = new Date(before)
+    if (Number.isNaN(beforeDate.getTime())) {
+      return sendError(res, 400, 'before must be an ISO-8601 timestamp')
+    }
+  }
+
+  try {
+    const page = await getNotifications(orgId, { limit: parsedLimit, before: beforeDate })
+    return sendSuccess(res, {
+      notifications: page.items,
+      count:         page.items.length,
+      // Cursor for the next page — omitted when this page is the end.
+      nextBefore:    page.items.length > 0 ? page.items[page.items.length - 1]!.ts : null,
+      servedFrom:    page.source,
+    })
+  } catch (err) {
+    logger.error({ err, orgId }, 'Failed to list notifications')
+    return sendError(res, 500, 'Could not load notifications')
+  }
+}
 
 // ─── GET /api/v1/notifications/vapid-key ──────────────────────────────────
 // Public endpoint — called by the Service Worker before subscribing.
@@ -38,8 +82,13 @@ export async function dashboardStream(req: Request, res: Response) {
   // Replay the fleet's last-known positions so this client is in sync with
   // every other open browser immediately, not after the next poll tick.
   const replayed = replayDashboardPositions(orgId, res)
-  // …and the recent activity feed, so the Live Feed panel has history.
-  const feedReplayed = replayDashboardFeed(orgId, res)
+  // …and this org's recent activity, so the Live Feed panel has history. Async
+  // because it reads the durable store (Redis, then Postgres) rather than an
+  // in-memory buffer — see replayDashboardFeed. Awaited before the client is
+  // registered so the replay cannot interleave with a live item arriving
+  // mid-read, which would land an older event above a newer one.
+  const feedReplayed = await replayDashboardFeed(orgId, res)
+    .catch((err) => { logger.warn({ err, orgId }, 'Feed replay failed — panel starts empty and fills from live events'); return 0 })
   logger.debug({ orgId, replayed, feedReplayed }, 'Dashboard SSE client connected')
 
   const cleanup   = registerDashboardClient(orgId, res)

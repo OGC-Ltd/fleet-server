@@ -1,5 +1,5 @@
 /**
- * Vehicle registry sync — Controltech EA (factorysuite) → vehicles table.
+ * Vehicle registry sync — RaiFactorySuite (factorysuite) → vehicles table.
  *
  * Production data flow: there is no on-prem GPS hardware and no IMEIs — the
  * provider's API is the source of truth for the fleet roster. This script is
@@ -32,7 +32,7 @@ const API_URL = process.env.CONTROLTECH_API_URL ?? 'https://factorysuite.org/api
 const API_KEY = process.env.CONTROLTECH_API_KEY ?? ''
 
 // Provider factoryCode → our organisation code. Extend as factories onboard
-// (Kasulu gets its code here when Controltech provisions it).
+// (Kasulu gets its code here when RaiFactorySuite provisions it).
 const FACTORY_TO_ORG: Record<string, string> = {
   NDHIWA: 'SUKARI',
 }
@@ -81,11 +81,11 @@ async function fetchVehicles(): Promise<CtVehicle[]> {
   const res = await fetch(`${API_URL}/vehicles?limit=2000`, {
     headers: { accept: 'application/json', 'X-API-Key': API_KEY },
   })
-  if (!res.ok) throw new Error(`Controltech /vehicles responded ${res.status}`)
+  if (!res.ok) throw new Error(`RaiFactorySuite /vehicles responded ${res.status}`)
   const body = await res.json() as CtVehicle[] | { data?: CtVehicle[] }
   const list = Array.isArray(body) ? body : (body.data ?? [])
   if (!Array.isArray(list) || list.length === 0) {
-    throw new Error('Controltech /vehicles returned no records — refusing to deactivate the whole fleet on a bad response')
+    throw new Error('RaiFactorySuite /vehicles returned no records — refusing to deactivate the whole fleet on a bad response')
   }
   return list
 }

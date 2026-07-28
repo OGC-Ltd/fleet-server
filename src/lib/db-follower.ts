@@ -108,7 +108,7 @@ async function runOneCycle(): Promise<void> {
           t.vehicle_id, t.device_id, t.captured_at,
           t.lat, t.lng, t.heading_deg, t.speed_kmh, t.engine_on,
           t.fuel_level_ml, t.cargo_weight_kg,
-          -- _sim.* are legacy simulator extras; live Controltech pings
+          -- _sim.* are legacy simulator extras; live RaiFactorySuite pings
           -- return NULL here and the dashboard degrades gracefully.
           r.payload->'_sim'->'leg'        AS leg,
           r.payload->'_sim'->>'cargoDesc' AS cargo_desc,

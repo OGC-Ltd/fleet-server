@@ -1,5 +1,5 @@
 /**
- * Webhook authentication for provider callbacks (Controltech EA).
+ * Webhook authentication for provider callbacks (RaiFactorySuite).
  *
  * Two accepted schemes, in order of preference — which one is used depends on
  * what the provider can send:

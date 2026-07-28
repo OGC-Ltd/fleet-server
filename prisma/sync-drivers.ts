@@ -1,5 +1,5 @@
 /**
- * Driver registry + vehicle-assignment sync — Controltech EA (factorysuite).
+ * Driver registry + vehicle-assignment sync — RaiFactorySuite (factorysuite).
  *
  * Two passes, both RE-RUNNABLE:
  *
@@ -78,10 +78,10 @@ async function get<T>(path: string): Promise<T[]> {
   const res = await fetch(`${API_URL}${path}`, {
     headers: { accept: 'application/json', 'X-API-Key': API_KEY },
   })
-  if (!res.ok) throw new Error(`Controltech ${path} responded ${res.status}`)
+  if (!res.ok) throw new Error(`RaiFactorySuite ${path} responded ${res.status}`)
   const body = await res.json() as T[] | { data?: T[] }
   const list = Array.isArray(body) ? body : (body.data ?? [])
-  if (!Array.isArray(list)) throw new Error(`Controltech ${path} returned an unexpected shape`)
+  if (!Array.isArray(list)) throw new Error(`RaiFactorySuite ${path} returned an unexpected shape`)
   return list
 }
 
@@ -103,7 +103,7 @@ async function main() {
     get<CtDispatch>('/dispatches?limit=2000'),
   ])
   if (drivers.length === 0) {
-    throw new Error('Controltech /drivers returned no records — refusing to deactivate the whole roster')
+    throw new Error('RaiFactorySuite /drivers returned no records — refusing to deactivate the whole roster')
   }
   console.log(`  ← ${drivers.length} drivers, ${dispatches.length} dispatch records`)
 

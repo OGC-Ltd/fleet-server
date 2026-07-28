@@ -1,7 +1,7 @@
 /**
  * Additive seed — one "Fleet Admin" user per organisation.
  *
- * The 2026-07-25 database clean (pre-Controltech) removed every user, which
+ * The 2026-07-25 database clean (pre-RaiFactorySuite) removed every user, which
  * breaks AUTH_BYPASS: middleware/auth.ts attaches the first ACTIVE user and
  * 401s the whole API when none exists. This restores exactly one non-driver
  * admin per org (no licence, no vehicle assignment) so the API authenticates

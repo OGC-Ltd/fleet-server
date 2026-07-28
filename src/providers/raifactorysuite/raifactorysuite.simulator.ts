@@ -1,5 +1,5 @@
 /**
- * Controltech EA — vehicle state simulator.
+ * RaiFactorySuite — vehicle state simulator.
  *
  * Each vehicle is assigned one of ten realistic fleet scenarios.  The state
  * machine evolves on every tick (30 s) to produce convincing multi-cycle
@@ -25,11 +25,11 @@
  *  juice (product 2) — see AQUAMIST_PRODUCTS.
  *
  * Design principle: the simulator is an internal implementation detail of
- * ControltechMockAdapter.  Nothing outside the providers/ directory should
+ * RaiFactorySuiteMockAdapter.  Nothing outside the providers/ directory should
  * import it.
  */
 
-import type { CtDeviceSnapshot } from './controltech.types.js'
+import type { RfsDeviceSnapshot } from './raifactorysuite.types.js'
 import { getRoadPath, pointAlongPath } from '../../lib/road-routes.js'
 
 // ─── scenario catalogue ────────────────────────────────────────────────────
@@ -1658,9 +1658,9 @@ export function governFleetUtilization(states: Iterable<VehicleSimState>): numbe
   return dispatched
 }
 
-// ─── render state → Controltech wire packet ────────────────────────────────
+// ─── render state → RaiFactorySuite wire packet ────────────────────────────────
 
-export function renderSnapshot(s: VehicleSimState): CtDeviceSnapshot {
+export function renderSnapshot(s: VehicleSimState): RfsDeviceSnapshot {
   const fuelDelta      = s.fuelLevelMl - s.prevFuelLevelMl          // negative = used
   const isOutsideFence = haversineApproxKm(s.haltLat ?? s.lat, s.haltLng ?? s.lng, s.fenceLat, s.fenceLng) * 1000 > s.fenceRadiusM
 
@@ -1768,7 +1768,7 @@ export function renderSnapshot(s: VehicleSimState): CtDeviceSnapshot {
         resetOdoKm:          +s.maintenanceResetOdoKm.toFixed(1),
       },
     } } as Record<string, unknown>),
-  } as CtDeviceSnapshot & { _sim: unknown }
+  } as RfsDeviceSnapshot & { _sim: unknown }
 }
 
 // ─── geometry helpers (no dep — keeps simulator self-contained) ────────────

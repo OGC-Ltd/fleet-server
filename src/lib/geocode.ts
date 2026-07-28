@@ -22,7 +22,10 @@ let queue: Promise<void> = Promise.resolve()   // serialises external fetches
 
 // ~1.1 km grid — a place label doesn't change meaningfully within a cell, and
 // coarse keys are what make the cache converge for vehicles moving on roads.
-const keyOf = (lat: number, lng: number) => `${lat.toFixed(2)},${lng.toFixed(2)}`
+// The `v2:` prefix invalidates labels cached by the previous composeLabel,
+// which produced single-word answers. Bump it whenever the label FORMAT
+// changes, or the disk cache will keep serving the old shape indefinitely.
+const keyOf = (lat: number, lng: number) => `v2:${lat.toFixed(2)},${lng.toFixed(2)}`
 
 // ── disk cache ──────────────────────────────────────────────────────────────
 
@@ -47,19 +50,46 @@ function scheduleSave() {
 // ── label composition ───────────────────────────────────────────────────────
 
 interface NominatimAddress {
+  road?: string; neighbourhood?: string
   village?: string; hamlet?: string; town?: string; suburb?: string
   city_district?: string; city?: string; municipality?: string
-  county?: string; state?: string
+  county?: string; state?: string; country?: string
 }
 
-/** "Kapsoit, Kericho County" — the most local name plus its county/state. */
+/**
+ * "Kapsoit, Kericho County, Kenya" — a place label with enough parts to be
+ * unambiguous on its own.
+ *
+ * The previous version emitted `local ?? region`, which collapsed to a SINGLE
+ * word whenever the two matched — Kigoma town sits in Kigoma Region, so a
+ * vehicle there was labelled just "Kigoma", which reads like missing data
+ * rather than a location. This walks three tiers (local → region → country),
+ * takes the first available value in each, and de-duplicates, so the label is
+ * as complete as the data allows and never repeats a name.
+ */
 function composeLabel(addr: NominatimAddress): string | null {
   const local =
-    addr.village ?? addr.hamlet ?? addr.town ?? addr.suburb ??
-    addr.city_district ?? addr.city ?? addr.municipality ?? null
-  const region = addr.county ?? addr.state ?? null
-  if (local && region && local !== region) return `${local}, ${region}`
-  return local ?? region
+    addr.neighbourhood ?? addr.village ?? addr.hamlet ?? addr.town ??
+    addr.suburb ?? addr.city_district ?? addr.city ?? addr.municipality ?? null
+  const region  = addr.county ?? addr.state ?? null
+  const country = addr.country ?? null
+
+  // `road` only earns a place when it adds detail the locality does not — it
+  // is the difference between "Kigoma" and "Ujiji Road, Kigoma".
+  const street = addr.road && addr.road !== local ? addr.road : null
+
+  const parts: string[] = []
+  for (const part of [street, local, region, country]) {
+    if (!part) continue
+    // Case-insensitive de-dupe: "Kigoma" the town inside "Kigoma" the region
+    // must contribute one part, not two.
+    if (parts.some(p => p.toLowerCase() === part.toLowerCase())) continue
+    parts.push(part)
+  }
+
+  if (parts.length === 0) return null
+  // Three parts is the readable ceiling for a tooltip line.
+  return parts.slice(0, 3).join(', ')
 }
 
 // ── public API ──────────────────────────────────────────────────────────────
@@ -78,7 +108,7 @@ export async function reverseGeocode(lat: number, lng: number): Promise<string |
     const again = memory.get(key)
     if (again !== undefined) return again || null
     try {
-      const url = `${NOMINATIM_BASE}?lat=${lat}&lon=${lng}&format=jsonv2&zoom=14&addressdetails=1`
+      const url = `${NOMINATIM_BASE}?lat=${lat}&lon=${lng}&format=jsonv2&zoom=16&addressdetails=1`
       const res = await fetch(url, {
         headers: { 'User-Agent': 'fleet-server/1.0 (dashboard location labels)' },
       })

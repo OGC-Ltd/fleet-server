@@ -10,9 +10,17 @@ import { eventBus }              from '../event-bus.js'
 import { logger }                from '../logger.js'
 import { emitDashboardPosition } from '../sse.js'
 import { deriveFeedEvents } from '../feed-events.js'
-import { trackZonePresence } from '../zone-presence.js'
+import { trackZonePresence, assignedZoneStatus } from '../zone-presence.js'
+import { noteMovement, movementState } from '../movement-state.js'
+import type { MovementState } from '../movement-state.js'
+import type { AssignedZoneStatus } from '../zone-presence.js'
 
 export interface DashboardPositionPayload {
+  /** Assigned keep-out zones this vehicle is currently inside (may be stale
+   *  by one poll cycle — see where it is populated below). */
+  zones?:       AssignedZoneStatus
+  /** Current moving/resting run — see lib/movement-state. */
+  movement?:    MovementState | null
   vehicleId:    string
   vehicleName:  string
   plate:        string
@@ -39,7 +47,7 @@ export interface DashboardPositionPayload {
     progress: number; coveredKm: number; totalKm: number; moving: boolean
     beganAtMs: number; plannedArrivalMs: number
   } | null
-  // Real per-vehicle service cycle — see controltech.simulator.ts's `_sim.maintenance`.
+  // Real per-vehicle service cycle — see raifactorysuite.simulator.ts's `_sim.maintenance`.
   odometerKm?:            number | null
   nextServiceOdoKm?:      number | null
   inMaintenance?:         boolean
@@ -49,7 +57,7 @@ export interface DashboardPositionPayload {
   // ripple-circle overlay; null once the vehicle heads back (FROM_GARAGE).
   garageLat?:             number | null
   garageLng?:             number | null
-  // Simulator LogiPhase (see controltech.simulator.ts) — e.g. 'LOADING',
+  // Simulator LogiPhase (see raifactorysuite.simulator.ts) — e.g. 'LOADING',
   // 'OFFLOADING', 'TO_FARM'. Drives the map's purple loading/offloading
   // flag+route treatment, distinct from the generic 'parked' status (which
   // doesn't say *why* the vehicle stopped moving).
@@ -76,6 +84,13 @@ export function startTelemetryWorker(): () => void {
       const maintenance = (frame.rawPayload as {
         _sim?: { maintenance?: { nextServiceOdoKm: number; inMaintenance: boolean; maintenanceEndsAtMs: number | null; resetOdoKm: number; garageLat: number | null; garageLng: number | null } }
       } | undefined)?._sim?.maintenance
+
+      // Did the tracker actually report ignition on this frame? The Wialon
+      // adapter stamps this; without it engineOn is speed-derived and cannot
+      // support an idling claim.
+      const ignitionKnown = Boolean(
+        (frame.rawPayload as { ignition_known?: boolean } | undefined)?.ignition_known,
+      )
 
       const payload: DashboardPositionPayload = {
         vehicleId,
@@ -114,6 +129,24 @@ export function startTelemetryWorker(): () => void {
           highEngineTemp:      frame.flags.highEngineTemp,
           lowOil:              frame.flags.lowOil,
         },
+        // Which of this vehicle's ASSIGNED keep-out zones it is currently
+        // inside — see zone-presence.assignedZoneStatus.
+        //
+        // Computed from the PREVIOUS frame's evaluation, because
+        // trackZonePresence below is deliberately fire-and-forget to keep the
+        // DB-backed zone lookup off the emit path. At a 2 s poll cadence the
+        // badge is at most one cycle behind, which is invisible next to the
+        // ~30 s a marker tween already runs for.
+        zones: assignedZoneStatus(orgId, vehicleId),
+        // How long this vehicle has been moving, idling, or standing still.
+        // Folded in BEFORE the payload is built so the frame that starts a
+        // journey is the frame that reports it. Ignition is passed only when
+        // the unit genuinely reports it (see wialon.adapter's ignition_known);
+        // otherwise engineOn is speed-derived and idling is unknowable.
+        movement: (
+          noteMovement(vehicleId, frame.speedKmh, frame.capturedAt.getTime(), ignitionKnown ? frame.engineOn : null),
+          movementState(vehicleId, null, frame.capturedAt.getTime())
+        ),
       }
       emitDashboardPosition(orgId, payload)
 

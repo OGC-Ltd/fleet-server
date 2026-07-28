@@ -1,17 +1,27 @@
 /**
- * Telemetry poller — fetches frames from the configured provider every
- * POLL_INTERVAL_MS, feeds them into the existing `processTelemetry` ingest
- * pipeline, and publishes typed events to the fleet event bus so downstream
- * workers (telemetry.worker, notification.worker, alerts.worker,
- * sim-events.worker) can react without coupling to this module.
+ * Telemetry poller — fetches frames from a provider on its own cadence, feeds
+ * them into the existing `processTelemetry` ingest pipeline, and publishes
+ * typed events to the fleet event bus so downstream workers (telemetry.worker,
+ * notification.worker, alerts.worker, sim-events.worker) can react without
+ * coupling to this module.
  *
  * The alert-row bookkeeping (syncFrameAlerts) and sim-event persistence
  * (persistSimEvents) are NOT called directly here — they're published as
  * events and picked up by alerts.worker/sim-events.worker off the poll
  * cycle's critical path (see event-bus.ts's 'alerts:sync'/'simEvents:persist').
  *
- * Swapping providers:
- *   Change the `provider` argument to `startPoller`.  Nothing else changes.
+ * ## One instance per provider
+ *
+ * Everything that varies per provider — the in-flight guard, the rising-edge
+ * alert maps, the notify cooldowns, the halt-flag tracking — lives on a
+ * `TelemetryPoller` instance, NOT in module scope. That is what lets Wialon
+ * and any second provider poll concurrently at different cadences without one
+ * starving the other: previously a single shared `isPolling` flag meant a slow
+ * Wialon cycle would silently skip the other provider's tick, and the log line
+ * would blame the wrong loop. Scheduling itself is delegated to
+ * lib/poll-loop.ts, which owns the guard and the watchdog.
+ *
+ * Adding a provider: `startPoller(new SomeAdapter())`. Nothing else changes.
  */
 
 import { env }                   from '../config/env.js'
@@ -22,10 +32,9 @@ import { eventBus }              from './event-bus.js'
 import type { AlertType }        from './event-bus.js'
 import type { SimEvents }        from './simulation.persistence.js'
 import { emitDashboardNotice }   from './sse.js'
+import { startPollLoop }         from './poll-loop.js'
+import type { PollLoopHandle }   from './poll-loop.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
-
-// Configurable via POLL_INTERVAL_MS — see config/env.ts.
-const POLL_INTERVAL_MS = env.POLL_INTERVAL_MS
 
 // Minimum gap before the SAME vehicle+alert is allowed to notify again. The
 // rising-edge map already suppresses a continuously-active flag; this stops a
@@ -37,6 +46,10 @@ const NOTIFY_COOLDOWN_MS = 60 * 60_000
 // connection in the pg pool for the whole cycle, starving interactive API/SSE
 // requests (a trivial query would wait 20 s+). Bounding this leaves connections
 // free for the dashboard/map while telemetry still refreshes each cycle.
+//
+// This is a PER-POLLER budget, so N providers can hold N×POLL_CONCURRENCY
+// connections at once. Keep it low enough that the sum stays well under the
+// pool size (see lib/prisma.ts) — two providers at 6 is already 12.
 const POLL_CONCURRENCY = 6
 
 /** Run `worker` over `items` with at most `limit` in flight at a time. */
@@ -57,6 +70,12 @@ async function runWithConcurrency<T>(
 
 // ─── device metadata cache ─────────────────────────────────────────────────
 // Avoids a DB hit on every frame.  Refreshed every 5 min.
+//
+// Deliberately MODULE-level, unlike the per-poller alert state below: it is a
+// read-only projection of the whole vehicle table keyed by a provider-namespaced
+// deviceId (`wialon:123`), so every poller wants exactly the same contents.
+// Giving each one its own copy would just re-run the same ~600-row query per
+// provider every 5 minutes for identical data.
 
 interface DeviceMeta {
   orgId:           string
@@ -75,6 +94,9 @@ interface DeviceMeta {
 
 let deviceCache   = new Map<string, DeviceMeta>()
 let cacheLoadedAt = 0
+// In-flight refresh, shared by every caller. Without this, two pollers whose
+// cycles coincide after the TTL lapses each fire the same ~600-row query.
+let cacheRefresh: Promise<void> | null = null
 const CACHE_TTL_MS = 5 * 60_000
 
 async function refreshCache(): Promise<void> {
@@ -106,7 +128,10 @@ async function refreshCache(): Promise<void> {
 }
 
 async function getDeviceMeta(deviceId: string): Promise<DeviceMeta | null> {
-  if (Date.now() - cacheLoadedAt > CACHE_TTL_MS) await refreshCache()
+  if (Date.now() - cacheLoadedAt > CACHE_TTL_MS) {
+    cacheRefresh ??= refreshCache().finally(() => { cacheRefresh = null })
+    await cacheRefresh
+  }
   return deviceCache.get(deviceId) ?? null
 }
 
@@ -124,18 +149,6 @@ const FLAG_KEYS: Array<keyof VehicleTelemetryFrame['flags'] & AlertType> = [
   'lowOil',
 ]
 
-// ─── per-vehicle "previously active" flag tracking ─────────────────────────
-// Ensures alert:triggered fires ONCE when a flag first becomes true, not on
-// every subsequent 30-s poll cycle while the condition persists.
-const prevActiveMap = new Map<string, Set<AlertType>>()
-
-// vehicleId:alertType → epoch ms it was last notified — enforces the 1-hour
-// re-arm window so a recurring issue notifies at most once per hour.
-const lastNotifiedAt = new Map<string, number>()
-
-// Tracks which halt-causing flags were active last cycle per vehicle.
-// When all three clear and the engine is back on we emit a "back on road" notice.
-const haltFlagsPrev  = new Map<string, Set<AlertType>>()
 const HALT_FLAGS: AlertType[] = ['lowFuel', 'highEngineTemp', 'lowOil']
 
 /** True if the previously-active alert set equals the current active list. */
@@ -145,75 +158,41 @@ function sameAlertSet(prev: Set<AlertType>, current: AlertType[]): boolean {
   return true
 }
 
-// ─── single poll cycle ─────────────────────────────────────────────────────
-// Guard prevents a slow cycle from overlapping with the next interval tick.
+// ─── one poller per provider ───────────────────────────────────────────────
 
-// Hard ceiling on one cycle. Normal cycles run 5–100 s; if the pooler drops a
-// pg connection mid-cycle the cycle's promise can hang forever (Jul 2026: the
-// in-flight guard then skipped every tick for 3 days while the process stayed
-// alive, so pm2 never restarted it). The watchdog abandons the cycle and
-// re-arms the guard so the next tick can start.
-const CYCLE_TIMEOUT_MS = 5 * 60_000
+class TelemetryPoller {
+  /**
+   * Per-vehicle "previously active" flags. Ensures alert:triggered fires ONCE
+   * when a flag first becomes true, not on every subsequent poll cycle while
+   * the condition persists.
+   */
+  private readonly prevActiveMap = new Map<string, Set<AlertType>>()
 
-let isPolling = false
+  /** vehicleId:alertType → epoch ms last notified — the 1-hour re-arm window. */
+  private readonly lastNotifiedAt = new Map<string, number>()
 
-async function runOnePollCycle(provider: TelemetryProvider): Promise<void> {
-  if (isPolling) {
-    logger.warn({ provider: provider.name }, 'Previous poll cycle still running — skipping this tick')
-    return
-  }
-  isPolling = true
-  const t0 = Date.now()
+  /**
+   * Halt-causing flags active last cycle, per vehicle. When they clear and the
+   * engine is back on we emit a "back on road" notice.
+   */
+  private readonly haltFlagsPrev = new Map<string, Set<AlertType>>()
 
-  const cycle = _runOnePollCycle(provider).then(
-    () => 'settled' as const,
-    (err) => {
-      logger.error({ err, provider: provider.name }, 'Poll cycle failed')
-      return 'settled' as const
-    },
-  )
+  constructor(private readonly provider: TelemetryProvider) {}
 
-  // unref: a pending watchdog must not keep the process alive after stop().
-  let watchdogTimer!: NodeJS.Timeout
-  const watchdog = new Promise<'timeout'>((resolve) => {
-    watchdogTimer = setTimeout(() => resolve('timeout'), CYCLE_TIMEOUT_MS).unref()
-  })
+  async runCycle(): Promise<void> {
+    const t0 = Date.now()
+    let frames: VehicleTelemetryFrame[]
 
-  const outcome = await Promise.race([cycle, watchdog])
-  clearTimeout(watchdogTimer)
+    try {
+      frames = await this.provider.fetchAll()
+    } catch (err) {
+      logger.error({ err, provider: this.provider.name }, 'Provider fetchAll() failed — skipping cycle')
+      return
+    }
 
-  if (outcome === 'timeout') {
-    logger.error(
-      { provider: provider.name, timeoutMs: CYCLE_TIMEOUT_MS },
-      'Poll cycle exceeded watchdog timeout — abandoning it and re-arming the poller',
-    )
-    // If the abandoned cycle ever settles, its only remaining continuation is
-    // this log line — it can no longer touch isPolling (this call has already
-    // reset it, and a later cycle may own the guard by then).
-    void cycle.then(() =>
-      logger.warn(
-        { provider: provider.name, durationMs: Date.now() - t0 },
-        'Abandoned poll cycle eventually settled',
-      ),
-    )
-  }
-  isPolling = false
-}
+    let processed = 0, skipped = 0, errors = 0
 
-async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
-  const t0 = Date.now()
-  let frames: VehicleTelemetryFrame[]
-
-  try {
-    frames = await provider.fetchAll()
-  } catch (err) {
-    logger.error({ err, provider: provider.name }, 'Provider fetchAll() failed — skipping cycle')
-    return
-  }
-
-  let processed = 0, skipped = 0, errors = 0
-
-  await runWithConcurrency(frames, POLL_CONCURRENCY, async (frame) => {
+    await runWithConcurrency(frames, POLL_CONCURRENCY, async (frame) => {
       const meta = await getDeviceMeta(frame.deviceId)
       if (!meta) { skipped++; return }
 
@@ -275,7 +254,7 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
         //    completes as soon as the fast path (upsert + SSE emit) is done,
         //    instead of blocking on alert-row bookkeeping before the next
         //    vehicle in the batch gets its turn.
-        const prevActive = prevActiveMap.get(meta.vehicleId)
+        const prevActive = this.prevActiveMap.get(meta.vehicleId)
         const alertsChanged = prevActive === undefined || !sameAlertSet(prevActive, activeAlertTypes)
         if (alertsChanged) {
           eventBus.publish('alerts:sync', {
@@ -310,7 +289,7 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
 
         // 4c. Detect halt-flag clearing → emit "vehicle back on road" notice
         const activeHalts = new Set(HALT_FLAGS.filter(f => frame.flags[f as keyof typeof frame.flags]))
-        const prevHalts   = haltFlagsPrev.get(meta.vehicleId) ?? new Set<AlertType>()
+        const prevHalts   = this.haltFlagsPrev.get(meta.vehicleId) ?? new Set<AlertType>()
         const justCleared = [...prevHalts].filter(f => !activeHalts.has(f))
         if (justCleared.length > 0 && frame.engineOn) {
           emitDashboardNotice(meta.orgId, {
@@ -322,13 +301,13 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
             capturedAt:    frame.capturedAt.toISOString(),
           })
         }
-        haltFlagsPrev.set(meta.vehicleId, activeHalts)
+        this.haltFlagsPrev.set(meta.vehicleId, activeHalts)
 
         // 5. Emit SSE+Push ONLY for flags that are newly active this cycle
         //    (rising-edge detection — prevents flooding the feed every 30 s
         //    while a condition like lowFuel or highEngineTemp persists)
         const newlyActive = activeAlertTypes.filter(k => !(prevActive?.has(k)))
-        prevActiveMap.set(meta.vehicleId, new Set(activeAlertTypes))
+        this.prevActiveMap.set(meta.vehicleId, new Set(activeAlertTypes))
 
         const nowMs = Date.now()
         for (const flagKey of newlyActive) {
@@ -336,8 +315,8 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
           // last hour — a persistent/flapping issue is reported only once until
           // the re-arm window elapses.
           const cooldownKey = `${meta.vehicleId}:${flagKey}`
-          if (nowMs - (lastNotifiedAt.get(cooldownKey) ?? 0) < NOTIFY_COOLDOWN_MS) continue
-          lastNotifiedAt.set(cooldownKey, nowMs)
+          if (nowMs - (this.lastNotifiedAt.get(cooldownKey) ?? 0) < NOTIFY_COOLDOWN_MS) continue
+          this.lastNotifiedAt.set(cooldownKey, nowMs)
 
           eventBus.publish('alert:triggered', {
             type:        flagKey,
@@ -363,19 +342,20 @@ async function _runOnePollCycle(provider: TelemetryProvider): Promise<void> {
         errors++
         logger.error({ err, deviceId: frame.deviceId }, 'processTelemetry error')
       }
-  })
+    })
 
-  logger.info(
-    {
-      provider:   provider.name,
-      durationMs: Date.now() - t0,
-      total:      frames.length,
-      processed,
-      skipped,
-      errors,
-    },
-    'Poll cycle complete',
-  )
+    logger.info(
+      {
+        provider:   this.provider.name,
+        durationMs: Date.now() - t0,
+        total:      frames.length,
+        processed,
+        skipped,
+        errors,
+      },
+      'Poll cycle complete',
+    )
+  }
 }
 
 // ─── public lifecycle API ─────────────────────────────────────────────────
@@ -386,22 +366,35 @@ export interface PollerHandle {
   flush: () => Promise<void>
 }
 
+export interface StartPollerOptions {
+  /** Override the global POLL_INTERVAL_MS for this provider. */
+  intervalMs?: number
+  /** Stagger the first cycle so co-starting pollers don't contend for the pool. */
+  startDelayMs?: number
+}
+
 /**
- * The provider is REQUIRED. It used to default to the mock Controltech
+ * The provider is REQUIRED. It used to default to the mock raifactorysuite
  * simulator, which is now retired — with the production database live, a
  * defaulted `startPoller()` would have quietly resumed writing simulated
  * positions over real fleet data. Callers must name the provider they mean.
+ *
+ * Safe to call more than once, with different providers and cadences: each
+ * call gets its own state and its own scheduling loop.
  */
-export function startPoller(provider: TelemetryProvider): PollerHandle {
-  logger.info({ provider: provider.name, intervalMs: POLL_INTERVAL_MS }, 'Telemetry poller starting')
+export function startPoller(provider: TelemetryProvider, opts: StartPollerOptions = {}): PollerHandle {
+  const poller = new TelemetryPoller(provider)
 
-  void runOnePollCycle(provider)
-  const timer = setInterval(() => void runOnePollCycle(provider), POLL_INTERVAL_MS)
+  const loop: PollLoopHandle = startPollLoop({
+    name:         `telemetry:${provider.name}`,
+    intervalMs:   opts.intervalMs ?? env.POLL_INTERVAL_MS,
+    startDelayMs: opts.startDelayMs ?? 0,
+    run:          () => poller.runCycle(),
+  })
 
   return {
     stop() {
-      clearInterval(timer)
-      logger.info({ provider: provider.name }, 'Telemetry poller stopped')
+      loop.stop()
     },
     async flush() {
       // Persist the latest simulation state so a restart resumes from here.

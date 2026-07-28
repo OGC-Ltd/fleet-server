@@ -1,14 +1,14 @@
 /**
- * Controltech EA adapter — mock implementation.
+ * RaiFactorySuite adapter — mock implementation.
  *
  * Implements `TelemetryProvider` using the in-process simulator so the server
- * behaves identically to production without a live Controltech endpoint.
+ * behaves identically to production without a live RaiFactorySuite endpoint.
  *
- * ── Integrating the live Controltech API ──────────────────────────────────
- * Create `controltech-live.adapter.ts` next to this file:
+ * ── Integrating the live RaiFactorySuite API ──────────────────────────────────
+ * Create `raifactorysuite-live.adapter.ts` next to this file:
  *
- *   export class ControltechLiveAdapter implements TelemetryProvider {
- *     readonly name = 'Controltech EA (live)'
+ *   export class RaiFactorySuiteLiveAdapter implements TelemetryProvider {
+ *     readonly name = 'RaiFactorySuite (live)'
  *     constructor(private readonly apiUrl: string, private readonly apiKey: string) {}
  *
  *     async fetchAll(): Promise<VehicleTelemetryFrame[]> {
@@ -21,8 +21,8 @@
  *   }
  *
  * Then in `src/lib/poller.ts` swap:
- *   new ControltechMockAdapter(vehicles)
- *   → new ControltechLiveAdapter(env.CONTROLTECH_URL, env.CONTROLTECH_KEY)
+ *   new RaiFactorySuiteMockAdapter(vehicles)
+ *   → new RaiFactorySuiteLiveAdapter(env.CONTROLTECH_URL, env.CONTROLTECH_KEY)
  * ─────────────────────────────────────────────────────────────────────────
  */
 
@@ -32,11 +32,11 @@ import { logger }          from '../../lib/logger.js'
 import { env }             from '../../config/env.js'
 import { getSimFleetVehicles } from '../../lib/sim-fleet.js'
 import type { TelemetryProvider, VehicleTelemetryFrame, DoorStatus, NetworkType } from '../telemetry-provider.js'
-import type { CtDeviceSnapshot }   from './controltech.types.js'
-import { initVehicleState, tickVehicle, renderSnapshot, initSimClock, advanceSimClock, simNow, governFleetUtilization } from './controltech.simulator.js'
-import type { VehicleSimState, RoutingProfile } from './controltech.simulator.js'
+import type { RfsDeviceSnapshot }   from './raifactorysuite.types.js'
+import { initVehicleState, tickVehicle, renderSnapshot, initSimClock, advanceSimClock, simNow, governFleetUtilization } from './raifactorysuite.simulator.js'
+import type { VehicleSimState, RoutingProfile } from './raifactorysuite.simulator.js'
 
-// ─── normaliser — CtDeviceSnapshot → VehicleTelemetryFrame ────────────────
+// ─── normaliser — RfsDeviceSnapshot → VehicleTelemetryFrame ────────────────
 // Shared by both mock and future live adapters.
 
 const DOOR_MAP: Record<0 | 1 | 2, DoorStatus> = { 0: 'CLOSED', 1: 'OPEN', 2: 'AJAR' }
@@ -47,7 +47,7 @@ const HIGH_ENGINE_TEMP_C           = 105          // °C — overheat threshold
 const LOW_OIL_PCT                  = 10           // % — critically low oil
 
 export function normaliseCtSnapshot(
-  raw: CtDeviceSnapshot,
+  raw: RfsDeviceSnapshot,
   tankCapacityMl: number,
 ): VehicleTelemetryFrame {
   const fuelUsedMl  = raw.fuel_used_ml ?? 0
@@ -93,7 +93,7 @@ export function normaliseCtSnapshot(
     signalStrengthPct:  raw.signal_pct,
     flags,
     rawPayload: {
-      vendor:       'Controltech EA',
+      vendor:       'RaiFactorySuite',
       imei:         raw.imei,
       protocol:     'HTTPS/REST',
       io_inputs:    raw.io_inputs,
@@ -108,8 +108,8 @@ export function normaliseCtSnapshot(
 
 type SimEntry = VehicleSimState & { tankCapacityMl: number }
 
-export class ControltechMockAdapter implements TelemetryProvider {
-  readonly name = 'Controltech EA (mock)'
+export class RaiFactorySuiteMockAdapter implements TelemetryProvider {
+  readonly name = 'RaiFactorySuite (mock)'
 
   /** deviceId → sim state; populated on first fetchAll() call */
   private states = new Map<string, SimEntry>()
@@ -198,7 +198,7 @@ export class ControltechMockAdapter implements TelemetryProvider {
 
     logger.info(
       { adapter: this.name, deviceCount: this.states.size, hydrated, coldStarted },
-      'Controltech mock adapter initialised',
+      'RaiFactorySuite mock adapter initialised',
     )
     this.initialised = true
   }

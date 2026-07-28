@@ -27,7 +27,7 @@ import dashboardRoutes from './modules/dashboard/dashboard.routes.js'
 import { notificationsOrgRouter } from './modules/notifications/notifications.router.js'
 import * as notificationsCtrl from './modules/notifications/notifications.controller.js'
 import { authenticate, requireOrgAccess } from './middleware/auth.js'
-import { simNow, SIM_SCALE } from './providers/controltech/controltech.simulator.js'
+import { simNow, SIM_SCALE } from './providers/raifactorysuite/raifactorysuite.simulator.js'
 import { getRoadPathAsync } from './lib/road-routes.js'
 import { reverseGeocode } from './lib/geocode.js'
 import { prisma } from './lib/prisma.js'
@@ -132,9 +132,9 @@ export function createApp() {
 
   app.use(`${v1}/ingest`, ingestRoutes)
 
-  // Provider callbacks (Controltech EA alerts) — push replaces polling.
+  // Provider callbacks (RaiFactorySuite alerts) — push replaces polling.
   // Deliberately mounted at the ROOT, not under /api/v1: the URL registered
-  // with Controltech is http://<host>/webhook/rai (nginx proxies /webhook/ to
+  // with RaiFactorySuite is http://<host>/webhook/rai (nginx proxies /webhook/ to
   // this process). Authenticated by HMAC signature or shared secret; see
   // middleware/webhookAuth.
   app.use('/webhook', webhookRoutes)

@@ -3,6 +3,8 @@ import { getMaintenanceHistoryCached, getOrgVehicleMaintenance } from './mainten
 import { getFleetSnapshotCached } from './fleet-snapshot.cache.js'
 import type { TelemetryListQuery } from './telemetry.schema.js'
 import { NotFoundError } from '../../core/errors/errors.js'
+import { assignedZoneStatus } from '../../lib/zone-presence.js'
+import { movementState } from '../../lib/movement-state.js'
 
 export async function listPings(vehicleId: string, orgId: string, q: TelemetryListQuery) {
   const result = await findPings(vehicleId, orgId, q)
@@ -13,7 +15,51 @@ export async function listPings(vehicleId: string, orgId: string, q: TelemetryLi
 export async function getFleetSnapshot(orgId: string) {
   // Warmed cache — the snapshot is each client's first paint only; the live
   // SSE stream takes over immediately after (see fleet-snapshot.cache.ts).
-  return getFleetSnapshotCached(orgId)
+  const snapshot = await getFleetSnapshotCached(orgId)
+
+  // Decorate with assigned-geofence containment.
+  //
+  // This CANNOT come from the SSE stream alone. Wialon only emits a frame when
+  // a unit's fix time advances, so a parked vehicle may not produce one for
+  // hours — and a parked vehicle is exactly the one an operator opens the card
+  // to inspect. Without this, its containment badge stayed blank indefinitely
+  // while moving vehicles got one within seconds.
+  //
+  // Free to compute: assignedZoneStatus reads the poller's in-memory presence
+  // and zone caches, so this adds no query to a request that is already served
+  // from a warm cache. It is deliberately applied AFTER the cache rather than
+  // inside it, so containment is current even when the cached rows are a sweep
+  // interval old.
+  // findFleetSnapshot returns a flat ARRAY of vehicle rows (the response
+  // wrapper is what adds `data`), so map it directly.
+  if (!Array.isArray(snapshot)) return snapshot
+  return snapshot.map(v => {
+    const zones = assignedZoneStatus(orgId, v.vehicleId)
+    // Current moving/resting run. `lastMovedAt` is the fallback for a vehicle
+    // parked since before this process started: it emits no frames, so it is
+    // absent from the in-memory tracker, but its last moving ping in the
+    // database IS the moment it stopped. Without this the card showed nothing
+    // for exactly the vehicles that have been resting longest.
+    const row = v as { lastMovedAt?: Date | string | null; capturedAt?: Date | string | null; engineOn?: boolean }
+    const fixMs = row.capturedAt
+      ? (typeof row.capturedAt === 'string' ? Date.parse(row.capturedAt) : row.capturedAt.getTime())
+      : null
+    const movement = movementState(v.vehicleId, row.lastMovedAt, fixMs)
+
+    // Keep the row self-consistent. The in-memory tracker is fed by the live
+    // frame pipeline and can be fresher than the snapshot's newest stored row
+    // — most visibly right after ignition support shipped, when a vehicle that
+    // has not moved since still carries a row written before ignition was
+    // read. Without this the card says "Idling" beside an ENGINE tile reading
+    // "off". Only the two states that are POSITIVE evidence of a running
+    // engine correct the field; 'resting' leaves it alone, because it can mean
+    // either "off" or "not reported".
+    const engineOn = (movement?.state === 'idling' || movement?.state === 'moving')
+      ? true
+      : row.engineOn
+
+    return { ...v, zones, movement, engineOn }
+  })
 }
 
 export async function getLatestPing(vehicleId: string, orgId: string) {

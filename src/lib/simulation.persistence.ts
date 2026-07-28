@@ -20,7 +20,7 @@
 import { prisma } from './prisma.js'
 import { logger } from './logger.js'
 import { emitDashboardNotice } from './sse.js'
-import type { TripEvent, TheftEvent, RefuelEvent, ServiceEvent, GarageVisitEvent } from '../providers/controltech/controltech.simulator.js'
+import type { TripEvent, TheftEvent, RefuelEvent, ServiceEvent, GarageVisitEvent } from '../providers/raifactorysuite/raifactorysuite.simulator.js'
 
 export interface SimEvents {
   tripCompleted:       TripEvent | null

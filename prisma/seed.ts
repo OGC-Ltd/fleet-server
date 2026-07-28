@@ -73,7 +73,7 @@ const FLEET_COMPOSITION: [string, number, string, number, number[], number[]][] 
   ['PICKUP',          20, 'KDP', 800, [8.0, 9.0, 10.0],     [70, 80]],
 ]
 const PLATE_SUFFIXES = ['A','B','C','D','E','F','G','H','J','K','L','M','N','P','Q','R','S','T','U','V']
-const GPS_VENDORS    = ['Queclink','Teltonika','CalAmp','Meitrack','Controltech']
+const GPS_VENDORS    = ['Queclink','Teltonika','CalAmp','Meitrack','RaiFactorySuite']
 const CARGO_DESCS    = [
   'Maize flour 50 kg bags','Sugar cane bales','Cement bags 50 kg',
   'Steel reinforcement rods','Fast-moving consumer goods','Medical supplies & PPE',
