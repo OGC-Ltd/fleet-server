@@ -125,13 +125,38 @@ export function readIgnition(
   for (const sensor of Object.values(sensors)) {
     if (sensor.t !== IGNITION_SENSOR_TYPE) continue
     const raw = params[sensor.p]
-    // Digital line: any non-zero numeric means the ignition is live. Some
-    // firmwares send it as a string, hence the coercion rather than a
-    // typeof-number guard.
+    // Some firmwares send the line as a string, hence the coercion rather than
+    // a typeof-number guard.
     if (raw == null || raw === '') continue
     const n = Number(raw)
     if (!Number.isFinite(n)) continue
-    return n !== 0
+
+    // ONLY a genuine digital line can answer this. `n !== 0` used to be the
+    // test, and it silently accepted parameters that are not booleans at all.
+    //
+    // Every unit in this account names its sensor "1.IGN", but they are bound
+    // to FIVE different parameters and only some are digital. Measured live:
+    //
+    //   io_239   0/1 only          — Teltonika ignition. Genuine.
+    //   io_1     0/1 only          — digital input 1. Genuine.
+    //   io_9     0,43,86,87,130,…  — NOT boolean. Never 1, almost never 0.
+    //   pwr_ext  27.99            — external supply VOLTAGE, live whenever the
+    //                               tracker is wired to the battery.
+    //   flg:1                     — a message-flag bit, absent from `p`.
+    //
+    // Under `n !== 0`, io_9 and pwr_ext units reported the engine running
+    // essentially always: 33 of 39 io_9 units read "on" against 41% of the
+    // genuine io_239 ones. That inflated the idling count with vehicles that
+    // were simply switched off, and no calibration exists to decode them —
+    // the sensors carry no bounds and no conversion table.
+    //
+    // So the reading is trusted only when the value is actually binary.
+    // Anything else is UNKNOWN, not "off": callers fall back to the speed
+    // heuristic and lib/movement-state collapses to 'resting' rather than
+    // claiming an idle it cannot support. Fixing this properly is a Wialon
+    // configuration job — those sensors need binding to a real ignition input.
+    if (n !== 0 && n !== 1) continue
+    return n === 1
   }
   return null
 }
