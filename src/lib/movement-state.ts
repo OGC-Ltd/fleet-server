@@ -173,8 +173,21 @@ export function movementState(
     // to "≥ a few minutes" and silently discard history we actually hold: a
     // truck idle since Tuesday would read "resting for ≥ 3m" purely because
     // the server had just come back up.
+    //
+    // This corrects the START TIME only. It used to hardcode `state: 'resting'`
+    // and so DISCARDED a measured idling verdict: a vehicle already idling when
+    // this process booted takes exactly this branch — first sighting sets
+    // exact:false, and later stationary frames leave it false because
+    // `prev.state === stoppedState` short-circuits noteMovement — so its
+    // ignition-backed 'idling' was overwritten with 'resting' for the whole run.
+    // Measured on production, that misreported 18 of 78 online units, which the
+    // dashboard showed as ENGINE ON sitting next to PARKED.
+    //
+    // Backdating to the last moving ping stays correct for idling: the branch
+    // only fires when we never witnessed the transition, so the moment it
+    // stopped moving IS the moment the current stationary run began.
     if (!moving && !s.exact && fallbackMs != null && fallbackMs < s.sinceMs) {
-      return { state: 'resting', moving: false, since: new Date(fallbackMs).toISOString(), exact: true }
+      return { state, moving: false, since: new Date(fallbackMs).toISOString(), exact: true }
     }
 
     return { state, moving, since: new Date(s.sinceMs).toISOString(), exact: s.exact }
