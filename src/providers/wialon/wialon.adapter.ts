@@ -90,6 +90,9 @@ export class WialonLiveAdapter implements TelemetryProvider {
    */
   private lastReconcileAt = 0
   private static readonly RECONCILE_EVERY_MS = 2 * 60_000
+  /** How often to re-read connection state on its own. See refreshConnections. */
+  private static readonly CONNECTION_EVERY_MS = 30_000
+  private lastConnectionAt = 0
 
   constructor(
     token: string = env.WIALON_TOKEN || process.env['access_token'] || '',
@@ -110,7 +113,35 @@ export class WialonLiveAdapter implements TelemetryProvider {
     if (!this.initialised) await this.init()
 
     const dueReconcile = Date.now() - this.lastReconcileAt >= WialonLiveAdapter.RECONCILE_EVERY_MS
-    return dueReconcile ? this.reconcileAll() : this.pollDeltas()
+    if (dueReconcile) return this.reconcileAll()
+
+    // Connection state on its own, faster cadence than the sweep. Awaited
+    // rather than fired and forgotten so two refreshes can never overlap, and
+    // never fatal — a failed refresh just leaves the previous verdict, which
+    // lib/connection-state ages out on its own.
+    await this.refreshConnections()
+    return this.pollDeltas()
+  }
+
+  /**
+   * Re-read every unit's `netconn`.
+   *
+   * The full sweep also carries this, but only every RECONCILE_EVERY_MS, and
+   * connection state is the field that goes stale fastest — cross-checked
+   * against Wialon, ~7% of units had flipped within one 2-minute sweep
+   * window. This call is ~145× smaller than the sweep (19 KB vs 2.7 MB), so
+   * running it far more often is close to free.
+   */
+  private async refreshConnections(): Promise<void> {
+    if (Date.now() - this.lastConnectionAt < WialonLiveAdapter.CONNECTION_EVERY_MS) return
+    this.lastConnectionAt = Date.now()
+    try {
+      for (const u of await this.client.listConnectionStates()) {
+        if (typeof u.netconn === 'number') noteConnection(wialonDeviceId(u.id), u.netconn === 1)
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Wialon connection-state refresh failed — keeping the previous verdict')
+    }
   }
 
   /**
@@ -121,6 +152,9 @@ export class WialonLiveAdapter implements TelemetryProvider {
   private async reconcileAll(): Promise<VehicleTelemetryFrame[]> {
     const units = await this.client.listUnits()
     this.lastReconcileAt = Date.now()
+    // The sweep carries netconn too, so the standalone refresh restarts its
+    // clock from here rather than firing again moments later.
+    this.lastConnectionAt = Date.now()
 
     const frames: VehicleTelemetryFrame[] = []
     let unchanged = 0, neverReported = 0

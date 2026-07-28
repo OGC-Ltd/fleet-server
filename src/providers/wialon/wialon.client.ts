@@ -168,6 +168,29 @@ export class WialonClient {
   }
 
   /**
+   * Connection state only — every unit's `netconn`, nothing else.
+   *
+   * Deliberately its own call rather than a field of the full sweep. Measured
+   * against the live account: 19 KB / 315 ms here versus 2.7 MB / 874 ms for
+   * the full sweep, so this can run several times per sweep interval and keep
+   * the online/offline verdict fresh, which is the whole point — a unit that
+   * dropped 90 seconds ago should not still be shown connected.
+   */
+  async listConnectionStates(): Promise<Array<{ id: number; netconn?: number }>> {
+    const res = await this.call<{ items?: Array<{ id: number; netconn?: number }> }>(
+      'core/search_items',
+      {
+        spec: { itemsType: 'avl_unit', propName: 'sys_name', propValueMask: '*', sortType: 'sys_name' },
+        force: 1,
+        flags: 1 | 0x200000,
+        from: 0,
+        to: 0xFFFFFFFF,
+      },
+    )
+    return res.items ?? []
+  }
+
+  /**
    * Subscribe this session to position updates for the given units.
    *
    * `avl_evts` returns ONLY what the session is subscribed to — an empty
