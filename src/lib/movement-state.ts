@@ -23,8 +23,21 @@
  * — not to the moment the grace period elapsed.
  */
 
-/** km/h at or above which a unit counts as moving. Above GPS jitter. */
-const MOVING_THRESHOLD_KMH = 3
+/**
+ * km/h at or above which a unit counts as moving.
+ *
+ * 1 km/h: a vehicle under power and covering ground is in transit, per the
+ * fleet definition (engine on and speed >= 1).
+ *
+ * This was 3, to sit above the 1-2 km/h of GPS jitter a stationary unit can
+ * emit. Measured against the live account, that jitter does not appear here —
+ * of 82 online units the speed histogram was 77 at exactly 0 and 5 at 6+, with
+ * NOTHING in the 1-5 band, so Wialon is already filtering it upstream. Kept in
+ * step with MOVING_THRESHOLD_KMH in the dash's lib/vehicleMap: if the two ever
+ * differ, a vehicle can be "in transit" on the card while its run row reports
+ * it idling.
+ */
+const MOVING_THRESHOLD_KMH = 1
 
 /** A stop shorter than this does not end a journey. */
 const STOP_GRACE_MS = 3 * 60_000
