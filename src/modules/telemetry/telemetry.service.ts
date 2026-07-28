@@ -5,6 +5,7 @@ import type { TelemetryListQuery } from './telemetry.schema.js'
 import { NotFoundError } from '../../core/errors/errors.js'
 import { assignedZoneStatus } from '../../lib/zone-presence.js'
 import { movementState } from '../../lib/movement-state.js'
+import { connectionStatus } from '../../lib/connection-state.js'
 
 export async function listPings(vehicleId: string, orgId: string, q: TelemetryListQuery) {
   const result = await findPings(vehicleId, orgId, q)
@@ -58,7 +59,24 @@ export async function getFleetSnapshot(orgId: string) {
       ? true
       : row.engineOn
 
-    return { ...v, zones, movement, engineOn }
+    // The provider's own connection verdict. Attached here for the same reason
+    // as `zones` above — an OFFLINE unit emits no frame by definition, so this
+    // can never arrive through the telemetry stream, and inferring it from the
+    // age of the newest ping is measurably wrong (see lib/connection-state).
+    //
+    // `null` when the poller has no current answer (this process polls no
+    // provider, or the sweep has stalled). Clients then fall back to the
+    // last-reported window rather than being told the fleet is offline.
+    const conn = connectionStatus((v as { deviceId?: string | null }).deviceId)
+
+    return {
+      ...v,
+      zones,
+      movement,
+      engineOn,
+      connectionOnline:    conn?.online    ?? null,
+      connectionCheckedAt: conn?.checkedAt ?? null,
+    }
   })
 }
 

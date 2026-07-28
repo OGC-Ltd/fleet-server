@@ -67,6 +67,16 @@ export interface WialonUnit {
   cnm_km?: number
   /** Engine-hours counter. Requires flag 0x2000. */
   cneh?: number
+  /**
+   * Wialon's OWN connection verdict: 1 = online, 0 = offline. Requires flag
+   * 0x200000.
+   *
+   * This is the authority on whether a unit is connected, and it is not the
+   * same as "sent a message recently". Measured against the live account, a
+   * 15-minute last-message window disagreed with Wialon on 28 of 224 units —
+   * 25 of them units Wialon considered offline.
+   */
+  netconn?: number
 }
 
 export class WialonClient {
@@ -135,10 +145,13 @@ export class WialonClient {
    * configured sensors, and the last message's raw parameters.
    *
    * flags: 1 base | 8 custom fields | 0x400 last position + last message
-   *        | 0x1000 sensors | 0x2000 counters. The sensors and `lmsg.p` make
-   *        a fuel reading possible; 0x2000 is what returns `cnm_km` (total
-   *        mileage) and `cneh` (engine hours) — without it they are absent,
-   *        which reads as zero rather than as an error.
+   *        | 0x1000 sensors | 0x2000 counters | 0x200000 connection state.
+   *        The sensors and `lmsg.p` make a fuel reading possible; 0x2000 is
+   *        what returns `cnm_km` (total mileage) and `cneh` (engine hours) —
+   *        without it they are absent, which reads as zero rather than as an
+   *        error. 0x200000 is the ONLY flag that returns `netconn`; it was
+   *        found by probing all 32 bits against the live account, because the
+   *        published flag tables do not list it.
    */
   async listUnits(): Promise<WialonUnit[]> {
     const res = await this.call<{ items?: WialonUnit[]; totalItemsCount?: number }>(
@@ -146,7 +159,7 @@ export class WialonClient {
       {
         spec: { itemsType: 'avl_unit', propName: 'sys_name', propValueMask: '*', sortType: 'sys_name' },
         force: 1,
-        flags: 1 | 8 | 0x400 | 0x1000 | 0x2000,
+        flags: 1 | 8 | 0x400 | 0x1000 | 0x2000 | 0x200000,
         from: 0,
         to: 0xFFFFFFFF,
       },

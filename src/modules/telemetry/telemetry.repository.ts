@@ -57,6 +57,9 @@ export async function findFleetSnapshot(orgId: string) {
       registrationPlate: true,
       vehicleType: true,
       tankCapacityLitres: true,
+      // The provider's own unit id — how lib/connection-state is keyed, so the
+      // service layer can attach the provider's connection verdict.
+      deviceId: true,
       assignments: {
         where: { unassignedAt: null },
         select: { user: { select: { fullName: true, driverRatingScore: true } } },
@@ -129,6 +132,7 @@ export async function findFleetSnapshot(orgId: string) {
 
       return {
         vehicleId:      v.id,
+        deviceId:       v.deviceId,
         plate:          v.registrationPlate,
         name:           v.name,
         vehicleType:    v.vehicleType,
