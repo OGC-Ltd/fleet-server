@@ -3,7 +3,7 @@ import { webhookAuth } from '../../middleware/webhookAuth.js'
 import { ingestLimiter } from '../../middleware/rateLimiter.js'
 import { validateBody } from '../../middleware/validate.js'
 import { webhookEnvelopeSchema } from './webhooks.schema.js'
-import { controltechAlerts } from './webhooks.controller.js'
+import { providerWebhook } from './webhooks.controller.js'
 
 const router = Router()
 
@@ -11,7 +11,7 @@ const router = Router()
 // ingest budget (webhooks burst like device traffic, not user traffic).
 //
 // Mounted at the ROOT as POST /webhook/rai (not under /api/v1) — this is the
-// callback URL registered with Controltech.
+// callback URL registered with RaiFactorySuite.
 router.post(
   '/rai',
   ingestLimiter,
@@ -19,7 +19,7 @@ router.post(
   // Deliberately permissive: the controller sorts the event types out. A 400
   // here would make the provider retry and then drop the event.
   validateBody(webhookEnvelopeSchema),
-  controltechAlerts,
+  providerWebhook,
 )
 
 export default router

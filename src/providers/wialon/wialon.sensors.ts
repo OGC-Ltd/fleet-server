@@ -25,6 +25,12 @@ export interface WialonSensor {
 }
 
 const FUEL_SENSOR_TYPE = 'fuel level'
+/**
+ * Wialon's type for an ignition line. Verified against this account: 222 of
+ * 224 units carry one, every one of them reading `io_239` — the standard
+ * Teltonika ignition input.
+ */
+const IGNITION_SENSOR_TYPE = 'engine operation'
 /** "…Qty (450L)" / "…Level (254 L)" → 450 / 254. */
 const CAPACITY_IN_NAME = /\((\d+(?:\.\d+)?)\s*L\)/i
 
@@ -95,6 +101,39 @@ export function readFuel(
     if (!best || (capacityL ?? 0) > (best.capacityL ?? 0)) best = { litres, capacityL }
   }
   return best
+}
+
+/**
+ * Ignition state for a unit, or null when it cannot be known.
+ *
+ * This is the ONLY way to tell a vehicle that is idling from one that is
+ * parked. Without it `engineOn` has to be derived from speed, which makes the
+ * two states literally the same signal — the reason the dashboard could not
+ * report idling at all.
+ *
+ * Null is returned rather than `false` when the unit has no ignition sensor,
+ * or has one but its parameter is absent from this message: "we do not know"
+ * and "the engine is off" are different claims, and only the first is honest
+ * here. Callers fall back to the speed heuristic in that case.
+ */
+export function readIgnition(
+  sensors: Record<string, WialonSensor> | undefined,
+  params: Record<string, unknown> | undefined,
+): boolean | null {
+  if (!sensors || !params) return null
+
+  for (const sensor of Object.values(sensors)) {
+    if (sensor.t !== IGNITION_SENSOR_TYPE) continue
+    const raw = params[sensor.p]
+    // Digital line: any non-zero numeric means the ignition is live. Some
+    // firmwares send it as a string, hence the coercion rather than a
+    // typeof-number guard.
+    if (raw == null || raw === '') continue
+    const n = Number(raw)
+    if (!Number.isFinite(n)) continue
+    return n !== 0
+  }
+  return null
 }
 
 /** Largest stated tank capacity across a unit's fuel sensors. */

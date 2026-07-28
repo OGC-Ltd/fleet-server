@@ -298,7 +298,7 @@ export interface DriversOverview {
  * /analytics/drivers/overview endpoint the Drivers page consumes.
  *
  * The roster is the org's DRIVER REGISTRY — every user holding a driver role,
- * synced from the Controltech EA API by sync:drivers. Lifetime aggregates
+ * synced from the RaiFactorySuite API by sync:drivers. Lifetime aggregates
  * (trips, tonnes, mileage, theft/overspeed cases) come from real Trip +
  * CargoManifest + FuelTheft + VehicleAlert rows, so a driver with no recorded
  * activity yet reports honest zeroes; each driver's detail covers a trailing
@@ -310,7 +310,7 @@ export interface DriversOverview {
  * never wait on the database.
  */
 export async function driversOverview(orgId: string, days: number): Promise<DriversOverview> {
-  // The roster is the org's DRIVER REGISTRY (synced from Controltech EA by
+  // The roster is the org's DRIVER REGISTRY (synced from RaiFactorySuite by
   // sync:drivers), not just whoever happens to be out on a dispatch right now
   // — a driver between dispatches is still on the workforce. Employment
   // standing rides along on `status`, which the grid badges.

@@ -13,7 +13,7 @@
 // same vehicle (plus rising edges on the alert flags), buffered per org in
 // sse.ts and replayed to newly connected clients.
 
-import { emitDashboardFeed } from './sse.js'
+import { publishNotification } from './notifications/notification.store.js'
 
 interface FeedSource {
   vehicleId:     string
@@ -131,17 +131,23 @@ export function deriveFeedEvents(orgId: string, p: FeedSource): void {
   prev.set(p.vehicleId, st)
 
   for (const item of items) {
-    emitDashboardFeed(orgId, {
-      id:        `feed-${now}-${feedSeq++}`,
-      time:      at,
-      ts:        new Date(now).toISOString(),
+    publishNotification({
+      orgId,
+      // vehicleId is in the id because feedSeq resets to 0 on restart: without
+      // it, two events in the same millisecond either side of a restart could
+      // collide on what is now a UNIQUE key in Postgres.
+      id:        `feed-${now}-${p.vehicleId}-${feedSeq++}`,
+      source:    'telemetry',
+      severity:  item.type,
+      text:      item.text,
+      at:        new Date(now),
+      plate:     p.plate,
       vehicleId: p.vehicleId,
       // Position at the moment of the event — the feed is global across orgs,
       // so clients can't resolve coordinates from their own org's fleet list
-      // (powers the WhatsApp share's maps pin).
-      lat:       p.lat,
-      lng:       p.lng,
-      ...item,
+      // (powers the WhatsApp share's maps pin). No Postgres column; see
+      // notification.store's `extra`.
+      extra:     { lat: p.lat, lng: p.lng },
     })
   }
 }

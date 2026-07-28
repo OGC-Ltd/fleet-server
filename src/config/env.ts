@@ -31,15 +31,29 @@ const schema = z.object({
   // Lets two deployments split the sim fleet org-wise over one shared DB.
   SIM_ORGS: z.string().optional(),
 
-  // Controltech EA — the live vehicle/telemetry provider (factorysuite).
-  // There is no on-prem GPS hardware: vehicles and their live data are
-  // provisioned entirely by this API. Used by sync:vehicles and the live
-  // telemetry adapter.
-  CONTROLTECH_API_URL: z.string().optional().default('https://factorysuite.org/api/external/v1'),
+  // RaiFactorySuite — the live vehicle/driver/alert provider (factorysuite).
+  // There is no on-prem GPS hardware: vehicles and their operational data are
+  // provisioned entirely by this API. Used by sync:vehicles, sync:drivers,
+  // sync:alerts and the reconcile poller.
+  //
+  // RAIFACTORYSUITE_* are canonical; the CONTROLTECH_* names are kept as
+  // fallbacks so the deployed .env on the EC2 box keeps working through the
+  // rename (see `raiFactorySuiteApi` below for the resolution order).
+  RAIFACTORYSUITE_API_URL: z.string().optional().default(''),
+  RAIFACTORYSUITE_API_KEY: z.string().optional().default(''),
+  CONTROLTECH_API_URL: z.string().optional().default(''),
   CONTROLTECH_API_KEY: z.string().optional().default(''),
 
+  // Cadence for the RaiFactorySuite reconcile poller (providers/raifactorysuite).
+  // Alerts normally arrive by webhook; this loop is the safety net for the
+  // deliveries their sender gives up on, so minutes — not seconds — is right.
+  RAIFACTORYSUITE_POLL_MS: z.coerce.number().optional().default(5 * 60_000),
+  // Set 'false' to run webhook-only (e.g. a second instance that must not
+  // duplicate the reconcile traffic against the provider's API).
+  RAIFACTORYSUITE_POLL_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
   // Wialon Hosting — the GPS/telemetry provider for KASULU (Tanzania).
-  // Sukari's data comes from Controltech instead; the two do not overlap.
+  // Sukari's data comes from RaiFactorySuite instead; the two do not overlap.
   WIALON_API_URL: z.string().optional().default('https://hst-api.wialon.com'),
   WIALON_TOKEN:   z.string().optional().default(''),
 
@@ -70,6 +84,26 @@ const schema = z.object({
 
   // OpenWeather — powers the route weather card (server-side proxy; key never ships to the client)
   OPENWEATHER_API_KEY: z.string().optional().default(''),
+
+  // ── notification cache + retention (lib/redis, lib/queues) ───────────────
+  // UNSET is a supported production state: the notification cache degrades to
+  // Postgres and the BullMQ retention sweep does not run. The box is a
+  // t3.micro that is already swapping, so Redis only appears after a resize.
+  // e.g. redis://127.0.0.1:6379
+  REDIS_URL: z.string().optional().default(''),
+
+  // How long a notification is kept before the retention sweep deletes it.
+  NOTIFICATION_RETENTION_DAYS: z.coerce.number().optional().default(90),
+
+  // How many notifications per org the Redis cache holds. The read endpoint
+  // serves from cache up to this depth and falls through to Postgres beyond
+  // it, so this is a latency knob, not a data-loss one.
+  NOTIFICATION_CACHE_MAX: z.coerce.number().optional().default(200),
+
+  // Set 'false' on additional instances so only ONE runs the retention sweep.
+  // BullMQ's repeatable jobs already de-duplicate on a shared Redis, so this
+  // is belt-and-braces for the case where instances point at different Redises.
+  RETENTION_SWEEP_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
 })
 
 // Production must talk to the real (remote) database endpoint. localhost URLs
@@ -98,3 +132,16 @@ if (!parsed.success) {
 }
 
 export const env = parsed.data
+
+/**
+ * Resolved RaiFactorySuite API credentials.
+ *
+ * The provider is still reachable under its old configuration names on the
+ * deployed box, so the canonical RAIFACTORYSUITE_* value wins and the
+ * CONTROLTECH_* one is the fallback. Both being unset means the reconcile
+ * poller stays off rather than hammering the default URL unauthenticated.
+ */
+export const raiFactorySuiteApi = {
+  url: env.RAIFACTORYSUITE_API_URL || env.CONTROLTECH_API_URL || 'https://factorysuite.org/api/external/v1',
+  key: env.RAIFACTORYSUITE_API_KEY || env.CONTROLTECH_API_KEY || '',
+} as const

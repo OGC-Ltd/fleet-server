@@ -1,5 +1,5 @@
 /**
- * Controltech EA operational events — dispatches and gate movements.
+ * RaiFactorySuite operational events — dispatches and gate movements.
  *
  *   dispatch.created — a unit left with a driver. Same shape as the REST
  *                      /dispatches resource, so this and `sync:drivers`
@@ -12,12 +12,12 @@
  *                      crossing, not GPS, so it cannot move map markers.
  *
  * Both are narrated into the Live Feed. Alerts live in
- * controltech-alerts.service.ts.
+ * raifactorysuite-alerts.service.ts.
  */
 
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
-import { emitDashboardFeed } from '../../lib/sse.js'
+import { eventBus } from '../../lib/event-bus.js'
 import { parseProviderTime, parseProviderTimeOr } from '../../lib/provider-time.js'
 
 /** Provider factoryCode → our organisation code (mirrors the sync scripts). */
@@ -36,15 +36,33 @@ async function resolveOrgId(factoryCode: string): Promise<string | null> {
 const norm = (s: string | null | undefined): string =>
   (s ?? '').trim().toUpperCase().replace(/\s+/g, ' ')
 
-const FLEET_TZ = 'Africa/Nairobi'
-const clockFmt = new Intl.DateTimeFormat('en-GB', {
-  timeZone: FLEET_TZ, hour: '2-digit', minute: '2-digit', hour12: false,
-})
-
-function feed(orgId: string, id: string, at: Date, type: 'info' | 'success' | 'warning', text: string, extra: Record<string, unknown> = {}) {
-  emitDashboardFeed(orgId, {
-    id, time: clockFmt.format(at), ts: at.toISOString(),
-    type, text, source: 'controltech', ...extra,
+/**
+ * Narrate an event into the Live Feed via the bus (notification.worker owns the
+ * fan-out — see raifactorysuite-alerts.service for why).
+ *
+ * `notify: false` on every one of these: a dispatch leaving the yard is routine
+ * narration, and pushing it to every subscribed device would train people to
+ * ignore the notifications that DO matter. They still appear in the feed.
+ */
+function feed(
+  orgId: string,
+  id: string,
+  at: Date,
+  type: 'info' | 'success' | 'warning',
+  text: string,
+  extra: { alertType: string; plate?: string | null; vehicleId?: string | null },
+) {
+  eventBus.publish('provider:alert', {
+    orgId,
+    id,
+    source:    'controltech',   // stored value — see provider_alerts.source
+    alertType: extra.alertType,
+    severity:  type,
+    text,
+    at,
+    plate:     extra.plate ?? null,
+    vehicleId: extra.vehicleId ?? null,
+    notify:    false,
   })
 }
 
@@ -65,7 +83,10 @@ export interface MovementEvent {
  * Mirrors sync-drivers.ts so a webhook and a later backfill converge on the
  * same row rather than duplicating.
  */
-export async function handleDispatch(d: DispatchEvent): Promise<boolean> {
+export async function handleDispatch(
+  d: DispatchEvent,
+  { narrate = true }: { narrate?: boolean } = {},
+): Promise<boolean> {
   const organisationId = await resolveOrgId(d.factoryCode)
   if (!organisationId) return false
 
@@ -105,6 +126,13 @@ export async function handleDispatch(d: DispatchEvent): Promise<boolean> {
       'Dispatch could not be linked to a unique vehicle+driver',
     )
   }
+
+  // The reconcile poller re-reads the SAME dispatch window every few minutes to
+  // keep assignments fresh. Narrating there would replay "X dispatched to Y"
+  // into the feed on every pass, so it passes narrate:false and the webhook —
+  // which sees each dispatch exactly once, when it happens — stays the only
+  // thing that tells the story.
+  if (!narrate) return true
 
   const dest = d.destinationOrPurpose ? ` to ${d.destinationOrPurpose}` : ''
   feed(

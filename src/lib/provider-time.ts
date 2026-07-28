@@ -1,7 +1,7 @@
 /**
  * Timestamp parsing for provider payloads.
  *
- * Controltech (and Wialon's REST surfaces) send local wall-clock timestamps
+ * RaiFactorySuite (and Wialon's REST surfaces) send local wall-clock timestamps
  * with NO timezone offset and nanosecond precision, e.g.
  *
  *     "2026-07-26T06:35:12.100337484"

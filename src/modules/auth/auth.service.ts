@@ -17,7 +17,7 @@ export interface TokenPayload {
   typ: 'access' | 'refresh'
 }
 
-// Accounts synced from the Controltech driver registry carry no email (the
+// Accounts synced from the RaiFactorySuite driver registry carry no email (the
 // provider holds none) and therefore cannot hold a session — the token subject
 // is the email, and login only ever matches a non-null one.
 const issueTokens = (user: { id: string; email: string | null }) => {

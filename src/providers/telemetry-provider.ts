@@ -1,11 +1,11 @@
 /**
  * Vendor-agnostic telemetry provider interface.
  *
- * To integrate a live provider (e.g. real Controltech EA REST API):
- *   1. Create `src/providers/controltech/controltech-live.adapter.ts`
+ * To integrate a live provider (e.g. real RaiFactorySuite REST API):
+ *   1. Create `src/providers/raifactorysuite/raifactorysuite-live.adapter.ts`
  *   2. Implement `TelemetryProvider` — fetch from their API, normalise the
  *      response into `VehicleTelemetryFrame[]`, return it.
- *   3. In `src/lib/poller.ts` swap `ControltechMockAdapter` for the live one.
+ *   3. In `src/lib/poller.ts` swap `RaiFactorySuiteMockAdapter` for the live one.
  *   Nothing else changes.
  */
 
@@ -36,7 +36,7 @@ export interface VehicleTelemetryFrame {
   // ── Cargo weight ──────────────────────────────────────────────────────────
   cargoWeightKg:     number | null
 
-  // ── Extended Controltech sensor channels ──────────────────────────────────
+  // ── Extended RaiFactorySuite sensor channels ──────────────────────────────────
   batteryVoltageV:   number | null     // vehicle chassis battery (e.g. 12.4 V)
   doorStatus:        DoorStatus
   panicButtonPressed: boolean

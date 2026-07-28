@@ -26,7 +26,7 @@
 
 import { prisma } from './prisma.js'
 import { logger } from './logger.js'
-import { emitDashboardFeed } from './sse.js'
+import { publishNotification } from './notifications/notification.store.js'
 import { isInsideFence, type FenceGeometry } from './geofence.js'
 
 interface CachedZone {
@@ -42,6 +42,70 @@ const ZONE_TTL_MS = 5 * 60_000
 
 /** vehicleId → geofence ids it was inside on the previous frame. */
 const presence = new Map<string, Set<string>>()
+
+/**
+ * vehicleId → the geofence ids ASSIGNED to it (vehicle_geofences).
+ *
+ * Presence above is computed against every zone in the org, because the feed
+ * should narrate any named place a vehicle reaches. Whether that is a BREACH
+ * is a different question, and it depends on assignment: a vehicle is only
+ * accountable to the zones someone actually attached to it.
+ */
+const assignmentCache = new Map<string, Set<string>>()
+let assignmentsLoadedAt = 0
+
+async function getAssignments(orgId: string): Promise<void> {
+  if (Date.now() - assignmentsLoadedAt < ZONE_TTL_MS && assignmentCache.size > 0) return
+  const rows = await prisma.vehicleGeofence.findMany({
+    where:  { vehicle: { organisationId: orgId } },
+    select: { vehicleId: true, geofenceId: true },
+  })
+  assignmentCache.clear()
+  for (const r of rows) {
+    let set = assignmentCache.get(r.vehicleId)
+    if (!set) { set = new Set(); assignmentCache.set(r.vehicleId, set) }
+    set.add(r.geofenceId)
+  }
+  assignmentsLoadedAt = Date.now()
+  logger.debug({ orgId, vehicles: assignmentCache.size, rows: rows.length }, 'Geofence assignment cache loaded')
+}
+
+export interface AssignedZoneStatus {
+  /** Assigned zones this vehicle is currently inside. */
+  inside: Array<{ id: string; name: string; enforced: boolean }>
+  /** Inside at least one ENFORCED assigned keep-out zone. */
+  breach: boolean
+  /** False when we have not evaluated this vehicle yet (no fix seen). */
+  known: boolean
+}
+
+/**
+ * Which of a vehicle's ASSIGNED zones it is currently inside.
+ *
+ * Every geofence in this deployment is a BLOCKLIST (keep-out) zone, so being
+ * inside one is a violation rather than a reassurance — but only 8 of 107 are
+ * `isActive`. The rest were bulk-imported from Wialon and never switched on,
+ * so they are reported as context (`enforced: false`) and do not raise
+ * `breach`. Treating them as live would flood the UI with warnings nobody has
+ * chosen to enforce.
+ */
+export function assignedZoneStatus(orgId: string, vehicleId: string): AssignedZoneStatus {
+  const current = presence.get(vehicleId)
+  if (!current) return { inside: [], breach: false, known: false }
+
+  const assigned = assignmentCache.get(vehicleId)
+  const zones = zoneCache.get(orgId)?.zones ?? []
+
+  const inside: AssignedZoneStatus['inside'] = []
+  for (const z of zones) {
+    if (!current.has(z.id)) continue
+    // No assignment row means the vehicle is not accountable to this zone.
+    if (assigned && !assigned.has(z.id)) continue
+    inside.push({ id: z.id, name: z.name, enforced: z.keepOut })
+  }
+
+  return { inside, breach: inside.some(z => z.enforced), known: true }
+}
 
 // A vehicle hovering on a boundary would otherwise flap enter/exit every few
 // seconds. Re-announcing the same zone for a vehicle is suppressed for this
@@ -116,6 +180,7 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
 
   const zones = await getZones(p.orgId)
   if (zones.length === 0) return
+  await getAssignments(p.orgId)
 
   const now = new Set<string>()
   for (const z of zones) {
@@ -151,17 +216,19 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
           : `${who} arrived at ${z.name}.`)
       : `${who} left ${z.name}.`
 
-    emitDashboardFeed(p.orgId, {
+    // Live feed + durable history + cache — see notifications/notification.store.
+    // Zone crossings are the Live Feed's ONLY narrative for a GPS-only provider
+    // like Wialon, so they are the notifications most worth keeping.
+    publishNotification({
+      orgId:     p.orgId,
       id:        `zn-${p.vehicleId}-${z.id}-${isIn ? 'i' : 'o'}-${at}`,
-      time:      clockFmt.format(at),
-      ts:        new Date(at).toISOString(),
-      type,
-      text,
       source:    'zone',
       alertType: isIn ? (z.keepOut ? 'GEOFENCE_BREACH' : 'ZONE_ENTRY') : 'ZONE_EXIT',
+      severity:  type,
+      text,
+      at:        new Date(at),
       plate:     p.plate,
       vehicleId: p.vehicleId,
-      zone:      z.name,
     })
   }
 }

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 /**
- * Controltech EA delivers several event types to the same callback:
+ * RaiFactorySuite delivers several event types to the same callback:
  *
  *   alert.created     — an operational alert (feeds the Live Feed)
  *   dispatch.created  — a unit went out with a driver
@@ -20,11 +20,11 @@ export const webhookEnvelopeSchema = z.union([
   z.array(z.unknown()),
 ])
 
-/** The alert body we can actually map (see controltech-alerts.service).
+/** The alert body we can actually map (see raifactorysuite-alerts.service).
  *  `createdAt` is NULLABLE: the webhook sends null on live alerts (only the
  *  REST backfill populates it), so requiring it silently dropped every pushed
  *  alert. The receive time stands in when it's absent. */
-export const controltechAlertSchema = z.object({
+export const raiFactorySuiteAlertSchema = z.object({
   id:           z.string().min(1),
   factoryCode:  z.string().min(1),
   type:         z.string().min(1),
@@ -34,11 +34,11 @@ export const controltechAlertSchema = z.object({
   createdAt:    z.string().nullish(),
 })
 
-export type ControltechAlertInput = z.infer<typeof controltechAlertSchema>
+export type RaiFactorySuiteAlertInput = z.infer<typeof raiFactorySuiteAlertSchema>
 
 /** A dispatch record — a unit leaving with a driver. Same shape as the REST
  *  /dispatches resource, so the two paths normalise identically. */
-export const controltechDispatchSchema = z.object({
+export const raiFactorySuiteDispatchSchema = z.object({
   id:                   z.string().min(1),
   factoryCode:          z.string().min(1),
   vehicleNumberPlate:   z.string().min(1),
@@ -53,7 +53,7 @@ export const controltechDispatchSchema = z.object({
 
 /** A gate movement — a unit crossing the factory gate. Carries NO coordinates:
  *  this is a checkpoint crossing, not GPS. */
-export const controltechMovementSchema = z.object({
+export const raiFactorySuiteMovementSchema = z.object({
   id:                 z.string().min(1),
   factoryCode:        z.string().min(1),
   vehicleNumberPlate: z.string().min(1),

@@ -47,7 +47,7 @@ export async function findLatest(vehicleId: string, orgId: string) {
 /** Latest telemetry snapshot for every vehicle in an org — powers the initial map render. */
 export async function findFleetSnapshot(orgId: string) {
   // The live fleet is every ACTIVE vehicle in the org — the registry synced
-  // from the Controltech EA API (sync:vehicles). Vehicles the provider has
+  // from the RaiFactorySuite API (sync:vehicles). Vehicles the provider has
   // decommissioned/dropped stay in the DB for history but leave the fleet.
   const vehicles = await prisma.vehicle.findMany({
     where: { organisationId: orgId, isActive: true },
@@ -72,7 +72,7 @@ export async function findFleetSnapshot(orgId: string) {
   // Latest ping per vehicle in ONE query. LATERAL per vehicle (not DISTINCT ON
   // over the whole table): each vehicle walks its (vehicle_id, captured_at)
   // index newest-first and stops at the first row. The `_sim.*` extractions
-  // below are legacy simulator extras — live Controltech pings simply return
+  // below are legacy simulator extras — live RaiFactorySuite pings simply return
   // NULL for them and the clients degrade gracefully (no journey leg/phase).
   interface PingRow {
     vehicle_id: string

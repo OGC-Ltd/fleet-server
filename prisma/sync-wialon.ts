@@ -3,7 +3,7 @@
  *
  * Kasulu's vehicles exist ONLY in Wialon; they are not in factorysuite. So for
  * this org the Wialon unit *is* the registry entry — this script is the
- * counterpart of `sync:vehicles` (which covers Sukari from Controltech).
+ * counterpart of `sync:vehicles` (which covers Sukari from RaiFactorySuite).
  *
  * Two things happen per run, both idempotent:
  *
@@ -13,7 +13,7 @@
  *   2. each unit's LAST KNOWN position is written as a telemetry ping, so the
  *      map has something to draw before the live poller exists.
  *
- * Honesty rules carried over from the Controltech cutover:
+ * Honesty rules carried over from the RaiFactorySuite cutover:
  *   • `capturedAt` is the provider's own timestamp, never "now" — a position
  *     that is nine days old must look nine days old on the map.
  *   • a unit that has never reported gets a vehicle row and NO telemetry, so

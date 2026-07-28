@@ -16,7 +16,7 @@
  * every assigned driver holds one of the driver roles, so the Drivers page
  * roster, the Maintenance vehicle grid, and the live map all agree from the
  * first snapshot. HQ / customer / product data must stay in lockstep with
- * DIRECT_PROFILES in src/providers/controltech/controltech.simulator.ts.
+ * DIRECT_PROFILES in src/providers/raifactorysuite/raifactorysuite.simulator.ts.
  *
  * Run: npm run seed:orgs
  */
@@ -53,7 +53,7 @@ const LAST_NAMES = [
   'Ndegwa','Nekesa','Gathua','Simiyu','Njenga','Chebet','Mugambi','Koech',
   'Njeru','Kirui','Kariuki','Sang','Kiema','Rotich','Muthoni','Mutai',
 ]
-const GPS_VENDORS    = ['Queclink','Teltonika','CalAmp','Meitrack','Controltech']
+const GPS_VENDORS    = ['Queclink','Teltonika','CalAmp','Meitrack','RaiFactorySuite']
 const PLATE_SUFFIXES = ['A','B','C','D','E','F','G','H','J','K','L','M','N','P','Q','R','S','T','U','V']
 const RESOURCES = ['vehicle','trip','fuel_theft','fuel_filling','user','route',
                    'geofence','report','ingest_key','assignment','engine_session','cargo']

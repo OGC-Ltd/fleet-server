@@ -16,7 +16,7 @@
  * heavy plant). Several codes are unambiguous — BUS, EX(cavator), DZ (dozer,
  * matches the declared BULLDOZER), WL (wheel loader), GR (grader), BH
  * (backhoe), COMP (compactor). Others are a best reading of the abbreviation
- * and should be confirmed with ControlTech: the legend lives here so a
+ * and should be confirmed with RaiFactorySuite: the legend lives here so a
  * correction is a one-line edit, not a schema change.
  *
  * Median tank size per code, for reference when revising:
@@ -28,7 +28,7 @@
 export type VehicleClass =
   | 'BUS' | 'TRACTOR' | 'TRUCK' | 'LORRY' | 'SALOON' | 'PLANT' | 'UNSPECIFIED'
 
-/** Equipment code → class. Edit here when ControlTech confirms the legend. */
+/** Equipment code → class. Edit here when RaiFactorySuite confirms the legend. */
 const CODE_TO_CLASS: Record<string, VehicleClass> = {
   // Unambiguous
   BUS:   'BUS',

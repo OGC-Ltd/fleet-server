@@ -1,7 +1,7 @@
 /**
- * Alert backfill / reconciliation — Controltech EA (factorysuite).
+ * Alert backfill / reconciliation — RaiFactorySuite (factorysuite).
  *
- * Alerts normally arrive by WEBHOOK (POST /api/v1/webhooks/controltech/alerts)
+ * Alerts normally arrive by WEBHOOK (POST /api/v1/webhooks/raifactorysuite/alerts)
  * so we don't poll. This script exists for the two cases a push model can't
  * cover by itself:
  *
@@ -44,7 +44,7 @@ async function main() {
   const res = await fetch(`${API_URL}/alerts?limit=${LIMIT}`, {
     headers: { accept: 'application/json', 'X-API-Key': API_KEY },
   })
-  if (!res.ok) throw new Error(`Controltech /alerts responded ${res.status}`)
+  if (!res.ok) throw new Error(`RaiFactorySuite /alerts responded ${res.status}`)
   const body = await res.json() as unknown
   const alerts = (Array.isArray(body) ? body : (body as { data?: unknown[] }).data ?? []) as never[]
   if (alerts.length === 0) {
@@ -56,7 +56,7 @@ async function main() {
   // The intake service is shared with the webhook receiver, so classification,
   // plate resolution and dedupe behave identically on both paths. It imports
   // the app's prisma singleton, hence the dynamic import after dotenv.
-  const { ingestAlerts } = await import('../src/modules/webhooks/controltech-alerts.service.js')
+  const { ingestAlerts } = await import('../src/modules/webhooks/raifactorysuite-alerts.service.js')
   const result = await ingestAlerts(alerts, 'backfill', EMIT)
 
   console.log(`  ✓ created ${result.created}, already present ${result.updated}, skipped ${result.skipped} (unmapped factory)`)

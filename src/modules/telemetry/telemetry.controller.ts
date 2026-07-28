@@ -15,7 +15,12 @@ export const getFleetSnapshotHandler: RequestHandler = async (req, res, next) =>
 
 export const getTelemetryHistory: RequestHandler = async (req, res, next) => {
   try {
-    const result = await listPings(p(req, 'vehicleId'), req.user!.organisationId, req.query as unknown as TelemetryListQuery)
+    // Scope by the PATH org, not the caller's home org. requireOrgAccess has
+    // already proven the two are the same when auth is on; under AUTH_BYPASS
+    // they are not, and using req.user.organisationId made this 404 for every
+    // vehicle outside the bypass user's own org — which is every KASULU
+    // vehicle, i.e. the entire GPS fleet.
+    const result = await listPings(p(req, 'vehicleId'), p(req, 'orgId'), req.query as unknown as TelemetryListQuery)
     sendSuccess(res, result.data, 200, { cursor: result.cursor, hasNextPage: result.hasNextPage })
   } catch (err) {
     next(err)
@@ -24,7 +29,7 @@ export const getTelemetryHistory: RequestHandler = async (req, res, next) => {
 
 export const getLatestTelemetry: RequestHandler = async (req, res, next) => {
   try {
-    const ping = await getLatestPing(p(req, 'vehicleId'), req.user!.organisationId)
+    const ping = await getLatestPing(p(req, 'vehicleId'), p(req, 'orgId'))
     sendSuccess(res, ping)
   } catch (err) {
     next(err)

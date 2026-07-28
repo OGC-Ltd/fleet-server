@@ -23,7 +23,7 @@ const BASE = `/api/v1/organisations/${TEST_ORG_ID}/api-keys`
 
 const makeKey = (overrides = {}) => ({
   id: 'key_01', organisationId: TEST_ORG_ID,
-  label: 'Controltech Webhook', isActive: true,
+  label: 'RaiFactorySuite Webhook', isActive: true,
   createdAt: new Date(), expiresAt: null, lastUsedAt: null, createdById: TEST_USER_ID,
   ...overrides,
 })
@@ -32,7 +32,7 @@ describe('POST /api-keys', () => {
   it('creates an API key and returns rawKey once', async () => {
     prismaMock.ingestApiKey.create.mockResolvedValue(makeKey() as never)
 
-    const res = await request(app).post(BASE).send({ label: 'Controltech Webhook' })
+    const res = await request(app).post(BASE).send({ label: 'RaiFactorySuite Webhook' })
 
     expect(res.status).toBe(201)
     expect(res.body.data).toHaveProperty('rawKey')

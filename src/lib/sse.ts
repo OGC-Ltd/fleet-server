@@ -103,36 +103,50 @@ export function registerDashboardClient(orgId: string, res: Response): () => voi
   }
 }
 
-// Live-feed ring buffer — GLOBAL across organisations: the feed panel shows
-// the whole platform's activity (every org's dispatches, arrivals, alerts),
-// so items are buffered once and broadcast to every org's dashboard channel.
-// Replayed to new clients so the panel has history on page load.
-const FEED_BUFFER_MAX = 60
-const globalFeed: unknown[] = []
-
-/** Human activity-feed item (dispatch/arrival/offload/alert …) — powers the
- *  Live Feed panel. `orgId` tags the item; delivery is to ALL orgs' clients. */
+/**
+ * Human activity-feed item (dispatch / arrival / offload / alert …) — powers
+ * the Live Feed panel.
+ *
+ * Delivered ONLY to the owning organisation's dashboard clients.
+ *
+ * This used to buffer into a single 60-item ring shared by every org and
+ * broadcast to all of them, on the theory that the panel showed "the whole
+ * platform's activity". The client never agreed: useFleetLive drops any item
+ * whose `orgId` is not the active one. The result was that the noisiest org
+ * starved every other one — KASULU emits a zone crossing every few seconds, so
+ * a SUKARI client would receive 60 replayed items, discard 58 of them, and
+ * watch its remaining 2 get evicted from the shared ring within seconds. Its
+ * Live Feed went permanently empty while the platform was visibly busy.
+ *
+ * History now comes from the durable per-org store instead of a ring buffer
+ * (see replayDashboardFeed), so nothing here needs to retain anything.
+ */
 export function emitDashboardFeed(orgId: string, item: unknown) {
   const stamped = { ...(item as Record<string, unknown>), orgId }
-  globalFeed.push(stamped)
-  if (globalFeed.length > FEED_BUFFER_MAX) globalFeed.splice(0, globalFeed.length - FEED_BUFFER_MAX)
-  const payload = `event: feed\ndata: ${JSON.stringify(stamped, bigIntReplacer)}\n\n`
-  for (const [key, clients] of registry) {
-    if (!key.endsWith(':dashboard')) continue
-    for (const client of clients) {
-      try { client.res.write(payload) } catch { /* client disconnected */ }
-    }
-  }
+  broadcastDashboard(orgId, 'feed', stamped)
 }
 
-/** Write the buffered feed history (all orgs) straight to one client. */
-export function replayDashboardFeed(_orgId: string, res: Response): number {
-  for (const item of globalFeed) {
+/**
+ * Replay this organisation's recent feed history to one newly-connected
+ * client, oldest-first (the client prepends, so it lands newest-first).
+ *
+ * Reads the durable store — Redis cache first, Postgres behind it — rather
+ * than an in-memory buffer. Two things follow from that: history survives a
+ * restart, and one org's traffic can no longer crowd out another's, because
+ * each org is queried for its own rows.
+ */
+export async function replayDashboardFeed(orgId: string, res: Response, limit = 40): Promise<number> {
+  const { getNotifications } = await import('./notifications/notification.reader.js')
+  const { items } = await getNotifications(orgId, { limit })
+
+  // getNotifications returns newest-first; the panel wants the replay in
+  // arrival order so its prepend leaves the newest at the top.
+  for (const item of [...items].reverse()) {
     try {
-      res.write(`event: feed\ndata: ${JSON.stringify(item, bigIntReplacer)}\n\n`)
+      res.write(`event: feed\ndata: ${JSON.stringify({ ...item, orgId }, bigIntReplacer)}\n\n`)
     } catch { /* client disconnected mid-replay */ }
   }
-  return globalFeed.length
+  return items.length
 }
 
 /** Vehicle position + state snapshot — powers the live map markers. */

@@ -12,9 +12,11 @@ import { stopPushDispatcher }       from './lib/push-dispatcher.js'
 import { startCacheWarmer } from './lib/warm-cache.js'
 import { warmRoadRoutes } from './lib/road-routes.js'
 import { startAiInsightWarmer } from './modules/dashboard/ai-insight.js'
-import { seedFeedFromStoredAlerts } from './modules/webhooks/controltech-alerts.service.js'
 import { WialonLiveAdapter } from './providers/wialon/wialon.adapter.js'
-import { staticRoutePairs } from './providers/controltech/controltech.simulator.js'
+import { startRaiFactorySuiteReconciler } from './providers/raifactorysuite/raifactorysuite.reconciler.js'
+import { startRetentionSweep } from './lib/queues/retention.js'
+import { disconnectRedis } from './lib/redis.js'
+import { staticRoutePairs } from './providers/raifactorysuite/raifactorysuite.simulator.js'
 
 async function main() {
   await connectDB()
@@ -40,20 +42,38 @@ async function main() {
   // Hourly AI operations brief per org (dashboard/ai-insight.ts) — generated
   // in the background so the endpoint always answers from memory.
   const stopAiInsightWarmer = startAiInsightWarmer()
-  // The live-feed buffer is in-memory, so a restart would blank the Operations
-  // feed even though the alerts are stored. Replay the most recent ones so the
-  // panel is populated for the first client that connects.
-  void seedFeedFromStoredAlerts().catch((err) =>
-    logger.warn({ err }, 'Could not seed the live feed from stored alerts'))
+  // (The live feed used to be seeded here into a shared in-memory ring. Each
+  // SSE client now replays its OWN org's history from the durable store on
+  // connect — see lib/sse.ts's replayDashboardFeed — so there is nothing to
+  // pre-warm, and a restart no longer blanks anyone's Operations panel.)
+  // ── provider ingestion ──────────────────────────────────────────────────
+  // Two INDEPENDENT loops, each with its own guard, watchdog and cadence (see
+  // lib/poll-loop.ts). Neither can skip the other's tick, and a stall in one
+  // provider is visible in the logs as that provider's loop, not the other's.
+  //
   // API-only mode (POLL_ENABLED=false): serve reads off the DB without running
-  // the sim — see config/env.ts.
-  // Live positions for KASULU come from Wialon. Sukari's provider (Controltech)
-  // exposes no coordinates, so this is currently the platform's only source of
-  // real GPS — see docs/LIVE_INTEGRATION.md.
+  // the telemetry poller — see config/env.ts.
+  //
+  // Live positions for KASULU come from Wialon. Sukari's provider
+  // (RaiFactorySuite) exposes no coordinates, so Wialon is currently the
+  // platform's only source of real GPS — see docs/LIVE_INTEGRATION.md.
   const poller = env.POLL_ENABLED
     ? startPoller(new WialonLiveAdapter())
     : { stop: () => {}, flush: async () => {} }
   if (!env.POLL_ENABLED) logger.warn('POLL_ENABLED=false — telemetry poller/sim NOT started (API-only instance)')
+
+  // RaiFactorySuite's alerts and dispatches arrive by WEBHOOK; this loop is the
+  // reconcile safety net for the deliveries their sender retries a few times
+  // and then drops. Independent of POLL_ENABLED: an API-only instance still
+  // wants its operations feed to be complete, and the writes are idempotent.
+  const raiFactorySuite = startRaiFactorySuiteReconciler()
+
+  // Notification retention — a BullMQ repeatable job that deletes items past
+  // NOTIFICATION_RETENTION_DAYS. No-op without REDIS_URL, which is the current
+  // production state: the t3.micro is already swapping, so Redis only arrives
+  // after the instance is resized. Until then notifications persist to
+  // Postgres and accumulate — see lib/queues/retention.ts.
+  const retention = await startRetentionSweep()
   // API-only instances re-emit live positions + feed off the shared DB
   // (read-only) so a dev dashboard still gets a live map — see lib/db-follower.
   const stopDbFollower = !env.POLL_ENABLED && env.FOLLOW_DB ? startDbFollower() : () => {}
@@ -61,6 +81,8 @@ async function main() {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received')
     poller.stop()
+    raiFactorySuite.stop()
+    await retention.stop().catch((err) => logger.warn({ err }, 'Retention sweep shutdown failed'))
     // Freeze the simulation exactly where it is so the next start resumes it.
     await poller.flush().catch((err) => logger.warn({ err }, 'Simulation flush failed on shutdown'))
     stopDbFollower()
@@ -71,6 +93,7 @@ async function main() {
     stopCacheWarmer()
     stopAiInsightWarmer()
     await stopPushDispatcher().catch((err) => logger.warn({ err }, 'Push worker thread shutdown failed'))
+    await disconnectRedis().catch((err) => logger.warn({ err }, 'Redis disconnect failed'))
     server.close(async () => {
       await disconnectDB()
       logger.info('Graceful shutdown complete')
