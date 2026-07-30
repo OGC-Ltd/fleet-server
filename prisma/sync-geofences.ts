@@ -11,6 +11,17 @@
  *   2 POLYGON → POLYGON  (vertex ring)
  *   1 LINE    → LINE     (centre-line + width — a corridor; see lib/geofence)
  *
+ * …with one correction. Wialon's drawing tools let an operator trace an AREA
+ * boundary with the polyline tool, and the estate's own zones were captured
+ * that way: "2500 Ha Area", "Commercial Area", the FARM#210-215 blocks, the
+ * nurseries and the rainfed area all arrive as type 1 carrying a 1-3 m width.
+ * Taking that at face value models a 2,354-hectare field as a one-metre-wide
+ * corridor — it draws as a hairline on the map, and containment tests the
+ * wrong thing entirely. Those rings close exactly on themselves, which is what
+ * separates them from the real corridors (drains, rivers, haulage roads, whose
+ * endpoints sit 1-29 km apart), so closure is the discriminator — see
+ * isClosedRing below.
+ *
  * Idempotent on `external_id = "wialon:zone:<id>"`, so re-running updates in
  * place and picks up edits made in Wialon.
  *
@@ -40,6 +51,28 @@ const ORG_CODE = 'KASULU'
 
 /** Wialon zone type → ours. */
 const ZONE_TYPE = { 1: 'LINE', 2: 'POLYGON', 3: 'CIRCLE' } as const
+
+/**
+ * True when a traced polyline returns to its own start — i.e. it is an area
+ * boundary, not a corridor.
+ *
+ * The tolerance is deliberately tight. Wialon writes the closing vertex as a
+ * byte-identical copy of the first, so genuine rings measure 0 m; the loosest
+ * real corridor in the estate (DRAINS3) still has its endpoints 1,044 m apart.
+ * Anything between those two is ambiguous and stays a corridor, because
+ * mistaking a river for a polygon is far worse than the reverse: a river's
+ * "interior" is meaningless, and every vehicle in the fleet would fall inside
+ * the Malagarasi's 62 km hull.
+ */
+function isClosedRing(pts: Array<[number, number]>, toleranceM = 25): boolean {
+  if (pts.length < 4) return false
+  const [x1, y1] = pts[0]!
+  const [x2, y2] = pts[pts.length - 1]!
+  const rad = (d: number) => (d * Math.PI) / 180
+  const dx = rad(x2 - x1) * Math.cos(rad((y1 + y2) / 2)) * 6_371_000
+  const dy = rad(y2 - y1) * 6_371_000
+  return Math.hypot(dx, dy) <= toleranceM
+}
 
 interface WialonZonePoint { x: number; y: number; r?: number }
 interface WialonZone {
@@ -85,7 +118,7 @@ async function main() {
   })
   console.log(`  ← ${zones.length} geozones from "${resource.nm}"`)
 
-  let created = 0, updated = 0, skipped = 0
+  let created = 0, updated = 0, skipped = 0, retyped = 0
   const byType: Record<string, number> = {}
   const seen: string[] = []
 
@@ -127,7 +160,17 @@ async function main() {
       // Both polygons and corridors store [[lng, lat], …] — the ordering the
       // geometry helpers and GeoJSON both expect.
       const coords = pts.map(p => [p.x, p.y] as [number, number])
-      data = kind === 'POLYGON'
+
+      // A traced polyline that closes on itself is an area boundary the
+      // operator drew with the wrong tool — store what it means, not what
+      // Wialon called it.
+      const isArea = kind === 'POLYGON' || isClosedRing(coords)
+      if (isArea && kind === 'LINE') {
+        retyped++
+        console.log(`    ↻ "${base.name}" — closed ring, importing as POLYGON (Wialon says LINE w=${z.w ?? 1}m)`)
+      }
+
+      data = isArea
         ? { ...base, type: 'POLYGON', polygonCoords: coords }
         : { ...base, type: 'LINE', polygonCoords: coords, widthM: z.w ?? 1 }
     }
@@ -143,11 +186,13 @@ async function main() {
       await prisma.geofence.create({ data: { ...data, externalId } })
       created++
     }
-    byType[kind] = (byType[kind] ?? 0) + 1
+    // Count what we STORED, not what Wialon called it.
+    byType[data.type] = (byType[data.type] ?? 0) + 1
   }
 
   console.log(`\n  ✓ created ${created}, updated ${updated}, skipped ${skipped} (unsupported or empty geometry)`)
   console.log(`  ✓ by type: ${Object.entries(byType).map(([k, n]) => `${k} ${n}`).join(', ')}`)
+  if (retyped) console.log(`  ✓ ${retyped} closed ring(s) reclassified LINE → POLYGON`)
 
   const active = await prisma.geofence.count({ where: { organisationId: org.id, isActive: true } })
   const bound  = await prisma.vehicleGeofence.count()

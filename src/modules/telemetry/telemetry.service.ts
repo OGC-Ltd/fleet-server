@@ -1,7 +1,7 @@
-import { findPings, findLatest, findActiveAlerts, findAlertHistoryCounts } from './telemetry.repository.js'
+import { findPings, findTrack, findLatest, findActiveAlerts, findAlertHistoryCounts } from './telemetry.repository.js'
 import { getMaintenanceHistoryCached, getOrgVehicleMaintenance } from './maintenance.cache.js'
 import { getFleetSnapshotCached } from './fleet-snapshot.cache.js'
-import type { TelemetryListQuery } from './telemetry.schema.js'
+import type { TelemetryListQuery, TrackQuery } from './telemetry.schema.js'
 import { NotFoundError } from '../../core/errors/errors.js'
 import { assignedZoneStatus } from '../../lib/zone-presence.js'
 import { movementState } from '../../lib/movement-state.js'
@@ -9,6 +9,12 @@ import { connectionStatus } from '../../lib/connection-state.js'
 
 export async function listPings(vehicleId: string, orgId: string, q: TelemetryListQuery) {
   const result = await findPings(vehicleId, orgId, q)
+  if (!result) throw new NotFoundError('Vehicle not found')
+  return result
+}
+
+export async function getVehicleTrack(vehicleId: string, orgId: string, q: TrackQuery) {
+  const result = await findTrack(vehicleId, orgId, q)
   if (!result) throw new NotFoundError('Vehicle not found')
   return result
 }

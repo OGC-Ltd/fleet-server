@@ -105,7 +105,7 @@ class RaiFactorySuiteReconciler {
       // the only thing that tells a dispatch's story. Here we only keep the
       // driver↔vehicle assignment rows current.
       for (const d of dispatches) {
-        if (await handleDispatch(d, { narrate: false })) dispatchesSeen++
+        if (await handleDispatch(d, { narrate: false, source: 'reconciler' })) dispatchesSeen++
       }
     } catch (err) {
       failed = true

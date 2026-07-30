@@ -85,7 +85,7 @@ export interface MovementEvent {
  */
 export async function handleDispatch(
   d: DispatchEvent,
-  { narrate = true }: { narrate?: boolean } = {},
+  { narrate = true, source = 'webhook' }: { narrate?: boolean; source?: string } = {},
 ): Promise<boolean> {
   const organisationId = await resolveOrgId(d.factoryCode)
   if (!organisationId) return false
@@ -96,6 +96,34 @@ export async function handleDispatch(
   const vehicle = await prisma.vehicle.findFirst({
     where: { organisationId, registrationPlate: norm(d.vehicleNumberPlate) },
     select: { id: true },
+  })
+
+  // The dispatch ITSELF, kept whether or not the plate and driver resolve.
+  //
+  // Two things need it. The map tooltip needs the open one per vehicle (where
+  // is this truck going, since when, when is it due). The duration statistics
+  // need the closed ones — and `/dispatches` is a 1000-row sliding window with
+  // no pagination, so anything not persisted here is lost the moment the
+  // provider's window moves past it.
+  const row = {
+    organisationId,
+    vehicleId:        vehicle?.id ?? null,
+    plate:            norm(d.vehicleNumberPlate),
+    driverName:       d.driverName.trim(),
+    destination:      d.destinationOrPurpose?.trim() || null,
+    status:           (d.status ?? 'DISPATCHED').toUpperCase(),
+    dispatchedAt:     when,
+    expectedReturnAt: parseProviderTime(d.expectedReturnTime),
+    actualReturnAt:   parseProviderTime(d.actualReturnTime),
+    source,
+  }
+  await prisma.dispatch.upsert({
+    where:  { externalId: d.id },
+    create: { externalId: d.id, ...row },
+    // A dispatch is re-read on every reconcile pass and changes as it runs
+    // (DISPATCHED → OVERDUE → COMPLETED, and actualReturnTime lands at the
+    // end), so the update path is the normal case, not the exception.
+    update: row,
   })
 
   // The driver is identified by name only — the provider sends no id here.

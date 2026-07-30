@@ -96,6 +96,7 @@ model Organisation {
   silos             Silo[]
   providerAlerts    ProviderAlert[]
   notifications     Notification[]
+  dispatches        Dispatch[]
 
   @@map("organisations")
 }
@@ -319,6 +320,7 @@ model Vehicle {
   alerts             VehicleAlert[]
   providerAlerts     ProviderAlert[]
   notifications      Notification[]
+  dispatches         Dispatch[]
 
   @@index([organisationId])
   @@index([vehicleGroupId])
@@ -944,6 +946,55 @@ model ProviderAlert {
   @@index([organisationId, createdAt])
   @@index([vehicleId, createdAt])
   @@map("provider_alerts")
+}
+
+/// A dispatch as RaiFactorySuite recorded it: this vehicle, this driver, sent
+/// to this destination at this time.
+///
+/// The provider is the ONLY source of "where is it going" — it exposes no
+/// coordinates, so `destination` is the dispatcher's free text and nothing more.
+/// 152 distinct values are in use ("OPAPO", "GOT KOJOWI", "OSOGO KAJ"): cane
+/// collection zones in a local naming system. They are deliberately NOT
+/// geocoded — probing Nominatim on the fourteen busiest returned five matches,
+/// three of them plainly wrong (a primary school 20 km away, a road 25 km
+/// away), so any coordinate derived from the text would be a fabrication. What
+/// CAN be measured is time: the dispatch clock is exact, and the fleet's own
+/// completed trips to the same destination give a typical duration.
+///
+/// Why a table rather than living off the provider: `/dispatches` is capped at
+/// 1000 rows with no pagination, so the history it exposes is a sliding window
+/// that will eventually drop the trips the duration statistics are built from.
+model Dispatch {
+  id             String    @id @default(cuid())
+  /// Provider's dispatch UUID — dedupe key across webhook, reconciler and backfill.
+  externalId     String    @unique @map("external_id")
+  organisationId String    @map("organisation_id")
+  /// NULL when the plate does not resolve to our registry.
+  vehicleId      String?   @map("vehicle_id")
+  plate          String
+  driverName     String    @map("driver_name")
+  /// Free text, verbatim from the provider. Never parsed into coordinates.
+  destination    String?
+  /// DISPATCHED | OVERDUE | COMPLETED | CANCELLED, as the provider reports it.
+  status         String
+  dispatchedAt   DateTime  @map("dispatched_at")
+  /// The dispatcher's own commitment, when they set one — present on about a
+  /// third of open dispatches. Beats any estimate we could compute.
+  expectedReturnAt DateTime? @map("expected_return_at")
+  actualReturnAt   DateTime? @map("actual_return_at")
+  receivedAt     DateTime  @default(now()) @map("received_at")
+  /// 'webhook' when pushed, 'reconciler' on the safety-net poll, 'backfill' from sync:dispatches.
+  source         String    @default("webhook")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  vehicle      Vehicle?     @relation(fields: [vehicleId], references: [id])
+
+  // "what is open right now for this org" — the hot query behind the tooltip.
+  @@index([organisationId, actualReturnAt, dispatchedAt])
+  @@index([vehicleId, dispatchedAt])
+  // Duration statistics per destination, over completed trips only.
+  @@index([organisationId, destination, actualReturnAt])
+  @@map("dispatches")
 }
 
 /// Durable Live Feed history — every item the operations feed has ever shown,

@@ -47,8 +47,7 @@ const CODE_TO_CLASS: Record<string, VehicleClass> = {
   GR:    'PLANT',    // grader
   BH:    'PLANT',    // backhoe loader
   COMP:  'PLANT',    // compactor — NOTE: distinct from COM below
-  HYD:   'PLANT',    // hydraulic unit — 43 L, the smallest group
-  CM:    'PLANT',
+  CM:    'PLANT',    // compactor, the other code the operator uses for one
   HST:   'PLANT',
   GL:    'PLANT',
 
@@ -60,6 +59,9 @@ const CODE_TO_CLASS: Record<string, VehicleClass> = {
   CTR:   'TRACTOR',  // cane tractor. The legend allows "container truck" too;
                      // 2.4 km per engine hour rules that out — a container
                      // truck sits with FT/FTT at 24-51.
+  HYD:   'TRACTOR',  // operator-confirmed. Was PLANT, guessed from "hydraulic"
+                     // and the fleet's smallest tank (43 L); 1.2 km per engine
+                     // hour fits a tractor working a field either way.
 
   // Haulage.
   FT:    'TRUCK',    // flatbed truck. Was TRACTOR, inferred from a 385 L tank.

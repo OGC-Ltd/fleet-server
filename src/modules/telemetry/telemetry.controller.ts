@@ -1,8 +1,8 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import { registerSseClient, emitHeartbeat } from '../../lib/sse.js'
-import { listPings, getLatestPing, getFleetSnapshot, getActiveAlerts, getAlertHistoryCounts, getMaintenanceHistory, getVehicleServiceHistory, getVehicleGarageVisits } from './telemetry.service.js'
-import type { TelemetryListQuery } from './telemetry.schema.js'
+import { listPings, getVehicleTrack, getLatestPing, getFleetSnapshot, getActiveAlerts, getAlertHistoryCounts, getMaintenanceHistory, getVehicleServiceHistory, getVehicleGarageVisits } from './telemetry.service.js'
+import type { TelemetryListQuery, TrackQuery } from './telemetry.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -25,6 +25,17 @@ export const getTelemetryHistory: RequestHandler = async (req, res, next) => {
   } catch (err) {
     next(err)
   }
+}
+
+export const getVehicleTrackHandler: RequestHandler = async (req, res, next) => {
+  try {
+    // The whole result is the payload: a track is not a page, so its span and
+    // truncation flag belong in `data`, not in the pagination `meta` slot.
+    const track = await getVehicleTrack(
+      p(req, 'vehicleId'), p(req, 'orgId'), req.query as unknown as TrackQuery,
+    )
+    sendSuccess(res, track)
+  } catch (err) { next(err) }
 }
 
 export const getLatestTelemetry: RequestHandler = async (req, res, next) => {
