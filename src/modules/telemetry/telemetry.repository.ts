@@ -1,7 +1,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { Prisma } from '../../../generated/prisma/client.js'
 import { ALERT_SOURCE } from '../../lib/alerts.js'
-import type { TelemetryListQuery } from './telemetry.schema.js'
+import type { TelemetryListQuery, TrackQuery } from './telemetry.schema.js'
 
 export async function findPings(vehicleId: string, orgId: string, q: TelemetryListQuery) {
   // Verify vehicle belongs to org before returning data
@@ -29,6 +29,84 @@ export async function findPings(vehicleId: string, orgId: string, q: TelemetryLi
   const nextCursor = hasNextPage ? (pings.at(-1)?.id ?? null) : null
 
   return { data: pings, cursor: nextCursor?.toString() ?? null, hasNextPage }
+}
+
+/**
+ * Rows scanned for one track. At the 30 s poll cadence this is ~41 hours, so a
+ * normal 12 h window never reaches it; it exists only so an open-ended `from`
+ * cannot try to stream a year of history into memory.
+ */
+const TRACK_SCAN_CAP = 5000
+
+/** Metres between two lat/lng points (equirectangular — exact enough here). */
+function metresBetween(aLat: number, aLng: number, bLat: number, bLng: number) {
+  const R = 6371000, rad = Math.PI / 180
+  const dLat = (bLat - aLat) * rad
+  const dLng = (bLng - aLng) * rad * Math.cos(((aLat + bLat) / 2) * rad)
+  return Math.sqrt(dLat * dLat + dLng * dLng) * R
+}
+
+/**
+ * The vehicle's travelled track over a window: three columns, thinned, oldest
+ * first — the shape a polyline actually needs.
+ *
+ * Returns `truncated` so the caller can say how far back the track really
+ * reaches instead of asserting the requested window. That distinction matters:
+ * a vehicle with no fixes in the window is NOT the same as one that sat still,
+ * and the map had been reporting both as "no movement".
+ */
+export async function findTrack(vehicleId: string, orgId: string, q: TrackQuery) {
+  const vehicle = await prisma.vehicle.findFirst({
+    where: { id: vehicleId, organisationId: orgId },
+    select: { id: true },
+  })
+  if (!vehicle) return null
+
+  // Newest-first with the cap, so a truncated scan drops the OLDEST end and the
+  // track still runs up to the present. Reversed to ascending below.
+  const rows = await prisma.vehicleTelemetry.findMany({
+    where: {
+      vehicleId,
+      ...(q.from || q.to
+        ? { capturedAt: { ...(q.from ? { gte: q.from } : {}), ...(q.to ? { lte: q.to } : {}) } }
+        : {}),
+    },
+    orderBy: { capturedAt: 'desc' },
+    take: TRACK_SCAN_CAP + 1,
+    select: { capturedAt: true, lat: true, lng: true },
+  })
+
+  const truncated = rows.length > TRACK_SCAN_CAP
+  if (truncated) rows.pop()
+
+  const fixes = rows.length
+  const points: { t: number; lat: number; lng: number }[] = []
+  // Ascending, dropping fixes with no position and any that have not moved far
+  // enough from the last one kept.
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i]
+    if (r.lat == null || r.lng == null || !Number.isFinite(r.lat) || !Number.isFinite(r.lng)) continue
+    const prev = points[points.length - 1]
+    if (prev && metresBetween(prev.lat, prev.lng, r.lat, r.lng) < q.minSpacingM) continue
+    points.push({ t: r.capturedAt.getTime(), lat: r.lat, lng: r.lng })
+  }
+
+  // Always keep the final fix, so the track reaches where the vehicle actually
+  // stopped even if that last hop was shorter than the spacing threshold.
+  const lastRow = rows.find(r => r.lat != null && r.lng != null)
+  if (lastRow?.lat != null && lastRow.lng != null) {
+    const last = points[points.length - 1]
+    const t = lastRow.capturedAt.getTime()
+    if (!last || last.t !== t) points.push({ t, lat: lastRow.lat, lng: lastRow.lng })
+  }
+
+  return {
+    points,
+    fixes,                                   // rows in the window before thinning
+    truncated,                               // scan cap hit: earliest is not the window start
+    firstAt: points[0]?.t ?? null,
+    lastAt:  points[points.length - 1]?.t ?? null,
+  }
 }
 
 export async function findLatest(vehicleId: string, orgId: string) {

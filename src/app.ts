@@ -21,6 +21,7 @@ import telemetryRoutes from './modules/telemetry/telemetry.routes.js'
 import routeRoutes from './modules/routes/route.routes.js'
 import geofenceRoutes from './modules/geofences/geofence.routes.js'
 import cargoRoutes from './modules/cargo/cargo.routes.js'
+import dispatchRoutes from './modules/dispatches/dispatch.routes.js'
 import apiKeyRoutes from './modules/api-keys/api-key.routes.js'
 import analyticsRoutes from './modules/analytics/analytics.routes.js'
 import dashboardRoutes from './modules/dashboard/dashboard.routes.js'
@@ -153,6 +154,7 @@ export function createApp() {
   app.use(orgBase, reportRoutes)
   app.use(`${orgBase}/routes`, routeRoutes)
   app.use(`${orgBase}/geofences`, geofenceRoutes)
+  app.use(`${orgBase}/dispatches`, dispatchRoutes)
   app.use(`${orgBase}/api-keys`, apiKeyRoutes)
   app.use(`${orgBase}/analytics`, analyticsRoutes)
   app.use(`${orgBase}/dashboard`, dashboardRoutes)

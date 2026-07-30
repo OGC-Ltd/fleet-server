@@ -10,6 +10,9 @@ router.use(authenticate, requireOrgAccess)
 
 router.get('/',              validateQuery(geofenceListQuerySchema), ctrl.list)
 router.post('/',             validateBody(createGeofenceSchema),     ctrl.create)
+// MUST precede '/:geofenceId' — otherwise "geojson" is read as a fence id and
+// the map layer 404s.
+router.get('/geojson',       ctrl.geojson)
 router.get('/:geofenceId',   ctrl.getOne)
 router.patch('/:geofenceId', validateBody(updateGeofenceSchema),    ctrl.update)
 router.delete('/:geofenceId', ctrl.remove)

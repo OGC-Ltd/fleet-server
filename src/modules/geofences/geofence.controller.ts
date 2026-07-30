@@ -13,6 +13,13 @@ export const list: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+export const geojson: RequestHandler = async (req, res, next) => {
+  try {
+    const fc = await repo.findAllAsGeoJSON(p(req, 'orgId'))
+    sendSuccess(res, fc)
+  } catch (err) { next(err) }
+}
+
 export const create: RequestHandler = async (req, res, next) => {
   try {
     const fence = await repo.create(p(req, 'orgId'), req.user!.id, req.body as CreateGeofence)
