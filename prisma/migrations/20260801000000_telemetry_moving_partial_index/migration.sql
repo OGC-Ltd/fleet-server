@@ -1,0 +1,35 @@
+-- Partial index for the fleet snapshot's "last moved" lookup.
+--
+-- findFleetSnapshot resolves, per vehicle, the newest ping WITH movement:
+--
+--   SELECT captured_at FROM vehicle_telemetries
+--    WHERE vehicle_id = $1 AND speed_kmh > 0
+--    ORDER BY captured_at DESC LIMIT 1
+--
+-- The existing (vehicle_id, captured_at) index cannot satisfy the speed_kmh
+-- predicate, so for a vehicle that has NEVER moved this walks that vehicle's
+-- entire history and returns nothing. One such lookup is fast; 597 of them in
+-- a single LATERAL is not. Measured against SUKARI on 2026-08-01, with
+-- vehicle_telemetries at 1.87M rows / 663 MB:
+--
+--   latest ping only .................. 422 ms
+--   + raws payload join .............. 3 490 ms
+--   + this last-moved subquery ....... > 170 000 ms (timeout)
+--
+-- The partial index makes both branches instant: a vehicle that moves hits a
+-- tiny index; one that never has hits an EMPTY index range and stops
+-- immediately, instead of scanning its whole history.
+--
+-- Written as a raw migration because Prisma's schema language cannot express a
+-- partial (WHERE-filtered) index — see the note above the @@index list on
+-- model VehicleTelemetry in schema.prisma.
+--
+-- NOTE ON CONCURRENCY: Prisma wraps migrations in a transaction, and
+-- CREATE INDEX CONCURRENTLY cannot run inside one. On an existing hot database
+-- this index is therefore built CONCURRENTLY out-of-band and this migration is
+-- marked applied with `prisma migrate resolve`. IF NOT EXISTS keeps that
+-- resolution safe and makes fresh/empty databases (CI, a new environment)
+-- build it inline, where the table is small and the brief lock is irrelevant.
+CREATE INDEX IF NOT EXISTS "vehicle_telemetries_moving_idx"
+  ON "vehicle_telemetries" ("vehicle_id", "captured_at" DESC)
+  WHERE "speed_kmh" > 0;
