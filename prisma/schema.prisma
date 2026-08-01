@@ -786,6 +786,14 @@ model VehicleTelemetry {
 
   @@unique([deviceId, capturedAt])    // idempotent ingest
   @@index([vehicleId, capturedAt])    // timeline + latest-ping (B-tree serves ASC and DESC)
+  // A THIRD index exists on this table that is NOT declared here:
+  //   vehicle_telemetries_moving_idx (vehicle_id, captured_at DESC)
+  //     WHERE speed_kmh > 0
+  // Prisma's schema language cannot express a partial index, so it lives in
+  // migrations/20260801000000_telemetry_moving_partial_index. Do not "tidy it
+  // up" as drift — without it the fleet snapshot's last-moved lookup scans the
+  // full history of every vehicle that has never moved, and the query times
+  // out. Details and measurements in that migration's header.
   @@index([capturedAt])               // partition key — range queries across all vehicles
   @@map("vehicle_telemetries")
 }

@@ -2,3 +2,8 @@
 /generated/prisma
 **/*.env
 /dist
+# Surveyor source documents — the estate CAD drawing and its plot. 8 MB of
+# binary that never changes and is not built from; the georeferenced extract
+# that IS used lives in dash/public/estate-plan.geojson.
+ESTATE*.pdf
+ESTATE*.dwg
