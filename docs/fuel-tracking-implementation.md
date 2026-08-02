@@ -248,6 +248,20 @@ rewrites the row when the provider's figures have moved, guarded on an actual ch
 events are not written every cycle, and counts it as `corrected`. This is the module's own principle
 applied consistently: the provider computes the event, we record its current answer.
 
+**A refresh discarded everything that was not fuel.** The panel took the server's newest-40 replay
+and threw away what it had accumulated — and on a lopsided fleet those 40 are all one kind of event.
+Measured: SUKARI's newest 40 are 37 fuel items; KASULU's are 40 zone crossings. So a
+`TRACTOR_OVERDUE` or a keep-out breach survived only as long as the tab stayed open. The dashboard
+now persists the feed per company in localStorage (12-hour horizon) and merges the replay onto it
+rather than replacing it.
+
+Persistence alone was not enough, and the arithmetic is why: at thirteen crossings a minute a
+200-item list is fifteen minutes of history, so an hour-old fuel drop is evicted by volume and a
+bigger cap only moves the cliff. Trimming therefore reserves space — no single `alertType` takes
+more than 60% of the list, and the majority gets the remainder back when nothing else is waiting, so
+a single-type feed still fills the panel. The cost is that the list can show a chronological gap.
+The `?alertType=` filter is the alternative if strict chronology matters more.
+
 Also: `deriveFeedEvents` built its id from a process-global counter, so re-processing one frame
 minted new ids and the duplicate was invisible to every dedupe including Postgres'. It now uses the
 item's index within the frame — same uniqueness, but it repeats.
@@ -261,6 +275,42 @@ is still running is **skipped** rather than queued — concurrency 1 stopped ove
 push an alert for the same drain the report path publishes, under a different `feedId`, and nothing
 will collide them. Deriving both from `fuel-<kind>-<vehicleId>-<minute>` would, but it needs the
 webhook receiver to agree — decide before enabling the rules, not after.
+
+## 9. Running the backfill against a live server
+
+*Added 2026-08-02, after the first repair pass came back half-done.*
+
+**Wialon executes ONE report at a time per account.** The CLI opens its own session, and the
+in-process cycle (§5) is executing reports on the same account every fifteen minutes. Run them
+together and the loser gets `Only one request at a time is allowed (1003)` per unit. Measured:
+
+| Run | KASULU failures | SUKARI failures |
+|---|---|---|
+| Alongside the in-process cycle | 6 / 205 | **108 / 257** |
+| With the cycle paused | 0 / 205 | — |
+
+SUKARI took the damage because it runs second, by which point the cycle had fired twice. A pass that
+reports "3 fillings written" after skipping 42% of the fleet looks like a quiet day, not a failure —
+so **check the failed count, not just the written count.**
+
+Pause it for the duration rather than editing `.env` (which is root-owned on the box):
+
+```
+FUEL_SYNC_ENABLED=false pm2 restart fleet-server --update-env    # log: "fuel event sync NOT started"
+npx tsx prisma/sync-fuel-events.ts --days 7 --apply              # NOT npm run — see below
+FUEL_SYNC_ENABLED=true  pm2 restart fleet-server --update-env
+```
+
+`--update-env` is what makes pm2 pick the variable up, and it is also what makes the restore
+necessary: pm2 remembers the injected environment until told otherwise.
+
+Nothing is lost to the pause. The cycle's report window is three hours and its notify horizon two,
+so whatever matured while it was stopped is picked up on the next tick.
+
+**Do not use `npm run sync:fuel` on the box.** It sets `DOTENV_CONFIG_PATH=.env.example`, and that
+file points at `localhost:15432` — the developer's SSH tunnel, which does not exist on the server.
+It fails to connect rather than writing anywhere wrong (`env.ts` also refuses a localhost URL under
+`NODE_ENV=production`), but it will not do the job. Invoking `tsx` directly loads `.env`.
 
 **Historical rows are still wrong.** The correction only fires when a cycle sees the event again,
 i.e. inside the 3-hour window. Every `fuel_fillings` / `fuel_thefts` row older than that keeps
