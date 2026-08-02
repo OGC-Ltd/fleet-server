@@ -112,14 +112,38 @@ Measured off the live snapshot (597 rows) on 2026-07-30:
 | Reported in the last 24 h | 190 |
 | Provider says connected | 103 |
 | Engine on | 85 |
-| **Fuel level** | **0** |
+| **Fuel level** | **0** — see the correction below |
 | **Cargo weight** | **0** |
 
-The last two rows are the ones to internalise. **No Sukari vehicle reports fuel
-or load, from either provider.** The vehicle card's FUEL LEVEL bar and payload
-bar have no data behind them for this org, and the IN TRANSIT topbar KPI was
-made plain for exactly this reason — its sub line was a permanent "(cargo not
-reported)".
+> **CORRECTED 2026-08-02 — the fuel row was a reporting artefact, not a fact
+> about the fleet.**
+>
+> Re-measured against the live provider and the database:
+>
+> | | Measured |
+> |---|---|
+> | Sukari Wialon units carrying a fuel-level probe | **336 of 336** |
+> | …with a calibration table (readable by `readFuel`) | **262** |
+> | Sukari vehicles whose newest ping carries `fuel_level_ml` (24 h) | **176** |
+>
+> Calibrated litres had been landing in `vehicle_telemetries.fuel_level_ml` all
+> along. What was missing was `vehicles.tank_capacity_litres` — NULL on all 598
+> rows, because `sync:sukari-gps` bound `deviceId` and never wrote the capacity,
+> unlike `sync:wialon`, which has always read it from the probe's sensor name
+> for Kasulu. With no divisor the snapshot computes no percentage, and both it
+> and the dashboard refuse to invent one against an assumed tank — so the gauge
+> rendered "—" and the count above came out as zero.
+>
+> `sync:sukari-gps` now writes the capacity too; 257 vehicles were populated on
+> 2026-08-02 and the same query returns **176**, not 0.
+>
+> The lesson worth keeping: this table measures **what our pipeline stored**,
+> not what the hardware reports. A zero here is a question, not an answer.
+
+**Cargo weight is genuinely 0** — neither provider exposes a load channel. The
+payload bar has no data behind it for this org, and the IN TRANSIT topbar KPI
+was made plain for exactly this reason: its sub line was a permanent "(cargo
+not reported)".
 
 Note also that only **172 of 278** bound vehicles reported within the hour. A
 tracker that is bound is not necessarily a tracker that is transmitting.
@@ -164,7 +188,10 @@ it was removed on 2026-07-30.
 
 1. **598 vehicles, 278 tracked.** The other 320 have no hardware.
 2. **Tractors are the blind spot** — 482 of them, only 184 tracked.
-3. **No fuel, no load, anywhere.** Those instruments are empty by data, not bug.
+3. **Fuel WORKS (corrected 2026-08-02); load does not.** 176 vehicles report a
+   calibrated fuel level. The earlier "no fuel" finding was a missing tank
+   capacity in our own registry, not absent hardware — see §4. Cargo weight is
+   genuinely unavailable from either provider.
 4. **No history before 2026-07-29.** Trends and medians have nothing to stand on.
 5. **46 tracked units have no registry row** and are invisible in the app.
 

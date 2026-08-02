@@ -18,6 +18,17 @@
  * vehicle's `deviceId` at its Wialon unit and telemetry starts landing with no
  * code change.
  *
+ * ## Tank capacity, and why it is written here too
+ *
+ * Every one of the 336 Sukari units carries a fuel-level probe and 262 are
+ * readable, so calibrated litres have been landing in `fuel_level_ml` all
+ * along — 177 of them in the last 24 hours. The gauge still read "—" because
+ * `tank_capacity_litres` was NULL on all 598 rows: a percentage needs a
+ * divisor, and both the snapshot and the dashboard refuse to invent one
+ * against an assumed tank. Wialon has no capacity FIELD, so it comes from the
+ * sensor's name via `tankCapacityOf` — exactly as `sync:wialon` has always
+ * done for Kasulu. This script simply never did the same for Sukari.
+ *
  * Why this is safe rather than a schema migration:
  *   • The Controltech alert/event webhooks resolve vehicles by
  *     `registrationPlate`, NOT deviceId (see raifactorysuite-*.service.ts) —
@@ -38,6 +49,7 @@ import pg from 'pg'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { PrismaClient } from '../generated/prisma/client.js'
 import { WialonClient } from '../src/providers/wialon/wialon.client.js'
+import { tankCapacityOf, type WialonSensor } from '../src/providers/wialon/wialon.sensors.js'
 
 const pool    = new pg.Pool({ connectionString: process.env.DIRECT_URL })
 const adapter = new PrismaPg(pool)
@@ -86,24 +98,28 @@ async function main() {
   const client = new WialonClient(TOKEN, API_URL)
   await client.login()
 
-  const units = await client.call<{ items?: Array<{ id: number; nm: string }> }>(
+  const units = await client.call<{ items?: Array<{ id: number; nm: string; sens?: Record<string, WialonSensor> }> }>(
     'core/search_items',
     {
       spec: { itemsType: 'avl_unit', propName: 'sys_name', propValueMask: 'SUKARI*', sortType: 'sys_name' },
-      force: 1, flags: 1, from: 0, to: 10_000,
+      // 0x1000 = sensors. Needed for the tank capacity, which Wialon has no
+      // field for — the operator encodes it in the fuel sensor's NAME
+      // ("2.Main Tank Fuel Level Qty (520L)"). Without it a vehicle can report
+      // litres and still show no gauge, because the percentage has no divisor.
+      force: 1, flags: 1 | 0x1000, from: 0, to: 10_000,
     },
   )
   const items = units.items ?? []
   console.log(`  ← ${items.length} Wialon unit(s) named SUKARI*`)
 
-  const parsed  = items.map(u => ({ id: u.id, nm: u.nm, ...parseUnitName(u.nm) }))
+  const parsed  = items.map(u => ({ id: u.id, nm: u.nm, sens: u.sens, ...parseUnitName(u.nm) }))
   const plated  = parsed.filter(p => p.plate)
   const noPlate = parsed.filter(p => !p.plate)
   console.log(`    ${plated.length} carry a readable plate, ${noPlate.length} do not`)
 
   const vehicles = await prisma.vehicle.findMany({
     where:  { organisationId: org.id },
-    select: { id: true, registrationPlate: true, vehicleType: true, deviceId: true, name: true },
+    select: { id: true, registrationPlate: true, vehicleType: true, deviceId: true, name: true, tankCapacityLitres: true },
   })
   console.log(`  ← ${vehicles.length} ${ORG_CODE} vehicle(s) in the database`)
 
@@ -115,6 +131,7 @@ async function main() {
   )
 
   const toBind: Array<{ vehicleId: string; plate: string; deviceId: string; unit: string; wtype: string | null; dbtype: string }> = []
+  const toCapacity: Array<{ vehicleId: string; plate: string; litres: number; sensor: string }> = []
   const already: string[] = []
   const conflicts: string[] = []
   const unmatched: typeof plated = []
@@ -122,6 +139,19 @@ async function main() {
   for (const p of plated) {
     const v = byPlate.get(p.plate!)
     if (!v) { unmatched.push(p); continue }
+
+    // TANK CAPACITY — independent of the deviceId binding, and collected for
+    // every matched vehicle including the already-bound ones. Those are the
+    // ones that need it most: 280 Sukari vehicles are bound and receiving
+    // calibrated litres, but all 598 have a NULL capacity, so the snapshot
+    // computes no percentage and the gauge renders "—" on live data. Binding
+    // was only ever half the job.
+    const litres = tankCapacityOf(p.sens)
+    if (litres != null && v.tankCapacityLitres !== litres) {
+      const sensor = Object.values(p.sens ?? {}).find(s => s.t === 'fuel level')?.n ?? '?'
+      toCapacity.push({ vehicleId: v.id, plate: p.plate!, litres, sensor })
+    }
+
     const deviceId = `wialon:${p.id}`
     if (v.deviceId === deviceId) { already.push(p.plate!); continue }
     // Another row already owns this deviceId (two Wialon units naming the same
@@ -135,6 +165,12 @@ async function main() {
     console.log(`    ${b.plate.padEnd(10)} → ${b.deviceId.padEnd(16)} ${String(b.wtype ?? '—').padEnd(18)} (db: ${b.dbtype})`)
   }
   if (toBind.length > 15) console.log(`    … and ${toBind.length - 15} more`)
+
+  console.log(`\n  tank capacity to write: ${toCapacity.length}`)
+  for (const c of toCapacity.slice(0, 10)) {
+    console.log(`    ${c.plate.padEnd(10)} ${String(c.litres).padStart(6)} L   ← "${c.sensor}"`)
+  }
+  if (toCapacity.length > 10) console.log(`    … and ${toCapacity.length - 10} more`)
 
   if (already.length)   console.log(`\n  already bound: ${already.length}`)
   if (conflicts.length) {
@@ -165,9 +201,22 @@ async function main() {
       console.error(`  ✗ ${b.plate}: ${err instanceof Error ? err.message.split('\n').at(-1) : err}`)
     }
   }
+  let capped = 0
+  for (const c of toCapacity) {
+    try {
+      await prisma.vehicle.update({ where: { id: c.vehicleId }, data: { tankCapacityLitres: c.litres } })
+      capped++
+    } catch (err) {
+      console.error(`  ✗ ${c.plate} capacity: ${err instanceof Error ? err.message.split('\n').at(-1) : err}`)
+    }
+  }
+
   console.log(`\n  ✓ bound ${bound} vehicle(s) to their Wialon unit`)
+  console.log(`  ✓ wrote tank capacity for ${capped} vehicle(s)`)
   console.log('    Positions arrive on the next poll cycle — the adapter already')
-  console.log('    emits every visible unit as wialon:<id>; these rows can now receive them.\n')
+  console.log('    emits every visible unit as wialon:<id>; these rows can now receive them.')
+  console.log('    Fuel percentages appear on the next snapshot read for any vehicle')
+  console.log('    whose probe is calibrated — the litres were already arriving.\n')
 
   await client.logout()
 }

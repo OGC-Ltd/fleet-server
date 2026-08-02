@@ -84,6 +84,22 @@ export const wialonNotificationSchema = z.object({
   driver:       z.string().nullish(),        // %DRIVER%
   location:     z.string().nullish(),        // %LOCATION%
   text:         z.string().nullish(),        // free-form message
+
+  // ── fuel ────────────────────────────────────────────────────────────────
+  // Wialon's fuel-filling and fuel-theft notifications know the VOLUME, but a
+  // notification only carries what its template substitutes, and the template
+  // in docs/LIVE_INTEGRATION.md predates fuel rules — so today a "Fuel theft"
+  // would arrive as an event with no litres in it.
+  //
+  // These are named by MEANING rather than after a Wialon tag on purpose. The
+  // exact tag spelling differs per notification type and is not something to
+  // guess at in a document an operator will copy: whoever authors the rule maps
+  // the volume tag their trigger offers into `volumeL`, and the level tag into
+  // `fuelLevelL`. Both optional, like every other field here — a template that
+  // omits them still produces a usable alert, just without the amount.
+  volumeL:      z.coerce.number().nullish(),  // litres filled or lost
+  fuelLevelL:   z.coerce.number().nullish(),  // tank level at trigger time
+  sensorName:   z.string().nullish(),         // %SENSOR_NAME%, when sent
 })
 
 export type WialonNotificationInput = z.infer<typeof wialonNotificationSchema>
