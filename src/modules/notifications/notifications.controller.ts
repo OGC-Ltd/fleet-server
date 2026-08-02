@@ -12,6 +12,7 @@ import { getNotifications }         from '../../lib/notifications/notification.r
 //
 // Query: ?limit=1..200 (default 50)  ?before=<ISO timestamp> to page back.
 //        ?alertType=fuelFilling,fuelInconsistency   ?severity=critical
+//        ?vehicleId=<cuid>  — one unit's history, for the map's per-vehicle feed
 //
 // Until this existed there was no way to read notification history at all:
 // clients had the live SSE stream and a 60-item in-memory buffer, and a
@@ -33,7 +34,7 @@ function csv(v: unknown): string[] | undefined {
 
 export async function listNotifications(req: Request, res: Response) {
   const { orgId } = req.params as { orgId: string }
-  const { limit, before, alertType, severity } = req.query as Record<string, unknown>
+  const { limit, before, alertType, severity, vehicleId } = req.query as Record<string, unknown>
 
   const parsedLimit = limit ? Number(limit) : undefined
   if (parsedLimit !== undefined && !Number.isFinite(parsedLimit)) {
@@ -54,6 +55,9 @@ export async function listNotifications(req: Request, res: Response) {
       before:     beforeDate,
       alertTypes: csv(alertType),
       severities: csv(severity),
+      // One vehicle only — a repeated param would be ambiguous, so take the
+      // first and ignore the rest rather than silently unioning them.
+      vehicleId:  vehicleId ? String(Array.isArray(vehicleId) ? vehicleId[0] : vehicleId) : undefined,
     })
     return sendSuccess(res, {
       notifications: page.items,

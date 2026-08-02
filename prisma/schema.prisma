@@ -80,6 +80,14 @@ model Organisation {
   id        String   @id @default(cuid())
   name      String
   code      String   @unique
+  /// The yard/plant every dispatch leaves from and returns to, MEASURED from
+  /// the fleet's own telemetry (the densest cell of fixes) rather than typed
+  /// in — see prisma/sync-destinations.ts. NULL until that script has run.
+  ///
+  /// It is the origin of every round trip: the provider records a destination
+  /// and nothing else, so "where did it set off from" has no other source.
+  hubLat    Float?   @map("hub_lat")
+  hubLng    Float?   @map("hub_lng")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -97,6 +105,7 @@ model Organisation {
   providerAlerts    ProviderAlert[]
   notifications     Notification[]
   dispatches        Dispatch[]
+  dispatchDestinations DispatchDestination[]
 
   @@map("organisations")
 }
@@ -1005,6 +1014,47 @@ model Dispatch {
   @@map("dispatches")
 }
 
+/// Where a dispatch destination actually IS, measured from the fleet's own
+/// completed trips.
+///
+/// The provider records the destination as free text and nothing else — 152
+/// distinct cane-zone names ("OPAPO", "GOT KOJOWI"), no coordinates, and not
+/// in any gazetteer worth trusting: probing Nominatim on the fourteen busiest
+/// returned five matches, three plainly wrong. So this is derived instead of
+/// looked up. For every COMPLETED dispatch, take the vehicle's fix farthest
+/// from the hub between the dispatch and return clocks — the turn-around
+/// point — and take the median of those across every trip to the same name.
+///
+/// It is a measurement, so it carries its own error bars and the reader is
+/// expected to check them: `samples` is how many trips agreed and `spreadM` is
+/// how far apart they were. A name used twice, or one whose trips scatter over
+/// 5 km, is a zone rather than a point and must not be drawn as one.
+///
+/// Validated 2026-08-03 against an operator-supplied coordinate for NYAONDO:
+/// 39 trips, 0.1 km spread, and the derived point sits 83 m from theirs.
+model DispatchDestination {
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  /// UPPER(TRIM(dispatch.destination)) — the same key the duration statistics
+  /// group on, because the dispatchers type it freehand and the casing wanders.
+  name           String
+  lat            Float
+  lng            Float
+  /// Completed trips this point was measured from.
+  samples        Int
+  /// Median distance from a trip's own turn-around to the consensus point.
+  /// Small = a place; large = a spread-out zone with no single point.
+  spreadM        Int      @map("spread_m")
+  /// Straight-line hub → here, cached so the round-trip maths needs one row.
+  distanceFromHubM Int    @map("distance_from_hub_m")
+  computedAt     DateTime @default(now()) @map("computed_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@unique([organisationId, name])
+  @@map("dispatch_destinations")
+}
+
 /// Durable Live Feed history — every item the operations feed has ever shown,
 /// whatever produced it.
 ///
@@ -1048,6 +1098,11 @@ model Notification {
 
   /// Serves the org-scoped history endpoint (newest first).
   @@index([organisationId, occurredAt])
+  /// Serves the same endpoint filtered to ONE vehicle — the map's per-unit
+  /// feed. Without it that read is the org range scan plus a filter, and one
+  /// vehicle is a few hundredths of the rows, so it would walk most of the
+  /// organisation's history to fill a page.
+  @@index([organisationId, vehicleId, occurredAt])
   /// Serves the retention sweep, which scans by age ACROSS organisations.
   @@index([occurredAt])
   @@map("notifications")

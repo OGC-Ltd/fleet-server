@@ -99,12 +99,27 @@ export interface ProviderAlertEvent {
   plate:     string | null
   vehicleId: string | null
   /**
-   * False for history being restored at boot (seedFeedFromStoredAlerts) and
-   * for routine narration: the feed still receives it, but no banner is raised
-   * and no push is sent. Replaying 40 stored alerts must not wake every
-   * subscribed device.
+   * Whether to raise a banner and send a Web Push. False for routine
+   * narration — a dispatch leaving the yard belongs in the feed, but waking
+   * every subscribed phone for it trains people to ignore the alerts that
+   * matter.
+   *
+   * This says nothing about STORAGE. It used to: notification.worker passed it
+   * straight through as `persist`, on the reasoning that the only caller
+   * setting it false was the boot replay of already-stored alerts. That caller
+   * (seedFeedFromStoredAlerts) is long gone, and the one that inherited the
+   * flag means something else entirely — with the result that every dispatch
+   * and gate movement RaiFactorySuite has ever reported reached whoever had a
+   * tab open at that instant and was then lost. Measured 2026-08-03: 1,813
+   * dispatches on record, zero surviving feed items.
    */
   notify:    boolean
+  /**
+   * Whether to write the durable record. Defaults to true and should stay
+   * that way for anything that actually happened; only a replay of rows the
+   * store already holds sets it false.
+   */
+  persist?:  boolean
 }
 
 type EventMap = {

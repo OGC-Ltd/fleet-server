@@ -20,6 +20,11 @@ export function makeOrg(overrides: Partial<Organisation> = {}): Organisation {
     id: id(),
     name: 'Acme Fleet',
     code: 'ACME',
+    // Null by default: the yard is MEASURED from telemetry by
+    // sync:destinations, so a fresh organisation genuinely has none yet, and
+    // anything that reads it must cope with that.
+    hubLat: null,
+    hubLng: null,
     createdAt: now(),
     updatedAt: now(),
     ...overrides,

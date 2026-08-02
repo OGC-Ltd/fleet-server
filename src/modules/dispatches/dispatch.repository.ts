@@ -38,6 +38,8 @@
  */
 
 import { prisma } from '../../lib/prisma.js'
+import { arrivalRadiusM } from '../../lib/dispatch-trip.js'
+import { fleetDayStart } from '../../lib/provider-time.js'
 
 const OPEN_STATUSES = ['DISPATCHED', 'OVERDUE']
 
@@ -81,6 +83,205 @@ export interface ActiveDispatch {
    */
   firstFixLat: number | null
   firstFixLng: number | null
+}
+
+/**
+ * The open dispatch on each vehicle, as the fleet snapshot needs it.
+ *
+ * Separate from `findActive` on purpose. That one answers "what is out right
+ * now" for a dispatcher's list and pays for a per-vehicle distance-covered sum
+ * over every fix since dispatch. This one answers "what is THIS vehicle doing"
+ * for 597 rows of a snapshot, so it carries only what the trip card renders and
+ * costs one indexed read plus one bounded lookup per open dispatch — of which
+ * there are about fifty, not six hundred.
+ */
+export interface OpenTrip {
+  externalId:   string
+  driverName:   string
+  destination:  string | null
+  status:       string
+  dispatchedAt: string
+  expectedReturnAt: string | null
+  dueBackAt:     string | null
+  dueBackSource: 'provider' | 'history' | null
+  /** The destination's MEASURED point, null for a name we cannot place. */
+  destinationLat: number | null
+  destinationLng: number | null
+  /** Median spread of that measurement, and how many trips it came from. */
+  destinationSpreadM: number
+  destinationSamples: number
+  /** First moment this run was seen at the destination. Null = not yet. */
+  arrivedAt: string | null
+  /** Newest fix at or after the dispatch clock. Null = silent since dispatch. */
+  lastFixAt: string | null
+}
+
+export async function findOpenTripsByVehicle(organisationId: string): Promise<Map<string, OpenTrip>> {
+  const open = await prisma.dispatch.findMany({
+    where:   {
+      organisationId,
+      actualReturnAt: null,
+      status:    { in: OPEN_STATUSES },
+      vehicleId: { not: null },
+      // Today's runs on the fleet's own clock, plus the tail of yesterday's.
+      //
+      // "Open" and "current" are not the same thing. A dispatch stays open
+      // until the provider records a return and some never get one, so the row
+      // sits DISPATCHED indefinitely — days-old paperwork presented as the
+      // vehicle's active trip. That is what this cuts out.
+      //
+      // It cannot be TODAY alone, though. This fleet's median round trip to
+      // Nyaondo is about nineteen hours and the local day rolls over at
+      // midnight, so a truck that left at 23:16 and is still driving at 01:00
+      // was "dispatched yesterday" while being the most in-transit vehicle on
+      // the board. Measured at 02:00 EAT on 2026-08-03, a strict same-day
+      // filter matched ZERO of 46 open dispatches while six units were
+      // demonstrably on the road. The extra day is admitted here and the
+      // service then keeps only those still genuinely out — see getFleetSnapshot.
+      dispatchedAt: { gte: new Date(fleetDayStart().getTime() - 24 * 3_600_000) },
+    },
+    orderBy: { dispatchedAt: 'desc' },
+    select: {
+      externalId: true, vehicleId: true, driverName: true, destination: true,
+      status: true, dispatchedAt: true, expectedReturnAt: true,
+    },
+  })
+  if (open.length === 0) return new Map()
+
+  // ONE run per vehicle, decided before anything else is computed.
+  //
+  // `open` is newest-first, so the first row seen for a vehicle is the run it
+  // is on now. Six of Sukari's 52 open dispatches are second rows on a vehicle
+  // that already had one — the provider not having closed the previous trip —
+  // and this used to be resolved at the very END, after the arrival lookup had
+  // been built from every row. That lookup was keyed by vehicle alone, so the
+  // duplicate silently overwrote the real one and the vehicle inherited the
+  // ARRIVAL OF ITS PREVIOUS TRIP: KDL 715E showed "arrived 18:05 on 1 Aug" for
+  // a run raised at 20:41 on the 2nd, and therefore read as already home.
+  // Deciding here means every derived value below is about the same dispatch.
+  const current = new Map<string, typeof open[number]>()
+  for (const d of open) if (!current.has(d.vehicleId!)) current.set(d.vehicleId!, d)
+  const runs = [...current.values()]
+
+  // Destination points, for the names in play only.
+  const names = [...new Set(runs.map(d => d.destination?.trim().toUpperCase()).filter(Boolean) as string[])]
+  const places = names.length
+    ? await prisma.dispatchDestination.findMany({
+        where:  { organisationId, name: { in: names } },
+        select: { name: true, lat: true, lng: true, spreadM: true, samples: true },
+      })
+    : []
+  const placeByName = new Map(places.map(p => [p.name, p]))
+
+  const durations = await destinationDurations(organisationId)
+
+  // Arrival + last fix per open dispatch, in ONE round trip.
+  //
+  // Arrival is the EARLIEST fix inside the destination's radius at or after the
+  // dispatch clock, which is what makes the return leg knowable: a unit heading
+  // home retraces the outbound corridor, so its distance from the yard alone
+  // cannot say which way it is pointing.
+  //
+  // The radius is per destination (it scales with how tightly that name's trips
+  // agreed), so it is carried in the VALUES list rather than being one constant.
+  const probes = runs
+    .map(d => {
+      const place = d.destination ? placeByName.get(d.destination.trim().toUpperCase()) : undefined
+      return place ? { vehicleId: d.vehicleId!, since: d.dispatchedAt, place } : { vehicleId: d.vehicleId!, since: d.dispatchedAt, place: null }
+    })
+    // Same guard as coveredSince: ids are pinned to the cuid shape, and the
+    // bound is rebuilt from UTC parts, so neither can carry SQL.
+    .filter(p => /^[a-z0-9]{20,32}$/i.test(p.vehicleId))
+
+  const fixes = new Map<string, { arrivedAt: Date | null; lastFixAt: Date | null }>()
+  if (probes.length > 0) {
+    const utc = (d: Date) => d.toISOString().replace('T', ' ').replace('Z', '')
+    const values = probes.map(p => {
+      const lat = p.place ? p.place.lat : 'NULL'
+      const lng = p.place ? p.place.lng : 'NULL'
+      const rad = p.place ? arrivalRadiusM(p.place.spreadM) : 0
+      // Half-side of a bounding box that comfortably contains the radius, in
+      // degrees. One degree of latitude is ~111.32 km everywhere; longitude
+      // shrinks by cos(lat), which at 1°S is a 0.015% correction — far inside
+      // the 1.5× slack, so the box is simply taken as square.
+      const deg = p.place ? (rad * 1.5) / 111_320 : 0
+      return `('${p.vehicleId}', TIMESTAMP '${utc(p.since)}', ${lat}::float8, ${lng}::float8, ${rad}::float8, ${deg}::float8)`
+    }).join(',')
+
+    const rows = await prisma.$queryRawUnsafe<{
+      vehicle_id: string; arrived_at: Date | null; last_fix_at: Date | null
+    }[]>(`
+      WITH probe(vehicle_id, since, dest_lat, dest_lng, radius_m, bbox_deg) AS (VALUES ${values})
+      SELECT p.vehicle_id,
+             (SELECT t.captured_at FROM vehicle_telemetries t
+               WHERE t.vehicle_id = p.vehicle_id
+                 AND t.captured_at >= p.since
+                 AND p.dest_lat IS NOT NULL
+                 AND t.lat IS NOT NULL AND t.lng IS NOT NULL
+                 -- Cheap box first. An open dispatch can span days and a unit
+                 -- reports on a timer, so this walks thousands of fixes per
+                 -- vehicle; two float comparisons reject almost all of them,
+                 -- and only the survivors pay for a haversine. Measured on the
+                 -- live fleet, this took the whole lookup from 10.7 s to well
+                 -- under a second across 46 open dispatches.
+                 AND t.lat BETWEEN p.dest_lat - p.bbox_deg AND p.dest_lat + p.bbox_deg
+                 AND t.lng BETWEEN p.dest_lng - p.bbox_deg AND p.dest_lng + p.bbox_deg
+                 AND 2 * 6371000 * asin(sqrt(
+                       power(sin(radians(t.lat - p.dest_lat) / 2), 2) +
+                       cos(radians(p.dest_lat)) * cos(radians(t.lat)) *
+                       power(sin(radians(t.lng - p.dest_lng) / 2), 2))) <= p.radius_m
+               ORDER BY t.captured_at ASC LIMIT 1) AS arrived_at,
+             (SELECT t.captured_at FROM vehicle_telemetries t
+               WHERE t.vehicle_id = p.vehicle_id AND t.captured_at >= p.since
+               ORDER BY t.captured_at DESC LIMIT 1) AS last_fix_at
+        FROM probe p
+    `)
+    for (const r of rows) fixes.set(r.vehicle_id, { arrivedAt: r.arrived_at, lastFixAt: r.last_fix_at })
+  }
+
+  const out = new Map<string, OpenTrip>()
+  for (const d of runs) {
+    const vehicleId = d.vehicleId!
+    const key   = d.destination?.trim().toUpperCase() ?? ''
+    const place = placeByName.get(key)
+    const typ   = durations.get(key)
+    const f     = fixes.get(vehicleId)
+
+    // Provider first, history second, nothing third.
+    //
+    // A stated return time is only a commitment if it is AFTER the dispatch.
+    // The provider emits rows where the two are identical — two of the eight
+    // trips live on 2026-08-03 — and taken at face value those render as due
+    // back at the moment they left, i.e. permanently overdue. Same guard the
+    // duration statistics already apply to completed rows; here it falls
+    // through to the fleet's own median instead of quoting nonsense.
+    const stated = d.expectedReturnAt
+    const statedIsUsable = stated != null && stated.getTime() > d.dispatchedAt.getTime()
+    let dueBackAt: Date | null = statedIsUsable ? stated : null
+    let dueBackSource: OpenTrip['dueBackSource'] = statedIsUsable ? 'provider' : null
+    if (!dueBackAt && typ) {
+      dueBackAt = new Date(d.dispatchedAt.getTime() + typ.medianHours * 3_600_000)
+      dueBackSource = 'history'
+    }
+
+    out.set(vehicleId, {
+      externalId:   d.externalId,
+      driverName:   d.driverName,
+      destination:  d.destination,
+      status:       d.status,
+      dispatchedAt: d.dispatchedAt.toISOString(),
+      expectedReturnAt: d.expectedReturnAt?.toISOString() ?? null,
+      dueBackAt:        dueBackAt?.toISOString() ?? null,
+      dueBackSource,
+      destinationLat:     place?.lat ?? null,
+      destinationLng:     place?.lng ?? null,
+      destinationSpreadM: place?.spreadM ?? 0,
+      destinationSamples: place?.samples ?? 0,
+      arrivedAt: f?.arrivedAt?.toISOString() ?? null,
+      lastFixAt: f?.lastFixAt?.toISOString() ?? null,
+    })
+  }
+  return out
 }
 
 /**
