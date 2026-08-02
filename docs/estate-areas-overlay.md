@@ -370,13 +370,62 @@ are measuring different things. Neither figure is ours to overrule.
 
 ### Zones the drawing does not corroborate
 
-Six zones fall wholly outside the drawing's extent (plan bbox lng 30.3625–30.5453,
-lat −4.0782–−3.9481), 12–20 km west of the sheet:
+**Eight** zones fall wholly outside the drawing's extent (plan bbox
+lng 30.3625–30.5453, lat −4.0782–−3.9481):
 
-`FARM#212`, `FARM#213`, `Swamp area1`, `Swamp area2`, `Swamp area3`,
-`Wet area1`, `Wet land2`.
+`FARM#212`, `FARM#213`, **`FARM#214`**, `Swamp area1`, `Swamp area2`,
+`Swamp area3`, `Wet area1`, `Wet land2`.
 
-This is the basis for suppressing the two wet-land plates
+> Corrected 2026-08-02. This list previously said "six", named seven, and omitted
+> `FARM#214` — which is off the sheet to the **south**, not the west, so a
+> west-only reading missed it. Re-measured from `polygon_coords` against the DWG's
+> recovered UTM-36S window (E 212,263–224,931 / N 9,551,231–9,558,920):
+
+| Zone | Ring ha | Bbox overlap with the sheet | Offset |
+| --- | --- | --- | --- |
+| FARM#210 | 8,168 | 16 % | mostly north |
+| FARM#211 | 16,373 | 59 % | the nesting envelope |
+| **FARM#212** | 3,455 | **0 %** | 17.6 km west |
+| **FARM#213** | 2,979 | **0 %** | 25.1 km west, 6.3 km south |
+| **FARM#214** | 3,165 | **0 %** | 12.8 km south |
+| FARM #215 | 3,649 | 94 % | on the sheet |
+
+Caveat that applies to the whole table: only 253 of the DWG's vertices are
+recoverable by raw scan (AC1032 compresses the rest), so this proves where part
+of the drawing *is*, not where all of it *isn't*. The 12–25 km gaps are far
+beyond that uncertainty, so "outside this sheet" is safe; "not real estate land"
+is **not** — these are 3,000 ha parcels with 377 and 282 vertices, carefully
+digitised, and may simply be ground this season's plan does not cover. That
+question is open for the estate.
+
+### FARM#212 / #213 / #214 — excluded from the overlay
+
+Asked for, 2026-08-02: drop all three from the map. `ZONE_EXCLUDE` in
+`FleetMap.jsx` removes them before any `bounds.extend`, so they contribute no
+shape, no plate, no click and no camera fit. They stay in `geofences` and are
+still served by `/geofences/geojson` — all three are `is_active = false`, so
+enforcement is unchanged, and hiding them does not decide the open question
+above.
+
+Two things this surfaced:
+
+- **`FARM#213`'s name begins with a zero-width space (U+200B)**, and `FARM #215`
+  has a space its five siblings lack — both straight from Wialon. An exact-name
+  filter silently misses `FARM#213`. All name-keyed lookups now go through
+  `zoneKey()`, which strips U+200B–U+200D/U+FEFF and collapses whitespace.
+- **Nothing to exclude on the PLAN layer.** `estate-plan.geojson` carries no
+  `FARM#` features at all. Its `ZONE 4 - 212/213/214` are ~350 × 440 m field
+  plots inside Zone 4, squarely on the sheet, and are unrelated objects — they
+  must not be matched by number.
+
+Effect on the layer: **40 → 37 zones drawn, 38 → 35 plates**; 8,853 → 8,188
+vertices; the fitted camera box drops from 45.6 × 44.5 km to 45.6 × 35.1 km
+(2,029 → 1,601 km²). The west edge does not move — it is held by
+`Main river malagarasi` (lng 30.1441) and the swamps, which are genuine features
+and were not in scope. The §6 coverage-by-zoom table above was measured before
+this change and still reads 40/38.
+
+The outside-the-sheet finding is also the basis for suppressing the two wet-land plates
 (`ZONE_LABEL_SUPPRESS`): the drawing's only wet-ground class anywhere is
 **WET FIELDS 6.21 ha** inside Nursery B, against `Wet land2` at 1,110 ha and
 `Wet area1` at 254 ha — three orders of magnitude apart, on ground the surveyor
@@ -481,6 +530,178 @@ trace runs about a kilometre off the surveyed Malagarasi, and the Rain-fed
 geofence box contains almost none of the plan's rain-fed block. That is the
 honest state of the fit, and it is why the caveat is in the UI and not just in
 this document.
+
+### Tier 2b — cleaning what the layer draws (2026-08-02)
+
+Asked for: *"the grid and boxes are too sketchy, make them real as possible;
+remove the drawing of B1–B4 and stick to the real B1–B4."* Both were real
+defects. Neither is a georeferencing fix — see the ceiling note at the end.
+
+**The affine is recoverable, and it is good.** The original extraction script was
+not kept, so it was re-derived from the shipped layer: match each uniquely-named
+GeoJSON feature to the uniquely-matching PDF text line, least-squares an affine,
+trim the worst decile five times. **109 inliers, median 9 m, max 15 m**, implying
+10.68 / 10.57 m per PDF point at 86.3° — which independently reproduces the
+"10.6 m per point, rotation −3.6°" recorded above (86.3° = 90° − 3.7°, the sheet
+being a 270°-rotated page). Including ambiguous names gave a 503 m median; that
+was the whole difference between a useless fit and a 9 m one.
+
+**1. The drawing's own text was on the map as land.** AutoCAD plots annotation
+text as linework *as well as* text, and the extraction kept the strokes. The
+sheet's big red `B1`…`B4` nursery callouts were four red scribbles sitting in
+open country — this is the "drawing of B1–B4" in the request. Removed by
+CONTAINMENT rather than size: a feature lying wholly inside a PDF text line's
+box is a glyph, because a real field block is always bigger than the label
+printed inside it. **151 features stripped, 9,450 → 9,299.**
+
+**2. The shading was hatch strokes, so it read as scribble.** `planted` was 2,856
+features, every one 4-point, over half long thin slivers — diagonal land-use
+hatching drawn as linework, not edges. Demoting it to hairlines helped but was
+still lines. It is now **dissolved into the region it represents**: buffer every
+feature of the class by 25 m, union, shrink back, simplify. `planted` becomes
+**21 flat polygons**, `borrow` 5. One uniform wash under the block grid, no
+strokes of its own — the grid on top supplies every edge the eye needs.
+
+Every shaded class is checked against the hectares the sheet's KEY panel prints:
+
+**All eight classes are now shaded**, on instruction. Four were added after being
+left out on the strength of this table; the table is kept because it is the only
+honest statement of what each wash is worth.
+
+| Class | Reconstructed | Printed | Δ | Confidence |
+| --- | --- | --- | --- | --- |
+| planted | 632 ha, 21 patches | 637 | **−1 %** | solid, stable at every cutoff |
+| rocky | 1,164 ha, 67 patches | 1,067 | +9 % | area tuned, **position good** |
+| swampy | 88 ha, 76 patches | 167 | −47 % | stable shape, incomplete |
+| borrow | 29 ha, 5 patches | 31.9 | −10 % | solid |
+| reservoir | 4 ha, 1 patch | 4.5 | −13 % | **solid** — 60 m from the sheet's own RESEVOIR label |
+| factory | 29 ha, 2 patches | 330 | −91 % | right place, tiny fraction |
+| logistics | 42 ha, 4 patches | 21 | +102 % | weak |
+| wet | 146 ha, 8 patches | 6.21 | +2252 % | **weakest — do not rely on it** |
+
+### Label anchoring — how the colour collisions were resolved
+
+The extraction assigns class by **colour** and the sheet reuses colours, which is
+why `factory` green produced a 43-patch wash across Nursery A, 9 km from the
+factory. The fix is the sheet's own map labels: `FACTORY`, `RESEVOIR` and
+`LOGISTICS` are printed on the drawing (the versions with hectares in brackets
+are the KEY panel, not the map), so a region of that class further than a set
+radius from its own label is something else wearing the same colour.
+
+| Class | Anchor | Radius | Patches kept |
+| --- | --- | --- | --- |
+| factory | `FACTORY` | 3 km | **2 of 43** |
+| reservoir | `RESEVOIR` | 2 km | **1 of 2** |
+| logistics | `LOGISTICS` | 5 km | 4 of 6 |
+
+`reservoir` is the win: one patch, 3.9 ha against 4.5 printed, sitting 60 m from
+the word RESEVOIR. `wet` has no on-map label, so it gets no filter — and it shows.
+
+Reading the weak ones honestly: **`factory` is in the right place but is the
+factory yard, not the 330 ha FACTORY AREA allocation** — the green only ever
+covered the buildings. **`logistics`' four patches sit 4–5 km from the LOGISTICS
+label**, which is why the radius is 5 km; treat them as unconfirmed. **`wet` at
+146 ha against a printed 6.21 ha follows canals and drains**, and its wash
+overlaps the planted strip.
+
+Because washes overlap where colours collide, they are emitted **worst-validated
+first**, so the better-evidenced class draws on top (`google.maps.Data` renders in
+insertion order at equal zIndex): wet → logistics → factory → swampy → reservoir
+→ borrow → rocky → planted.
+
+**`rocky` and `swampy`**, stated plainly:
+
+- **`rocky` has no stable reconstruction.** Its union climbs monotonically with
+  the outline cutoff — 130 ha at 800 m, 212 at 1.4 km, 723 at 1.8 km, 1,164 at
+  2 km, 2,115 at 2.5 km, 3,122 at 2.8 km — because rocky ground is drawn as large
+  overlapping region polygons and the estate boundary is drawn in the same red.
+  2 km is the cutoff that *matches* the printed figure; it is chosen, not
+  measured. Read the hectares as indicative.
+  What does hold up is **where it lands**: 67 discrete patches, heaviest in the
+  north-west, which is exactly where the sheet puts Zone 3's 641.8 ha — the
+  largest of the three rocky allocations — with smaller patches south and east.
+  It does not blanket the sheet. That spatial agreement is better evidence than
+  the total, and it is the reason this is defensible to ship.
+- **`swampy` is well-determined but short.** 88 ha, and *stable* at every cutoff
+  from 1.0 to 3.0 km, so the geometry is not threshold-sensitive the way rocky's
+  is. The −47 % gap means the extraction did not capture all of Zone 3's
+  144.55 ha swamp, not that the shape is wrong.
+
+### Two more rounds of "there are still boxes in the cells"
+
+Reported after the shading landed, and both real.
+
+**Anchor-rejected fill was being kept as linework.** The rule at the time was
+"consume only what dissolved into a surviving region", which left the 41
+anchor-rejected factory patches drawn as **42 stray green boxes across
+Nursery A**. Corrected: everything that passes the size cutoff is land-use fill
+and none of it survives as linework — it either dissolves into a region, or its
+region was rejected as a colour collision and it is not that class at all. Only
+what the *cutoff* rejects stays, and that is the structural outlines.
+
+**Annotation symbols are near-square, so the aspect test never saw them.** The
+sheet stamps small marks inside blocks — 43 × 35 m yellow-hatched squares, pale
+green tags, white label backing boxes, leader stubs — and at aspect ~1.2 none of
+them looked like hatch. Zooming the PDF to a single mark settled what they were.
+Anything under **110 m** that is not part of a chain is annotation, not land: the
+90–140 m band is entirely 3-point there-and-back strokes rather than closed
+blocks, and the smallest real field block is comfortably above it. 114 removed.
+
+**The sheet double-draws.** 622 features had a byte-identical twin — 12 % of the
+layer paying twice for the same pixels, and drawing every one of those edges at
+double weight. Deduped.
+
+**Structural outlines are kept, not consumed.** The first cut of this pass
+removed every feature of a shaded class, including the large ones the cutoff had
+deliberately excluded from the union — and the biggest red feature in the file is
+the 5.3 × 4.3 km estate boundary, so the estate lost its outline. Only the
+features that actually go into the union are removed; 32 rocky outlines survive
+as linework.
+
+**Two false starts worth recording, because shape alone cannot find hatch.**
+Aspect ratio ≥ 4 also matches the river trace and the estate boundary, which are
+plotted as long runs of short thin segments; removing them left the boundary
+drawn as dashes. Adding a 300 m length cap was not enough — the trace's segments
+are 18 × 97 m. What separates them is topology: a trace is a **chain** whose
+strokes abut within ~1.6 m, while hatch is isolated dashes 20–30 m apart. Two
+further traps in implementing that: a closed ring's first and last point are
+identical, so counting `r[0]`/`r[-1]` marks every polygon as chained; and the
+trace strokes are plotted *there and back* (`A → B → A`), so `r[0] == r[-1]` on
+them too and the whole river was skipped. The ends of a stroke are `r[0]` and the
+vertex furthest from it. Final: 507 tagged, 1,590 spared as chain links.
+
+**3. B1–B4 now sit on their own ground.** The drawing labels 265 nursery plots
+hierarchically — `B.1.5.3`, `B.2.10.1`, `B.4.7.3.2` — so the real B1 is its 62
+`B.1.*` plots, B2 its 80, B3 64, B4 55. The shipped plates were placed at the red
+callout text, which sits on the block's north-east EDGE 650–885 m from the ground
+it names; they were landing outside the planted strip entirely. Plates now sit at
+the mean of each block's own plots, moving 815–951 m south-west onto the blocks.
+`ZONE 4` already worked this way; `ZONE 3` still uses its text position, for the
+reason given in the code.
+
+**4. 46 names were on the wrong feature.** A block label is printed inside its
+own 100–300 m block, so a named feature sitting >500 m from its own label has
+simply been mis-assigned. The two worst were `B2` and `B4`, stuck on *swampy*
+features 2.5 km and 4.1 km away in Zone 4 — hovering there claimed to be the
+nursery block of that name, while the corrected plate for the same block sat
+kilometres off. Geometry kept, name dropped: 265 → 219 named features.
+
+The layer ends up **9,450 → 4,451 features, 1.6 MB → 0.84 MB**, with 184 shading regions.
+
+`dash/scripts/clean-estate-plan.py` does all five passes and is in the repo
+precisely because the first extraction script was not — re-deriving it cost a
+day. It is a **one-way transform, not a repeatable filter**: pass 4 removes
+names, and names are what the affine is fitted on, so a naive second run refits
+a slightly different affine and strips a further 12 features — the layer would
+erode a little on every run. The output is therefore stamped with a `cleaned`
+block (counts + affine quality) and a re-run is a no-op unless `--force` is
+passed. Verified: from the original it reports 151 stripped / 2,155 tagged / 46
+names dropped; run again it reports "already cleaned" and writes nothing.
+
+**Ceiling, unchanged.** All of this fixes what the layer DRAWS. It does not move
+it. Absolute accuracy is still ~±1.5 km and still gated on the DXF export — a
+cleaner wrong-by-1.5-km grid is still wrong by 1.5 km, and the legend's warning
+stays exactly as it is.
 
 ### The underlying problem
 
