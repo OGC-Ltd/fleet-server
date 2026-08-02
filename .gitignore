@@ -7,3 +7,7 @@
 # that IS used lives in dash/public/estate-plan.geojson.
 ESTATE*.pdf
 ESTATE*.dwg
+
+# Throwaway one-off DB/API probe scripts (_age.mjs, _clock.mjs, …). Ad-hoc
+# queries written to answer one question, kept out of the repo deliberately.
+/_*.mjs

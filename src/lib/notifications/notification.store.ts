@@ -97,7 +97,19 @@ export function publishNotification(input: PublishNotificationInput): Notificati
 
   // 2. Durable record. Detached: a failed write logs and is dropped rather
   //    than propagating into a poll cycle or an HTTP handler.
-  void prisma.notification.upsert({
+  void writeNotification(input)
+    .catch((err) => logger.warn({ err, feedId: id }, 'Notification persist failed — item was still delivered live'))
+
+  // 3. Hot cache. No-op without Redis.
+  void cacheNotification(orgId, item)
+
+  return item
+}
+
+/** The durable write on its own, so both callers below share one upsert. */
+function writeNotification(input: PublishNotificationInput): Promise<unknown> {
+  const { orgId, id, source, alertType = null, severity, text, at, plate = null, vehicleId = null } = input
+  return prisma.notification.upsert({
     where:  { feedId: id },
     create: {
       feedId: id, organisationId: orgId, vehicleId, source,
@@ -107,10 +119,22 @@ export function publishNotification(input: PublishNotificationInput): Notificati
     // occurredAt is rewritten too so a re-sync repairs rows stored before a
     // timestamp fix (the same reason ingestAlerts rewrites createdAt).
     update: { severity, text, plate, vehicleId, occurredAt: at },
-  }).catch((err) => logger.warn({ err, feedId: id }, 'Notification persist failed — item was still delivered live'))
+  })
+}
 
-  // 3. Hot cache. No-op without Redis.
-  void cacheNotification(orgId, item)
-
+/**
+ * Same feed item, but the durable write is AWAITED.
+ *
+ * `publishNotification` deliberately detaches persistence so a live poll cycle
+ * is never blocked by the pooler. That trade is wrong for a one-shot CLI: a
+ * script that publishes and exits would race its own writes and lose most of
+ * them, because nothing keeps the process alive for the detached promise.
+ *
+ * Same choke point, same row shape — only the timing differs.
+ */
+export async function publishNotificationDurable(input: PublishNotificationInput): Promise<NotificationItem> {
+  const item = publishNotification({ ...input, persist: false })
+  await writeNotification(input)
+  await cacheNotification(input.orgId, item)
   return item
 }

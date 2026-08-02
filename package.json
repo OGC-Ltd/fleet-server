@@ -35,6 +35,7 @@
     "sync:drivers": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-drivers.ts",
     "sync:wialon": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-wialon.ts",
     "sync:geofences": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-geofences.ts",
+    "sync:fuel": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-fuel-events.ts",
     "geofence:assign": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/geofence-assign.ts",
     "fix:rings": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/fix-ring-geofences.ts",
     "sync:sukari-gps": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-sukari-wialon.ts",

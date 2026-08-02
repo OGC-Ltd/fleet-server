@@ -104,6 +104,18 @@ const schema = z.object({
   // BullMQ's repeatable jobs already de-duplicate on a shared Redis, so this
   // is belt-and-braces for the case where instances point at different Redises.
   RETENTION_SWEEP_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  // Fuel fillings and drains from Wialon's own reports onto the Live Feed.
+  // Like the retention sweep this needs Redis and is inert without it; unlike
+  // it, this one MUST run in-process, because the notification read path
+  // serves its first page from the Redis cache and an external CLI cannot
+  // write that cache — see lib/queues/fuel-events.ts.
+  // Set 'false' on additional instances so only ONE runs it.
+  FUEL_SYNC_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  // Every 15 minutes. The job executes a Wialon report only for vehicles whose
+  // own fuel readings actually moved, so a quiet cycle costs nothing.
+  FUEL_SYNC_CRON: z.string().optional().default('*/15 * * * *'),
 })
 
 // Production must talk to the real (remote) database endpoint. localhost URLs

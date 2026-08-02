@@ -30,49 +30,12 @@ export interface SimEvents {
   garageVisitCompleted: GarageVisitEvent | null
 }
 
-// ─── current reporting period (find-or-create, cached + de-duped) ───────────
-
-const periodCache   = new Map<string, { id: string; endMs: number }>()
-const periodPending = new Map<string, Promise<string>>()
-
-async function resolvePeriod(orgId: string): Promise<string> {
-  const now = new Date()
-
-  const existing = await prisma.reportingPeriod.findFirst({
-    where: { organisationId: orgId, periodStart: { lte: now }, periodEnd: { gte: now } },
-    orderBy: { periodStart: 'desc' },
-    select: { id: true, periodEnd: true },
-  })
-  if (existing) {
-    periodCache.set(orgId, { id: existing.id, endMs: existing.periodEnd.getTime() })
-    return existing.id
-  }
-
-  const start = new Date(now); start.setHours(0, 0, 0, 0)
-  const end   = new Date(now); end.setHours(23, 59, 59, 999)
-  const label = `Live ${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`
-
-  const created = await prisma.reportingPeriod.create({
-    data: { organisationId: orgId, label, periodStart: start, periodEnd: end, periodType: 'DAILY' },
-    select: { id: true },
-  })
-  periodCache.set(orgId, { id: created.id, endMs: end.getTime() })
-  return created.id
-}
-
-/** Return the id of the reporting period covering now, creating a DAILY one if
- *  none exists. Concurrent callers for the same org share one round trip. */
-export async function getOrCreateCurrentPeriod(orgId: string): Promise<string> {
-  const cached = periodCache.get(orgId)
-  if (cached && Date.now() < cached.endMs) return cached.id
-
-  let pending = periodPending.get(orgId)
-  if (!pending) {
-    pending = resolvePeriod(orgId).finally(() => periodPending.delete(orgId))
-    periodPending.set(orgId, pending)
-  }
-  return pending
-}
+// The period find-or-create moved to lib/reporting-period, so the live path
+// and the Wialon fuel backfill share one implementation — the backfill needs
+// the period covering the EVENT, which the now-only version here could not
+// express. Re-exported because callers already import it from this module.
+import { getOrCreateCurrentPeriod } from './reporting-period.js'
+export { getOrCreateCurrentPeriod }
 
 const round1 = (n: number) => Math.round(n * 10) / 10
 
