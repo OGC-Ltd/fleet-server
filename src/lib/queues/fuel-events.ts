@@ -84,17 +84,35 @@ const CANDIDATE_THRESHOLD_ML = 15_000
 /** Stop one cycle running away — a bad window should not hold the session for hours. */
 const MAX_CANDIDATES_PER_CYCLE = 60
 
+/**
+ * Warn when a cycle takes longer than the interval it is scheduled on.
+ *
+ * The default cadence is quarter-hourly; a cycle that exceeds it means the next
+ * tick is already queued behind this one. Hardcoded against the DEFAULT rather
+ * than parsed out of FUEL_SYNC_CRON — a cron expression does not reduce to a
+ * single interval, and being approximately right about "this is too slow" is
+ * all the threshold needs to be.
+ */
+const CYCLE_OVERRUN_WARN_MS = 15 * 60_000
+
 export interface FuelSyncResult {
   candidates: number
   fillings:   number
   thefts:     number
   published:  number
+  /** Re-offered events suppressed as exact republishes — see SyncOutcome. */
+  deduped:    number
+  /** Ledger rows rewritten because the provider revised the event. */
+  corrected:  number
   failed:     number
+  /** Wall clock, so an overrunning cycle is visible rather than inferred. */
+  ms:         number
 }
 
 /** Run one cycle. Exported so it can be invoked by hand or from a test. */
 export async function runFuelSync(): Promise<FuelSyncResult> {
-  const result: FuelSyncResult = { candidates: 0, fillings: 0, thefts: 0, published: 0, failed: 0 }
+  const startedAt = Date.now()
+  const result: FuelSyncResult = { candidates: 0, fillings: 0, thefts: 0, published: 0, deduped: 0, corrected: 0, failed: 0, ms: 0 }
 
   const token = env.WIALON_TOKEN || process.env['access_token'] || ''
   if (!token) {
@@ -134,6 +152,8 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
           result.fillings  += out.fillings
           result.thefts    += out.thefts
           result.published += out.published
+          result.deduped   += out.deduped
+          result.corrected += out.corrected
         } catch (err) {
           // One unit's report failing must not abandon the rest of the cycle.
           result.failed++
@@ -145,10 +165,21 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
     await client.logout().catch(() => { /* best effort */ })
   }
 
-  const log = result.published > 0 || result.fillings > 0 || result.thefts > 0
+  result.ms = Date.now() - startedAt
+
+  const log = result.published > 0 || result.fillings > 0 || result.thefts > 0 || result.corrected > 0
     ? logger.info.bind(logger)
     : logger.debug.bind(logger)
   log(result, 'Fuel sync cycle complete')
+
+  // A cycle that outlasts its own interval means the next tick is already
+  // waiting, and BullMQ will run it the moment this one lands — which turns a
+  // slow Wialon session into back-to-back cycles rather than a paused one.
+  // Nothing here can fix that; it just must not be silent.
+  if (result.ms > CYCLE_OVERRUN_WARN_MS) {
+    logger.warn({ ms: result.ms, candidates: result.candidates, cron: env.FUEL_SYNC_CRON },
+      'Fuel sync cycle overran its interval — the next tick was already due')
+  }
 
   return result
 }
@@ -157,6 +188,8 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
 
 let queue:  Queue  | null = null
 let worker: Worker | null = null
+/** One cycle at a time — see the worker handler. */
+let running = false
 
 export interface FuelSyncHandle {
   stop: () => Promise<void>
@@ -197,7 +230,17 @@ export async function startFuelSync(): Promise<FuelSyncHandle> {
 
   worker = new Worker(FUEL_QUEUE, async (job: Job) => {
     if (job.name !== SYNC_JOB) return
-    return runFuelSync()
+    // Concurrency 1 stops two cycles running at once, but it does not stop
+    // ticks QUEUEING behind a slow one: a cycle that overran by an hour would
+    // land, then immediately run the four ticks that piled up behind it, each
+    // re-executing the same reports over an overlapping window. Skip instead —
+    // the next scheduled tick's window covers anything this one missed.
+    if (running) {
+      logger.warn({ jobId: job.id }, 'Fuel sync: previous cycle still running — skipping this tick')
+      return
+    }
+    running = true
+    try { return await runFuelSync() } finally { running = false }
   }, {
     connection,
     // Strictly one at a time: two concurrent cycles would open two Wialon
