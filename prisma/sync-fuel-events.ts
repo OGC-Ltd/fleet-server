@@ -93,7 +93,7 @@ async function main() {
   }
 
   const sources = await resolveOrgFuelSources(client)
-  let grandFillings = 0, grandThefts = 0, grandNotified = 0
+  let grandFillings = 0, grandThefts = 0, grandNotified = 0, grandCorrected = 0
 
   for (const source of sources) {
     if (ONLY_ORG && source.code !== ONLY_ORG) continue
@@ -111,7 +111,7 @@ async function main() {
     console.log(`  ── ${source.code} · resource ${source.resourceId} · template [${source.templateId}] "${source.templateName}"`)
     console.log(`     ${vehicles.length} vehicle(s) with a tracker and a known tank\n`)
 
-    let fillings = 0, thefts = 0, dupFill = 0, dupTheft = 0, failed = 0, done = 0, notified = 0
+    let fillings = 0, thefts = 0, dupFill = 0, dupTheft = 0, failed = 0, done = 0, notified = 0, corrected = 0
 
     for (const v of vehicles) {
       try {
@@ -125,6 +125,7 @@ async function main() {
         thefts   += out.thefts
         dupFill  += out.dupFill
         dupTheft += out.dupTheft
+        corrected += out.corrected
         notified += out.published
       } catch (err) {
         failed++
@@ -140,15 +141,22 @@ async function main() {
 
     console.log(`\n     ${source.code}: ${fillings} filling(s), ${thefts} drain(s) ${APPLY ? 'written' : 'to write'}`)
     console.log(`     already stored: ${dupFill} filling(s), ${dupTheft} drain(s)${failed ? `  ·  ${failed} unit(s) failed` : ''}`)
+    // The whole point of a re-run over old dates: Wialon refines an event's
+    // figures after the fact, and a row stored at first sight keeps the
+    // roughest of them. Silent corrections would make a repair pass look
+    // identical to a no-op.
+    if (APPLY && corrected > 0) console.log(`     corrected: ${corrected} row(s) whose figures the provider has since revised`)
     if (NOTIFY) console.log(`     live feed: ${notified} item(s) published`)
     console.log()
 
+    grandCorrected += corrected
     grandFillings += fillings
     grandThefts   += thefts
     grandNotified += notified
   }
 
   console.log(`  ── total: ${grandFillings} filling(s), ${grandThefts} drain(s) ${APPLY ? 'written' : 'pending'}`)
+  if (APPLY && grandCorrected > 0) console.log(`     ${grandCorrected} existing row(s) corrected`)
   if (NOTIFY) console.log(`     ${grandNotified} feed item(s) published`)
   if (!APPLY) console.log('\n  Dry run — nothing written. Re-run with:  npm run sync:fuel -- --apply')
   console.log()
