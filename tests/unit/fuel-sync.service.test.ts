@@ -7,7 +7,9 @@ vi.mock('../../src/lib/reporting-period.js', () => ({
 }))
 vi.mock('../../src/lib/notifications/notification.store.js', () => ({
   publishNotification: vi.fn(),
-  publishNotificationDurable: vi.fn(async (i: unknown) => i),
+  // Returns the store's DurablePublishResult. `published: false` is the store
+  // suppressing an exact republish — see the dedupe case below.
+  publishNotificationDurable: vi.fn(async (i: unknown) => ({ item: i, published: true })),
 }))
 vi.mock('../../src/providers/wialon/wialon.reports.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
@@ -51,11 +53,20 @@ const published = () => (publishNotificationDurable as unknown as { mock: { call
 
 beforeEach(() => {
   vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
+  // Ledger existence is now ONE range query per table per vehicle, not a
+  // findFirst per event — every cycle re-reads the same 3-hour window, so the
+  // per-event queries were all asking about the same rows over the pooler.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ;(prismaMock.fuelFilling.findFirst as any).mockResolvedValue(null)
+  ;(prismaMock.fuelFilling.findMany as any).mockResolvedValue([])
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ;(prismaMock.fuelTheft.findFirst as any).mockResolvedValue(null)
-  vi.mocked(publishNotificationDurable).mockClear()
+  ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([])
+  // Reset the IMPLEMENTATION, not just the calls: the dedupe case below swaps
+  // in `published: false`, and mockClear would leave that in place for every
+  // test after it.
+  vi.mocked(publishNotificationDurable).mockReset()
+  vi.mocked(publishNotificationDurable).mockImplementation(
+    async (i: unknown) => ({ item: i, published: true }) as unknown as Awaited<ReturnType<typeof publishNotificationDurable>>,
+  )
 })
 
 describe('wialonUnitId', () => {
@@ -95,13 +106,82 @@ describe('ledger writes', () => {
 
   it('does not re-store an event already in the ledger', async () => {
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [filling(RECENT)], thefts: [] })
+    // The ledger already holds this exact filling — matched on its timestamp,
+    // the same test the per-event query made.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ;(prismaMock.fuelFilling.findFirst as any).mockResolvedValue({ id: 'ff_1' })
+    ;(prismaMock.fuelFilling.findMany as any).mockResolvedValue([{ filledAt: RECENT }])
 
     const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
 
     expect(out).toMatchObject({ fillings: 0, dupFill: 1 })
     expect(prismaMock.fuelFilling.create).not.toHaveBeenCalled()
+  })
+
+  it('rewrites a ledger row when the provider revises the figures', async () => {
+    // Measured on the live box 2026-08-02: Wialon reported one KCR 714F filling
+    // as 55.1 L, then 53.9 L, then 52.8 L over three cycles. The notification
+    // was upserted each time but the ledger kept its first glimpse, so the two
+    // disagreed about the same event — KTCB 466U's 17:52 fill read 27.9 L in
+    // the ledger and 47.0 L on the feed. Analytics read the ledger.
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [filling(RECENT)], thefts: [] })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelFilling.findMany as any).mockResolvedValue([
+      { id: 'ff_1', filledAt: RECENT, filledMl: 55_100, finalFuelLevelMl: 96_100 },
+    ])
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
+
+    expect(out).toMatchObject({ dupFill: 1, fillings: 0, corrected: 1 })
+    const call = prismaMock.fuelFilling.update.mock.calls[0]![0] as { where: { id: string }; data: Record<string, unknown> }
+    expect(call.where.id).toBe('ff_1')
+    expect(call.data['filledMl']).toBe(40_000)          // the report's current answer
+    expect(call.data['finalFuelLevelMl']).toBe(760_000)
+    expect(prismaMock.fuelFilling.create).not.toHaveBeenCalled()
+  })
+
+  it('leaves a settled event alone', async () => {
+    // Most events in a 3-hour window are unchanged; rewriting them every cycle
+    // would be a write per event per cycle for no new information.
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [filling(RECENT)], thefts: [] })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelFilling.findMany as any).mockResolvedValue([
+      { id: 'ff_1', filledAt: RECENT, filledMl: 40_000, finalFuelLevelMl: 760_000 },
+    ])
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
+
+    expect(out).toMatchObject({ dupFill: 1, corrected: 0 })
+    expect(prismaMock.fuelFilling.update).not.toHaveBeenCalled()
+  })
+
+  it('rewrites a revised drain too', async () => {
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [drain(RECENT)] })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([
+      { id: 'ft_1', beganAt: RECENT, stolenMl: 60_000, finalFuelLevelMl: 700_000 },
+    ])
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
+
+    expect(out).toMatchObject({ dupTheft: 1, thefts: 0, corrected: 1 })
+    const call = prismaMock.fuelTheft.update.mock.calls[0]![0] as { data: Record<string, unknown> }
+    expect(call.data['stolenMl']).toBe(80_830)
+  })
+
+  it('checks the ledger once per table, not once per event', async () => {
+    // The pooler makes a round trip cost about a second, and a busy vehicle can
+    // return a dozen events per cycle over a window that is almost entirely
+    // already stored. One range scan answers for all of them.
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({
+      fillings: [filling(RECENT), filling(new Date('2026-08-02T11:00:00Z')), filling(new Date('2026-08-02T10:30:00Z'))],
+      thefts:   [drain(RECENT), drain(new Date('2026-08-02T11:00:00Z'))],
+    })
+
+    await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
+
+    expect(prismaMock.fuelFilling.findMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.fuelTheft.findMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.fuelFilling.findFirst).not.toHaveBeenCalled()
   })
 
   it('writes nothing when apply is false', async () => {
@@ -121,13 +201,31 @@ describe('feed publication is decided by AGE, not by ledger novelty', () => {
     // backfill stores an event, and a later cycle then has nothing "new" to
     // announce even though the event is minutes old.
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [filling(RECENT)], thefts: [] })
+    // The ledger already holds this exact filling — matched on its timestamp,
+    // the same test the per-event query made.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ;(prismaMock.fuelFilling.findFirst as any).mockResolvedValue({ id: 'ff_1' })
+    ;(prismaMock.fuelFilling.findMany as any).mockResolvedValue([{ filledAt: RECENT }])
 
     const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
 
     expect(out.dupFill).toBe(1)
     expect(out.published).toBe(1)
+  })
+
+  it('counts a suppressed republish as deduped, not as published', async () => {
+    // Publication is by AGE, so one filling is re-offered on every cycle inside
+    // the 2-hour window — up to eight times at a quarter-hourly cadence. The
+    // store drops the exact repeats; the cycle must report that honestly rather
+    // than claim eight publications, or "published: 0" on a quiet cycle becomes
+    // indistinguishable from the sync having stopped.
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [filling(RECENT)], thefts: [drain(RECENT)] })
+    vi.mocked(publishNotificationDurable).mockResolvedValue(
+      { item: {}, published: false } as unknown as Awaited<ReturnType<typeof publishNotificationDurable>>,
+    )
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
+
+    expect(out).toMatchObject({ published: 0, deduped: 2 })
   })
 
   it('stays silent about events older than the cutoff', async () => {

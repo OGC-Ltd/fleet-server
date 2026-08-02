@@ -10,6 +10,8 @@
 | Live Feed items | **live** — in-process job, every 15 min |
 | Provider fuel notifications | blocked on ControlTech ACL |
 | Org attribution fix for Wialon notifications | written, **not yet landed** (§7) |
+| Feed duplication + ordering under fuel events | fixed 2026-08-02 (§8) — **not deployed** |
+| Ledger figures vs feed figures | fixed 2026-08-02 (§8); historical rows still need a re-sync |
 
 ---
 
@@ -126,8 +128,10 @@ long one so Wialon has settled readings either side of the event. Sharing a sing
 returns 47 candidates and re-executes each report ~12 times for the same event; split, it is 8.
 
 **Feed publication is decided by an event's AGE**, never by whether the ledger row was new. Tying
-them together let the nightly backfill swallow an event before any cycle could surface it. The stable
-`feedId` upsert makes republishing harmless.
+them together let the nightly backfill swallow an event before any cycle could surface it.
+
+That means one event is re-offered on every cycle inside the 2-hour notify window — up to eight
+times. Republishing is now genuinely harmless, which it was not when this was written: see §8.
 
 Config — inert without `REDIS_URL`, exactly like the retention sweep:
 
@@ -179,10 +183,6 @@ real time rather than as events mature. Our receiver handles them today, includi
 rights only and cannot create rules. A configuration request; the report path deliberately routes
 around it.
 
-**Kasulu feed visibility.** Kasulu emits ~13 zone events per minute, so the 40-item feed covers
-roughly three minutes of history and a fuel event computed later never appears there. The data is in
-the ledger and the API. Needs filtering by event type or a dedicated fuel view — scoped, not built.
-
 **Drains worth an operator's eye.** Some are large — 485 L on `MUFINDI - CTR 03`, 351 L on
 `MUFINDI: DZ 04`. These are Wialon's own figures recorded faithfully, and are either serious losses
 or probe artefacts. That distinction is an operational judgement, not one the platform should make.
@@ -190,6 +190,83 @@ or probe artefacts. That distinction is an operational judgement, not one the pl
 **Driver attribution.** `analytics.repository` scores drains by `driverId`, and the backfill writes
 `null` — who was assigned during a drain days ago is not something the current roster can answer. So
 the ledger and the driver ratings will not agree.
+
+## 8. What fuel events broke in the feed, and the fix
+
+*Added 2026-08-02, after the first cycles ran against live dashboards.*
+
+Fuel is the first emitter whose events do **not** arrive at the moment they happen. Wialon only
+recognises a filling once settled readings follow it, so an item is published with an `at` up to two
+hours old. Three components assumed arrival order was event order.
+
+**The panel froze until a reload.** `useFleetLive` merged each SSE item with `[item, ...prev]` — a
+blind prepend with no identity. Both panels render `key={item.id}`, so a republished item put two
+siblings with the same React key in the list; React keeps the first and stops updating the rest.
+Three things republish: the reconnect replay (EventSource reconnects internally, so the effect never
+re-runs and never clears the feed, yet the server replays 40 items on every connect), the fuel sync's
+age-based re-offer, and any reconcile pass. It is now a Map keyed by `id`, sorted on `ts` — which
+also puts a past-dated fuel item in its correct slot instead of at the top.
+
+**One event could be cached twice.** The Redis ZSET member was `JSON.stringify(item)`, so identity
+was the exact serialised body rather than the `feedId`. Wialon refines a filling's volume, final
+level and location as the report matures, so a republished event differing by one character became a
+second member at the same score — one event shown twice, while Postgres held a single clean row. The
+ZSET now holds ids with payloads in a companion hash, kept in step by one Lua script.
+
+**Every republish reached the dashboard.** `publishNotification` is the single choke point, and it
+had no memory. It now fingerprints `severity|text|plate|vehicleId|at` per `feedId`: an identical
+re-offer reaches nothing — no SSE frame, no row, no cache write — while a **corrected** one still
+goes out, because a refined volume is an update and not noise. In-process and synchronous, since the
+callers are poll-cycle handlers; `SET NX EX` is the upgrade path if a second instance ever publishes.
+`publishNotificationDurable` returns `{ item, published }` so a cycle can log `published: 0,
+deduped: 6` rather than claim six publications.
+
+**Kasulu's fuel events were unreachable** (this replaces the old §7 open item, which read as
+cosmetic — it was not). At ~13 zone crossings a minute, `NOTIFICATION_CACHE_MAX` of 200 is about
+fifteen minutes of history, so a 90-minute-old fuel event was added to the ZSET and removed by the
+rank trim *in the same transaction* — and `notification.reader` serves the cache whenever it holds a
+full page, so Postgres was never consulted. The item flashed on a live tab and was gone on refresh.
+Correct ordering does not fix this: one chronological feed cannot serve both event rates. So the API
+grew `?alertType=` and `?severity=` filters, which bypass the cache and read Postgres. The dashboard
+still defaults to the mixed feed — **which view it should default to is not decided.**
+
+**The ledger and the feed disagreed about the same event.** Found while confirming the above against
+the live box, and the more serious of the two. Wialon does not merely refine an event's *wording* —
+it refines its **figures**: one KCR 714F filling was reported as 55.1 L, then 53.9 L, then 52.8 L
+across three cycles, at one unchanging timestamp. The notification was upserted every time, so the
+feed tracked the latest answer; the ledger checked existence by `filledAt` and skipped, so it kept
+the first glimpse forever. Measured on `fuel_fillings` versus `notifications`, 2026-08-02:
+
+| Event | Ledger held | Feed said |
+|---|---|---|
+| KCR 714F 18:06 | 55.1 L | 53.9 L |
+| KTCB 294U 17:52 | 57.2 L | 57.3 L |
+| KTCB 466U 17:52 | **27.9 L** | **47.0 L** |
+
+Analytics, reporting periods and driver scoring read the **ledger** — the stale side. A cycle now
+rewrites the row when the provider's figures have moved, guarded on an actual change so settled
+events are not written every cycle, and counts it as `corrected`. This is the module's own principle
+applied consistently: the provider computes the event, we record its current answer.
+
+Also: `deriveFeedEvents` built its id from a process-global counter, so re-processing one frame
+minted new ids and the duplicate was invisible to every dedupe including Postgres'. It now uses the
+item's index within the frame — same uniqueness, but it repeats.
+
+Cycle cost, while in here: ledger existence was a `findFirst` per event over a window that is almost
+entirely already stored; it is now one range scan per table per vehicle, with reporting periods
+memoised per month. A cycle that outruns its interval logs a warning, and a tick arriving while one
+is still running is **skipped** rather than queued — concurrency 1 stopped overlap but not a pile-up.
+
+**Not done.** Cross-source duplicates: when the ControlTech ACL lands, Wialon's own fuel rules will
+push an alert for the same drain the report path publishes, under a different `feedId`, and nothing
+will collide them. Deriving both from `fuel-<kind>-<vehicleId>-<minute>` would, but it needs the
+webhook receiver to agree — decide before enabling the rules, not after.
+
+**Historical rows are still wrong.** The correction only fires when a cycle sees the event again,
+i.e. inside the 3-hour window. Every `fuel_fillings` / `fuel_thefts` row older than that keeps
+whichever figure was first observed. Re-running `npm run sync:fuel -- --apply` over a date range now
+repairs them rather than skipping — worth doing over the backfilled week before anyone reads the
+analytics.
 
 ---
 

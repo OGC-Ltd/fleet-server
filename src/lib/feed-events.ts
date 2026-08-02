@@ -51,8 +51,6 @@ const clockFmt = new Intl.DateTimeFormat('en-GB', {
 const clock = (ms: number) => clockFmt.format(ms)
 const tonnes = (kg: number | null) => kg && kg > 0 ? `${(kg / 1000).toFixed(1)}t ` : ''
 
-let feedSeq = 0
-
 export function deriveFeedEvents(orgId: string, p: FeedSource): void {
   const st = prev.get(p.vehicleId) ?? {
     phase: null, overspeeding: false, fuelInconsistency: false, lastOverspeedFeedAt: 0,
@@ -130,13 +128,19 @@ export function deriveFeedEvents(orgId: string, p: FeedSource): void {
   st.fuelInconsistency = p.flags.fuelInconsistency
   prev.set(p.vehicleId, st)
 
-  for (const item of items) {
+  items.forEach((item, idx) => {
     publishNotification({
       orgId,
-      // vehicleId is in the id because feedSeq resets to 0 on restart: without
-      // it, two events in the same millisecond either side of a restart could
-      // collide on what is now a UNIQUE key in Postgres.
-      id:        `feed-${now}-${p.vehicleId}-${feedSeq++}`,
+      // Derived entirely from the FRAME — its captured time, its vehicle, and
+      // the position of this item within the frame. It used to end in a
+      // process-global counter, which made the id depend on when the frame was
+      // processed rather than on what it contained: re-processing one frame
+      // (a restart replaying it, a redelivery) minted brand-new ids, so the
+      // duplicate was invisible to every dedupe downstream — Postgres' unique
+      // feedId included. Same uniqueness guarantee as the counter had, since
+      // one capturedAt plus one vehicle IS one frame and the indices within it
+      // are distinct; the difference is that it now repeats.
+      id:        `feed-${now}-${p.vehicleId}-${idx}`,
       source:    'telemetry',
       severity:  item.type,
       text:      item.text,
@@ -149,5 +153,5 @@ export function deriveFeedEvents(orgId: string, p: FeedSource): void {
       // notification.store's `extra`.
       extra:     { lat: p.lat, lng: p.lng },
     })
-  }
+  })
 }

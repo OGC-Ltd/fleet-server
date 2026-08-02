@@ -22,6 +22,27 @@ export interface NotificationPage {
   source: 'cache' | 'database'
 }
 
+export interface NotificationQuery {
+  limit?:  number
+  before?: Date
+  /**
+   * Restrict to these `alertType`s, e.g. `['fuelFilling','fuelInconsistency']`.
+   *
+   * Why a filtered read exists at all: the feed is chronological and capped, so
+   * a busy organisation's routine traffic buries everything else. Kasulu emits
+   * roughly thirteen zone crossings a minute, which is about three minutes of
+   * history in a 40-item panel — and a fuel event arrives with a timestamp up
+   * to two hours old, because Wialon only recognises a filling once settled
+   * readings follow it. Correctly ordered, it therefore sorts below several
+   * hundred zone crossings and is never on the page. That is not a bug in the
+   * ordering; it is what a single chronological feed does at that event rate,
+   * and the answer is to be able to ask for one kind of event.
+   */
+  alertTypes?: string[]
+  /** Restrict to these severities, e.g. `['critical']`. */
+  severities?: string[]
+}
+
 /** DB row → the same shape the SSE feed and the cache use. */
 function toItem(row: {
   feedId: string; severity: string; text: string; source: string
@@ -50,11 +71,18 @@ function toItem(row: {
  */
 export async function getNotifications(
   orgId: string,
-  { limit = 50, before }: { limit?: number; before?: Date } = {},
+  { limit = 50, before, alertTypes, severities }: NotificationQuery = {},
 ): Promise<NotificationPage> {
   const capped = Math.min(Math.max(limit, 1), 200)
 
-  if (!before) {
+  // The cache is one mixed, capped, chronological set — it cannot answer a
+  // filtered question without lying by omission, because the rows that match
+  // may well be the ones it evicted. Filtered reads go to Postgres, where the
+  // whole history is. They are also rare: this is a user selecting a view, not
+  // the page every dashboard loads.
+  const filtered = Boolean(alertTypes?.length || severities?.length)
+
+  if (!before && !filtered) {
     const cached = await readCachedNotifications(orgId, capped)
     // A short cache is a legitimate answer only if it holds everything asked
     // for; otherwise fall through so the caller gets a full page.
@@ -65,7 +93,12 @@ export async function getNotifications(
   }
 
   const rows = await prisma.notification.findMany({
-    where:   { organisationId: orgId, ...(before ? { occurredAt: { lt: before } } : {}) },
+    where:   {
+      organisationId: orgId,
+      ...(before ? { occurredAt: { lt: before } } : {}),
+      ...(alertTypes?.length ? { alertType: { in: alertTypes } } : {}),
+      ...(severities?.length ? { severity:  { in: severities } } : {}),
+    },
     orderBy: { occurredAt: 'desc' },
     take:    capped,
     select:  {
@@ -77,9 +110,10 @@ export async function getNotifications(
   const items = rows.map(toItem)
 
   // Warm the cache from the authoritative store so the next first-page read is
-  // hot. Only for the first page — priming from a deep page would leave the
-  // cache holding old history and shadowing anything newer.
-  if (!before && items.length > 0) {
+  // hot. Only for the UNFILTERED first page — priming from a deep page would
+  // leave the cache holding old history and shadowing anything newer, and
+  // priming from a filtered one would replace the whole feed with a slice of it.
+  if (!before && !filtered && items.length > 0) {
     void primeCache(orgId, items.slice(0, env.NOTIFICATION_CACHE_MAX))
   }
 

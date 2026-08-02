@@ -11,14 +11,29 @@ import { getNotifications }         from '../../lib/notifications/notification.r
 // lib/notifications/notification.reader.
 //
 // Query: ?limit=1..200 (default 50)  ?before=<ISO timestamp> to page back.
+//        ?alertType=fuelFilling,fuelInconsistency   ?severity=critical
 //
 // Until this existed there was no way to read notification history at all:
 // clients had the live SSE stream and a 60-item in-memory buffer, and a
 // restart or a reload past that window simply lost it.
+//
+// The filters exist because one chronological feed cannot serve a fleet that
+// emits thirteen zone crossings a minute AND fuel events that surface up to two
+// hours after they happened: correctly ordered, the fuel event is several
+// hundred rows down. See NotificationQuery.
+
+/** `?alertType=a,b` or a repeated `?alertType=a&alertType=b`, both accepted. */
+function csv(v: unknown): string[] | undefined {
+  const parts = (Array.isArray(v) ? v : [v])
+    .flatMap((s) => String(s ?? '').split(','))
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return parts.length > 0 ? parts : undefined
+}
 
 export async function listNotifications(req: Request, res: Response) {
   const { orgId } = req.params as { orgId: string }
-  const { limit, before } = req.query as { limit?: string; before?: string }
+  const { limit, before, alertType, severity } = req.query as Record<string, unknown>
 
   const parsedLimit = limit ? Number(limit) : undefined
   if (parsedLimit !== undefined && !Number.isFinite(parsedLimit)) {
@@ -27,14 +42,19 @@ export async function listNotifications(req: Request, res: Response) {
 
   let beforeDate: Date | undefined
   if (before) {
-    beforeDate = new Date(before)
+    beforeDate = new Date(String(before))
     if (Number.isNaN(beforeDate.getTime())) {
       return sendError(res, 400, 'before must be an ISO-8601 timestamp')
     }
   }
 
   try {
-    const page = await getNotifications(orgId, { limit: parsedLimit, before: beforeDate })
+    const page = await getNotifications(orgId, {
+      limit:      parsedLimit,
+      before:     beforeDate,
+      alertTypes: csv(alertType),
+      severities: csv(severity),
+    })
     return sendSuccess(res, {
       notifications: page.items,
       count:         page.items.length,
