@@ -138,10 +138,22 @@ export async function findFleetSnapshot(orgId: string) {
       // The provider's own unit id — how lib/connection-state is keyed, so the
       // service layer can attach the provider's connection verdict.
       deviceId: true,
+      // NEWEST open assignment, not an arbitrary one.
+      //
+      // `take: 1` with no ordering left Postgres free to return any row, and a
+      // vehicle routinely has several open at once: assignments are derived
+      // from dispatch history rather than from an assignment endpoint, and a
+      // run whose return never landed leaves its link open forever. Measured
+      // 2026-08-03 on SUKARI — 19 of the 52 vehicles then out carried more than
+      // one, up to four, and some named a different person from the driver on
+      // the current run. The dispatch driver overrides this entirely while a
+      // run is open (see telemetry.service); this fixes what is shown the rest
+      // of the time.
       assignments: {
-        where: { unassignedAt: null },
-        select: { user: { select: { fullName: true, driverRatingScore: true } } },
-        take: 1,
+        where:   { unassignedAt: null },
+        orderBy: { assignedAt: 'desc' },
+        select:  { user: { select: { fullName: true, driverRatingScore: true } } },
+        take:    1,
       },
     },
     orderBy: { name: 'asc' },

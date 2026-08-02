@@ -42,7 +42,10 @@ const norm = (s: string | null | undefined): string =>
  *
  * `notify: false` on every one of these: a dispatch leaving the yard is routine
  * narration, and pushing it to every subscribed device would train people to
- * ignore the notifications that DO matter. They still appear in the feed.
+ * ignore the notifications that DO matter. They still appear in the feed — and
+ * they are still STORED, which is a separate flag and for a while was not: the
+ * worker passed notify straight through as `persist`, so none of this narration
+ * ever reached the database. See ProviderAlertEvent.
  */
 function feed(
   orgId: string,
@@ -117,6 +120,13 @@ export async function handleDispatch(
     actualReturnAt:   parseProviderTime(d.actualReturnTime),
     source,
   }
+  // Whether this is the FIRST time we have seen this dispatch decides whether
+  // it is narrated below. Checked before the upsert, because after it the row
+  // exists either way and the two cases are indistinguishable.
+  const alreadyKnown = await prisma.dispatch.findUnique({
+    where: { externalId: d.id }, select: { id: true },
+  })
+
   await prisma.dispatch.upsert({
     where:  { externalId: d.id },
     create: { externalId: d.id, ...row },
@@ -155,12 +165,21 @@ export async function handleDispatch(
     )
   }
 
-  // The reconcile poller re-reads the SAME dispatch window every few minutes to
-  // keep assignments fresh. Narrating there would replay "X dispatched to Y"
-  // into the feed on every pass, so it passes narrate:false and the webhook —
-  // which sees each dispatch exactly once, when it happens — stays the only
-  // thing that tells the story.
-  if (!narrate) return true
+  // Narrate a dispatch the FIRST time we see it, and never again.
+  //
+  // The reconcile poller re-reads the same day-wide window every few minutes,
+  // so "have I told this story already" cannot be answered by the caller — it
+  // is answered by whether the row existed a moment ago. That is what makes it
+  // safe for the reconciler to narrate at all, which it must: the
+  // `dispatch.created` webhook is not arriving in production, and until this
+  // changed the Live Feed had never once carried a dispatch (1,813 on record,
+  // zero feed items).
+  //
+  // Two independent guards, because they stop different things. `narrate` is
+  // the caller's own veto — the reconciler's first pass after a restart, which
+  // creates a day of backlog rows and must not replay them as fresh news. This
+  // one stops the steady-state repeat.
+  if (!narrate || alreadyKnown) return true
 
   const dest = d.destinationOrPurpose ? ` to ${d.destinationOrPurpose}` : ''
   feed(

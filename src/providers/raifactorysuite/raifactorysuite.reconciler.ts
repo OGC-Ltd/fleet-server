@@ -101,11 +101,26 @@ class RaiFactorySuiteReconciler {
 
     try {
       const dispatches = await this.client.listDispatches(DISPATCH_WINDOW)
-      // narrate:false — this window is re-read every cycle, so the webhook is
-      // the only thing that tells a dispatch's story. Here we only keep the
-      // driver↔vehicle assignment rows current.
+      // This used to pass narrate:false unconditionally, on the reasoning that
+      // the window is re-read every cycle and the `dispatch.created` webhook is
+      // the one thing that sees each dispatch exactly once. The webhook is not
+      // arriving: measured 2026-08-03, SUKARI had 1,813 dispatches on record
+      // and NOT ONE feed item of alertType DISPATCH, ever. Every dispatch in
+      // the system came through this reconciler, silently, so the Live Feed
+      // never mentioned the single most operationally significant event the
+      // provider reports.
+      //
+      // Narrating here is now safe because publishNotification dedupes on
+      // feedId plus a content fingerprint (see notifications/notification.store)
+      // — the same dispatch re-offered on the next cycle reaches nothing: no
+      // SSE frame, no row, no cache write. That mechanism did not exist when
+      // this was written.
+      //
+      // `primed` still gates the FIRST pass, exactly as the alerts path does:
+      // the window is a day wide, so a restart would otherwise replay a day of
+      // dispatches into the feed as though they had all just happened.
       for (const d of dispatches) {
-        if (await handleDispatch(d, { narrate: false, source: 'reconciler' })) dispatchesSeen++
+        if (await handleDispatch(d, { narrate: this.primed, source: 'reconciler' })) dispatchesSeen++
       }
     } catch (err) {
       failed = true

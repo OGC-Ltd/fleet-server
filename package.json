@@ -41,6 +41,7 @@
     "sync:sukari-gps": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-sukari-wialon.ts",
     "sync:alerts": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-alerts.ts",
     "sync:dispatches": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-dispatches.ts",
+    "sync:destinations": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-destinations.ts",
     "seed:silos": "tsx prisma/seed-silos.ts",
     "backfill:notifications": "tsx prisma/backfill-notifications.ts"
   },

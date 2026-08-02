@@ -41,6 +41,18 @@ export interface NotificationQuery {
   alertTypes?: string[]
   /** Restrict to these severities, e.g. `['critical']`. */
   severities?: string[]
+  /**
+   * Restrict to ONE vehicle (its cuid, the same `vehicleId` every feed item
+   * carries).
+   *
+   * Same argument as `alertTypes`, from the other direction: an operator who
+   * has clicked a unit on the map is asking "what has THIS truck been doing",
+   * and a chronological org feed answers with everything except that, because
+   * one vehicle is 1/224th of Kasulu's traffic. The live SSE stream can be
+   * filtered client-side, but only over the couple of hundred items a browser
+   * happens to be holding — anything older has to come from here.
+   */
+  vehicleId?: string
 }
 
 /** DB row → the same shape the SSE feed and the cache use. */
@@ -71,7 +83,7 @@ function toItem(row: {
  */
 export async function getNotifications(
   orgId: string,
-  { limit = 50, before, alertTypes, severities }: NotificationQuery = {},
+  { limit = 50, before, alertTypes, severities, vehicleId }: NotificationQuery = {},
 ): Promise<NotificationPage> {
   const capped = Math.min(Math.max(limit, 1), 200)
 
@@ -80,7 +92,7 @@ export async function getNotifications(
   // may well be the ones it evicted. Filtered reads go to Postgres, where the
   // whole history is. They are also rare: this is a user selecting a view, not
   // the page every dashboard loads.
-  const filtered = Boolean(alertTypes?.length || severities?.length)
+  const filtered = Boolean(alertTypes?.length || severities?.length || vehicleId)
 
   if (!before && !filtered) {
     const cached = await readCachedNotifications(orgId, capped)
@@ -96,6 +108,7 @@ export async function getNotifications(
     where:   {
       organisationId: orgId,
       ...(before ? { occurredAt: { lt: before } } : {}),
+      ...(vehicleId ? { vehicleId } : {}),
       ...(alertTypes?.length ? { alertType: { in: alertTypes } } : {}),
       ...(severities?.length ? { severity:  { in: severities } } : {}),
     },
