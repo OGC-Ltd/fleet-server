@@ -82,6 +82,18 @@ function buildTrip(
     destinationSpreadM: open.destinationSpreadM,
     departedAt:   open.dispatchedAt,
     arrivedAt:    open.arrivedAt,
+    /**
+     * Kilometres actually DRIVEN since local midnight. Deliberately alongside
+     * `percent`, never instead of it: percent is a position along the round
+     * trip and this is ground covered, and on real data they diverge wildly —
+     * a unit that reached its destination yesterday reads 50% of the round
+     * trip and 0 km today. Both are shown, each labelled for what it is,
+     * because a card saying "27.8 km covered" beside a brief saying "0.2 km
+     * today" is the operator's problem, not a rounding difference.
+     */
+    distanceTodayKm: open.distanceTodayM != null
+      ? Math.round(open.distanceTodayM / 100) / 10
+      : null,
     lastFixAt:    open.lastFixAt,
     dueBackAt:    open.dueBackAt,
     dueBackSource: open.dueBackSource,
