@@ -114,6 +114,18 @@ export interface OpenTrip {
   arrivedAt: string | null
   /** Newest fix at or after the dispatch clock. Null = silent since dispatch. */
   lastFixAt: string | null
+  /**
+   * GROUND COVERED since local midnight — real distance through the vehicle's
+   * own fixes, not a straight line.
+   *
+   * Distinct from the trip's `percent`, which is a POSITION along the round
+   * trip, and the two are routinely far apart: a unit that reached Oyani
+   * yesterday and has not moved since is half way through its round trip and
+   * has driven nothing today. Both numbers are true and neither substitutes
+   * for the other, so both are carried and each is labelled for what it is.
+   * Null when there is no fix to measure from.
+   */
+  distanceTodayM: number | null
 }
 
 export async function findOpenTripsByVehicle(organisationId: string): Promise<Map<string, OpenTrip>> {
@@ -174,6 +186,12 @@ export async function findOpenTripsByVehicle(organisationId: string): Promise<Ma
   const placeByName = new Map(places.map(p => [p.name, p]))
 
   const durations = await destinationDurations(organisationId)
+
+  // Distance driven TODAY, for the same vehicles, in one query. Reuses
+  // coveredSince — the same haversine, the same MIN_SPACING_M jitter floor —
+  // so this figure and the per-vehicle brief's cannot drift apart.
+  const dayStart = fleetDayStart()
+  const today = await coveredSince(runs.map(d => ({ vehicleId: d.vehicleId!, since: dayStart })))
 
   // Arrival + last fix per open dispatch, in ONE round trip.
   //
@@ -279,6 +297,12 @@ export async function findOpenTripsByVehicle(organisationId: string): Promise<Ma
       destinationSamples: place?.samples ?? 0,
       arrivedAt: f?.arrivedAt?.toISOString() ?? null,
       lastFixAt: f?.lastFixAt?.toISOString() ?? null,
+      // Null, not 0, with fewer than two fixes: "we have heard nothing today"
+      // is not "it has not moved today".
+      distanceTodayM: (() => {
+        const t = today.get(vehicleId)
+        return t && t.fixCount > 1 ? t.coveredM : null
+      })(),
     })
   }
   return out

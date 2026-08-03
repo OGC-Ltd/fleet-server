@@ -172,6 +172,10 @@ async function collectFacts(orgId: string, vehicleId: string): Promise<VehicleFa
 
   const row  = Array.isArray(snapshot) ? snapshot.find(v => v.vehicleId === vehicleId) : undefined
   const trip = trips.byVehicle.get(vehicleId) ?? null
+  // The trip AS THE CARD RENDERS IT — the snapshot's decorated copy, which has
+  // already decided whether this dispatch is a current run and carries the
+  // figures the operator is looking at.
+  const tripRow = (row as { trip?: { leg?: string; distanceTodayKm?: number | null } | null } | undefined)?.trip ?? null
 
   // Whichever came first: the wheels turning, or the paperwork. A unit can be
   // dispatched hours before it leaves, and it can also be working since dawn
@@ -202,11 +206,22 @@ async function collectFacts(orgId: string, vehicleId: string): Promise<VehicleFa
       ? clockFmt.format(startedAt) + (startedAt < dayStart ? ' yesterday' : '')
       : null,
     startedSource,
-    // Null, not 0, when nothing was heard: "we have no fixes today" and "it has
-    // not moved" are different facts and must not read the same.
-    distanceTodayKm: movement.fixes > 1 && movement.coveredM != null
-      ? Math.round(movement.coveredM / 100) / 10
-      : null,
+    // The SAME number the Active Trip card shows, taken from the same object
+    // whenever the vehicle is on a trip.
+    //
+    // Both sides compute ground covered since local midnight with the same
+    // haversine and the same jitter floor, so they should agree anyway — but
+    // "should agree" is how a card reading 27.8 km ends up beside a brief
+    // reading 0.2 km. Reading the trip's own field makes them the same value,
+    // not two values that ought to match. Vehicles with no open trip fall back
+    // to this brief's own measurement, which is the only source for them.
+    //
+    // Null, not 0, when nothing was heard: "we have no fixes today" and "it
+    // has not moved" are different facts and must not read the same.
+    distanceTodayKm: tripRow?.distanceTodayKm
+      ?? (movement.fixes > 1 && movement.coveredM != null
+            ? Math.round(movement.coveredM / 100) / 10
+            : null),
     refuelledLitres: fills.length ? Math.round(refuelledMl / 100) / 10 : null,
     refuelCount:     fills.length,
     refuelLocations: [...new Set(fills.map(f => f.location).filter(Boolean) as string[])],
@@ -215,7 +230,7 @@ async function collectFacts(orgId: string, vehicleId: string): Promise<VehicleFa
     // geometry decision (has it left, has it arrived, is it coming back) and
     // that is made once, in getFleetSnapshot, against the vehicle's position.
     // Absent when the snapshot has decided this dispatch is not a current run.
-    leg: (row as { trip?: { leg?: string } | null } | undefined)?.trip?.leg ?? null,
+    leg: tripRow?.leg ?? null,
     dueBackAt:     trip?.dueBackAt ?? null,
     dueBackLocal:  trip?.dueBackAt ? clockFmt.format(new Date(trip.dueBackAt)) : null,
     dueBackSource: trip?.dueBackSource ?? null,
