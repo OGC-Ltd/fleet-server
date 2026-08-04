@@ -68,7 +68,28 @@ export interface TripBuildResult {
   skipped: number
 }
 
+export interface TripRecomputeResult {
+  /** Trips whose stored avgSpeedKmh disagreed with the fixes and was rewritten. */
+  corrected:   number
+  /** Trips already holding the right value. */
+  unchanged:   number
+  /** Trips whose fixes no longer support a measurement — left untouched. */
+  unmeasurable: number
+}
+
 interface Fix { capturedAt: Date; lat: number; lng: number; speedKmh: number | null }
+
+/**
+ * Mean speed WHILE MOVING, from a run of fixes — null when nothing in the run
+ * was moving, which is not the same as zero and must not be stored as one.
+ */
+export function movingAvgSpeedKmh(fixes: readonly Fix[]): number | null {
+  const moving = fixes
+    .map(f => f.speedKmh)
+    .filter((s): s is number => s != null && s >= MOVING_THRESHOLD_KMH)
+  if (moving.length === 0) return null
+  return Math.round((moving.reduce((a, b) => a + b, 0) / moving.length) * 10) / 10
+}
 
 /** Distance actually driven across a run of fixes, in km. */
 export function measureKm(fixes: readonly Fix[]): number {
@@ -183,10 +204,7 @@ export async function buildTripsForOrg(
      * nineteen hours loading then reads as interrupted, which is the whole
      * point of the metric.
      */
-    const moving          = speeds.filter(s => s >= MOVING_THRESHOLD_KMH)
-    const avgSpeedKmh     = moving.length
-      ? Math.round((moving.reduce((a, b) => a + b, 0) / moving.length) * 10) / 10
-      : null
+    const avgSpeedKmh     = movingAvgSpeedKmh(fixes)
 
     out.built++
     if (!opts.apply) continue
@@ -222,5 +240,63 @@ export async function buildTripsForOrg(
   }
 
   logger.info({ orgId, ...out, dispatches: dispatches.length }, 'Trip build complete')
+  return out
+}
+
+/**
+ * Re-measure `avgSpeedKmh` on trips ALREADY persisted.
+ *
+ * `buildTripsForOrg` only ever inserts — it is idempotent through
+ * `Trip.dispatchId`, so a re-run skips every row it already wrote. That makes
+ * the average-speed fix above invisible on its own: the rows built before it
+ * keep the elapsed-time average, and the analytics timely/interrupted split
+ * keeps reporting the tautology those rows encode. This pass is what actually
+ * retires it.
+ *
+ * Narrow on purpose. Only `avgSpeedKmh` is rewritten — it is the single field
+ * whose definition changed. Distance, duration and max speed are measured the
+ * same way they always were, and re-deriving them here would silently fold
+ * telemetry retention (fixes aged out since the trip was built) into fields
+ * nobody asked to revisit. For the same reason a trip whose window no longer
+ * holds a usable fix is LEFT ALONE and counted, not nulled: losing the source
+ * data is not evidence the stored measurement was wrong.
+ */
+export async function recomputeTripSpeeds(
+  orgId: string,
+  opts: { from: Date; to: Date; apply: boolean; limit?: number },
+): Promise<TripRecomputeResult> {
+  const out: TripRecomputeResult = { corrected: 0, unchanged: 0, unmeasurable: 0 }
+
+  const trips = await prisma.trip.findMany({
+    where:   { vehicle: { organisationId: orgId }, beganAt: { gte: opts.from, lte: opts.to } },
+    select:  { id: true, vehicleId: true, beganAt: true, endedAt: true, avgSpeedKmh: true },
+    orderBy: { beganAt: 'asc' },
+    ...(opts.limit ? { take: opts.limit } : {}),
+  })
+
+  for (const t of trips) {
+    if (t.endedAt == null || t.endedAt <= t.beganAt) { out.unmeasurable++; continue }
+
+    const rows = await prisma.vehicleTelemetry.findMany({
+      where:   { vehicleId: t.vehicleId, capturedAt: { gte: t.beganAt, lte: t.endedAt } },
+      select:  { capturedAt: true, lat: true, lng: true, speedKmh: true },
+      orderBy: { capturedAt: 'asc' },
+    })
+    const fixes: Fix[] = rows.flatMap(r =>
+      r.lat != null && r.lng != null
+        ? [{ capturedAt: r.capturedAt, lat: r.lat, lng: r.lng, speedKmh: r.speedKmh }]
+        : [])
+    if (fixes.length < 2) { out.unmeasurable++; continue }
+
+    const avgSpeedKmh = movingAvgSpeedKmh(fixes)
+    if (avgSpeedKmh == null) { out.unmeasurable++; continue }
+    if (t.avgSpeedKmh != null && Math.abs(t.avgSpeedKmh - avgSpeedKmh) < 0.05) { out.unchanged++; continue }
+
+    out.corrected++
+    if (!opts.apply) continue
+    await prisma.trip.update({ where: { id: t.id }, data: { avgSpeedKmh } })
+  }
+
+  logger.info({ orgId, ...out, trips: trips.length }, 'Trip speed recompute complete')
   return out
 }
