@@ -248,17 +248,23 @@ async function collectFacts(orgId: string) {
  * "it's too much".
  *
  * So the brief is now three sentences and a hard list of what may appear in
- * them: fleet health with the active count, this morning's gate movement split
- * by destination, and today's fuel exceptions with the number that actually
- * needs chasing. Everything else in the payload exists ONLY to inform the risk
- * verdict. The model chooses the wording; it never chooses the content.
+ * them: fleet health, this morning's gate movement split by destination, and
+ * today's fuel exceptions with the number that actually needs chasing.
+ * Everything else in the payload exists ONLY to inform the risk verdict. The
+ * model chooses the wording; it never chooses the content.
+ *
+ * The unit counts are NOT among them. FleetAIInsightCard prints "115/510
+ * active:" immediately before this text, so a sentence that also says "115 out
+ * of 510 units active" stutters on the card. The ratio still sets the health
+ * verdict — it is simply the card's job to print it, not the model's.
  */
 export const SYSTEM_PROMPT =
   'You are the duty operations analyst for a Kenyan haulage fleet, briefing the fleet manager mid-shift. ' +
   'You receive a JSON object of MEASURED facts. Write EXACTLY THREE short sentences, at most 60 words in total, ' +
   'and nothing else: ' +
-  '(1) Fleet health and your risk verdict, WITH the active and total unit counts from `fleetNow.enginesOn` and ' +
-  '`fleetNow.vehicles` — e.g. "Fleet health is good but risk is high, as we have 115 out of 510 units active." ' +
+  '(1) Fleet health and your risk verdict — e.g. "Fleet health is good, though risk is high." Do NOT state the ' +
+  'active or total unit counts: the card prints "115/510 active:" immediately before your text, so repeating them ' +
+  'reads as a stutter. Let that ratio inform the verdict without naming it. ' +
   '(2) Today\'s gate movement broken down by destination, from `today.leftGate`, `today.sinceLabel` (use it ' +
   'verbatim) and `today.byDestination` — e.g. "We have had 70 units leave the gate this morning, with 20 going to ' +
   'WEIGHBRIDGE X and 50 going to WEIGHBRIDGE Y." ' +
