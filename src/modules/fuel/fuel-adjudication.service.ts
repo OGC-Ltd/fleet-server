@@ -149,11 +149,13 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     const plate = t.vehicle.registrationPlate
     const where = t.initialLocation ? ` at ${t.initialLocation}` : ''
     const tank  = t.finalFuelLevelMl != null ? `. Tank now ${L(t.finalFuelLevelMl)}.` : '.'
+    // The distinction between a confirmed loss and an unchecked claim is
+    // carried by "lost" vs "reported lost" and by the severity, not by a
+    // trailing explanation. The place string alone runs to a full line on this
+    // fleet, and a caveat nobody finishes reading is not a caveat.
     const text = verdict.verdict === 'LOSS'
       ? `FUEL DROP: ${plate} — ${L(t.stolenMl)} lost${where}${tank}`
-      // Say plainly that we could not check it. The alternative is a feed that
-      // sounds equally certain about a measurement and a claim.
-      : `FUEL DROP: ${plate} — ${L(t.stolenMl)} reported lost${where}, unconfirmed (no tank readings to check).`
+      : `FUEL DROP: ${plate} — ${L(t.stolenMl)} reported lost${where}${tank}`
 
     const { published } = await publishNotificationDurable({
       orgId:     t.vehicle.organisationId,
