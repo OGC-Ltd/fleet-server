@@ -130,6 +130,14 @@ const schema = z.object({
   // afford it; 0 is the same as disabling the pass.
   FUEL_SETTLE_BATCH: z.coerce.number().int().nonnegative().optional().default(20),
 
+  // Adjudicate the provider's drain claims against our own tank readings
+  // before they count as a loss or reach the feed. Measured over the 250 most
+  // recent drains per org, 40% (KASULU) and 50% (SUKARI) of decidable loss
+  // volume came back with no filling to explain it — fuel that moved off the
+  // probe on a slope and returned. Off means the ledger records Wialon's claim
+  // verbatim, as it did before; nothing is deleted either way.
+  FUEL_ADJUDICATION_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
   // Completed dispatches → measured Trip rows (lib/queues/trips.ts). The trips
   // table had no writer once the simulator was retired, so every surface
   // reading it — the delivery half of Analytics, the Drivers roster, the org

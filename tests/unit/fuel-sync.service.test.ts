@@ -234,7 +234,9 @@ describe('feed publication is decided by AGE, not by ledger novelty', () => {
 
     const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
 
-    expect(out).toMatchObject({ published: 0, deduped: 2 })
+    // One, not two: the drain is no longer announced here at all — it waits
+    // for adjudication. See fuel-adjudication.service.
+    expect(out).toMatchObject({ published: 0, deduped: 1 })
   })
 
   it('stays silent about events older than the cutoff', async () => {
@@ -262,9 +264,9 @@ describe('feed publication is decided by AGE, not by ledger novelty', () => {
 
     const ids = published().map(c => c[0]['id'])
     // Keyed on the LEDGER ROW, not the event's clock — see the drift case below.
-    expect(ids[0]).toBe('fuel-fill-veh_1-ff_new')
-    expect(new Set(ids).size).toBe(2)          // one filling id, one drain id
-    expect(ids[0]).toBe(ids[2])                // identical across runs
+    // Only the filling reaches the feed from here; the drain is adjudicated
+    // first and announced by that pass.
+    expect(ids).toEqual(['fuel-fill-veh_1-ff_new', 'fuel-fill-veh_1-ff_new'])
   })
 
   it('keeps one feed item when the provider moves the event clock', async () => {
@@ -283,9 +285,10 @@ describe('feed publication is decided by AGE, not by ledger novelty', () => {
 
     await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
 
-    expect(published()).toHaveLength(1)
-    expect(published()[0]![0]['id']).toBe('fuel-drain-veh_1-ft_1')
+    // The matcher still collapses the re-clamped report onto the one row —
+    // which is the point of this case. Nothing is announced from here now.
     expect(prismaMock.fuelTheft.create).not.toHaveBeenCalled()
+    expect(published()).toHaveLength(0)
   })
 })
 
@@ -386,20 +389,18 @@ describe('one physical event, many reports', () => {
 })
 
 describe('what the feed item says', () => {
-  it('renders a drain as critical, with the volume and the place', async () => {
+  it('does NOT announce a drain — the claim is adjudicated first', async () => {
+    // Measured over the 250 most recent drains per org, 40% (KASULU) and 50%
+    // (SUKARI) of decidable loss volume came back with no filling to explain
+    // it. Announcing on the provider's claim is what put those in front of the
+    // operator. The row is still written; only the feed item waits.
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [drain(RECENT)] })
 
-    await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
 
-    const item = published()[0]![0]
-    expect(item['severity']).toBe('critical')
-    expect(item['alertType']).toBe('fuelInconsistency')
-    expect(item['text']).toContain('FUEL DROP: CTR 03')
-    expect(item['text']).toContain('80.8 L lost')
-    expect(item['text']).toContain('Nyalulanga')
-    expect(item['text']).toContain('Tank now 679.1 L')
-    // The event's own time, never "now".
-    expect(item['at']).toEqual(RECENT)
+    expect(out.thefts).toBe(1)
+    expect(prismaMock.fuelTheft.create).toHaveBeenCalled()
+    expect(publishNotificationDurable).not.toHaveBeenCalled()
   })
 
   it('renders a filling as info, without false precision on a whole number', async () => {
@@ -414,7 +415,7 @@ describe('what the feed item says', () => {
   })
 
   it('makes no claim of escalation', async () => {
-    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [drain(RECENT)] })
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [filling(RECENT)], thefts: [] })
 
     await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
 
