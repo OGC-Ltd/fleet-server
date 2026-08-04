@@ -80,18 +80,20 @@ describe('adjudicatePendingDrains', () => {
     expect(item['at']).toEqual(BEGAN)
   })
 
-  it('says so plainly when it could not check the claim', async () => {
+  it('does not sound as certain about a claim it could not check', async () => {
     // The provider saw something and our telemetry cannot speak to it. The
-    // feed must not sound as certain as it does for a confirmed loss.
+    // distinction is carried by the wording and the severity — not by a
+    // trailing explanation, which on this fleet followed a place string long
+    // enough that nobody reached the end of it.
     setLevels([200_000, 160_000])
 
     const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
 
     expect(out).toMatchObject({ unverified: 1, loss: 0 })
     const item = published()[0]![0]
-    expect(item['severity']).toBe('warning')
+    expect(item['severity']).toBe('warning')          // a confirmed loss is 'critical'
     expect(item['text']).toContain('reported lost')
-    expect(item['text']).toContain('unconfirmed')
+    expect(item['text']).not.toMatch(/unconfirmed|no tank readings/)
   })
 
   it('makes no claim of escalation', async () => {
