@@ -275,6 +275,9 @@ export const SYSTEM_PROMPT =
   'spelled in the JSON. ' +
   'WRITE PROSE, NOT A FIELD DUMP. Never print a JSON key — not "leftGate", "needInvestigating", "dispatchesRaised" ' +
   'nor any other — and never use the "label: value" form. Begin with a capital letter and write complete sentences. ' +
+  'Agree singular and plural with the actual figure — "There is 1 fuel issue raised", never "There are 1 fuel ' +
+  'issues" — and write "none of which" rather than "0 of which". Write the risk level in lower case inside the ' +
+  'sentence ("risk is medium"), since it is prose and not a label. ' +
   'DO NOT NARRATE ZEROES. The fleet day begins at local midnight, so early in it there is genuinely nothing to ' +
   'report. If `today.quiet` is true or `today.leftGate` is 0, sentence 2 becomes exactly "Nothing has been ' +
   'dispatched yet today." If `today.fuelIssues.raised` is 0, sentence 3 becomes exactly "No fuel issues have been ' +
