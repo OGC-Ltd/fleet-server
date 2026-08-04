@@ -25,6 +25,11 @@ export function makeOrg(overrides: Partial<Organisation> = {}): Organisation {
     // anything that reads it must cope with that.
     hubLat: null,
     hubLng: null,
+    // Likewise the gate: supplied by the operator per site, so absent until
+    // someone provides it — which is the case yard-departure falls back for.
+    gateLat: null,
+    gateLng: null,
+    gateRadiusM: null,
     createdAt: now(),
     updatedAt: now(),
     ...overrides,
