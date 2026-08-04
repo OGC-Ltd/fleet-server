@@ -474,6 +474,105 @@ export const SYSTEM_PROMPT =
   'been confirmed as losses, nor off `connectionUnknown`, which means the poller has no answer rather than that ' +
   'the units are down. Reply with STRICT JSON: {"msg": string, "risk": "Low"|"Medium"|"High"}.'
 
+/**
+ * Every figure the facts justify, as written text.
+ *
+ * Taken from the SERIALISED facts rather than from a hand-listed set of fields,
+ * so a number is legitimate if it appears anywhere the model could have read
+ * it: a count, a volume, a clock reading in the feed, or a digit inside a name
+ * it is quoting back ("FARM#212", "KTCB 295U", "MUFINDI - EX 16"). Thousands
+ * separators are stripped so 18,640 and 18640 are the same figure.
+ */
+function citableFigures(facts: unknown): Set<string> {
+  const out = new Set<string>()
+  for (const m of JSON.stringify(facts).matchAll(/\d+(?:\.\d+)?/g)) out.add(m[0])
+  return out
+}
+
+/**
+ * Did the model invent a number?
+ *
+ * The prompt tells it to quote figures exactly and never to derive one. A
+ * prompt is a request, not a guarantee — and this brief's whole value is that a
+ * fleet manager can act on it, so a plausible-looking figure nobody measured is
+ * the single worst thing it could produce. Measured during rollout, the model
+ * summed `inTransit + idling + parked` into a total that appears nowhere in the
+ * data, which is exactly the failure this catches.
+ *
+ * Deliberately CHEAP and syntactic: every digit-run in the reply must appear in
+ * the facts. That admits a wrong number pulled from the wrong field — no string
+ * check can catch that — but it makes invention out of whole cloth impossible,
+ * and it cannot be argued with the way a "be accurate" instruction can.
+ *
+ * Returns the offending figures, so the rejection is diagnosable in the log
+ * rather than silent.
+ */
+export function fabricatedFigures(msg: string, facts: unknown): string[] {
+  const citable = citableFigures(facts)
+  const used    = [...msg.replace(/,(?=\d{3}\b)/g, '').matchAll(/\d+(?:\.\d+)?/g)].map(m => m[0])
+  return [...new Set(used.filter(n => !citable.has(n)))]
+}
+
+/**
+ * The same brief, written from the facts alone.
+ *
+ * Not a degraded mode: on a missing key, a timeout, a malformed reply or a
+ * fabricated figure, the operator still gets the sentences. The model buys
+ * phrasing, not information — so anything it would have said that this cannot
+ * was never measured in the first place.
+ *
+ * Sentences are emitted only for figures that exist, so an empty shift yields a
+ * shorter brief rather than a row of zeroes.
+ */
+export function buildFleetFallback(facts: {
+  fleetNow: ReturnType<typeof collectLiveState>
+  working:  Awaited<ReturnType<typeof collectWorkingAreas>>
+  today:    Awaited<ReturnType<typeof collectToday>>
+}): string {
+  const { fleetNow: f, working, today } = facts
+  const parts: string[] = []
+
+  const running: string[] = []
+  if (f.connectionKnown && f.online != null) running.push(`${f.online} online`)
+  if (f.inTransit) running.push(`${f.inTransit} in transit`)
+  if (f.idling)    running.push(`${f.idling} idling`)
+  if (f.parked)    running.push(`${f.parked} parked`)
+  parts.push(running.length
+    ? `The fleet is running with ${running.join(', ')}.`
+    : 'The fleet is quiet.')
+
+  if (today.leftGate > 0) {
+    const split = today.byDestination
+      .filter(d => d.leftGate > 0)
+      .map(d => `${d.leftGate} to ${d.destination}`)
+    parts.push(split.length
+      ? `${today.leftGate} units have left the gate ${today.sinceLabel}, with ${split.join(' and ')}.`
+      : `${today.leftGate} units have left the gate ${today.sinceLabel}.`)
+  } else {
+    parts.push('Nothing has been dispatched yet today.')
+  }
+
+  if (working.byArea.length) {
+    const where = working.byArea.slice(0, 3).map(a => `${a.units} in ${a.area}`)
+    parts.push(`On the ground, ${where.join(' and ')}.`)
+  }
+
+  const exceptions: string[] = []
+  if (today.fuelIssues.raised > 0) {
+    exceptions.push(
+      `${today.fuelIssues.raised} fuel ${today.fuelIssues.raised === 1 ? 'issue' : 'issues'} raised`
+      + (today.fuelIssues.needInvestigating > 0
+          ? `, ${today.fuelIssues.needInvestigating} of which need investigating`
+          : ', none of which need investigating'),
+    )
+  }
+  if (today.feed.overspeedingAlerts > 0) exceptions.push(`${today.feed.overspeedingAlerts} overspeeding alerts`)
+  if (f.insideKeepOutZone > 0)           exceptions.push(`${f.insideKeepOutZone} inside a keep-out zone`)
+  parts.push(exceptions.length ? `There are ${exceptions.join(', and ')}.` : 'No exceptions have been raised today.')
+
+  return parts.join(' ')
+}
+
 async function generateFor(orgId: string): Promise<void> {
   if (generating.has(orgId)) return
   generating.add(orgId)
@@ -497,10 +596,22 @@ async function generateFor(orgId: string): Promise<void> {
     const parsed = JSON.parse(body.choices?.[0]?.message?.content ?? '{}') as { msg?: string; risk?: string }
     if (!parsed.msg) throw new Error('empty insight from model')
 
+    // Accepted only if every figure in it was measured. There is already a
+    // complete brief written from the facts, so the bar for taking the model's
+    // wording is that it invented nothing.
+    const invented = fabricatedFigures(parsed.msg, facts)
+    const msg = invented.length ? buildFleetFallback(facts) : parsed.msg
+    if (invented.length) {
+      logger.warn(
+        { orgId, invented, rejected: parsed.msg },
+        'AI insight: model quoted figures that are not in the data — the facts-only brief stands',
+      )
+    }
+
     const risk = (['Low', 'Medium', 'High'] as const).find(r => r === parsed.risk) ?? 'Medium'
     insights.set(orgId, {
       configured: true,
-      insight: { msg: parsed.msg, risk, activeCount, totalCount, generatedAt: new Date().toISOString() },
+      insight: { msg, risk, activeCount, totalCount, generatedAt: new Date().toISOString() },
     })
     // The TEXT, not just the level. The card is the only place this is
     // otherwise visible, and that needs a browser and a login — so a brief that
@@ -508,9 +619,27 @@ async function generateFor(orgId: string): Promise<void> {
     // from the box at all. One line an hour per organisation.
     // `brief`, NOT `msg` — pino owns `msg` for the log message itself, so a
     // field of that name is silently overwritten and the text never appears.
-    logger.info({ orgId, risk, brief: parsed.msg, live: facts.fleetNow }, 'AI insight refreshed')
+    logger.info(
+      { orgId, risk, brief: msg, source: invented.length ? 'facts' : 'model', live: facts.fleetNow },
+      'AI insight refreshed',
+    )
   } catch (err) {
-    logger.warn({ err, orgId }, 'AI insight generation failed — previous brief (or local fallback) stays')
+    // The model is unreachable or unusable — but the facts are already
+    // measured, so the operator gets the brief anyway rather than falling back
+    // to the client's local heuristic.
+    try {
+      const { facts, activeCount, totalCount } = await collectFacts(orgId)
+      insights.set(orgId, {
+        configured: true,
+        insight: {
+          msg: buildFleetFallback(facts), risk: 'Medium',
+          activeCount, totalCount, generatedAt: new Date().toISOString(),
+        },
+      })
+      logger.warn({ err, orgId }, 'AI insight: model failed — the facts-only brief stands')
+    } catch (inner) {
+      logger.warn({ err: inner, orgId }, 'AI insight generation failed — previous brief stays')
+    }
   } finally {
     generating.delete(orgId)
   }
