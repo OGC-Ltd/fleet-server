@@ -30,6 +30,10 @@ import { getDeliveriesAnalytics } from '../analytics/deliveries.cache.js'
 // exactly the live signals this brief is built on.
 import { getFleetSnapshot } from '../telemetry/telemetry.service.js'
 import { resolveEstatePlaces } from '../../lib/zone-presence.js'
+// The SHARED staleness threshold, not a second copy of it. Beyond this age a
+// fix cannot support a claim about what the vehicle is doing — the same rule
+// the movement tracker applies before it will call a unit moving.
+import { STALE_FIX_MS } from '../../lib/movement-state.js'
 import { getMaintenanceHistoryCached, getOrgVehicleMaintenance, DEFAULT_HISTORY_WINDOW_DAYS } from '../telemetry/maintenance.cache.js'
 
 export interface AiInsight {
@@ -209,6 +213,8 @@ export async function collectToday(orgId: string) {
 interface SnapRow {
   vehicleId?: string
   vehicleType?: string | null
+  /** ISO time of this vehicle's newest ping. Null when it has never reported. */
+  capturedAt?: string | null
   lat?: number | null
   lng?: number | null
   speedKmh?: number | null
@@ -235,7 +241,7 @@ interface SnapRow {
  * current answer, which is why unknown is counted separately rather than being
  * folded into offline and reported as a fleet-wide outage.
  */
-function collectLiveState(snapshot: SnapRow[]) {
+export function collectLiveState(snapshot: SnapRow[]) {
   const state = (s: string) => snapshot.filter(v => v.movement?.state === s).length
   const legs = new Map<string, number>()
   for (const v of snapshot) {
@@ -258,13 +264,46 @@ function collectLiveState(snapshot: SnapRow[]) {
    */
   const connectionKnown = online + offline > 0
 
+  /**
+   * "Active" has to mean RUNNING NOW, and the fleet it is measured against has
+   * to be the fleet that reports.
+   *
+   * The snapshot takes each vehicle's newest ping with no recency bound, so
+   * `engine_on` is whatever its last-ever frame said. Measured on SUKARI
+   * (2026-08-05) that made the headline "54/597 active" out of:
+   *
+   *   597 vehicles in the registry, of which only 280 have EVER sent a ping —
+   *        317 carry no telemetry at all and could never be in the numerator.
+   *    54 whose newest ping says engine on, of which just 20 were within the
+   *        hour. Nineteen last reported over a WEEK ago; the oldest had been
+   *        stuck "active" for 566 days on a frame from early 2025.
+   *
+   * So the count is bounded by the same staleness rule the movement tracker
+   * uses — a vehicle that has stopped reporting is not running, we have simply
+   * not heard from it — and the denominator is the reporting fleet. On that
+   * data the card goes from 54/597 to 20/280, and both figures now mean
+   * something an operator can act on.
+   *
+   * `vehicles` is kept for context and for the risk verdict, but it is NOT the
+   * denominator and the units missing from it are not "down".
+   */
+  const fresh = (v: SnapRow) =>
+    v.capturedAt != null && Date.now() - Date.parse(v.capturedAt) <= STALE_FIX_MS
+
   return {
     vehicles:      snapshot.length,
+    /** Vehicles that have ever sent telemetry — the fleet the ratio is over. */
+    reporting:     snapshot.filter(v => v.capturedAt != null).length,
+    /** Never reported at all: in the registry, invisible to telemetry. */
+    noTelemetryEver: snapshot.filter(v => v.capturedAt == null).length,
     connectionKnown,
     online:        connectionKnown ? online  : null,
     offline:       connectionKnown ? offline : null,
     connectionUnknown: snapshot.filter(v => v.connectionOnline == null).length,
-    enginesOn:     snapshot.filter(v => v.engineOn).length,
+    /** Engine on AND heard from within the hour. */
+    enginesOn:     snapshot.filter(v => v.engineOn && fresh(v)).length,
+    /** Engine flag still true on a ping too old to support it. */
+    engineOnButStale: snapshot.filter(v => v.engineOn && !fresh(v)).length,
     inTransit:     state('moving'),
     idling:        state('idling'),
     parked:        state('resting'),
@@ -331,8 +370,10 @@ async function collectFacts(orgId: string) {
   const working = await collectWorkingAreas(orgId, snapshot)
 
   const fleetNow    = collectLiveState(snapshot)
+  // The card's "N/M active:" prefix. Running now, over the fleet that reports —
+  // see collectLiveState for why neither is the registry figure.
   const activeCount = fleetNow.enginesOn
-  const totalCount  = fleetNow.vehicles
+  const totalCount  = fleetNow.reporting
   const roster      = drivers.drivers
   const weekAgo     = Date.now() - 7 * 86_400_000
   const hist30      = history.slice(-30)
@@ -426,6 +467,9 @@ export const SYSTEM_PROMPT =
   'If `fleetNow.connectionKnown` is false, `online` and `offline` are null because the poller has no current ' +
   'answer — SAY NOTHING about connectivity at all, describe the fleet from the movement counts alone, and never ' +
   'write "0 online", which would assert a fleet-wide blackout that is not in evidence. ' +
+  '`fleetNow.reporting` is the fleet that sends telemetry and `fleetNow.vehicles` is the whole registry; the ' +
+  'difference (`noTelemetryEver`) is units that have NEVER reported, which is a provisioning gap, NOT units that ' +
+  'are down or offline. Never describe them as either, and never raise the risk level because of them. ' +
   '(2) Today\'s gate movement broken down by destination, from `today.leftGate`, `today.sinceLabel` (use it ' +
   'verbatim) and `today.byDestination` — e.g. "We have had 70 units leave the gate this morning, with 20 going to ' +
   'WEIGHBRIDGE X and 50 going to WEIGHBRIDGE Y." ' +
