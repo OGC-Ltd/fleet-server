@@ -12,17 +12,25 @@
  *
  * Idempotent through Trip.dispatchId, so re-running any window is safe.
  *
+ * `--recompute` switches to re-measuring `avgSpeedKmh` on trips that ALREADY
+ * exist, which a plain re-run can never do (it skips every row it has written).
+ * Needed once, after the average-speed definition changed from distance-over-
+ * elapsed-time to the mean while moving — see lib/trip-builder.
+ *
  * Run: npm run build:trips                       (dry run, all orgs, 90 days)
  *      npm run build:trips -- --apply
  *      npm run build:trips -- --org SUKARI --days 30 --apply
+ *      npm run build:trips -- --recompute                (dry run)
+ *      npm run build:trips -- --recompute --apply
  */
 
 import 'dotenv/config'
 import { prisma } from '../src/lib/prisma.js'
-import { buildTripsForOrg } from '../src/lib/trip-builder.js'
+import { buildTripsForOrg, recomputeTripSpeeds } from '../src/lib/trip-builder.js'
 
-const argv  = process.argv.slice(2)
-const APPLY = argv.includes('--apply')
+const argv      = process.argv.slice(2)
+const APPLY     = argv.includes('--apply')
+const RECOMPUTE = argv.includes('--recompute')
 const flag  = (name: string): string | null => {
   const i = argv.indexOf(`--${name}`)
   return i >= 0 && argv[i + 1] ? argv[i + 1]! : null
@@ -37,10 +45,39 @@ async function main() {
   const to   = new Date()
   const from = new Date(to.getTime() - DAYS * 86_400_000)
 
-  console.log(`\n🚚  completed dispatches → trips  ${APPLY ? '(APPLYING)' : '(dry run)'}`)
+  const headline = RECOMPUTE ? '⏱  re-measuring avgSpeedKmh on existing trips' : '🚚  completed dispatches → trips'
+  console.log(`\n${headline}  ${APPLY ? '(APPLYING)' : '(dry run)'}`)
   console.log(`    window: ${from.toISOString().slice(0, 10)} → ${to.toISOString().slice(0, 10)}  (${DAYS}d)\n`)
 
   const orgs = await prisma.organisation.findMany({ select: { id: true, code: true, name: true } })
+
+  if (RECOMPUTE) {
+    let grandCorrected = 0, grandUnmeasurable = 0
+    for (const org of orgs) {
+      if (ONLY_ORG && org.code !== ONLY_ORG) continue
+
+      const out = await recomputeTripSpeeds(org.id, { from, to, apply: APPLY, limit: LIMIT })
+      if (out.corrected + out.unchanged + out.unmeasurable === 0) continue
+
+      console.log(`  ── ${org.code} (${org.name})`)
+      console.log(`     ${out.corrected} trip(s) ${APPLY ? 'corrected' : 'to correct'}`)
+      console.log(`     ${out.unchanged} already correct`)
+      // Fixes aged out of retention since the trip was built. The stored value
+      // is kept — losing the source data is not evidence it was wrong.
+      if (out.unmeasurable > 0) {
+        console.log(`     ${out.unmeasurable} left alone — no usable fixes left in the trip window`)
+      }
+      console.log()
+
+      grandCorrected    += out.corrected
+      grandUnmeasurable += out.unmeasurable
+    }
+    console.log(`  ── total: ${grandCorrected} trip(s) ${APPLY ? 'corrected' : 'pending'}${grandUnmeasurable ? `, ${grandUnmeasurable} unmeasurable` : ''}`)
+    if (!APPLY) console.log('\n  Dry run — nothing written. Re-run with:  npm run build:trips -- --recompute --apply')
+    console.log()
+    return
+  }
+
   let grandBuilt = 0, grandSkipped = 0
 
   for (const org of orgs) {
