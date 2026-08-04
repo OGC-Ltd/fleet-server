@@ -452,7 +452,11 @@ export const SYSTEM_PROMPT =
   'Agree singular and plural with the actual figure — "There is 1 fuel issue raised", never "There are 1 fuel ' +
   'issues" — and write "none of which" rather than "0 of which". Write the risk level in lower case inside the ' +
   'sentence ("risk is medium"), since it is prose and not a label. ' +
-  'DO NOT NARRATE ZEROES. The fleet day begins at local midnight, so early in it there is genuinely nothing to ' +
+  'DO NOT NARRATE ZEROES. NEVER write the digit 0 in front of a noun — not "0 in transit", not "0 idling", not ' +
+  '"0 overspeeding alerts", not "0 units". If a count is zero, either leave it out entirely (preferred) or fold ' +
+  'the absence into words as part of a larger clause: "158 parked and nothing moving", "no overspeeding alerts". ' +
+  'A brief that omits an empty figure is CORRECT and shorter; one that lists zeroes is the failure. ' +
+  'The fleet day begins at local midnight, so early in it there is genuinely nothing to ' +
   'report, and a brief is allowed to be SHORT. If `today.quiet` is true or `today.leftGate` is 0, the gate sentence ' +
   'becomes exactly "Nothing has been dispatched yet today." If `today.fuelIssues.raised` is 0 and there are no ' +
   'overspeeding alerts or keep-out breaches, the exceptions sentence becomes exactly "No exceptions have been ' +
