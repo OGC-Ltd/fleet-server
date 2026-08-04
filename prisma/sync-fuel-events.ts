@@ -30,13 +30,19 @@
  * took roughly 50 minutes and wrote 1,119 fillings and 479 drains. Vehicles
  * with no known tank are skipped up front.
  *
- * Idempotent: a row already stored for the same vehicle and timestamp is left
- * alone, so overlapping windows are safe and re-running costs only time.
+ * Idempotent: an event already stored for the same vehicle is matched to its
+ * existing row (fuel-event-match) and updated rather than duplicated, so
+ * overlapping windows are safe and re-running costs only time.
  *
  * Run: npm run sync:fuel                          (dry run, all orgs, 7 days)
  *      npm run sync:fuel -- --apply
  *      npm run sync:fuel -- --org SUKARI --days 30 --apply
  *      npm run sync:fuel -- --limit 5             (probe a handful of units)
+ *
+ * Repairing history written by the old timestamp-keyed sync:
+ *      npm run sync:fuel -- --days 30 --reconcile --apply
+ * which additionally DELETES rows the provider no longer reports. See
+ * RECONCILE below for why that is the only way to undo the duplication.
  */
 
 import 'dotenv/config'
@@ -72,15 +78,44 @@ const LIMIT    = flag('limit') ? Number(flag('limit')) : null
 const NOTIFY       = argv.includes('--notify')
 const NOTIFY_AGE_H = Number(flag('notify-age') ?? 6)
 
+/**
+ * Make the ledger EQUAL the provider's answer for the window, instead of
+ * merely containing it — deleting rows Wialon no longer reports.
+ *
+ * This is the repair for history already written by the old sync, which keyed
+ * an event's identity on its start timestamp. Wialon re-clamps that timestamp
+ * while an event is still in progress, so every cycle inserted a row the
+ * previous cycle had never seen: MUFINDI: 008 held ten drain rows totalling
+ * 1553.3 L for a day the provider reports two drains and 371.1 L on.
+ *
+ * Refuses to run against a window that has not finished maturing — an event
+ * Wialon has not yet recognised would be deleted here and re-created by the
+ * live job minutes later.
+ */
+const RECONCILE      = argv.includes('--reconcile')
+const SETTLE_AGE_H   = Number(flag('settle-age') ?? 6)
+
 async function main() {
   if (!TOKEN) throw new Error('WIALON_TOKEN / access_token is not set')
   if (!Number.isFinite(DAYS) || DAYS <= 0) throw new Error(`--days must be a positive number, got ${flag('days')}`)
 
-  const to   = new Date()
+  // --reconcile deletes, so it must not be pointed at events that are still
+  // maturing: the live job would simply re-create them, and in between the feed
+  // and the ledger would disagree. Ending the window at the maturity horizon is
+  // the guard, and it is applied rather than merely warned about.
+  const to   = RECONCILE
+    ? new Date(Date.now() - SETTLE_AGE_H * 3_600_000)
+    : new Date()
   const from = new Date(to.getTime() - DAYS * 86_400_000)
 
   console.log(`\n⛽  Wialon fuel events → fuel_fillings / fuel_thefts  ${APPLY ? '(APPLYING)' : '(dry run)'}`)
-  console.log(`    window: ${from.toISOString().slice(0, 10)} → ${to.toISOString().slice(0, 10)}  (${DAYS}d)\n`)
+  console.log(`    window: ${from.toISOString().slice(0, 10)} → ${to.toISOString().slice(0, 10)}  (${DAYS}d)`)
+  if (RECONCILE) {
+    console.log(`    --reconcile: the ledger will be made to MATCH the provider for this window.`)
+    console.log(`                 rows Wialon no longer reports are DELETED.`)
+    console.log(`                 window ends ${SETTLE_AGE_H}h back so nothing still maturing is touched.`)
+  }
+  console.log()
 
   const client = new WialonClient(TOKEN, API_URL)
   await client.login()
@@ -93,25 +128,26 @@ async function main() {
   }
 
   const sources = await resolveOrgFuelSources(client)
-  let grandFillings = 0, grandThefts = 0, grandNotified = 0, grandCorrected = 0
+  let grandFillings = 0, grandThefts = 0, grandNotified = 0, grandCorrected = 0, grandRemoved = 0
 
   for (const source of sources) {
     if (ONLY_ORG && source.code !== ONLY_ORG) continue
 
-    // Only vehicles bound to a Wialon unit AND known to have a tank can carry
-    // a fuel event. The capacity is the cheap proxy for "has a fuel probe" —
-    // it is read from the probe's own sensor name at sync time.
+    // Every vehicle bound to a Wialon unit. The old `tankCapacityLitres` filter
+    // was standing in for "has a fuel probe", but it is filled in by hand and
+    // 42 instrumented vehicles across the two orgs had it blank — they were
+    // silently outside the backfill's reach, not outside the fleet's.
     const vehicles = await prisma.vehicle.findMany({
-      where:   { organisationId: source.orgId, deviceId: { startsWith: 'wialon:' }, tankCapacityLitres: { not: null } },
+      where:   { organisationId: source.orgId, deviceId: { startsWith: 'wialon:' } },
       select:  { id: true, deviceId: true, registrationPlate: true },
       orderBy: { registrationPlate: 'asc' },
       ...(LIMIT ? { take: LIMIT } : {}),
     })
 
     console.log(`  ── ${source.code} · resource ${source.resourceId} · template [${source.templateId}] "${source.templateName}"`)
-    console.log(`     ${vehicles.length} vehicle(s) with a tracker and a known tank\n`)
+    console.log(`     ${vehicles.length} vehicle(s) bound to a tracker\n`)
 
-    let fillings = 0, thefts = 0, dupFill = 0, dupTheft = 0, failed = 0, done = 0, notified = 0, corrected = 0
+    let fillings = 0, thefts = 0, dupFill = 0, dupTheft = 0, failed = 0, done = 0, notified = 0, corrected = 0, removed = 0
 
     for (const v of vehicles) {
       try {
@@ -120,12 +156,14 @@ async function main() {
           apply:        APPLY,
           notify:       NOTIFY,
           notifyCutoff: NOTIFY ? notifyCutoff : undefined,
+          reconcile:    RECONCILE,
         })
         fillings += out.fillings
         thefts   += out.thefts
         dupFill  += out.dupFill
         dupTheft += out.dupTheft
         corrected += out.corrected
+        removed  += out.removed
         notified += out.published
       } catch (err) {
         failed++
@@ -146,9 +184,11 @@ async function main() {
     // roughest of them. Silent corrections would make a repair pass look
     // identical to a no-op.
     if (APPLY && corrected > 0) console.log(`     corrected: ${corrected} row(s) whose figures the provider has since revised`)
+    if (removed > 0) console.log(`     ${APPLY ? 'removed:  ' : 'to remove:'} ${removed} row(s) the provider no longer reports`)
     if (NOTIFY) console.log(`     live feed: ${notified} item(s) published`)
     console.log()
 
+    grandRemoved  += removed
     grandCorrected += corrected
     grandFillings += fillings
     grandThefts   += thefts
@@ -157,6 +197,7 @@ async function main() {
 
   console.log(`  ── total: ${grandFillings} filling(s), ${grandThefts} drain(s) ${APPLY ? 'written' : 'pending'}`)
   if (APPLY && grandCorrected > 0) console.log(`     ${grandCorrected} existing row(s) corrected`)
+  if (grandRemoved > 0) console.log(`     ${grandRemoved} stale row(s) ${APPLY ? 'removed' : 'would be removed'}`)
   if (NOTIFY) console.log(`     ${grandNotified} feed item(s) published`)
   if (!APPLY) console.log('\n  Dry run — nothing written. Re-run with:  npm run sync:fuel -- --apply')
   console.log()

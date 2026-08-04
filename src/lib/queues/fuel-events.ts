@@ -39,7 +39,7 @@ import { env } from '../../config/env.js'
 import { logger } from '../logger.js'
 import { WialonClient } from '../../providers/wialon/wialon.client.js'
 import {
-  resolveOrgFuelSources, findFuelCandidates, syncVehicleFuelEvents,
+  resolveOrgFuelSources, findFuelCandidates, listVehicleSlice, syncVehicleFuelEvents,
 } from '../../modules/fuel/fuel-sync.service.js'
 
 export const FUEL_QUEUE = 'fuel'
@@ -95,6 +95,30 @@ const MAX_CANDIDATES_PER_CYCLE = 60
  */
 const CYCLE_OVERRUN_WARN_MS = 15 * 60_000
 
+// ─── the settle pass ───────────────────────────────────────────────────────
+//
+// The live pass above only ever inserts and updates, and it only ever looks at
+// vehicles whose own telemetry moved. Two things escape it, both measured on
+// the live account:
+//
+//   · RETRACTIONS. Wialon offers an event, then a wider settled read no longer
+//     considers it one. Eight of MUFINDI: DZ 04's 29 stored drains for
+//     2026-08-03 had no counterpart in the provider's settled answer.
+//   · SPARSE REPORTERS. A vehicle sending one fuel reading a day has a zero
+//     spread and never becomes a candidate, so its events are never fetched at
+//     all — MUFINDI: 009's 957.9 L drain, never recorded.
+//
+// So a slice of vehicles is re-read every cycle over a window that has finished
+// maturing, with `reconcile` on, until the rotation comes round again. This is
+// the pass that makes the ledger EQUAL the provider rather than merely overlap
+// it. Cost is bounded by the slice size, not by fleet size.
+
+/** Youngest event the settle pass will touch. Below this, a window is still moving. */
+const SETTLE_MIN_AGE_MS = 6 * 60 * 60_000
+
+/** How much history each settle read covers, ending at the maturity horizon. */
+const SETTLE_SPAN_MS = 24 * 60 * 60_000
+
 export interface FuelSyncResult {
   candidates: number
   fillings:   number
@@ -104,6 +128,10 @@ export interface FuelSyncResult {
   deduped:    number
   /** Ledger rows rewritten because the provider revised the event. */
   corrected:  number
+  /** Vehicles re-read by the settle pass this cycle. */
+  settled:    number
+  /** Ledger rows deleted because the provider has retracted them. */
+  removed:    number
   failed:     number
   /** Wall clock, so an overrunning cycle is visible rather than inferred. */
   ms:         number
@@ -112,7 +140,10 @@ export interface FuelSyncResult {
 /** Run one cycle. Exported so it can be invoked by hand or from a test. */
 export async function runFuelSync(): Promise<FuelSyncResult> {
   const startedAt = Date.now()
-  const result: FuelSyncResult = { candidates: 0, fillings: 0, thefts: 0, published: 0, deduped: 0, corrected: 0, failed: 0, ms: 0 }
+  const result: FuelSyncResult = {
+    candidates: 0, fillings: 0, thefts: 0, published: 0, deduped: 0,
+    corrected: 0, settled: 0, removed: 0, failed: 0, ms: 0,
+  }
 
   const token = env.WIALON_TOKEN || process.env['access_token'] || ''
   if (!token) {
@@ -160,6 +191,41 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
           logger.warn({ err, plate: vehicle.registrationPlate }, 'Fuel sync: report failed for vehicle')
         }
       }
+
+      // ── settle pass ──
+      // Runs inside the same cycle rather than on a queue of its own: both
+      // passes drive one Wialon session, and Wialon rejects concurrent calls on
+      // a session (error 1003). Sequential here is the only safe arrangement,
+      // and it also means the `running` guard already covers both.
+      if (env.FUEL_SETTLE_ENABLED && env.FUEL_SETTLE_BATCH > 0) {
+        const settleTo   = new Date(to.getTime() - SETTLE_MIN_AGE_MS)
+        const settleFrom = new Date(settleTo.getTime() - SETTLE_SPAN_MS)
+        // Rotation position from the clock, so it survives restarts and needs
+        // no cursor: consecutive cycles read consecutive slices.
+        const slice = Math.floor(startedAt / 60_000 / 15)
+        const batch = await listVehicleSlice(source.orgId, slice, env.FUEL_SETTLE_BATCH)
+
+        for (const vehicle of batch) {
+          try {
+            const out = await syncVehicleFuelEvents(client, source, vehicle, {
+              from: settleFrom, to: settleTo,
+              apply: true,
+              // Never: these events are hours old, and the live pass already
+              // announced them when they were news.
+              notify: false,
+              reconcile: true,
+            })
+            result.settled++
+            result.fillings  += out.fillings
+            result.thefts    += out.thefts
+            result.corrected += out.corrected
+            result.removed   += out.removed
+          } catch (err) {
+            result.failed++
+            logger.warn({ err, plate: vehicle.registrationPlate }, 'Fuel settle: report failed for vehicle')
+          }
+        }
+      }
     }
   } finally {
     await client.logout().catch(() => { /* best effort */ })
@@ -167,7 +233,8 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
 
   result.ms = Date.now() - startedAt
 
-  const log = result.published > 0 || result.fillings > 0 || result.thefts > 0 || result.corrected > 0
+  const log = result.published > 0 || result.fillings > 0 || result.thefts > 0
+           || result.corrected > 0 || result.removed > 0
     ? logger.info.bind(logger)
     : logger.debug.bind(logger)
   log(result, 'Fuel sync cycle complete')

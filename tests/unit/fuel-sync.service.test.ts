@@ -60,6 +60,12 @@ beforeEach(() => {
   ;(prismaMock.fuelFilling.findMany as any).mockResolvedValue([])
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([])
+  // Prisma returns the created row, and the feed id is keyed on it — see the
+  // stable-feed-id case.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(prismaMock.fuelFilling.create as any).mockResolvedValue({ id: 'ff_new' })
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(prismaMock.fuelTheft.create as any).mockResolvedValue({ id: 'ft_new' })
   // Reset the IMPLEMENTATION, not just the calls: the dedupe case below swaps
   // in `published: false`, and mockClear would leave that in place for every
   // test after it.
@@ -124,9 +130,12 @@ describe('ledger writes', () => {
     // disagreed about the same event — KTCB 466U's 17:52 fill read 27.9 L in
     // the ledger and 47.0 L on the feed. Analytics read the ledger.
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [filling(RECENT)], thefts: [] })
+    // The stored row and the revised event describe the SAME tank state — same
+    // final level, a volume the provider has since narrowed. That overlap is
+    // what identifies them as one event now that a timestamp cannot.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.fuelFilling.findMany as any).mockResolvedValue([
-      { id: 'ff_1', filledAt: RECENT, filledMl: 55_100, finalFuelLevelMl: 96_100 },
+      { id: 'ff_1', filledAt: RECENT, filledMl: 55_100, initialFuelLevelMl: 704_900, finalFuelLevelMl: 760_000 },
     ])
 
     const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
@@ -145,7 +154,7 @@ describe('ledger writes', () => {
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [filling(RECENT)], thefts: [] })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.fuelFilling.findMany as any).mockResolvedValue([
-      { id: 'ff_1', filledAt: RECENT, filledMl: 40_000, finalFuelLevelMl: 760_000 },
+      { id: 'ff_1', filledAt: RECENT, filledMl: 40_000, initialFuelLevelMl: 720_000, finalFuelLevelMl: 760_000 },
     ])
 
     const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
@@ -158,7 +167,7 @@ describe('ledger writes', () => {
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [drain(RECENT)] })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([
-      { id: 'ft_1', beganAt: RECENT, stolenMl: 60_000, finalFuelLevelMl: 700_000 },
+      { id: 'ft_1', beganAt: RECENT, detectedAt: RECENT, stolenMl: 60_000, finalFuelLevelMl: 700_000 },
     ])
 
     const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
@@ -252,9 +261,127 @@ describe('feed publication is decided by AGE, not by ledger novelty', () => {
     await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
 
     const ids = published().map(c => c[0]['id'])
-    expect(ids[0]).toBe(`fuel-fill-veh_1-${RECENT.getTime()}`)
+    // Keyed on the LEDGER ROW, not the event's clock — see the drift case below.
+    expect(ids[0]).toBe('fuel-fill-veh_1-ff_new')
     expect(new Set(ids).size).toBe(2)          // one filling id, one drain id
     expect(ids[0]).toBe(ids[2])                // identical across runs
+  })
+
+  it('keeps one feed item when the provider moves the event clock', async () => {
+    // The regression this whole change exists for, at the feed layer: a drain
+    // still in progress comes back with a re-clamped start on every cycle. Keyed
+    // on the timestamp, MUFINDI: 008 would have raised nine separate "FUEL DROP"
+    // lines for one drain.
+    const later = new Date(RECENT.getTime() + 15 * 60_000)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([
+      { id: 'ft_1', beganAt: RECENT, detectedAt: later, stolenMl: 60_000, finalFuelLevelMl: 700_000 },
+    ])
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({
+      fillings: [], thefts: [{ ...drain(later), detectedAt: later }],
+    })
+
+    await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
+
+    expect(published()).toHaveLength(1)
+    expect(published()[0]![0]['id']).toBe('fuel-drain-veh_1-ft_1')
+    expect(prismaMock.fuelTheft.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('reconcile — the provider retracts an event', () => {
+  const stale = { id: 'ft_stale', beganAt: OLD, detectedAt: OLD, stolenMl: 90_000, finalFuelLevelMl: 1_000 }
+
+  it('deletes ledger rows the provider no longer reports', async () => {
+    // Eight of MUFINDI: DZ 04's 29 stored drains for 2026-08-03 had no
+    // counterpart in Wialon's settled answer. Matching cannot reach them —
+    // they overlap nothing — so without this they inflate the loss figure for
+    // as long as the row exists.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([stale])
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ reconcile: true }))
+
+    expect(out.removed).toBe(1)
+    expect(prismaMock.fuelTheft.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['ft_stale'] } } })
+  })
+
+  it('deletes nothing without the flag', async () => {
+    // The default path runs against a window that is still maturing, where an
+    // event Wialon has not yet recognised would be deleted and re-created every
+    // cycle, churning the feed.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([stale])
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
+
+    expect(out.removed).toBe(0)
+    expect(prismaMock.fuelTheft.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('keeps a row the provider still reports', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([
+      { id: 'ft_1', beganAt: RECENT, detectedAt: RECENT, stolenMl: 80_830, finalFuelLevelMl: 679_090 },
+    ])
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [drain(RECENT)] })
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ reconcile: true }))
+
+    expect(out.removed).toBe(0)
+    expect(prismaMock.fuelTheft.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('counts but does not delete during a dry run', async () => {
+    // This is the only branch that destroys data, so the dry run has to be able
+    // to answer "how many rows would go?" before anyone runs it for real.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([stale])
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ reconcile: true, apply: false }))
+
+    expect(out.removed).toBe(1)
+    expect(prismaMock.fuelTheft.deleteMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('one physical event, many reports', () => {
+  it('updates the same row as the drain start marches forward', async () => {
+    // MUFINDI: 008 verbatim — nine rows 15 minutes apart where the provider
+    // reports one drain. Each cycle here must land on the row the last one
+    // wrote, not beside it.
+    let stored: Record<string, unknown> | null = null
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockImplementation(async () => (stored ? [stored] : []))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.update as any).mockImplementation(async (a: { data: Record<string, unknown> }) => {
+      stored = { ...stored, ...a.data }
+      return stored
+    })
+
+    // The drain is still running throughout, so every re-clamped start sits
+    // inside it — 008's nine starts all preceded one 23:30 end.
+    const endsAt = new Date('2026-08-02T13:30:00Z')
+    for (const minutes of [0, 15, 30, 45]) {
+      const began = new Date(RECENT.getTime() + minutes * 60_000)
+      vi.mocked(fetchUnitFuelEvents).mockResolvedValue({
+        fillings: [], thefts: [{ ...drain(began), detectedAt: endsAt, stolenMl: 60_000 + minutes * 100 }],
+      })
+      const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
+      if (minutes === 0) {
+        expect(out.thefts).toBe(1)
+        stored = { id: 'ft_1', beganAt: began, detectedAt: endsAt, stolenMl: 60_000, finalFuelLevelMl: 679_090 }
+      } else {
+        expect(out, `cycle at +${minutes}m`).toMatchObject({ thefts: 0, dupTheft: 1 })
+      }
+    }
+
+    // One insert across four cycles. Before this change it was four.
+    expect(prismaMock.fuelTheft.create).toHaveBeenCalledTimes(1)
+    expect(stored!['stolenMl']).toBe(64_500)   // the provider's latest answer
   })
 })
 
