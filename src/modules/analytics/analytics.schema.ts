@@ -16,6 +16,16 @@ export const deliveriesQuerySchema = z.object({
   to:   z.coerce.date().optional(),
 })
 
+// Fuel cost: the same trailing window as deliveries, plus the price to cost the
+// litres at. `pricePerLitre` is optional because the server has a configured
+// default (env.FUEL_PRICE_PER_LITRE) — it is a query param only so an operator
+// can re-price a period without a redeploy (e.g. "what would last month have
+// cost at the new EPRA rate?"). The quantities never depend on it.
+export const fuelCostQuerySchema = deliveriesQuerySchema.extend({
+  pricePerLitre: z.coerce.number().positive().optional(),
+})
+
 export type AnalyticsRange  = z.infer<typeof analyticsRangeSchema>
 export type SpeedingQuery   = z.infer<typeof speedingQuerySchema>
 export type DeliveriesQuery = z.infer<typeof deliveriesQuerySchema>
+export type FuelCostQuery   = z.infer<typeof fuelCostQuerySchema>
