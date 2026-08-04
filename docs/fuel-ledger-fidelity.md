@@ -248,6 +248,58 @@ everything older, and the two cannot meet.
 A 10-vehicle dry run over 2 days found 16 stale rows to delete, 3 events to
 re-point onto existing rows, and 2 drains the old sync had missed outright.
 
+### Outcome — run 2026-08-04, 30 days, both orgs
+
+```
+KASULU   926 fillings,  673 drains written · 30 corrected · 113 removed · 6 units failed
+SUKARI  2327 fillings,  655 drains written · 13 corrected ·  18 removed
+total   3253 fillings, 1328 drains written · 43 corrected · 131 removed
+```
+
+Verified afterwards against Wialon over 2026-08-03 00:00–20:00Z, a window wholly
+inside the repaired range:
+
+| vehicle | Wialon fills | ledger fills | Wialon drains | ledger drains |
+|---|---|---|---|---|
+| MUFINDI: 008 | 1 / 661.8 L | 1 / 661.8 L | 1 / 95.4 L | 1 / 95.4 L |
+| MUFINDI: DZ 04 | 3 / 524.9 L | 3 / 524.9 L | 5 / 388.4 L | 5 / 391.5 L |
+| MUFINDI: EX 17 | 1 / 474.6 L | 1 / 474.6 L | 2 / 55.0 L | 2 / 55.0 L |
+| MUFINDI: CTR 23 | 2 / 26.1 L | 2 / 26.1 L | 5 / 116.7 L | 5 / 116.7 L |
+
+Counts match exactly; volumes match to the litre except DZ 04's drains, 0.8%
+apart because the provider has revised them since the run — which the settle
+pass converges. For contrast, DZ 04 over the same day before the repair held
+**29 drain rows totalling 2,498 L against Wialon's 6 and 418 L**.
+
+**The totals went UP, not down.** Removing 131 phantom rows is dwarfed by
+recovering 4,581 events that were never fetched at all (Finding 4): the old
+candidate query needed both a 15 L spread and a tank capacity on file, so
+roughly two-thirds of SUKARI's instrumented fleet was invisible to it. The
+pre-fix figure was wrong in both directions at once.
+
+30-day totals now served by `/analytics/fuel-cost`:
+
+| | filled | lost | loss share |
+|---|---|---|---|
+| KASULU | 205,481 L · KES 36,855,101 | 56,048 L · KES 10,052,698 | 27.3% |
+| SUKARI | 96,324 L · KES 17,276,705 | 21,995 L · KES 3,944,978 | 22.8% |
+
+A 22–27% "loss" share is not credible as theft and should not be read as such —
+see the domain caveat above. It is the Wialon template's drain detection firing
+on engine-on stationary consumption, and it is now measured honestly rather than
+measured wrongly.
+
+### Six KASULU units the token cannot report on
+
+```
+MUFINDI: OPTIM - COMP 02 / DZ 08 / FT 02 / LMV 03 / LMV 10 · MUFINDI: WL 05
+  → Wialon report/exec_report failed: Access denied (7)
+```
+
+These are visible to the token for telemetry but not for report execution, so
+they contribute no fuel events and never will until the account's report
+permissions are widened. Their fuel is silently absent from every figure above.
+
 ### ⚠ The repair is a point in time, not a cure
 
 The production box runs the code in `git HEAD`. Everything in this document is
