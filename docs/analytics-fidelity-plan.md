@@ -380,10 +380,69 @@ Unit tests cover the notification path itself (12 cases), including the
 hysteresis band, the plausibility rejection, the bounded wording, and the
 fallback for an org with no gate. Full suite 287 passed / 7 skipped.
 
+### The ~320 s gap — investigated, 2026-08-04
+
+**It is a device power-save heartbeat that engages when the engine is off, and
+the gate is exactly where trucks switch off.**
+
+Over 635,221 fixes / 194 vehicles / 3 days, the gap distribution is **bimodal,
+not a tail**:
+
+```
+   0- 19s  31.14%  ############################################################
+  20- 39s  59.43%  ############################################################
+  40- 59s   1.75%
+  60-139s   1.17%
+ 140-279s   ~0        <- nothing here
+ 280-299s   0.12%
+ 300-319s   0.82%
+ 320-339s   1.21%     <- a discrete second mode
+   >600s    3.39%
+```
+
+A near-empty 140–280 s band with a clean spike at 300–340 s is a configured
+interval, not random loss.
+
+Of gaps in the 240–420 s band: **90% are preceded by speed 0** and **88% by
+engine OFF**; only 7% have the vehicle moving at both ends.
+
+**Not our pipeline.** Ingest lag (`receivedAt − capturedAt`) is a median of 2 s
+for frames ending a 320 s gap and 2 s for frames ending a 30 s gap. The frames
+arrive promptly; the device sent nothing in between.
+
+**Normal reporting is much denser than assumed.** Across 156 vehicles with
+enough data, the median gap is **12 s while moving** and **30 s while parked** —
+so the earlier "30 s median" was the parked figure, and moving resolution is
+better still.
+
+**Two distinct populations:**
+
+| | vehicles | median gap moving | median gap parked |
+|---|---|---|---|
+| normal | 153 | 12 s | 30 s |
+| **permanently sparse** | **3** | **301 s** | 320 s |
+
+The three are `KTCB 297U`, `KCX 796S`, `KCX 802S` — reporting every ~5 minutes
+*even at speed*. That is a tracker configuration defect, not power-save, and it
+is worth raising with the installer. They happen to explain none of the missed
+departures (none were dispatched in the sample), so it is a separate, smaller
+problem than it first looked.
+
+**What actually causes the departure misses.** All 6 of the 54 departures with
+no fix at the gate were on NORMAL reporters. The mechanism: a truck halts at
+the barrier for the weigh-out — median 157 s, engine off — the tracker drops to
+its ~320 s heartbeat, and the next fix lands hundreds of metres down the road.
+The power-save engages precisely at the one place we most need resolution.
+
+This is upstream of the codebase. Two ways to close it, both provider-side:
+shorten the parked heartbeat, or have the device report on ignition-on so the
+restart itself is an event. Until then, bounded notification is the honest
+answer and is what ships.
+
 ### Next
 
-- The **~320 s gap periodicity** is unexplained and is the main driver of both
-  the 3 bounded cases and the p90 tail. Own investigation.
+- Raise the 3 permanently-sparse trackers, and the parked-heartbeat question,
+  with the provider.
 - Workstream 1 (false fuel-loss flags) is unstarted and re-enters discovery on
   its own terms.
 
