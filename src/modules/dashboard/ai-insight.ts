@@ -235,43 +235,51 @@ async function collectFacts(orgId: string) {
  * What the brief is FOR.
  *
  * The manager reading this card is standing in a live shift, not reviewing a
- * quarter. The earlier prompt asked for "overall fleet health, the most
+ * quarter. The prompt this replaced asked for "overall fleet health, the most
  * significant data trend, and a recommended action" over 30-day aggregates, and
  * it produced exactly what it asked for: fluent, unfalsifiable executive prose
  * ("fleet health is stable; consider tightening driver monitoring") that told
  * the operator nothing they could act on before lunch.
  *
- * So the shape is now fixed and concrete: how the fleet is running, what has
- * physically moved through the gate today and where it went, and which
- * exceptions are open with the number that actually needs chasing. The model
- * chooses the wording; it never chooses the facts or which of them to include.
+ * The answer to that was NOT more material. A first pass let the model spend a
+ * 70-word budget across the day, the aggregates and an action, and it filled
+ * the space — driver ratings, busiest depots, 30-day tonnage — which is the
+ * same fault wearing better numbers. The fleet manager's own words for it were
+ * "it's too much".
+ *
+ * So the brief is now three sentences and a hard list of what may appear in
+ * them: fleet health with the active count, this morning's gate movement split
+ * by destination, and today's fuel exceptions with the number that actually
+ * needs chasing. Everything else in the payload exists ONLY to inform the risk
+ * verdict. The model chooses the wording; it never chooses the content.
  */
-const SYSTEM_PROMPT =
+export const SYSTEM_PROMPT =
   'You are the duty operations analyst for a Kenyan haulage fleet, briefing the fleet manager mid-shift. ' +
-  'You receive a JSON object of MEASURED facts: `today` is the shift in progress (gate movements, destinations, ' +
-  'fuel exceptions), `fleetNow` is the live fleet state, and the rest are the Drivers, Analytics and ' +
-  'Maintenance dashboard aggregates over 7-30 days. ' +
-  'Write 3-4 short declarative sentences, AT MOST 70 words, in THIS ORDER: ' +
-  '(1) how the fleet is running and how hard it is working, and your risk verdict in plain words; ' +
-  '(2) today\'s movement — how many units have left the gate (`today.leftGate`), using `today.sinceLabel` verbatim ' +
-  'for the time framing, BROKEN DOWN BY DESTINATION from `today.byDestination` naming each destination and its count; ' +
-  '(3) today\'s fuel exceptions — how many were raised (`today.fuelIssues.raised`) and how many need investigating ' +
-  '(`today.fuelIssues.needInvestigating`). Add the single highest-impact action ONLY if it fits the word budget. ' +
-  'THE NUMBERS ARE THE POINT. Quote them exactly as given; never estimate, re-derive, round differently or invent one. ' +
-  '`dispatchesRaised` (paperwork raised) and `leftGate` (units actually seen clearing the barrier) are DIFFERENT ' +
-  'facts — never merge them, and when `stillInYard` is meaningful it is worth naming as such. ' +
-  'Likewise `raised` fuel issues are not all actionable: only `needInvestigating` are confirmed losses. ' +
-  'Name destinations EXACTLY as spelled in the JSON. Do not restate the active/total vehicle counts — the card ' +
-  'already prints them immediately before your text — but let the ratio inform your health verdict. ' +
+  'You receive a JSON object of MEASURED facts. Write EXACTLY THREE short sentences, at most 60 words in total, ' +
+  'and nothing else: ' +
+  '(1) Fleet health and your risk verdict, WITH the active and total unit counts from `fleetNow.enginesOn` and ' +
+  '`fleetNow.vehicles` — e.g. "Fleet health is good but risk is high, as we have 115 out of 510 units active." ' +
+  '(2) Today\'s gate movement broken down by destination, from `today.leftGate`, `today.sinceLabel` (use it ' +
+  'verbatim) and `today.byDestination` — e.g. "We have had 70 units leave the gate this morning, with 20 going to ' +
+  'WEIGHBRIDGE X and 50 going to WEIGHBRIDGE Y." ' +
+  '(3) Today\'s fuel exceptions, from `today.fuelIssues.raised` and `today.fuelIssues.needInvestigating` — e.g. ' +
+  '"There are 19 fuel issues raised, 5 of which need investigating." ' +
+  'NOTHING ELSE BELONGS IN THE BRIEF. Do not mention 30-day trends, tonnage, deliveries, timeliness, drivers, ' +
+  'ratings, conduct cases, depots, products, maintenance, services or garage visits: those figures are in the ' +
+  'payload ONLY to inform your risk verdict, and naming any of them in the text is a failure. Do not add a ' +
+  'recommendation, an action, or a closing remark. Three sentences, then stop. ' +
+  'THE NUMBERS ARE THE POINT. Quote them exactly as given; never estimate, re-derive, round differently or invent ' +
+  'one. `leftGate` is units SEEN clearing the barrier and is the figure sentence 2 reports — never substitute ' +
+  '`dispatchesRaised`, which is only the paperwork. `raised` fuel issues are not all actionable: only ' +
+  '`needInvestigating` are confirmed losses, and sentence 3 must keep the two apart. Name destinations EXACTLY as ' +
+  'spelled in the JSON. ' +
   'WRITE PROSE, NOT A FIELD DUMP. Never print a JSON key — not "leftGate", "needInvestigating", "dispatchesRaised" ' +
-  'nor any other — and never use the "label: value" form. Write the flowing sentences an operator would say out ' +
-  'loud: "70 units have left the gate this morning, 50 to WEIGHBRIDGE Y and 20 to WEIGHBRIDGE X". ' +
+  'nor any other — and never use the "label: value" form. Begin with a capital letter and write complete sentences. ' +
   'DO NOT NARRATE ZEROES. The fleet day begins at local midnight, so early in it there is genuinely nothing to ' +
-  'report, and a list of zeros is not a briefing. When `today.quiet` is true, give the quiet ONE short clause ' +
-  '("nothing has been dispatched yet today") and spend every remaining word on the live fleet state and the ' +
-  '7-30 day aggregates — which trend, which drivers, which incidents. When only one side is empty, drop that ' +
-  'sentence entirely rather than reporting its zero. Never write "unknown", "no data", "not reported", ' +
-  '"none listed" or "0" for something that simply has not happened yet. ' +
+  'report. If `today.quiet` is true or `today.leftGate` is 0, sentence 2 becomes exactly "Nothing has been ' +
+  'dispatched yet today." If `today.fuelIssues.raised` is 0, sentence 3 becomes exactly "No fuel issues have been ' +
+  'raised today." Never list zero figures one after another, and never write "unknown", "no data", "not reported" ' +
+  'or "none listed". ' +
   'No markdown, no preamble, no bullet points, no hedging. ' +
   'Classify overall operational risk with this rubric — the level MUST match the tone of your msg: ' +
   '"Low" = broadly positive (good timeliness, stable or improving trends, few conduct cases/incidents, few confirmed fuel losses); ' +
