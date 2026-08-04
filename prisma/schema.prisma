@@ -88,6 +88,19 @@ model Organisation {
   /// and nothing else, so "where did it set off from" has no other source.
   hubLat    Float?   @map("hub_lat")
   hubLng    Float?   @map("hub_lng")
+  /// The GATE the fleet actually leaves through — the barrier/weigh-out, not
+  /// the yard's centre. Distinct from the hub even when they are metres apart
+  /// (SUKARI's are 17 m apart), because a departure is measured against the
+  /// gate and "at the yard" is measured against the hub. Supplied by the
+  /// operator, and re-derivable from telemetry: the gate is where outbound
+  /// vehicles halt, which clusters far more tightly than anything else on the
+  /// way out. NULL falls back to the hub radius — see lib/yard-departure.
+  gateLat     Float? @map("gate_lat")
+  gateLng     Float? @map("gate_lng")
+  /// How far past the gate counts as through it. Sized from the measured halt
+  /// spread (13-20 m at SUKARI), wide enough to contain the halt and narrow
+  /// enough to stay clear of the next cluster inside the site.
+  gateRadiusM Int?   @map("gate_radius_m")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

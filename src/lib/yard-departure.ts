@@ -1,5 +1,5 @@
 /**
- * "Left the yard" — measured, not declared.
+ * "Left the gate" — measured, not declared.
  *
  * ## Why this exists
  *
@@ -10,55 +10,96 @@
  * the dispatch transaction, so it carries no fact the dispatch line does not
  * already carry.
  *
- * The consequence was a feed that announced a departure the instant paperwork
- * was raised. On 2026-08-04 the feed said KTCC 870B "left the yard to kwoyo u k"
- * at 05:25:14.429 while the truck was still standing in the compound: twenty-five
- * minutes later it had moved 440 m from where it was dispatched, at a peak of
- * 16 km/h, and was stationary. Meanwhile the Active Trip card — which measures —
- * correctly said "not yet left the yard", and the two surfaces contradicted each
- * other in front of the operator.
- *
  * So the provider's claim is suppressed at the webhook (see
  * raifactorysuite-events.handleMovement) and the real event is derived here from
- * the vehicle's own fixes: one feed item the first time a dispatched vehicle is
- * seen beyond the yard radius.
+ * the vehicle's own fixes.
+ *
+ * ## Why the gate, and not a radius round the yard
+ *
+ * This used to fire on the first fix more than `YARD_RADIUS_M` (800 m) from the
+ * organisation's HUB point. On SUKARI the hub sits **17 m from the gate**, so
+ * that rule announced the departure one full radius PAST the barrier — by
+ * construction, not by accident. Replayed over 54 departures across 21 days:
+ *
+ *   metres past the gate, hub radius:  median 867 m · p90 4,210 m · max 20 km
+ *   metres past the gate, this rule:   median 118 m · p90   554 m
+ *   warning gained:                    median 264 s · p90 1,113 s
+ *
+ * The operator's complaint — "we are told it left when it is already 800 m
+ * away" — was exactly the radius, restated.
+ *
+ * The gate is a coordinate, not a geofence. The Wialon zone set covers neither
+ * the whole site nor the wider operating area, so nothing here depends on it.
+ * It is also re-derivable at any time: a gate is where outbound vehicles HALT,
+ * and those halts cluster to within 13-20 m, far tighter than any other
+ * signature on the way out.
  *
  * ## Shape
  *
- * Deliberately mirrors zone-presence: a per-org cache of the one thing this
- * needs (the yard point), per-vehicle state in memory, and a first frame that
- * only SEEDS — otherwise a restart would announce a departure for every vehicle
- * already out on the road.
+ * Two radii, not one. A vehicle must be seen INSIDE `gateRadiusM` and then
+ * beyond `gateRadiusM + DEPARTURE_BUFFER_M`. The band is what stops a truck
+ * idling at the barrier, or jittering on GPS noise, from narrating a convoy —
+ * and unlike waiting for consecutive frames it costs no delay, which is the
+ * whole point of the change.
  *
- * The dispatch lookup happens only on the transition, which is at most once per
- * vehicle per run, so the steady state costs one distance calculation per frame.
+ * A vehicle never seen at the gate gets a BOUNDED notification instead of a
+ * precise one: 9 of 54 departures in the replay had no fix at the gate at all,
+ * behind coverage gaps whose 99th percentile is 20 minutes. We know it left. We
+ * do not know when, and inventing a time would be the one thing this module
+ * exists to avoid.
  */
 
 import { prisma } from './prisma.js'
 import { logger } from './logger.js'
 import { publishNotification } from './notifications/notification.store.js'
 import { haversineM, YARD_RADIUS_M } from './dispatch-trip.js'
+import { isPlausibleFix } from './fix-plausibility.js'
 
-/** orgId → the organisation's yard point, or null when it has none recorded. */
-const yardCache = new Map<string, { yard: { lat: number; lng: number } | null; loadedAt: number }>()
-const YARD_TTL_MS = 5 * 60_000
+/**
+ * Hysteresis band outside the gate radius. Sized above the fleet's positional
+ * jitter while parked (a few tens of metres) and well below the distance a
+ * departing truck covers between fixes at the 30 s median cadence.
+ */
+const DEPARTURE_BUFFER_M = 40
 
-/** vehicleId → was it inside the yard radius on the previous frame? */
-const insideYard = new Map<string, boolean>()
+/** Used when an organisation records a gate but no radius for it. */
+const DEFAULT_GATE_RADIUS_M = 60
 
-async function getYard(orgId: string): Promise<{ lat: number; lng: number } | null> {
-  const hit = yardCache.get(orgId)
-  if (hit && Date.now() - hit.loadedAt < YARD_TTL_MS) return hit.yard
+interface OrgGeo {
+  hub:  { lat: number; lng: number } | null
+  gate: { lat: number; lng: number; radiusM: number } | null
+}
+
+const geoCache = new Map<string, { geo: OrgGeo; loadedAt: number }>()
+const GEO_TTL_MS = 5 * 60_000
+
+interface VehicleState {
+  /** Outside the hub radius on the previous frame; undefined until seeded. */
+  beyondHub?: boolean
+  /** Seen inside the gate radius since the last announcement. */
+  sawGate: boolean
+  /** Dispatch already announced, so a later frame cannot restate it. */
+  announcedFor: string | null
+}
+
+const state = new Map<string, VehicleState>()
+
+async function getGeo(orgId: string): Promise<OrgGeo> {
+  const hit = geoCache.get(orgId)
+  if (hit && Date.now() - hit.loadedAt < GEO_TTL_MS) return hit.geo
 
   const org = await prisma.organisation.findUnique({
     where:  { id: orgId },
-    select: { hubLat: true, hubLng: true },
+    select: { hubLat: true, hubLng: true, gateLat: true, gateLng: true, gateRadiusM: true },
   })
-  const yard = org?.hubLat != null && org.hubLng != null
-    ? { lat: org.hubLat, lng: org.hubLng }
-    : null
-  yardCache.set(orgId, { yard, loadedAt: Date.now() })
-  return yard
+  const geo: OrgGeo = {
+    hub: org?.hubLat != null && org.hubLng != null ? { lat: org.hubLat, lng: org.hubLng } : null,
+    gate: org?.gateLat != null && org.gateLng != null
+      ? { lat: org.gateLat, lng: org.gateLng, radiusM: org.gateRadiusM ?? DEFAULT_GATE_RADIUS_M }
+      : null,
+  }
+  geoCache.set(orgId, { geo, loadedAt: Date.now() })
+  return geo
 }
 
 export interface YardDepartureInput {
@@ -72,27 +113,77 @@ export interface YardDepartureInput {
 }
 
 /**
- * Publish a departure the first time a dispatched vehicle is seen outside the
- * yard. Safe to call on every frame.
+ * Publish a departure the first time a dispatched vehicle is seen clear of the
+ * gate. Safe to call on every frame.
  */
 export async function trackYardDeparture(p: YardDepartureInput): Promise<void> {
   const { lat, lng } = p
   if (lat == null || lng == null || !Number.isFinite(lat) || !Number.isFinite(lng)) return
 
-  const yard = await getYard(p.orgId)
-  if (!yard) return
+  const atMs = new Date(p.capturedAt).getTime()
+  if (!Number.isFinite(atMs)) return
+  // A position the vehicle could not have reached cannot be evidence that it
+  // went anywhere. 5.15% of fixes in departure windows fail this.
+  if (!isPlausibleFix({ vehicleId: p.vehicleId, lat, lng, atMs })) return
 
-  const out    = haversineM(yard, { lat, lng }) > YARD_RADIUS_M
-  const before = insideYard.get(p.vehicleId)
-  insideYard.set(p.vehicleId, !out)
+  const geo = await getGeo(p.orgId)
+  if (!geo.gate && !geo.hub) return
 
-  // First sighting seeds only — a restart must not announce the departure of
-  // every vehicle that is already on the road.
-  if (before === undefined) return
-  // Only the inside → outside crossing is news. Coming back is the provider's
-  // RETURN event and the trip's own 'back' leg.
-  if (!before || !out) return
+  const here = { lat, lng }
+  const beyondHub = geo.hub ? haversineM(geo.hub, here) > YARD_RADIUS_M : false
 
+  const seeded = state.get(p.vehicleId)
+  if (!seeded) {
+    // First sighting seeds only — a restart must not announce the departure of
+    // every vehicle already on the road.
+    state.set(p.vehicleId, {
+      beyondHub,
+      sawGate: geo.gate ? haversineM(geo.gate, here) <= geo.gate.radiusM : false,
+      announcedFor: null,
+    })
+    return
+  }
+  const st = seeded
+
+  const wasBeyondHub = st.beyondHub
+  st.beyondHub = beyondHub
+
+  // ── the gate rule ──
+  if (geo.gate) {
+    const fromGate = haversineM(geo.gate, here)
+    if (fromGate <= geo.gate.radiusM) {
+      // At the barrier. Coming back also re-arms the next departure.
+      st.sawGate = true
+      return
+    }
+    if (st.sawGate) {
+      // Inside the hysteresis band the vehicle has not committed to leaving.
+      if (fromGate > geo.gate.radiusM + DEPARTURE_BUFFER_M) {
+        await announce(p, st, 'gate')
+      }
+      return
+    }
+  }
+
+  // ── fallback ──
+  // Either the org has no gate recorded, or this vehicle was never seen at it.
+  // The hub radius is coarse — that is precisely why the gate rule exists — so
+  // when a gate IS configured and we simply missed the vehicle at it, the
+  // notification says so rather than implying we watched it leave.
+  if (wasBeyondHub === false && beyondHub) {
+    await announce(p, st, geo.gate ? 'bounded' : 'yard')
+  }
+}
+
+/**
+ * `gate`    — watched it clear the barrier; the precise case.
+ * `yard`    — org has no gate recorded, so the old hub radius still applies and
+ *             the wording stays honest about which boundary was crossed.
+ * `bounded` — org HAS a gate but this vehicle was never seen at it.
+ */
+type Precision = 'gate' | 'yard' | 'bounded'
+
+async function announce(p: YardDepartureInput, st: VehicleState, precision: Precision): Promise<void> {
   // Only now, on the transition itself, is a dispatch worth looking up.
   const dispatch = await prisma.dispatch.findFirst({
     where:   { vehicleId: p.vehicleId, actualReturnAt: null },
@@ -102,6 +193,9 @@ export async function trackYardDeparture(p: YardDepartureInput): Promise<void> {
   // No open dispatch: the vehicle is moving, but nothing claimed it was going
   // anywhere. That is not a departure, it is just traffic.
   if (!dispatch) return
+  // A dispatch is announced once. Without this the bounded fallback could
+  // restate — and blunt — a departure the gate had already reported precisely.
+  if (st.announcedFor === dispatch.id) return
 
   const at   = new Date(p.capturedAt)
   const who  = p.driverName ? ` · ${p.driverName}` : ''
@@ -113,30 +207,40 @@ export async function trackYardDeparture(p: YardDepartureInput): Promise<void> {
     ? ` ${Math.round(waitedMs / 60_000)} min after dispatch`
     : ''
 
+  const text =
+    precision === 'gate' ? `${p.plate}${who} left the gate${dest}${waited}.`
+    : precision === 'yard' ? `${p.plate}${who} left the yard${dest}${waited}.`
+    // Never seen at the gate — say what is known and not more. Stamping the
+    // first fix we happened to receive as the departure time would be exactly
+    // the provider's mistake in a different costume.
+    : `${p.plate}${who} has left${dest} — departure time not observed (no fix at the gate).`
+
   await publishNotification({
     orgId:     p.orgId,
-    // Keyed on the DISPATCH, so a vehicle that noses out of the radius and back
-    // on GPS noise updates one row instead of narrating a convoy.
+    // Keyed on the DISPATCH, so a vehicle that noses out and back on GPS noise
+    // updates one row instead of narrating a convoy.
     id:        `yd-${dispatch.id}`,
     source:    'telemetry',
     alertType: 'MOVEMENT_EXIT',
     severity:  'info',
-    text:      `${p.plate}${who} left the yard${dest}${waited}.`,
+    text,
     at,
     plate:     p.plate,
     vehicleId: p.vehicleId,
   })
 
-  logger.debug({ plate: p.plate, dispatch: dispatch.id, waitedMs }, 'Yard departure published')
+  st.announcedFor = dispatch.id
+  st.sawGate = false
+  logger.debug({ plate: p.plate, dispatch: dispatch.id, waitedMs, precision }, 'Gate departure published')
 }
 
-/** Drop cached yard points — for tests and for a hub coordinate being corrected. */
+/** Drop cached org geometry — for tests and for a gate coordinate being corrected. */
 export function invalidateYardCache(orgId?: string): void {
-  if (orgId) yardCache.delete(orgId)
-  else       yardCache.clear()
+  if (orgId) geoCache.delete(orgId)
+  else       geoCache.clear()
 }
 
 /** Forget per-vehicle state. Tests only. */
 export function resetYardPresence(): void {
-  insideYard.clear()
+  state.clear()
 }
