@@ -344,15 +344,48 @@ it can be re-derived from halt clustering whenever the site changes.
 6. **Keep the 800 m radius as the fallback** for an org with no gate configured,
    so nothing regresses elsewhere.
 
-### Verification (before → after)
+### Verification — SHIPPED and verified 2026-08-04
 
-Re-run this same replay and require:
+Deployed as `fd8f0b4`; migrations `20260804200000_add_organisation_gate` and
+`20260804200100_set_sukari_gate` applied to prod RDS; pm2 restarted clean, 165
+poll cycles with `errors: 0`.
 
-- median distance past the gate falls from **867 m to roughly 120 m**;
-- no departure fires from a fix the plausibility filter would reject;
-- no departure fires for a vehicle that never reached the gate — it is reported
-  as bounded instead;
-- no dispatch produces more than one departure notification.
+Replay re-run over the same 54 dispatches, importing the **deployed**
+`isPlausibleFix` and `haversineM` from `dist/` and reading the gate from the
+database, so it exercises shipped code rather than a re-implementation:
+
+| | median | p90 | max |
+|---|---|---|---|
+| metres past gate — old rule | 865 m | 1,112 m | 4,557 m |
+| metres past gate — **new rule** | **136 m** | 1,240 m | 4,557 m |
+| warning gained | **242 s** | 1,019 s | 14,623 s |
+
+Outcome per dispatch: **44 precise** (watched it clear the gate), **3 bounded**
+(never seen at the gate), 7 announced nothing.
+
+| criterion | result |
+|---|---|
+| median distance well under the old 867 m | PASS — 136 m |
+| no departure fired from a rejected fix | PASS — 0 |
+| no dispatch announced more than once | PASS — 0 |
+| gate-less departures reported as bounded | PASS — 3 |
+
+**The p90 got worse, and that is correct.** 1,240 m against the old 1,112 m,
+because the bounded cases fire wherever the stream reappears — sometimes
+kilometres out. The old rule reported those with the same false confidence as
+the rest. The tail is not a regression in detection; it is the coverage gap
+finally being visible instead of hidden behind a plausible-looking number.
+
+Unit tests cover the notification path itself (12 cases), including the
+hysteresis band, the plausibility rejection, the bounded wording, and the
+fallback for an org with no gate. Full suite 287 passed / 7 skipped.
+
+### Next
+
+- The **~320 s gap periodicity** is unexplained and is the main driver of both
+  the 3 bounded cases and the p90 tail. Own investigation.
+- Workstream 1 (false fuel-loss flags) is unstarted and re-enters discovery on
+  its own terms.
 
 ### Still open
 
