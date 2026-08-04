@@ -116,6 +116,28 @@ const schema = z.object({
   // Every 15 minutes. The job executes a Wialon report only for vehicles whose
   // own fuel readings actually moved, so a quiet cycle costs nothing.
   FUEL_SYNC_CRON: z.string().optional().default('*/15 * * * *'),
+
+  // The settle pass — see lib/queues/fuel-events.ts. Each cycle re-reads a
+  // rotating slice of vehicles over a window that has finished maturing and
+  // makes the ledger EQUAL the provider's answer for it, deleting events
+  // Wialon has since retracted. Without it the ledger only ever grows, and
+  // retracted candidates inflated the fuel-loss figure permanently.
+  FUEL_SETTLE_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  // Vehicles per cycle. At the default cadence and ~460 instrumented vehicles
+  // this brings every one round in under six hours, for roughly a minute of
+  // extra Wialon time per cycle. Raise it to converge faster on a box that can
+  // afford it; 0 is the same as disabling the pass.
+  FUEL_SETTLE_BATCH: z.coerce.number().int().nonnegative().optional().default(20),
+
+  // Pump price for costing the fuel ledger (analytics/fuel-cost). NOTHING in
+  // the schema records what fuel cost — a filling stores litres, not money —
+  // so cost is always litres × a price supplied here, and the endpoint echoes
+  // the price it used. The default is the EPRA Nairobi diesel rate; set this
+  // on the box when the rate moves rather than editing the frontend constant
+  // the dashboard used to hardcode. A caller can still override per request.
+  FUEL_PRICE_PER_LITRE: z.coerce.number().positive().optional().default(179.36),
+  FUEL_CURRENCY:        z.string().optional().default('KES'),
 })
 
 // Production must talk to the real (remote) database endpoint. localhost URLs
