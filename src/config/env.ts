@@ -130,6 +130,17 @@ const schema = z.object({
   // afford it; 0 is the same as disabling the pass.
   FUEL_SETTLE_BATCH: z.coerce.number().int().nonnegative().optional().default(20),
 
+  // Completed dispatches → measured Trip rows (lib/queues/trips.ts). The trips
+  // table had no writer once the simulator was retired, so every surface
+  // reading it — the delivery half of Analytics, the Drivers roster, the org
+  // reports — reported zero against a fleet running thousands of dispatches.
+  // Set 'false' on additional instances so only ONE runs it.
+  TRIP_BUILD_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  // Every 10 minutes. A cycle only looks at dispatches closed in a short
+  // trailing window and does nothing when none have closed.
+  TRIP_BUILD_CRON: z.string().optional().default('*/10 * * * *'),
+
   // Pump price for costing the fuel ledger (analytics/fuel-cost). NOTHING in
   // the schema records what fuel cost — a filling stores litres, not money —
   // so cost is always litres × a price supplied here, and the endpoint echoes

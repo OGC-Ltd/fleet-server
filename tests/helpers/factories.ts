@@ -102,6 +102,9 @@ export function makeTrip(overrides: Partial<Trip> = {}): Trip {
     id: id(),
     vehicleId: id(),
     driverId: null,
+    // Null by default: a factory trip is not from a dispatch unless a test says
+    // so. Only trips the builder measured carry this.
+    dispatchId: null,
     reportingPeriodId: id(),
     beganAt: now(),
     endedAt: now(),
