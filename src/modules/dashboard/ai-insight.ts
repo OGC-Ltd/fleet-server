@@ -242,10 +242,27 @@ function collectLiveState(snapshot: SnapRow[]) {
     const leg = v.trip?.leg
     if (leg) legs.set(leg, (legs.get(leg) ?? 0) + 1)
   }
+
+  const online  = snapshot.filter(v => v.connectionOnline === true).length
+  const offline = snapshot.filter(v => v.connectionOnline === false).length
+  /**
+   * Does anything actually know the fleet's connectivity?
+   *
+   * `connectionStatus` reads the poller's in-memory map, so a process that
+   * polls nothing — or one whose sweep has stalled — sees every unit as `null`.
+   * Reported as counts alone that state is indistinguishable from a total
+   * outage, and it read exactly that way: "0 online, 0 in transit", risk High,
+   * for a fleet that was fine. So when nothing is known the counts are withheld
+   * rather than published as zeroes, and the brief is told to stay silent on
+   * connectivity instead of asserting a blackout that is not in evidence.
+   */
+  const connectionKnown = online + offline > 0
+
   return {
     vehicles:      snapshot.length,
-    online:        snapshot.filter(v => v.connectionOnline === true).length,
-    offline:       snapshot.filter(v => v.connectionOnline === false).length,
+    connectionKnown,
+    online:        connectionKnown ? online  : null,
+    offline:       connectionKnown ? offline : null,
     connectionUnknown: snapshot.filter(v => v.connectionOnline == null).length,
     enginesOn:     snapshot.filter(v => v.engineOn).length,
     inTransit:     state('moving'),
@@ -406,6 +423,9 @@ export const SYSTEM_PROMPT =
   'split between `inTransit`, `idling` and `parked` — e.g. "The fleet is working steadily, with 96 units online, ' +
   '41 in transit and 18 idling." Do NOT state the active or total unit counts: the card prints "115/510 active:" ' +
   'immediately before your text, so repeating them reads as a stutter. ' +
+  'If `fleetNow.connectionKnown` is false, `online` and `offline` are null because the poller has no current ' +
+  'answer — SAY NOTHING about connectivity at all, describe the fleet from the movement counts alone, and never ' +
+  'write "0 online", which would assert a fleet-wide blackout that is not in evidence. ' +
   '(2) Today\'s gate movement broken down by destination, from `today.leftGate`, `today.sinceLabel` (use it ' +
   'verbatim) and `today.byDestination` — e.g. "We have had 70 units leave the gate this morning, with 20 going to ' +
   'WEIGHBRIDGE X and 50 going to WEIGHBRIDGE Y." ' +
@@ -478,7 +498,11 @@ async function generateFor(orgId: string): Promise<void> {
       configured: true,
       insight: { msg: parsed.msg, risk, activeCount, totalCount, generatedAt: new Date().toISOString() },
     })
-    logger.info({ orgId, risk }, 'AI insight refreshed')
+    // The TEXT, not just the level. The card is the only place this is
+    // otherwise visible, and that needs a browser and a login — so a brief that
+    // reads badly (a narrated zero, a leaked field name) could not be diagnosed
+    // from the box at all. One line an hour per organisation.
+    logger.info({ orgId, risk, msg: parsed.msg, live: facts.fleetNow }, 'AI insight refreshed')
   } catch (err) {
     logger.warn({ err, orgId }, 'AI insight generation failed — previous brief (or local fallback) stays')
   } finally {
