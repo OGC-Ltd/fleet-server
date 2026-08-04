@@ -54,6 +54,13 @@ const JITTER_FLOOR_M = 20
  */
 const TELEPORT_CEILING_M = 5_000
 
+/**
+ * At or above this a fix counts as moving, for the average-speed calculation.
+ * Kept in step with movement-state's constant of the same name — the two answer
+ * the same question about the same frames and must not disagree.
+ */
+const MOVING_THRESHOLD_KMH = 1
+
 export interface TripBuildResult {
   built:   number
   updated: number
@@ -160,10 +167,26 @@ export async function buildTripsForOrg(
     const durationSeconds = Math.round((endedAt.getTime() - beganAt.getTime()) / 1000)
     const speeds          = fixes.map(f => f.speedKmh).filter((s): s is number => s != null)
     const maxSpeedKmh     = speeds.length ? Math.max(...speeds) : null
-    // Distance over elapsed time, NOT the mean of the speed samples: a truck
-    // that spent nine of nineteen hours loading has an average that has to
-    // include the waiting, or "expected transit time" downstream is nonsense.
-    const avgSpeedKmh     = durationSeconds > 0 ? Math.round((mileageKm / (durationSeconds / 3600)) * 10) / 10 : null
+    /**
+     * Mean speed WHILE MOVING — not distance over elapsed time.
+     *
+     * The difference is not cosmetic, because analytics divides by this to get
+     * a trip's expected transit time and calls the trip interrupted when the
+     * actual duration exceeds twice it. Distance over elapsed time makes that
+     * test tautological: expected = km ÷ (km ÷ hours) = hours, so duration can
+     * never exceed twice itself and EVERY trip reports timely. That is exactly
+     * what the first backfill produced — 428 of 428 — a KPI that had stopped
+     * being a measurement.
+     *
+     * Averaging only the moving samples restores the intended meaning: how long
+     * the run would have taken had it never stopped. A truck that spent nine of
+     * nineteen hours loading then reads as interrupted, which is the whole
+     * point of the metric.
+     */
+    const moving          = speeds.filter(s => s >= MOVING_THRESHOLD_KMH)
+    const avgSpeedKmh     = moving.length
+      ? Math.round((moving.reduce((a, b) => a + b, 0) / moving.length) * 10) / 10
+      : null
 
     out.built++
     if (!opts.apply) continue
