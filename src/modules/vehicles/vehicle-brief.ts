@@ -31,8 +31,11 @@
 
 import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
+import { shortPlaceLabel } from '../../lib/place-label.js'
 import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
+// The SHARED distance measurement, not a second copy of it — see coveredSince.
+import { coveredSince, firstFixClearOfYard } from '../dispatches/dispatch.repository.js'
 import { getOpenTripsCached } from '../dispatches/open-trips.cache.js'
 // The DECORATED snapshot, not fleet-snapshot.cache's raw rows. `driverSource`
 // and `trip` are attached by this service, not by the cached query — reading
@@ -46,14 +49,33 @@ const CACHE_TTL_MS = 10 * 60_000
 /** Bounded, so browsing a 597-vehicle fleet cannot grow this without limit. */
 const CACHE_MAX = 300
 
-/** Fixes closer together than this are GPS jitter, not travel — same floor the
- *  dispatch distance and the track endpoint use. */
-const MIN_SPACING_M = 15
+/** Legs that mean the unit demonstrably left the yard on this run. On the other
+ *  two ('at-yard', 'no-fix') there is no departure to look for. */
+const LEGS_CLEAR_OF_YARD = new Set(['outbound', 'at-destination', 'returning', 'back'])
 
 const FLEET_TZ = 'Africa/Nairobi'
 const clockFmt = new Intl.DateTimeFormat('en-GB', {
   timeZone: FLEET_TZ, hour: '2-digit', minute: '2-digit', hour12: false,
 })
+const dateFmt = new Intl.DateTimeFormat('en-GB', {
+  timeZone: FLEET_TZ, day: '2-digit', month: 'short',
+})
+
+/**
+ * A clock reading that cannot be misread as today's.
+ *
+ * This fleet's median round trip is about nineteen hours, so a bare "20:56"
+ * read at 05:20 says the opposite of what it means. Today's times stay bare;
+ * yesterday's are marked; anything older carries its date outright, because
+ * "yesterday" on a dispatch raised four days ago is just as wrong as no marker
+ * at all.
+ */
+function localStamp(at: Date, dayStart: Date): string {
+  const clock = clockFmt.format(at)
+  if (at >= dayStart) return clock
+  if (at >= new Date(dayStart.getTime() - 86_400_000)) return `${clock} yesterday`
+  return `${clock} on ${dateFmt.format(at)}`
+}
 
 export interface VehicleBrief {
   msg: string
@@ -68,8 +90,18 @@ export interface VehicleBrief {
 export interface VehicleFacts {
   plate: string
   driver: string | null
-  /** 'dispatch' = the person on today's run; 'assignment' = the standing link. */
-  driverSource: 'dispatch' | 'assignment' | null
+  /**
+   * Where the name came from. 'dispatch' = the person on the run that is open
+   * right now; 'assignment' = the standing vehicle→driver link; 'last-dispatch'
+   * = the person on today's run, which has since been closed.
+   *
+   * That third case is not a nicety. Only 95 of Sukari's 597 vehicles carry a
+   * standing assignment, so for the rest the open dispatch is the ONLY thing
+   * naming a driver — and the moment the run closes the vehicle reverted to
+   * "has no driver on record" for the rest of the day, an hour after the feed
+   * had narrated the driver's name twice.
+   */
+  driverSource: 'dispatch' | 'assignment' | 'last-dispatch' | null
   /** Local HH:MM of the first movement today, or of the dispatch if earlier. */
   startedAt: string | null
   startedSource: 'first-movement' | 'dispatch' | null
@@ -78,12 +110,38 @@ export interface VehicleFacts {
   /** Fuel put in today. */
   refuelledLitres: number | null
   refuelCount: number
+  /** Shortened place names — see lib/place-label. */
   refuelLocations: string[]
+  /** The open dispatch's own status — DISPATCHED, OVERDUE. Null when none. */
+  dispatchStatus: string | null
+  /** When the run was RAISED, local. Null when no dispatch is open. */
+  dispatchedAtLocal: string | null
+  /**
+   * When the unit was first seen clear of the yard on this run, local — the
+   * moment it actually left, which is a different fact from when the paperwork
+   * was raised and routinely hours later. Null while it is still in the yard,
+   * has not reported, or the yard has not been surveyed for this org.
+   */
+  leftYardLocal: string | null
+  /** 'gate' = the provider's own EXIT record, the event the Live Feed narrates;
+   *  'telemetry' = derived from the first fix beyond the yard radius. */
+  leftYardSource: 'gate' | 'telemetry' | null
+  /** Hours between the dispatch clock and leaving, when both are known. */
+  yardWaitHours: number | null
   destination: string | null
   leg: string | null
   dueBackAt: string | null
   dueBackLocal: string | null
   dueBackSource: 'provider' | 'history' | null
+  /**
+   * Today's most recent CLOSED run, when nothing is open now. Kept in its own
+   * three fields rather than reusing `destination`/`dispatchedAtLocal`, because
+   * those carry an implicit "it is out there" that a finished run must not
+   * inherit — a unit back in the yard at 09:05 is not "due back 15:20".
+   */
+  lastRunDestination: string | null
+  lastRunDispatchedAtLocal: string | null
+  lastRunReturnedAtLocal: string | null
   speedKmh: number | null
   fuelLevelPct: number | null
   online: boolean | null
@@ -93,6 +151,9 @@ export interface VehicleFacts {
 interface Entry { at: number; brief: VehicleBrief }
 const cache = new Map<string, Entry>()
 const generating = new Map<string, Promise<VehicleBrief>>()
+/** Last time the model was asked about a vehicle, so re-measuring a moving unit
+ *  cannot turn into a completion per page view. See getVehicleBrief. */
+const lastModelAsk = new Map<string, number>()
 
 function remember(key: string, brief: VehicleBrief): void {
   if (cache.size >= CACHE_MAX) {
@@ -106,48 +167,22 @@ function remember(key: string, brief: VehicleBrief): void {
 // ── facts ───────────────────────────────────────────────────────────────────
 
 /**
- * The day's distance and first movement, in one query.
+ * The day's distance and first movement.
  *
- * Ground covered through the real fixes since local midnight, hops under
- * MIN_SPACING_M dropped — a parked unit's GPS jitter would otherwise
- * accumulate kilometres of "travel" while it stood still, and this number is
- * about to be read out to an operator as fact.
+ * Deliberately NOT its own query. This module used to carry a hand-copied twin
+ * of `coveredSince`, and the twin bound its lower bound as a driver parameter
+ * where the original writes a naive-UTC TIMESTAMP literal — `captured_at` is
+ * `timestamp without time zone` holding UTC, so the two windows agree only on a
+ * UTC session and diverge by the session offset anywhere else. One query, one
+ * window, one number, and no second definition to keep in step.
  */
 async function movementToday(vehicleId: string, since: Date) {
-  const rows = await prisma.$queryRaw<{
-    covered_m: number | null; first_moving_at: Date | null; fixes: bigint
-  }[]>`
-    WITH fixes AS (
-      SELECT captured_at, speed_kmh, lat, lng,
-             LAG(lat) OVER w AS prev_lat,
-             LAG(lng) OVER w AS prev_lng
-        FROM vehicle_telemetries
-       WHERE vehicle_id = ${vehicleId}
-         AND captured_at >= ${since}
-         AND lat IS NOT NULL AND lng IS NOT NULL
-      WINDOW w AS (ORDER BY captured_at)
-    ),
-    hops AS (
-      SELECT captured_at, speed_kmh,
-             CASE WHEN prev_lat IS NULL THEN 0 ELSE
-               2 * 6371000 * asin(sqrt(
-                 power(sin(radians(lat - prev_lat) / 2), 2) +
-                 cos(radians(prev_lat)) * cos(radians(lat)) *
-                 power(sin(radians(lng - prev_lng) / 2), 2)
-               ))
-             END AS hop_m
-        FROM fixes
-    )
-    SELECT COALESCE(SUM(CASE WHEN hop_m >= ${MIN_SPACING_M} THEN hop_m ELSE 0 END), 0) AS covered_m,
-           MIN(captured_at) FILTER (WHERE speed_kmh > 0) AS first_moving_at,
-           COUNT(*) AS fixes
-      FROM hops
-  `
-  const r = rows[0]
+  const byVehicle = await coveredSince([{ vehicleId, since }])
+  const r = byVehicle.get(vehicleId)
   return {
-    coveredM:      r?.covered_m != null ? Number(r.covered_m) : null,
-    firstMovingAt: r?.first_moving_at ?? null,
-    fixes:         Number(r?.fixes ?? 0),
+    coveredM:      r?.coveredM ?? null,
+    firstMovingAt: r?.firstMovingAt ?? null,
+    fixes:         r?.fixCount ?? 0,
   }
 }
 
@@ -177,17 +212,39 @@ async function collectFacts(orgId: string, vehicleId: string): Promise<VehicleFa
   // figures the operator is looking at.
   const tripRow = (row as { trip?: { leg?: string; distanceTodayKm?: number | null } | null } | undefined)?.trip ?? null
 
+  const dispatchedAt = trip ? new Date(trip.dispatchedAt) : null
+
+  // Today's run, after it has been closed.
+  //
+  // Only asked when nothing is open, and it answers the question the brief was
+  // getting wrong: who drove this vehicle today. The open dispatch is the only
+  // thing that names a driver for 502 of the 597 vehicles — there is no standing
+  // assignment for them — so the moment a run completed, the unit went back to
+  // reading "has no driver on record" while the Live Feed above it still carried
+  // that driver's name against the same plate. The dispatch row does not vanish
+  // when it closes; nothing was ever looking at it.
+  const lastRun = trip ? null : await prisma.dispatch.findFirst({
+    where: {
+      organisationId: orgId,
+      vehicleId,
+      dispatchedAt:   { gte: dayStart },
+    },
+    orderBy: { dispatchedAt: 'desc' },
+    select:  { driverName: true, destination: true, dispatchedAt: true, actualReturnAt: true },
+  })
+
   // Whichever came first: the wheels turning, or the paperwork. A unit can be
   // dispatched hours before it leaves, and it can also be working since dawn
-  // with no dispatch raised at all.
-  const dispatchedAt = trip ? new Date(trip.dispatchedAt) : null
+  // with no dispatch raised at all. A closed run's clock counts here too — the
+  // vehicle was working from it either way.
+  const clockedOnAt  = dispatchedAt ?? lastRun?.dispatchedAt ?? null
   const firstMoving  = movement.firstMovingAt
   let startedAt: Date | null = null
   let startedSource: VehicleFacts['startedSource'] = null
-  if (firstMoving && (!dispatchedAt || firstMoving < dispatchedAt)) {
+  if (firstMoving && (!clockedOnAt || firstMoving < clockedOnAt)) {
     startedAt = firstMoving; startedSource = 'first-movement'
-  } else if (dispatchedAt) {
-    startedAt = dispatchedAt; startedSource = 'dispatch'
+  } else if (clockedOnAt) {
+    startedAt = clockedOnAt; startedSource = 'dispatch'
   } else if (firstMoving) {
     startedAt = firstMoving; startedSource = 'first-movement'
   }
@@ -195,16 +252,60 @@ async function collectFacts(orgId: string, vehicleId: string): Promise<VehicleFa
   const refuelledMl = fills.reduce((s, f) => s + f.filledMl, 0)
   const capturedAt  = (row as { capturedAt?: string | null } | undefined)?.capturedAt ?? null
 
+  // When it actually LEFT, as opposed to when the run was raised.
+  //
+  // The provider's own gate record first. It records an EXIT crossing and the
+  // Live Feed already narrates it — "KTCB 474R · ISAAC KIPLANGAT NGENO left the
+  // yard to KANYALGANDA" — so taking the same event means the brief and the
+  // feed cannot put the same departure at two different times, which is the
+  // whole complaint that started this. Matched on vehicle OR plate because the
+  // movement handler publishes a plate and does not always resolve the cuid.
+  //
+  // Telemetry second, and only once the trip geometry agrees the unit has in
+  // fact left: while the leg is 'at-yard' the first fix outside the radius
+  // would be a piece of GPS scatter, and on 'no-fix' there is nothing to
+  // measure at all.
+  //
+  // Costs at most two queries, and only for a vehicle that is out — the brief
+  // is generated on demand for a unit somebody clicked, then cached.
+  let leftYardAt: Date | null = null
+  let leftYardSource: VehicleFacts['leftYardSource'] = null
+  if (dispatchedAt) {
+    const gate = await prisma.notification.findFirst({
+      where: {
+        organisationId: orgId,
+        alertType:      'MOVEMENT_EXIT',
+        occurredAt:     { gte: dispatchedAt },
+        OR: [{ vehicleId }, { plate: vehicle.registrationPlate }],
+      },
+      orderBy: { occurredAt: 'asc' },
+      select:  { occurredAt: true },
+    })
+    if (gate) {
+      leftYardAt = gate.occurredAt
+      leftYardSource = 'gate'
+    } else if (trips.yard && tripRow?.leg && LEGS_CLEAR_OF_YARD.has(tripRow.leg)) {
+      leftYardAt = await firstFixClearOfYard(vehicleId, dispatchedAt, trips.yard)
+      if (leftYardAt) leftYardSource = 'telemetry'
+    }
+  }
+
+  // Open dispatch, then standing assignment, then TODAY'S CLOSED RUN. The
+  // snapshot already decides between the first two; the third is this module's,
+  // and it is the difference between naming the person who drove the vehicle
+  // this morning and telling the operator we have no idea who it was.
+  const snapDriver = (row as { driver?: string | null } | undefined)?.driver ?? trip?.driverName ?? null
+  const driver = snapDriver ?? lastRun?.driverName ?? null
+  const driverSource: VehicleFacts['driverSource'] = snapDriver
+    ? ((row as { driverSource?: VehicleFacts['driverSource'] } | undefined)?.driverSource ?? null)
+    : (lastRun?.driverName ? 'last-dispatch' : null)
+
   return {
     plate:        vehicle.registrationPlate,
-    driver:       (row as { driver?: string | null } | undefined)?.driver ?? trip?.driverName ?? null,
-    driverSource: (row as { driverSource?: VehicleFacts['driverSource'] } | undefined)?.driverSource ?? null,
-    // Marked when it is not today's clock. A run that crossed local midnight
-    // is common here (the median round trip is about nineteen hours), and a
-    // bare "since 20:56" read at 05:20 says the opposite of what it means.
-    startedAt: startedAt
-      ? clockFmt.format(startedAt) + (startedAt < dayStart ? ' yesterday' : '')
-      : null,
+    driver,
+    driverSource,
+    // Dated when it is not today's clock — see localStamp.
+    startedAt: startedAt ? localStamp(startedAt, dayStart) : null,
     startedSource,
     // The SAME number the Active Trip card shows, taken from the same object
     // whenever the vehicle is on a trip.
@@ -224,7 +325,30 @@ async function collectFacts(orgId: string, vehicleId: string): Promise<VehicleFa
             : null),
     refuelledLitres: fills.length ? Math.round(refuelledMl / 100) / 10 : null,
     refuelCount:     fills.length,
-    refuelLocations: [...new Set(fills.map(f => f.location).filter(Boolean) as string[])],
+    // Shortened before they ever reach the card OR the model. The provider
+    // records a full administrative address — "Ndhiwa-Uriri Rd., Kenya,
+    // Kanyikela Ward, Ndhiwa Sub County, Homa Bay County, Riat Centre" — and a
+    // two-sentence brief cannot spend a line and a half saying where Kenya is.
+    // De-duped AFTER shortening, because two addresses in the same ward
+    // collapse to the same label.
+    refuelLocations: [...new Set(
+      fills.map(f => shortPlaceLabel(f.location)).filter(Boolean) as string[],
+    )],
+    dispatchStatus:    trip?.status ?? null,
+    dispatchedAtLocal: dispatchedAt ? localStamp(dispatchedAt, dayStart) : null,
+    leftYardLocal:     leftYardAt ? localStamp(leftYardAt, dayStart) : null,
+    leftYardSource,
+    // How long it stood after the paperwork. Only quoted when both ends are
+    // measured AND the gap survives rounding to a tenth of an hour: the gate
+    // often fires within a minute of the dispatch being raised, and "it left
+    // the yard at 04:45, 0 h after being dispatched" is a sentence that spends
+    // eight words to say nothing. Negative is not a wait either — it means the
+    // unit was already out when the run was raised.
+    yardWaitHours: (() => {
+      if (!dispatchedAt || !leftYardAt || leftYardAt <= dispatchedAt) return null
+      const h = Math.round((leftYardAt.getTime() - dispatchedAt.getTime()) / 360_000) / 10
+      return h >= 0.1 ? h : null
+    })(),
     destination:   trip?.destination ?? null,
     // The leg comes off the SNAPSHOT's trip, not the raw dispatch: it is the
     // geometry decision (has it left, has it arrived, is it coming back) and
@@ -234,6 +358,12 @@ async function collectFacts(orgId: string, vehicleId: string): Promise<VehicleFa
     dueBackAt:     trip?.dueBackAt ?? null,
     dueBackLocal:  trip?.dueBackAt ? clockFmt.format(new Date(trip.dueBackAt)) : null,
     dueBackSource: trip?.dueBackSource ?? null,
+    lastRunDestination:       lastRun?.destination ?? null,
+    lastRunDispatchedAtLocal: lastRun ? localStamp(lastRun.dispatchedAt, dayStart) : null,
+    // Only when the provider actually closed it. A dispatch that is neither
+    // open nor returned is paperwork in an unknown state, and saying "back at
+    // —" would be worse than saying nothing.
+    lastRunReturnedAtLocal:   lastRun?.actualReturnAt ? localStamp(lastRun.actualReturnAt, dayStart) : null,
     speedKmh:      (row as { speedKmh?: number | null } | undefined)?.speedKmh ?? null,
     fuelLevelPct:  (row as { fuelLevelPct?: number | null } | undefined)?.fuelLevelPct ?? null,
     online:        (row as { connectionOnline?: boolean | null } | undefined)?.connectionOnline ?? null,
@@ -263,8 +393,14 @@ const LEG_PHRASE: Record<string, string> = {
 export function buildFallback(f: VehicleFacts): string {
   const parts: string[] = []
 
+  // Past tense for a run that has finished. "KTCC 832B is with PETER OUMA
+  // ODIEGI" is a claim about right now, and the vehicle has been parked in the
+  // yard since 09:05 — the name is still the answer to "who drove it today",
+  // which is what the brief is for, but the tense has to say so.
   const who = f.driver
-    ? `${f.plate} is with ${f.driver}${f.driverSource === 'dispatch' ? ' on today\'s dispatch' : ''}`
+    ? (f.driverSource === 'last-dispatch'
+        ? `${f.plate} was with ${f.driver} on today's run`
+        : `${f.plate} is with ${f.driver}${f.driverSource === 'dispatch' ? ' on today\'s dispatch' : ''}`)
     : `${f.plate} has no driver on record`
   parts.push(f.startedAt ? `${who}, since ${f.startedAt}.` : `${who}.`)
 
@@ -275,11 +411,38 @@ export function buildFallback(f: VehicleFacts): string {
   }
   if (did.length) parts.push(`It has ${did.join(' and ')}.`)
 
-  if (f.destination) {
+  // The run. "Dispatched" leads when we have the clock: "Sent to OPAPO" is a
+  // standing fact about the vehicle, while "Dispatched 06:10 to OPAPO" is the
+  // one an operator reconstructing the day is actually asking for.
+  const onARun = Boolean(f.destination || f.dispatchedAtLocal)
+  if (onARun) {
+    const overdue = f.dispatchStatus === 'OVERDUE' ? ' (overdue)' : ''
+    const where   = f.destination ?? 'a destination the dispatcher did not record'
+    const head    = f.dispatchedAtLocal
+      ? `Dispatched ${f.dispatchedAtLocal} to ${where}${overdue}`
+      : `Sent to ${where}${overdue}`
     const leg = f.leg ? LEG_PHRASE[f.leg] : null
     parts.push(leg
-      ? `Sent to ${f.destination} and ${leg}${f.dueBackLocal ? `; due back ${f.dueBackLocal}` : ''}.`
-      : `Sent to ${f.destination}${f.dueBackLocal ? `, due back ${f.dueBackLocal}` : ''}.`)
+      ? `${head} and ${leg}${f.dueBackLocal ? `; due back ${f.dueBackLocal}` : ''}.`
+      : `${head}${f.dueBackLocal ? `, due back ${f.dueBackLocal}` : ''}.`)
+
+    // Leaving is a separate event from being dispatched, and on this fleet the
+    // gap between them is the thing worth knowing — a quarter of the units
+    // carrying an open dispatch are still standing in the yard.
+    if (f.leftYardLocal) {
+      parts.push(f.yardWaitHours != null
+        ? `It left the yard at ${f.leftYardLocal}, ${f.yardWaitHours} h after being dispatched.`
+        : `It left the yard at ${f.leftYardLocal}.`)
+    }
+  } else if (f.lastRunDestination || f.lastRunReturnedAtLocal) {
+    // Nothing open, but it did work today. "No dispatch open" was technically
+    // true and read as "this unit has done nothing", which for a tractor that
+    // ran to OGANDO CENTRAL and came back at 09:05 is the opposite of the truth.
+    const where = f.lastRunDestination ? ` to ${f.lastRunDestination}` : ''
+    const out   = f.lastRunDispatchedAtLocal ? `, out ${f.lastRunDispatchedAtLocal}` : ''
+    parts.push(f.lastRunReturnedAtLocal
+      ? `It ran${where} today${out}, and was back at ${f.lastRunReturnedAtLocal}. Nothing open now.`
+      : `Today's run${where}${out} is closed on the provider's books, with no return time recorded.`)
   } else if (f.lastReportedLocal) {
     parts.push(`No dispatch open; last reported ${f.lastReportedLocal}.`)
   }
@@ -289,14 +452,70 @@ export function buildFallback(f: VehicleFacts): string {
 
 const SYSTEM_PROMPT =
   'You brief the duty operator of a Kenyan haulage fleet on ONE vehicle. You receive a JSON object of ' +
-  'MEASURED facts about that vehicle today. Write 2-3 short sentences, at most 55 words, in this shape: ' +
-  'who is driving and since when, what the vehicle has done today (distance covered, fuel taken on), ' +
-  'where it was sent and when it is due back at base. ' +
+  'MEASURED facts about that vehicle today. Write 3-4 short sentences, at most 75 words, in this shape: ' +
+  'which vehicle and who is driving it and since when, what the vehicle has done today (distance covered, ' +
+  'fuel taken on), the dispatch it is on — when it was dispatched (dispatchedAtLocal), where to, and when it ' +
+  'actually left the yard (leftYardLocal, with yardWaitHours as the gap between the two) — and when it is due ' +
+  'back at base. ' +
+  'NAME THE VEHICLE AND THE DRIVER. Open with the `plate`, and whenever `driver` is a name, write that name out ' +
+  'in full and EXACTLY as spelled in the JSON — never re-spell it, shorten it, or replace it with a description. ' +
+  'Never call a fact unreported when the JSON contains it. ' +
+  'When driverSource is "last-dispatch" the run has already finished, so write about the driver and the run in ' +
+  'the PAST tense: that person drove it today, and it is back. In that case there is no destination, leg or due ' +
+  'back — use lastRunDestination, lastRunDispatchedAtLocal and lastRunReturnedAtLocal instead, and do not imply ' +
+  'the vehicle is still out. ' +
+  'A null means the fleet does not know that fact: SAY NOTHING ABOUT IT AT ALL. Do not write "not reported", ' +
+  '"no data", "unknown", "not recorded" or any other phrase announcing an absence — a shorter brief is the ' +
+  'correct output, and an operator reading a list of things we failed to measure learns nothing. ' +
   'CRITICAL: use ONLY numbers present in the JSON. Never estimate, extrapolate, round differently, or invent a ' +
-  'figure that is not there — a null means the fleet does not know it, so SAY nothing about it or say it is not ' +
-  'reported. Do not add advice, praise, or speculation about causes. Plain declarative sentences, no markdown, ' +
-  'no preamble, no bullet points. If dueBackSource is "history", say the return time is estimated from past runs. ' +
+  'figure that is not there. In particular quote distanceTodayKm EXACTLY as given; it is the same figure the ' +
+  'operator sees on the vehicle card and the two must match to the decimal. Place names in refuelLocations are ' +
+  'already shortened — use them verbatim and do not expand them. Do not add advice, praise, or speculation ' +
+  'about causes. Write complete declarative sentences, not a list of labelled fields; no markdown, no preamble, ' +
+  'no bullet points. If dueBackSource is "history", say the return time is estimated from past runs. ' +
   'Reply with STRICT JSON: {"msg": string}.'
+
+/** Phrases that announce an absence. The brief must omit what it does not know,
+ *  not narrate it — see the prompt. */
+const ABSENCE_PHRASE = /\b(not (reported|recorded|available|known|provided)|no data|unknown|unreported|n\/?a)\b/i
+
+/**
+ * Is the model's sentence a faithful rendering of the facts it was given?
+ *
+ * The contract of this module is that the model buys PHRASING, not information.
+ * A brief that drops a fact we measured, or announces one we did not, has broken
+ * that contract and is worse than the deterministic sentence — an operator who
+ * reads "driver not reported" beside a card showing the driver's name stops
+ * trusting both. There is already a complete answer to fall back to, so the bar
+ * for accepting the model's version is that it lost nothing.
+ *
+ * Checks what is cheap and unambiguous: the driver's name and the day's
+ * distance must appear when we know them, and no absence phrase may appear at
+ * all. Returns the reason it failed, or null when it passed, so the rejection
+ * is diagnosable in the log rather than silent.
+ */
+export function modelBriefRejectionReason(msg: string, f: VehicleFacts): string | null {
+  const absence = msg.match(ABSENCE_PHRASE)
+  if (absence) return `narrates an absence ("${absence[0]}")`
+
+  // Matched case-insensitively on the whole name. The provider writes these in
+  // upper case and a model reasonably renders them in title case.
+  if (f.driver && !msg.toLowerCase().includes(f.driver.toLowerCase())) {
+    return 'omits the driver we know'
+  }
+
+  // The figure that must agree with the vehicle card, to the decimal.
+  if (f.distanceTodayKm != null) {
+    const shown = String(f.distanceTodayKm)
+    // Bounded so "0.1" does not match inside "10.1", and "32" does not match
+    // inside "32.4" — the near-miss is exactly the failure worth catching.
+    if (!new RegExp(`(^|[^\\d.])${shown.replace('.', '\\.')}([^\\d.]|$)`).test(msg)) {
+      return `does not quote distanceTodayKm (${shown})`
+    }
+  }
+
+  return null
+}
 
 async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
   const fallback = (): VehicleBrief => ({
@@ -326,6 +545,22 @@ async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
     const body   = await res.json() as { choices?: { message?: { content?: string } }[] }
     const parsed = JSON.parse(body.choices?.[0]?.message?.content ?? '{}') as { msg?: string }
     if (!parsed.msg) throw new Error('empty brief from model')
+
+    // Accepted only if it kept every fact it was given. A prompt is a request,
+    // not a guarantee: measured in production, the model returned "Driver
+    // FREDRICK OCHIENG ONGOLA since 07:45. Distance today: 0.1 km; fuel data
+    // not reported… yard wait hours not reported" — a field dump that spent
+    // half its words on things nobody measured. The deterministic sentence is
+    // strictly better than that, and it is already written.
+    const reason = modelBriefRejectionReason(parsed.msg, facts)
+    if (reason) {
+      logger.warn(
+        { plate: facts.plate, reason, msg: parsed.msg },
+        'Vehicle brief: model reply rejected — the facts-only brief stands',
+      )
+      return fallback()
+    }
+
     return { msg: parsed.msg, source: 'model', generatedAt: new Date().toISOString(), facts }
   } catch (err) {
     logger.warn({ err, plate: facts.plate }, 'Vehicle brief: model failed — the facts-only brief stands')
@@ -349,13 +584,21 @@ async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
  * improves; if it never does, nobody waited for it.
  *
  * Cached for CACHE_TTL_MS, and concurrent callers for one vehicle share a
- * single generation rather than each firing a completion.
+ * single generation rather than each firing a completion — but the cache is
+ * ALSO dropped early whenever the day's distance has moved on underneath it,
+ * because that figure is printed twice on the same screen (here and on the
+ * Active Trip card, which refreshes every sweep) and a ten-minute-old brief
+ * quoting 0.4 km beside a card reading 3.1 km is the operator's problem.
+ * Re-measuring does not re-ask the model — see lastModelAsk — so a unit driving
+ * all afternoon costs the same completions as one standing still.
  */
 export async function getVehicleBrief(orgId: string, vehicleId: string): Promise<VehicleBrief> {
   const key = `${orgId}:${vehicleId}`
 
   const hit = cache.get(key)
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.brief
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS && await distanceStillAgrees(orgId, vehicleId, hit.brief)) {
+    return hit.brief
+  }
 
   const inflight = generating.get(key)
   if (inflight) return inflight
@@ -371,7 +614,14 @@ export async function getVehicleBrief(orgId: string, vehicleId: string): Promise
 
     // Detached. A failure here is logged inside askModel and leaves the facts
     // brief in place, which is a complete answer in its own right.
-    if (env.OPENAI_API_KEY) {
+    //
+    // Rate-limited independently of the cache. A moving vehicle now
+    // re-measures on every view (the distance check above), and without this
+    // gate each of those would buy a completion for a sentence that differs
+    // from the last one by a decimal point.
+    const askedAt = lastModelAsk.get(key) ?? 0
+    if (env.OPENAI_API_KEY && Date.now() - askedAt >= CACHE_TTL_MS) {
+      lastModelAsk.set(key, Date.now())
       void askModel(facts)
         .then((brief) => { if (brief.source === 'model') remember(key, brief) })
         .catch(() => { /* askModel already fell back and logged */ })
@@ -382,4 +632,31 @@ export async function getVehicleBrief(orgId: string, vehicleId: string): Promise
 
   generating.set(key, p)
   return p
+}
+
+/**
+ * Does a cached brief still quote the distance the vehicle card is showing?
+ *
+ * Reads the warm open-trips cache — in memory, no query — and compares the
+ * figure the Active Trip card is rendering right now against the one baked
+ * into the cached sentence. `true` for a vehicle with no open trip: there is no
+ * card figure to contradict, so the brief's own measurement stands until the
+ * TTL expires.
+ */
+async function distanceStillAgrees(
+  orgId: string, vehicleId: string, brief: VehicleBrief,
+): Promise<boolean> {
+  try {
+    const { byVehicle } = await getOpenTripsCached(orgId)
+    const open = byVehicle.get(vehicleId)
+    if (!open || open.distanceTodayM == null) return true
+    // Same conversion buildTrip applies, so this compares the rendered value
+    // rather than one derived a second way.
+    const live = Math.round(open.distanceTodayM / 100) / 10
+    return brief.facts.distanceTodayKm === live
+  } catch {
+    // The cache is unavailable — serve what we have rather than hammering the
+    // database to prove a figure we cannot currently read.
+    return true
+  }
 }

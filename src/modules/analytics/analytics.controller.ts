@@ -1,9 +1,12 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
+import { env } from '../../config/env.js'
 import * as repo from './analytics.repository.js'
 import { getDriversOverview, DEFAULT_DRIVER_WINDOW_DAYS } from './drivers-overview.cache.js'
 import { getDeliveriesAnalytics } from './deliveries.cache.js'
-import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics.schema.js'
+import { getFuelConsumption } from './fuel-cost.cache.js'
+import { priceFuelConsumption } from './fuel-pricing.js'
+import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery, FuelCostQuery } from './analytics.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -30,6 +33,31 @@ export const fuelEfficiency: RequestHandler = async (req, res, next) => {
   try {
     const data = await repo.fuelEfficiency(p(req, 'orgId'), req.query as unknown as AnalyticsRange)
     sendSuccess(res, data)
+  } catch (err) { next(err) }
+}
+
+/**
+ * Fuel put in, fuel lost, and what both cost — from the FuelFilling/FuelTheft
+ * ledger rather than the telemetry channel /fuel-efficiency reads (which this
+ * fleet's trackers leave empty).
+ *
+ * Litres are measured; money is litres × a rate. The rate is the server's
+ * configured pump price unless the caller overrides it, and it is echoed in the
+ * payload so a client never has to assume one.
+ */
+export const fuelCost: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as FuelCostQuery
+    // Same split as `deliveries`: trailing windows serve from the warmed cache,
+    // an explicit `to` anchor is an unbounded key space so it computes live.
+    const data = q.to
+      ? await repo.fuelConsumption(p(req, 'orgId'), q)
+      : await getFuelConsumption(p(req, 'orgId'), q.days)
+    sendSuccess(res, priceFuelConsumption(data, {
+      pricePerLitre: q.pricePerLitre ?? env.FUEL_PRICE_PER_LITRE,
+      currency:      env.FUEL_CURRENCY,
+      source:        q.pricePerLitre == null ? 'configured' : 'request',
+    }))
   } catch (err) { next(err) }
 }
 

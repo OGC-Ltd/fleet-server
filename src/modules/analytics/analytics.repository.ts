@@ -182,6 +182,115 @@ export async function fuelEfficiency(orgId: string, q: AnalyticsRange) {
   }))
 }
 
+/**
+ * Fuel actually PUT IN and actually LOST over the trailing `days` window, from
+ * the FuelFilling + FuelTheft ledger the Wialon fuel sync persists.
+ *
+ * Why not `fuelEfficiency` above: that one sums `VehicleTelemetry.fuelUsedMl`,
+ * a channel this fleet's trackers never populate — it returns [] in production.
+ * The ledger is the only fuel source with real rows in it, and it is the one an
+ * operator can reconcile against receipts.
+ *
+ * Quantities only, deliberately: no money. Costing needs a price, no price is
+ * persisted anywhere, and mixing one in here would put the price in the warm
+ * cache key. See fuel-pricing.ts — the controller prices this payload on the
+ * way out, so the cached aggregate is shared by every caller whatever rate
+ * they asked for.
+ */
+export async function fuelConsumption(orgId: string, q: DeliveriesQuery) {
+  // Window and anchoring follow deliveriesAnalytics exactly — same calendar
+  // days in the fleet's timezone, same "later of now and the newest row"
+  // anchor, so the two dashboards can never disagree about what "30 days" is.
+  let anchor = q.to ?? new Date()
+  if (!q.to) {
+    const latest = await prisma.fuelFilling.aggregate({
+      where: { vehicle: { organisationId: orgId } },
+      _max:  { filledAt: true },
+    })
+    if (latest._max.filledAt && latest._max.filledAt > anchor) anchor = latest._max.filledAt
+  }
+  const anchorDayStart = new Date(`${fleetDayKey(anchor)}T00:00:00${FLEET_TZ_OFFSET}`)
+  const from = new Date(anchorDayStart.getTime() - (q.days - 1) * 86_400_000)
+  const to   = new Date(anchorDayStart.getTime() + 86_400_000 - 1)
+  const windowDays = Array.from({ length: q.days }, (_, i) =>
+    fleetDayKey(new Date(from.getTime() + i * 86_400_000)))
+
+  const vehicleSelect = { select: { registrationPlate: true, name: true } }
+  const [fillings, thefts] = await Promise.all([
+    prisma.fuelFilling.findMany({
+      where:  { vehicle: { organisationId: orgId }, filledAt: { gte: from, lte: to } },
+      select: { vehicleId: true, filledAt: true, filledMl: true, vehicle: vehicleSelect },
+      orderBy: { filledAt: 'asc' },
+    }),
+    // A drain is dated by when it BEGAN, not when the probe caught it: a theft
+    // that starts at 23:50 and is detected at 00:05 belongs to the night it
+    // happened, which is the day an operator will go looking for it.
+    prisma.fuelTheft.findMany({
+      where:  { vehicle: { organisationId: orgId }, beganAt: { gte: from, lte: to } },
+      select: { vehicleId: true, beganAt: true, stolenMl: true, vehicle: vehicleSelect },
+      orderBy: { beganAt: 'asc' },
+    }),
+  ])
+
+  interface Bucket { filledMl: number; stolenMl: number; fillings: number; thefts: number }
+  const empty = (): Bucket => ({ filledMl: 0, stolenMl: 0, fillings: 0, thefts: 0 })
+  const byDay     = new Map<string, Bucket>()
+  const byVehicle = new Map<string, Bucket & { registrationPlate: string | null; name: string | null }>()
+
+  const vehicleBucket = (id: string, v: { registrationPlate: string | null; name: string | null }) => {
+    let e = byVehicle.get(id)
+    if (!e) { e = { ...empty(), registrationPlate: v.registrationPlate, name: v.name }; byVehicle.set(id, e) }
+    return e
+  }
+  const dayBucket = (key: string) => {
+    let e = byDay.get(key)
+    if (!e) { e = empty(); byDay.set(key, e) }
+    return e
+  }
+
+  let totalFilledMl = 0, totalStolenMl = 0
+  for (const f of fillings) {
+    const d = dayBucket(fleetDayKey(f.filledAt)); d.filledMl += f.filledMl; d.fillings += 1
+    const v = vehicleBucket(f.vehicleId, f.vehicle); v.filledMl += f.filledMl; v.fillings += 1
+    totalFilledMl += f.filledMl
+  }
+  for (const t of thefts) {
+    const d = dayBucket(fleetDayKey(t.beganAt)); d.stolenMl += t.stolenMl; d.thefts += 1
+    const v = vehicleBucket(t.vehicleId, t.vehicle); v.stolenMl += t.stolenMl; v.thefts += 1
+    totalStolenMl += t.stolenMl
+  }
+
+  // Days that saw ANY fuel movement — the zero-filled series below is
+  // presentation, so a per-day average must not divide by quiet days.
+  const activeDays = byDay.size
+
+  return {
+    totals: {
+      filledMl:   totalFilledMl,
+      stolenMl:   totalStolenMl,
+      fillings:   fillings.length,
+      thefts:     thefts.length,
+      windowDays: q.days,
+      activeDays,
+    },
+    // One entry per window day, oldest→newest, zeroed where no fuel moved.
+    byDay: windowDays.map((day) => {
+      const v = byDay.get(day) ?? empty()
+      return { day, filledMl: v.filledMl, stolenMl: v.stolenMl, fillings: v.fillings, thefts: v.thefts }
+    }),
+    // Thirstiest first — that is the order the operator wants to read.
+    byVehicle: [...byVehicle].map(([vehicleId, v]) => ({
+      vehicleId,
+      registrationPlate: v.registrationPlate,
+      name:              v.name,
+      filledMl:          v.filledMl,
+      stolenMl:          v.stolenMl,
+      fillings:          v.fillings,
+      thefts:            v.thefts,
+    })).sort((a, b) => b.filledMl - a.filledMl),
+  }
+}
+
 export async function speedingEvents(orgId: string, q: SpeedingQuery) {
   const pings = await prisma.vehicleTelemetry.findMany({
     where: {

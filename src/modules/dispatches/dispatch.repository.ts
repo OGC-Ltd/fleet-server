@@ -38,7 +38,7 @@
  */
 
 import { prisma } from '../../lib/prisma.js'
-import { arrivalRadiusM } from '../../lib/dispatch-trip.js'
+import { arrivalRadiusM, YARD_RADIUS_M, type Point } from '../../lib/dispatch-trip.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 
 const OPEN_STATUSES = ['DISPATCHED', 'OVERDUE']
@@ -362,12 +362,21 @@ export async function destinationDurations(
  *
  * Haversine in SQL, not PostGIS: the extension is not installed, and at these
  * distances the sphere is accurate to a few metres.
+ *
+ * EXPORTED because it is the fleet's ONE definition of "ground covered". The
+ * per-vehicle brief used to carry its own copy of this SQL, and the copy bound
+ * its lower bound as a driver parameter rather than as the naive-UTC TIMESTAMP
+ * literal below — two statements measuring the same truck, agreeing only by
+ * inspection and only on a UTC session. There is now one query, and it cannot
+ * drift from itself.
  */
-async function coveredSince(
+export async function coveredSince(
   pairs: { vehicleId: string; since: Date }[],
 ): Promise<Map<string, {
   coveredM: number; fixCount: number; firstFixAt: Date; lastFixAt: Date
   firstLat: number | null; firstLng: number | null
+  /** Earliest fix in the window reporting a non-zero speed, or null. */
+  firstMovingAt: Date | null
 }>> {
   if (pairs.length === 0) return new Map()
 
@@ -389,11 +398,11 @@ async function coveredSince(
 
   const rows = await prisma.$queryRawUnsafe<{
     vehicle_id: string; covered_m: number; fix_count: bigint; first_fix: Date; last_fix: Date
-    first_lat: number | null; first_lng: number | null
+    first_lat: number | null; first_lng: number | null; first_moving: Date | null
   }[]>(`
     WITH bounds(vehicle_id, since) AS (VALUES ${sinceCase}),
     fixes AS (
-      SELECT t.vehicle_id, t.captured_at, t.lat, t.lng,
+      SELECT t.vehicle_id, t.captured_at, t.lat, t.lng, t.speed_kmh,
              LAG(t.lat) OVER w AS prev_lat,
              LAG(t.lng) OVER w AS prev_lng
         FROM vehicle_telemetries t
@@ -403,7 +412,7 @@ async function coveredSince(
       WINDOW w AS (PARTITION BY t.vehicle_id ORDER BY t.captured_at)
     ),
     hops AS (
-      SELECT vehicle_id, captured_at, lat, lng,
+      SELECT vehicle_id, captured_at, lat, lng, speed_kmh,
              CASE WHEN prev_lat IS NULL THEN 0 ELSE
                2 * 6371000 * asin(sqrt(
                  power(sin(radians(lat - prev_lat) / 2), 2) +
@@ -422,7 +431,11 @@ async function coveredSince(
            -- latitude and the minimum longitude in the set are two different
            -- fixes, and together they name a place the vehicle was never at.
            (array_agg(lat ORDER BY captured_at))[1] AS first_lat,
-           (array_agg(lng ORDER BY captured_at))[1] AS first_lng
+           (array_agg(lng ORDER BY captured_at))[1] AS first_lng,
+           -- When the wheels first turned in this window. Rides along because
+           -- the per-vehicle brief needs it over the SAME window as the
+           -- distance, and a second query would be a second window to get wrong.
+           MIN(captured_at) FILTER (WHERE speed_kmh > 0) AS first_moving
       FROM hops
      WHERE vehicle_id = ANY($1)
      GROUP BY vehicle_id
@@ -435,7 +448,56 @@ async function coveredSince(
     lastFixAt:  r.last_fix,
     firstLat:   r.first_lat != null ? Number(r.first_lat) : null,
     firstLng:   r.first_lng != null ? Number(r.first_lng) : null,
+    firstMovingAt: r.first_moving ?? null,
   }]))
+}
+
+/**
+ * When the vehicle was first seen CLEAR OF THE YARD on this run — i.e. the
+ * moment it actually left, as opposed to the moment the paperwork was raised.
+ *
+ * The two are routinely hours apart on this fleet: of the vehicles carrying an
+ * open dispatch, a quarter are still standing in the yard, so "dispatched
+ * 06:10" answers a different question from "left 09:42" and an operator asking
+ * where the day went needs the second one.
+ *
+ * Measured, with the caveat stated in its name: this is the first fix beyond
+ * YARD_RADIUS_M at or after the dispatch clock. If a unit was already out when
+ * the dispatch was raised, that is the first fix of the run rather than a
+ * departure — which is why the caller only quotes it once the trip geometry
+ * agrees the unit has in fact left.
+ *
+ * Same binding discipline as `coveredSince`: the id is pinned to the cuid shape
+ * and the bound is a naive-UTC TIMESTAMP literal, because `captured_at` is
+ * `timestamp without time zone` holding UTC and a driver-bound parameter would
+ * be re-read through the session timezone.
+ */
+export async function firstFixClearOfYard(
+  vehicleId: string,
+  since: Date,
+  yard: Point,
+  radiusM: number = YARD_RADIUS_M,
+): Promise<Date | null> {
+  if (!/^[a-z0-9]{20,32}$/i.test(vehicleId)) return null
+  // Numeric, finite, or nothing goes into the string. The yard comes from our
+  // own organisation row and the radius from a constant, but this is an
+  // interpolated statement and the guard costs nothing.
+  const lat = Number(yard.lat), lng = Number(yard.lng), rad = Number(radiusM)
+  if (![lat, lng, rad].every(Number.isFinite)) return null
+  const utc = since.toISOString().replace('T', ' ').replace('Z', '')
+
+  const rows = await prisma.$queryRawUnsafe<{ left_at: Date | null }[]>(`
+    SELECT MIN(t.captured_at) AS left_at
+      FROM vehicle_telemetries t
+     WHERE t.vehicle_id = '${vehicleId}'
+       AND t.captured_at >= TIMESTAMP '${utc}'
+       AND t.lat IS NOT NULL AND t.lng IS NOT NULL
+       AND 2 * 6371000 * asin(sqrt(
+             power(sin(radians(t.lat - ${lat}::float8) / 2), 2) +
+             cos(radians(${lat}::float8)) * cos(radians(t.lat)) *
+             power(sin(radians(t.lng - ${lng}::float8) / 2), 2))) > ${rad}::float8
+  `)
+  return rows[0]?.left_at ?? null
 }
 
 /** Every dispatch still out, enriched. Ordered oldest first — the overdue end. */
