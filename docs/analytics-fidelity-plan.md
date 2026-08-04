@@ -191,6 +191,62 @@ wrong half the time.
 5. **`unverified` is surfaced as such** rather than silently counted either
    way, because on SUKARI it is the majority of the volume.
 
+### SHIPPED and verified 2026-08-04
+
+Deployed as `4e35422`; migration `20260804220000_add_fuel_loss_verdict` applied;
+history judged with `npm run fuel:adjudicate -- --apply`; pm2 restarted clean.
+303 tests pass.
+
+Ledger after the backfill (1,972 drains):
+
+| verdict | drains | volume |
+|---|---|---|
+| LOSS | 327 | 14,293 L |
+| **REDISTRIBUTION** | **136** | **6,338 L** |
+| UNVERIFIED | 1,508 | 61,556 L |
+| PENDING | 1 | 20 L |
+
+Effect on the reported 30-day loss figure:
+
+| org | reported now | raw provider claim | removed |
+|---|---|---|---|
+| KASULU | 52,590 L | 58,041 L | **5,451 L · KES 977,623** |
+| SUKARI | 21,952 L | 22,839 L | **887 L · KES 159,114** |
+
+**The honest caveat, and it is a big one: 76% of the ledger came back
+UNVERIFIED**, far more than discovery implied. Two causes, measured:
+
+- **SUKARI's fuel channel is largely absent around drains** — 52% of its
+  pending drains had ZERO fuel-level readings in the 30 minutes before the
+  event, median 0. KASULU's is healthy by comparison (median 61 before, 340
+  after, zero on 4-5%).
+- **`filling-too-soon`** — a refuel lands before the level series can show a
+  recovery.
+
+So the backfill removed what it could prove and left the rest standing. The
+live pass should do better than this: it judges at 20 minutes, when the
+telemetry around the event is fresh, rather than re-reading history. That is a
+prediction, not a result — worth checking against the ledger in a week.
+
+Two defects were found and fixed during this work rather than after it:
+
+- The filling check originally disqualified a drain if a filling appeared
+  anywhere in the 3-hour window, which is wrong — a refuel two hours later says
+  nothing about a level that returned five minutes in. Cutting the window at
+  the filling instead lifted redistribution from 81 drains to 136.
+- The adjudication pass had no notify age gate, so the first cycle after deploy
+  would have replayed ~1,900 backlogged drains onto the live feed. Caught
+  before restarting; nothing reached production.
+
+### Next
+
+- Check the decidable rate on drains judged live rather than backfilled.
+- **Raise SUKARI's missing fuel-level telemetry with the provider** — it is now
+  the single biggest limit on this rule, and it is the same class of problem as
+  the ~320 s gap.
+- The `RECOVERY_THRESHOLD` of 60% is still a choice, not a measurement, and
+  wants tuning against a hand-checked set.
+
 ---
 
 ## Workstream 2 — "left the yard" fires ~800 m late
