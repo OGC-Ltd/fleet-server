@@ -11,6 +11,7 @@ import { logger }                from '../logger.js'
 import { emitDashboardPosition } from '../sse.js'
 import { deriveFeedEvents } from '../feed-events.js'
 import { trackZonePresence, assignedZoneStatus } from '../zone-presence.js'
+import { trackYardDeparture } from '../yard-departure.js'
 import { connectionStatus } from '../connection-state.js'
 import { noteMovement, movementState } from '../movement-state.js'
 import type { MovementState } from '../movement-state.js'
@@ -170,6 +171,14 @@ export function startTelemetryWorker(): () => void {
         orgId, vehicleId, plate, driverName,
         lat: payload.lat, lng: payload.lng, capturedAt: payload.capturedAt,
       }).catch(err => logger.warn({ err, vehicleId }, 'Zone presence tracking failed'))
+
+      // The MEASURED "left the yard" — the provider's own EXIT event fires
+      // inside the dispatch transaction and proves nothing, so the feed derives
+      // this from the vehicle's fixes instead. See lib/yard-departure.
+      void trackYardDeparture({
+        orgId, vehicleId, plate, driverName,
+        lat: payload.lat, lng: payload.lng, capturedAt: payload.capturedAt,
+      }).catch(err => logger.warn({ err, vehicleId }, 'Yard departure tracking failed'))
 
       // Human live-feed items (dispatch / arrival / offload / alerts) derived
       // from phase transitions between consecutive frames — see feed-events.

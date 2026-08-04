@@ -190,7 +190,33 @@ export async function handleDispatch(
   return true
 }
 
-/** Narrate a gate crossing. No coordinates are involved. */
+/**
+ * How close to its dispatch an EXIT event has to be before it is treated as
+ * part of the same paperwork rather than as a movement in its own right.
+ *
+ * Generous against a measured distribution: over seven days, 281 of 283
+ * dispatches were followed by their EXIT within one second (median 9 ms, p90
+ * 13 ms, max 39 ms). A minute leaves no room for a real gate crossing to be
+ * swallowed — a truck that takes under a minute from paperwork to gate has not
+ * been observed on this fleet — while comfortably covering webhook redelivery
+ * and the one case seen arriving 54 s BEFORE its dispatch.
+ */
+const DISPATCH_ECHO_MS = 60_000
+
+/**
+ * Narrate a gate crossing. No coordinates are involved.
+ *
+ * Except that an EXIT is not a gate crossing. The provider emits it inside the
+ * dispatch transaction, so it asserts a departure at the moment the paperwork
+ * is raised — on 2026-08-04 the feed had KTCC 870B leaving the yard while GPS
+ * showed it stationary in the compound, 440 m from where it started, and the
+ * Active Trip card correctly said it had not left. An EXIT that echoes its own
+ * dispatch is therefore dropped, and the real departure is derived from the
+ * vehicle's own fixes in lib/yard-departure.
+ *
+ * RETURN is left alone: nothing else observes a vehicle coming home, the
+ * provider records it at the weighbridge, and it is not duplicated by anything.
+ */
 export async function handleMovement(m: MovementEvent): Promise<boolean> {
   const organisationId = await resolveOrgId(m.factoryCode)
   if (!organisationId) return false
@@ -198,6 +224,26 @@ export async function handleMovement(m: MovementEvent): Promise<boolean> {
   const when = parseProviderTimeOr(m.timestamp)
 
   const exiting = (m.direction ?? '').toUpperCase() === 'EXIT'
+  if (exiting) {
+    const echoed = await prisma.dispatch.findFirst({
+      where: {
+        plate:        m.vehicleNumberPlate,
+        dispatchedAt: {
+          gte: new Date(when.getTime() - DISPATCH_ECHO_MS),
+          lte: new Date(when.getTime() + DISPATCH_ECHO_MS),
+        },
+      },
+      select: { id: true },
+    })
+    if (echoed) {
+      logger.debug(
+        { plate: m.vehicleNumberPlate, dispatch: echoed.id },
+        'Movement EXIT echoes its dispatch — not narrated; the measured departure comes from telemetry',
+      )
+      return true
+    }
+  }
+
   const who     = m.driverName ? ` · ${m.driverName}` : ''
   const dest    = m.destination ? ` to ${m.destination}` : ''
   const text    = exiting
