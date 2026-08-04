@@ -502,7 +502,9 @@ async function generateFor(orgId: string): Promise<void> {
     // otherwise visible, and that needs a browser and a login — so a brief that
     // reads badly (a narrated zero, a leaked field name) could not be diagnosed
     // from the box at all. One line an hour per organisation.
-    logger.info({ orgId, risk, msg: parsed.msg, live: facts.fleetNow }, 'AI insight refreshed')
+    // `brief`, NOT `msg` — pino owns `msg` for the log message itself, so a
+    // field of that name is silently overwritten and the text never appears.
+    logger.info({ orgId, risk, brief: parsed.msg, live: facts.fleetNow }, 'AI insight refreshed')
   } catch (err) {
     logger.warn({ err, orgId }, 'AI insight generation failed — previous brief (or local fallback) stays')
   } finally {
