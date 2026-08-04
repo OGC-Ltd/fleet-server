@@ -165,6 +165,12 @@ export function makeTheft(overrides: Partial<FuelTheft> = {}): FuelTheft {
     stolenMl: 20_000,
     initialSpeedKmh: null,
     finalSpeedKmh: null,
+    // Unjudged by default, which is what the provider's claim starts as —
+    // see modules/fuel/fuel-adjudication.
+    verdict: 'PENDING',
+    verdictAt: null,
+    recoveredMl: null,
+    verdictReason: null,
     ...overrides,
   }
 }

@@ -429,26 +429,14 @@ export async function syncVehicleFuelEvents(
       }
     }
 
-    if (opts.apply && opts.notify && (!cutoff || t.beganAt >= cutoff)) {
-      const { published } = await publishNotificationDurable({
-        orgId:     source.orgId,
-        id:        `fuel-drain-${vehicle.id}-${ledgerId ?? `t${t.beganAt.getTime()}`}`,
-        source:    'wialon',
-        alertType: 'fuelInconsistency',
-        severity:  'critical',
-        // No "Security alerted." — the rule the rest of the feed follows: no
-        // escalation path exists, so none is claimed. The wording states what
-        // Wialon measured and nothing more.
-        text: `FUEL DROP: ${vehicle.registrationPlate} — ${L(t.stolenMl)} lost`
-          + (t.initialLocation ? ` at ${t.initialLocation}` : '')
-          + (t.finalFuelLevelMl != null ? `. Tank now ${L(t.finalFuelLevelMl)}.` : '.'),
-        at:        t.beganAt,
-        plate:     vehicle.registrationPlate,
-        vehicleId: vehicle.id,
-      })
-      if (published) out.published++
-      else           out.deduped++
-    }
+    // NOT announced here. A drain reaches the feed only once it has survived
+    // adjudication — see modules/fuel/fuel-adjudication.service. Announcing on
+    // the provider's claim is what put the false flags in front of the
+    // operator: measured over the 250 most recent drains per org, 40% (KASULU)
+    // and 50% (SUKARI) of decidable loss volume came back with no filling to
+    // explain it. The 20-minute settle window is the agreed cost of not
+    // asserting a theft the next twenty minutes will contradict.
+    void ledgerId
   }
 
   // Anything in the window the provider did NOT report this time is something

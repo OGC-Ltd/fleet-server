@@ -225,8 +225,18 @@ export async function fuelConsumption(orgId: string, q: DeliveriesQuery) {
     // A drain is dated by when it BEGAN, not when the probe caught it: a theft
     // that starts at 23:50 and is detected at 00:05 belongs to the night it
     // happened, which is the day an operator will go looking for it.
+    //
+    // REDISTRIBUTION rows are excluded: our own level series showed the fuel
+    // coming back with no filling to explain it, so it never left the tank.
+    // Everything else still counts — including UNVERIFIED, where the telemetry
+    // could not check the claim. We subtract what we can DISPROVE, not what we
+    // merely doubt. See modules/fuel/fuel-adjudication.
     prisma.fuelTheft.findMany({
-      where:  { vehicle: { organisationId: orgId }, beganAt: { gte: from, lte: to } },
+      where:  {
+        vehicle: { organisationId: orgId },
+        beganAt: { gte: from, lte: to },
+        verdict: { not: 'REDISTRIBUTION' },
+      },
       select: { vehicleId: true, beganAt: true, stolenMl: true, vehicle: vehicleSelect },
       orderBy: { beganAt: 'asc' },
     }),
@@ -453,8 +463,16 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       },
       orderBy: { beganAt: 'asc' },
     }),
+    // REDISTRIBUTION excluded — see fuelConsumption. It matters more here than
+    // anywhere: conductStatus can SUSPEND a driver on two fuel-theft cases, and
+    // roughly half of the raw claims are fuel that never left the tank.
+    // Suspending someone over a slope is the worst thing this data can do.
     prisma.fuelTheft.findMany({
-      where:  { driverId: { in: driverIds }, vehicle: { organisationId: orgId } },
+      where:  {
+        driverId: { in: driverIds },
+        vehicle:  { organisationId: orgId },
+        verdict:  { not: 'REDISTRIBUTION' },
+      },
       select: { driverId: true, beganAt: true },
     }),
     prisma.vehicleAlert.findMany({
@@ -657,7 +675,13 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
   }
 
   const fuelTheftCases = await prisma.fuelTheft.count({
-    where: { driverId, vehicle: { organisationId: orgId }, beganAt: { gte: from, lte: to } },
+    // Same exclusion as driversOverview — a redistribution is not a case
+    // against the driver.
+    where: {
+      driverId, vehicle: { organisationId: orgId },
+      beganAt: { gte: from, lte: to },
+      verdict: { not: 'REDISTRIBUTION' },
+    },
   })
 
   const vehicleIds = [...new Set(trips.map(t => t.vehicleId))]

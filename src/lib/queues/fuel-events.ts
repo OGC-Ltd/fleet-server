@@ -41,6 +41,7 @@ import { WialonClient } from '../../providers/wialon/wialon.client.js'
 import {
   resolveOrgFuelSources, findFuelCandidates, listVehicleSlice, syncVehicleFuelEvents,
 } from '../../modules/fuel/fuel-sync.service.js'
+import { adjudicatePendingDrains } from '../../modules/fuel/fuel-adjudication.service.js'
 
 export const FUEL_QUEUE = 'fuel'
 const SYNC_JOB = 'fuel:sync'
@@ -132,6 +133,10 @@ export interface FuelSyncResult {
   settled:    number
   /** Ledger rows deleted because the provider has retracted them. */
   removed:    number
+  /** Drains whose settle window elapsed and were given a verdict this cycle. */
+  adjudicated:   number
+  /** Of those, the ones whose fuel came back — never announced as a loss. */
+  redistributed: number
   failed:     number
   /** Wall clock, so an overrunning cycle is visible rather than inferred. */
   ms:         number
@@ -142,7 +147,8 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   const startedAt = Date.now()
   const result: FuelSyncResult = {
     candidates: 0, fillings: 0, thefts: 0, published: 0, deduped: 0,
-    corrected: 0, settled: 0, removed: 0, failed: 0, ms: 0,
+    corrected: 0, settled: 0, removed: 0, adjudicated: 0, redistributed: 0,
+    failed: 0, ms: 0,
   }
 
   const token = env.WIALON_TOKEN || process.env['access_token'] || ''
@@ -231,10 +237,26 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
     await client.logout().catch(() => { /* best effort */ })
   }
 
+  // ── adjudication pass ──
+  // Judge the drains whose settle window has elapsed, and put the survivors on
+  // the feed. Deliberately AFTER the Wialon session is closed: it touches only
+  // our own database, so it must not hold a provider session open, and it must
+  // still run on a cycle where every report failed.
+  if (env.FUEL_ADJUDICATION_ENABLED) {
+    try {
+      const verdicts = await adjudicatePendingDrains({ apply: true, notify: true })
+      result.adjudicated   = verdicts.examined
+      result.redistributed = verdicts.redistribution
+      result.published    += verdicts.published
+    } catch (err) {
+      logger.warn({ err }, 'Fuel adjudication pass failed')
+    }
+  }
+
   result.ms = Date.now() - startedAt
 
   const log = result.published > 0 || result.fillings > 0 || result.thefts > 0
-           || result.corrected > 0 || result.removed > 0
+           || result.corrected > 0 || result.removed > 0 || result.adjudicated > 0
     ? logger.info.bind(logger)
     : logger.debug.bind(logger)
   log(result, 'Fuel sync cycle complete')
