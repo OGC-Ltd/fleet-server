@@ -29,11 +29,14 @@ const facts = {
   today: {
     asOfLocal: '09:24', sinceLabel: 'this morning', quiet: false,
     dispatchesRaised: 74, leftGate: 70, stillInYard: 4, returned: 12,
+    outNow: 67, outNowOverdue: 24,
     byDestination: [
-      { destination: 'WEIGHBRIDGE Y', dispatched: 52, leftGate: 50 },
-      { destination: 'WEIGHBRIDGE X', dispatched: 22, leftGate: 20 },
+      { destination: 'WEIGHBRIDGE Y', units: 50 },
+      { destination: 'WEIGHBRIDGE X', units: 20 },
     ],
     destinationsNotShown: 0, destinationNotRecorded: 0,
+    outNowByDestination: [{ destination: 'NYAONDO', units: 67 }],
+    outNowDestinationsNotShown: 0,
     fuelIssues: {
       raised: 19, needInvestigating: 5, stillSettling: 9, ruledOut: 4,
       unverifiable: 1, litresConfirmedLost: 57.3,
@@ -108,6 +111,7 @@ describe('buildFleetFallback', () => {
     expect(msg).toBe(
       'The fleet is running with 80 online, 5 in transit, 11 idling, 264 parked. '
       + '70 units have left the gate this morning, with 50 to WEIGHBRIDGE Y and 20 to WEIGHBRIDGE X. '
+      + '67 units are out, 24 of them overdue, and 12 have returned today. '
       + 'On the ground, 22 in FARM#212. '
       + 'There are 19 fuel issues raised, 5 of which need investigating, and 3 overspeeding alerts.',
     )
@@ -126,7 +130,9 @@ describe('buildFleetFallback', () => {
       today: {
         asOfLocal: '00:41', sinceLabel: 'this morning', quiet: true,
         dispatchesRaised: 0, leftGate: 0, stillInYard: 0, returned: 0,
+        outNow: 0, outNowOverdue: 0,
         byDestination: [], destinationsNotShown: 0, destinationNotRecorded: 0,
+        outNowByDestination: [], outNowDestinationsNotShown: 0,
         fuelIssues: {
           raised: 0, needInvestigating: 0, stillSettling: 0, ruledOut: 0,
           unverifiable: 0, litresConfirmedLost: 0,

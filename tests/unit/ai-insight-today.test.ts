@@ -1,16 +1,18 @@
 /**
  * The shift facts behind the Fleet AI Insight card.
  *
- * These are the numbers the brief now leads with, so the two distinctions the
- * aggregation exists to preserve are the ones worth pinning:
+ * Four distinctions the aggregation exists to preserve, each one a number that
+ * was wrong on the card before it was pinned here:
  *
- *   - dispatched ≠ left the gate. Paperwork raised is not a truck on the road,
- *     and on this fleet the gap is routinely hours.
- *   - raised ≠ needs investigating. Only a LOSS verdict is a confirmed loss;
- *     PENDING is still settling and REDISTRIBUTION has been disproved.
- *
- * Collapsing either pair is what would put an inflated number in front of the
- * fleet manager, which is the whole thing the card is judged on.
+ *   - dispatched ≠ left the gate. Paperwork raised is not a truck on the road.
+ *   - "left the gate today" is keyed on the CROSSING, not on when the run was
+ *     raised. This fleet dispatches through the night, so a unit clearing the
+ *     barrier at 00:14 against yesterday's paperwork is today's departure — and
+ *     keying it the other way reported it as no departure at all.
+ *   - out now excludes CANCELLED. Measured on SUKARI, 47 of 114 dispatches with
+ *     no return time were cancelled runs; counting them overstated the fleet on
+ *     the road by 70%.
+ *   - raised ≠ needs investigating. Only a LOSS verdict is a confirmed loss.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -20,99 +22,140 @@ vi.mock('../../src/lib/prisma.js')
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { collectToday } from '../../src/modules/dashboard/ai-insight.js'
 
-const dispatch = (id: string, destination: string | null, returned = false) => ({
-  id, destination, actualReturnAt: returned ? new Date() : null,
-})
+/** A run raised today, as the `dispatchedAt` query returns it. */
+const raised = (id: string, destination: string | null) => ({ id, destination, actualReturnAt: null })
+/** A run open right now, as the `actualReturnAt: null` query returns it. */
+const openRun = (destination: string | null, status = 'DISPATCHED') => ({ destination, status })
 const theft = (verdict: string, stolenMl: number) => ({ verdict, stolenMl })
 
-/** `groupBy`'s overloads are too generic for vitest-mock-extended to expose the
- *  mock methods, so it is reached through a narrow cast. */
+interface DispatchArgs { where?: { dispatchedAt?: unknown; actualReturnAt?: unknown; id?: unknown } }
+interface NotifArgs { where?: { feedId?: unknown } }
+
+/**
+ * `dispatch.findMany` now answers three different questions and
+ * `notification.findMany` two, so both mocks route on the WHERE clause rather
+ * than on call order — which would silently swap the answers if the query order
+ * in collectToday ever changed.
+ */
+function mockDispatches(opts: {
+  raisedToday?: Array<{ id: string; destination: string | null; actualReturnAt: null }>
+  openRuns?: Array<{ destination: string | null; status: string }>
+  departedRuns?: Array<{ destination: string | null }>
+}) {
+  ;(prismaMock.dispatch.findMany as unknown as {
+    mockImplementation: (fn: (a: DispatchArgs) => Promise<unknown>) => void
+  }).mockImplementation((args) => {
+    if (args?.where?.id)                    return Promise.resolve(opts.departedRuns ?? [])
+    if (args?.where?.actualReturnAt === null) return Promise.resolve(opts.openRuns ?? [])
+    return Promise.resolve(opts.raisedToday ?? [])
+  })
+}
+
+/** Gate crossings seen today, by feed id. */
+function mockGateCrossings(feedIds: string[]) {
+  ;(prismaMock.notification.findMany as unknown as {
+    mockImplementation: (fn: (a: NotifArgs) => Promise<unknown>) => void
+  }).mockImplementation((args) =>
+    Promise.resolve(args?.where?.feedId ? feedIds.map(feedId => ({ feedId })) : []),
+  )
+}
+
 function mockFeedKinds(rows: Array<{ alertType: string; _count: { _all: number } }>) {
   ;(prismaMock.notification.groupBy as unknown as {
     mockResolvedValue: (v: unknown) => void
   }).mockResolvedValue(rows)
 }
 
-/**
- * `notification.findMany` is called twice with different intent — once for the
- * newest feed lines, once to ask which of today's dispatches were seen leaving
- * the gate. Only the second carries a `feedId` filter, so the mock routes on
- * that rather than on call order, which would silently swap the two if the
- * query order in collectToday ever changed.
- */
-function mockGateDepartures(feedIds: string[]) {
-  ;(prismaMock.notification.findMany as unknown as {
-    mockImplementation: (fn: (args: { where?: { feedId?: unknown } }) => Promise<unknown>) => void
-  }).mockImplementation((args) =>
-    Promise.resolve(args?.where?.feedId ? feedIds.map(feedId => ({ feedId })) : []),
-  )
-}
-
 describe('collectToday', () => {
   beforeEach(() => {
     vi.setSystemTime(new Date('2026-08-05T06:24:00Z'))   // 09:24 EAT — a morning
-    // The feed aggregates are not what these tests are about; they are mocked
-    // empty so every case states only the rows it actually cares about.
     mockFeedKinds([])
     prismaMock.vehicleAlert.count.mockResolvedValue(0 as never)
-    mockGateDepartures([])
+    prismaMock.dispatch.count.mockResolvedValue(0 as never)   // returned today
+    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
+    mockDispatches({})
+    mockGateCrossings([])
   })
 
   it('splits the morning\'s gate departures by destination', async () => {
-    // 70 runs raised: 20 to X, 50 to Y. Every one of them seen leaving.
-    const dispatches = [
-      ...Array.from({ length: 20 }, (_, i) => dispatch(`x${i}`, 'WEIGHBRIDGE X')),
-      ...Array.from({ length: 50 }, (_, i) => dispatch(`y${i}`, 'WEIGHBRIDGE Y')),
+    const departed = [
+      ...Array.from({ length: 20 }, () => ({ destination: 'WEIGHBRIDGE X' })),
+      ...Array.from({ length: 50 }, () => ({ destination: 'WEIGHBRIDGE Y' })),
     ]
-    prismaMock.dispatch.findMany.mockResolvedValue(dispatches as never)
-    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
-    mockGateDepartures(dispatches.map(d => `yd-${d.id}`))
+    mockDispatches({
+      raisedToday: Array.from({ length: 74 }, (_, i) => raised(`d${i}`, 'WEIGHBRIDGE Y')),
+      departedRuns: departed,
+    })
+    mockGateCrossings(departed.map((_, i) => `yd-d${i}`))
 
     const today = await collectToday('org-1')
 
-    expect(today.dispatchesRaised).toBe(70)
+    expect(today.dispatchesRaised).toBe(74)
     expect(today.leftGate).toBe(70)
-    expect(today.stillInYard).toBe(0)
+    expect(today.stillInYard).toBe(4)
     expect(today.sinceLabel).toBe('this morning')
     expect(today.byDestination).toEqual([
-      { destination: 'WEIGHBRIDGE Y', dispatched: 50, leftGate: 50 },
-      { destination: 'WEIGHBRIDGE X', dispatched: 20, leftGate: 20 },
+      { destination: 'WEIGHBRIDGE Y', units: 50 },
+      { destination: 'WEIGHBRIDGE X', units: 20 },
     ])
   })
 
-  it('does not count paperwork as a truck through the gate', async () => {
-    const dispatches = [dispatch('a', 'OPAPO'), dispatch('b', 'OPAPO'), dispatch('c', 'OPAPO')]
-    prismaMock.dispatch.findMany.mockResolvedValue(dispatches as never)
-    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
-    // Only one was actually seen clearing the barrier.
-    mockGateDepartures(['yd-a'])
+  it('counts a crossing made today against paperwork raised yesterday', async () => {
+    // The 00:14 departure that the old keying reported as nothing at all: no
+    // run was raised today, yet a unit demonstrably left the gate.
+    mockDispatches({ raisedToday: [], departedRuns: [{ destination: 'OPAPO' }] })
+    mockGateCrossings(['yd-yesterday-1'])
 
     const today = await collectToday('org-1')
 
-    expect(today.dispatchesRaised).toBe(3)
+    expect(today.dispatchesRaised).toBe(0)
     expect(today.leftGate).toBe(1)
-    expect(today.stillInYard).toBe(2)
-    expect(today.byDestination).toEqual([{ destination: 'OPAPO', dispatched: 3, leftGate: 1 }])
+    expect(today.byDestination).toEqual([{ destination: 'OPAPO', units: 1 }])
+    expect(today.quiet).toBe(false)
+  })
+
+  it('excludes cancelled paperwork from the units it says are out', async () => {
+    mockDispatches({
+      openRuns: [
+        ...Array.from({ length: 43 }, () => openRun('NYAONDO', 'DISPATCHED')),
+        ...Array.from({ length: 24 }, () => openRun('OPAPO', 'OVERDUE')),
+      ],
+    })
+
+    const today = await collectToday('org-1')
+
+    // 43 + 24 — the 47 CANCELLED rows never reach this query.
+    expect(today.outNow).toBe(67)
+    expect(today.outNowOverdue).toBe(24)
+    expect(today.outNowByDestination).toEqual([
+      { destination: 'NYAONDO', units: 43 },
+      { destination: 'OPAPO',   units: 24 },
+    ])
+  })
+
+  it('counts runs closed today however long ago they were raised', async () => {
+    prismaMock.dispatch.count.mockResolvedValue(4 as never)
+    const today = await collectToday('org-1')
+    expect(today.returned).toBe(4)
+    expect(today.quiet).toBe(false)
   })
 
   it('groups destinations the dispatchers typed inconsistently, and counts the unnamed apart', async () => {
-    prismaMock.dispatch.findMany.mockResolvedValue([
-      dispatch('a', 'Weighbridge X'), dispatch('b', '  WEIGHBRIDGE X '),
-      dispatch('c', null), dispatch('d', '   '),
-    ] as never)
-    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
+    mockDispatches({
+      departedRuns: [
+        { destination: 'Weighbridge X' }, { destination: '  WEIGHBRIDGE X ' },
+        { destination: null }, { destination: '   ' },
+      ],
+    })
+    mockGateCrossings(['yd-a', 'yd-b', 'yd-c', 'yd-d'])
 
     const today = await collectToday('org-1')
 
-    expect(today.byDestination).toEqual([
-      { destination: 'WEIGHBRIDGE X', dispatched: 2, leftGate: 0 },
-    ])
+    expect(today.byDestination).toEqual([{ destination: 'WEIGHBRIDGE X', units: 2 }])
     expect(today.destinationNotRecorded).toBe(2)
   })
 
   it('counts only confirmed losses as needing investigation', async () => {
-    prismaMock.dispatch.findMany.mockResolvedValue([] as never)
-    // 19 raised: 5 real, 9 still settling, 4 disproved, 1 unmeasurable.
     prismaMock.fuelTheft.findMany.mockResolvedValue([
       ...Array.from({ length: 5 }, () => theft('LOSS', 20_000)),
       ...Array.from({ length: 9 }, () => theft('PENDING', 5_000)),
@@ -123,11 +166,7 @@ describe('collectToday', () => {
     const today = await collectToday('org-1')
 
     expect(today.fuelIssues).toEqual({
-      raised: 19,
-      needInvestigating: 5,
-      stillSettling: 9,
-      ruledOut: 4,
-      unverifiable: 1,
+      raised: 19, needInvestigating: 5, stillSettling: 9, ruledOut: 4, unverifiable: 1,
       // Only the confirmed ones — 5 × 20 L. Redistribution volume never counts.
       litresConfirmedLost: 100,
     })
@@ -135,36 +174,34 @@ describe('collectToday', () => {
 
   it('says "so far today" once the morning is over', async () => {
     vi.setSystemTime(new Date('2026-08-05T12:10:00Z'))   // 15:10 EAT
-    prismaMock.dispatch.findMany.mockResolvedValue([] as never)
-    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
-
     expect((await collectToday('org-1')).sinceLabel).toBe('so far today')
   })
 
-  it('asks for no gate departures at all when nothing was dispatched', async () => {
-    prismaMock.dispatch.findMany.mockResolvedValue([] as never)
-    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
+  it('is quiet only when nothing is raised, moving, out or home', async () => {
+    expect((await collectToday('org-1')).quiet).toBe(true)
 
+    // Units on the road at 02:00 against no new paperwork is NOT a quiet day —
+    // this fleet's round trip is about nineteen hours.
+    mockDispatches({ openRuns: [openRun('NYAONDO')] })
+    expect((await collectToday('org-1')).quiet).toBe(false)
+  })
+
+  it('asks for no departed-run lookup when no crossing was seen', async () => {
     const today = await collectToday('org-1')
 
-    // The feed query still runs — it is not conditional on dispatches — but the
-    // `feedId IN (…)` lookup must not fire with an empty list.
-    const calls = prismaMock.notification.findMany.mock.calls as unknown as Array<[{ where?: { feedId?: unknown } }]>
-    expect(calls.some(([args]) => args?.where?.feedId)).toBe(false)
+    const calls = prismaMock.dispatch.findMany.mock.calls as unknown as Array<[DispatchArgs]>
+    expect(calls.some(([a]) => a?.where?.id)).toBe(false)
     expect(today.leftGate).toBe(0)
-    expect(today.stillInYard).toBe(0)
   })
 
   it('summarises the day\'s feed by kind and keeps the newest lines', async () => {
-    prismaMock.dispatch.findMany.mockResolvedValue([] as never)
-    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
     prismaMock.vehicleAlert.count.mockResolvedValue(3 as never)
     mockFeedKinds([
       { alertType: 'ZONE_ENTRY', _count: { _all: 2914 } },
       { alertType: 'DISPATCH',   _count: { _all: 260 } },
     ])
     ;(prismaMock.notification.findMany as unknown as {
-      mockImplementation: (fn: (args: { where?: { feedId?: unknown } }) => Promise<unknown>) => void
+      mockImplementation: (fn: (a: NotifArgs) => Promise<unknown>) => void
     }).mockImplementation((args) =>
       Promise.resolve(args?.where?.feedId ? [] : [
         { text: 'KTCB 295U fuel drop', severity: 'warning', alertType: 'fuelInconsistency', occurredAt: new Date('2026-08-05T06:12:00Z') },
@@ -173,31 +210,10 @@ describe('collectToday', () => {
 
     const today = await collectToday('org-1')
 
-    // Ordered by volume, so the model sees the dominant kinds first.
     expect(today.feed.byKind).toEqual({ ZONE_ENTRY: 2914, DISPATCH: 260 })
     expect(today.feed.overspeedingAlerts).toBe(3)
     expect(today.feed.latest).toEqual([
       { at: '09:12', severity: 'warning', text: 'KTCB 295U fuel drop' },
     ])
-  })
-
-  it('flags a shift with nothing in it as quiet, so the brief can skip the zeroes', async () => {
-    // 00:40 local: the fleet day rolled over forty minutes ago and nothing has
-    // happened in it. Reported as one flag, not four zeros to be narrated.
-    prismaMock.dispatch.findMany.mockResolvedValue([] as never)
-    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
-
-    expect((await collectToday('org-1')).quiet).toBe(true)
-  })
-
-  it('is not quiet when either side has something in it', async () => {
-    prismaMock.dispatch.findMany.mockResolvedValue([dispatch('a', 'OPAPO')] as never)
-    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
-    expect((await collectToday('org-1')).quiet).toBe(false)
-
-    // Nothing dispatched, but a drain was flagged — still worth a briefing.
-    prismaMock.dispatch.findMany.mockResolvedValue([] as never)
-    prismaMock.fuelTheft.findMany.mockResolvedValue([theft('LOSS', 10_000)] as never)
-    expect((await collectToday('org-1')).quiet).toBe(false)
   })
 })

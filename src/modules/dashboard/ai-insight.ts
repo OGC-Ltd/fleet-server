@@ -93,10 +93,44 @@ export async function collectToday(orgId: string) {
   const dayStart = fleetDayStart()
   const now = new Date()
 
-  const [dispatches, thefts, feedCounts, overspeeding, latestFeed] = await Promise.all([
+  const [dispatches, returnedToday, openRuns, gateRows, thefts, feedCounts, overspeeding, latestFeed] = await Promise.all([
     prisma.dispatch.findMany({
       where:  { organisationId: orgId, dispatchedAt: { gte: dayStart } },
       select: { id: true, destination: true, actualReturnAt: true },
+    }),
+    // Runs CLOSED today, whenever they were raised. A round trip on this fleet
+    // runs about nineteen hours, so most of what comes home this morning left
+    // yesterday — filtering returns by dispatch date would have missed nearly
+    // all of them.
+    prisma.dispatch.count({
+      where: { organisationId: orgId, actualReturnAt: { gte: dayStart } },
+    }),
+    // What is out RIGHT NOW.
+    //
+    // CANCELLED is excluded and that is not a detail: measured on SUKARI
+    // (2026-08-05) 47 of the 114 dispatches with no return time were cancelled
+    // runs, so "114 units are out" would have overstated the fleet on the road
+    // by 70%. OVERDUE is carried separately because the provider's own late
+    // flag is the one an operator acts on.
+    prisma.dispatch.findMany({
+      where:  {
+        organisationId: orgId,
+        actualReturnAt: null,
+        status:         { in: ['DISPATCHED', 'OVERDUE'] },
+      },
+      select: { destination: true, status: true },
+    }),
+    // Gate crossings OBSERVED today, keyed on when the crossing happened rather
+    // than on when the paperwork was raised.
+    //
+    // This used to look up departures for dispatches RAISED today, which is a
+    // different question and routinely the wrong one: the fleet dispatches
+    // through the night, so a unit that cleared the barrier at 00:14 against a
+    // run raised at 21:25 yesterday was reported as no departure at all. The
+    // feed showed the crossing; the brief said "nothing has been dispatched".
+    prisma.notification.findMany({
+      where:  { organisationId: orgId, occurredAt: { gte: dayStart }, feedId: { startsWith: 'yd-' } },
+      select: { feedId: true },
     }),
     prisma.fuelTheft.findMany({
       where:  { vehicle: { organisationId: orgId }, detectedAt: { gte: dayStart } },
@@ -128,33 +162,36 @@ export async function collectToday(orgId: string) {
     }),
   ])
 
-  // Which of those runs has actually been SEEN leaving. Keyed on the dispatch,
-  // exactly as yard-departure mints it, so this counts observed crossings and
-  // not paperwork.
-  const departed = new Set<string>()
-  if (dispatches.length) {
-    const rows = await prisma.notification.findMany({
-      where:  { organisationId: orgId, feedId: { in: dispatches.map(d => `yd-${d.id}`) } },
-      select: { feedId: true },
-    })
-    for (const r of rows) departed.add(r.feedId.slice(3))
-  }
+  // The runs behind today's crossings — needed for the destination split, and
+  // deliberately NOT restricted to today's paperwork (see the query above).
+  const departedIds = [...new Set(gateRows.map(r => r.feedId.slice(3)))]
+  const departedRuns = departedIds.length
+    ? await prisma.dispatch.findMany({
+        where:  { id: { in: departedIds } },
+        select: { destination: true },
+      })
+    : []
 
   // Dispatchers type the destination freehand and the casing wanders, so group
   // on the same UPPER(TRIM()) key DispatchDestination uses. Unnamed destinations
   // are counted apart rather than pooled under a made-up label.
-  const byDest = new Map<string, { destination: string; dispatched: number; leftGate: number }>()
-  let destinationNotRecorded = 0
-  for (const d of dispatches) {
-    const key = d.destination?.trim().toUpperCase()
-    if (!key) { destinationNotRecorded++; continue }
-    const row = byDest.get(key) ?? { destination: key, dispatched: 0, leftGate: 0 }
-    row.dispatched++
-    if (departed.has(d.id)) row.leftGate++
-    byDest.set(key, row)
+  const tally = (rows: Array<{ destination: string | null }>) => {
+    const byDest = new Map<string, number>()
+    let notRecorded = 0
+    for (const r of rows) {
+      const key = r.destination?.trim().toUpperCase()
+      if (!key) { notRecorded++; continue }
+      byDest.set(key, (byDest.get(key) ?? 0) + 1)
+    }
+    const ranked = [...byDest.entries()]
+      .map(([destination, units]) => ({ destination, units }))
+      .sort((a, b) => b.units - a.units)
+    return { ranked, notRecorded }
   }
-  const ranked = [...byDest.values()].sort((a, b) => b.dispatched - a.dispatched)
-  const top    = ranked.slice(0, 6)
+
+  const gate = tally(departedRuns)
+  const out  = tally(openRuns)
+  const overdue = openRuns.filter(r => r.status === 'OVERDUE').length
 
   const verdicts = (v: string) => thefts.filter(t => t.verdict === v)
   const losses   = verdicts('LOSS')
@@ -172,16 +209,32 @@ export async function collectToday(orgId: string) {
      * no destinations listed. Fuel issues raised: 0". Four zeros is not a
      * briefing. Stated as one boolean so the prompt can branch on it instead of
      * inferring emptiness from a scatter of zeroes it has to check one by one.
+     *
+     * A day with nothing raised is NOT necessarily quiet: this fleet's round
+     * trip is about nineteen hours, so at 02:00 there can be no new paperwork
+     * and still be sixty-seven units on the road and four home since midnight.
      */
-    quiet: dispatches.length === 0 && thefts.length === 0,
+    quiet: dispatches.length === 0 && thefts.length === 0
+      && gateRows.length === 0 && returnedToday === 0 && openRuns.length === 0,
+    /** Paperwork raised today. Not the same as anything having moved. */
     dispatchesRaised: dispatches.length,
-    leftGate:         departed.size,
-    /** Raised but not yet seen past the barrier — still standing in the yard. */
-    stillInYard:      dispatches.length - departed.size,
-    returned:         dispatches.filter(d => d.actualReturnAt).length,
-    byDestination:    top,
-    destinationsNotShown: Math.max(0, ranked.length - top.length),
-    destinationNotRecorded,
+    /** Gate crossings OBSERVED today, whenever the run was raised. */
+    leftGate:         departedIds.length,
+    /** Raised today but not yet seen past the barrier. */
+    stillInYard:      Math.max(0, dispatches.length - departedIds.length),
+    /** Runs CLOSED today — units that have got back. */
+    returned:         returnedToday,
+    /** Units out on a live run right now. CANCELLED paperwork excluded. */
+    outNow:           openRuns.length,
+    /** Of those, flagged late by the provider. */
+    outNowOverdue:    overdue,
+    /** Where today's gate departures went. */
+    byDestination:    gate.ranked.slice(0, 6),
+    destinationsNotShown: Math.max(0, gate.ranked.length - 6),
+    destinationNotRecorded: gate.notRecorded,
+    /** Where the units currently out are headed. */
+    outNowByDestination: out.ranked.slice(0, 6),
+    outNowDestinationsNotShown: Math.max(0, out.ranked.length - 6),
     fuelIssues: {
       raised:            thefts.length,
       needInvestigating: losses.length,
@@ -470,9 +523,15 @@ export const SYSTEM_PROMPT =
   '`fleetNow.reporting` is the fleet that sends telemetry and `fleetNow.vehicles` is the whole registry; the ' +
   'difference (`noTelemetryEver`) is units that have NEVER reported, which is a provisioning gap, NOT units that ' +
   'are down or offline. Never describe them as either, and never raise the risk level because of them. ' +
-  '(2) Today\'s gate movement broken down by destination, from `today.leftGate`, `today.sinceLabel` (use it ' +
-  'verbatim) and `today.byDestination` — e.g. "We have had 70 units leave the gate this morning, with 20 going to ' +
-  'WEIGHBRIDGE X and 50 going to WEIGHBRIDGE Y." ' +
+  '(2) Today\'s movement: how many left the gate (`today.leftGate`, with `today.sinceLabel` used verbatim) broken ' +
+  'down by destination from `today.byDestination`, AND how the day stands — `today.outNow` units still out ' +
+  '(`today.outNowOverdue` of them overdue) and `today.returned` back already. E.g. "We have had 70 units leave the ' +
+  'gate this morning, with 20 going to WEIGHBRIDGE X and 50 going to WEIGHBRIDGE Y; 67 are still out, 24 of them ' +
+  'overdue, and 4 have returned." Use two sentences for this if one will not carry it. ' +
+  'A round trip on this fleet runs about nineteen hours, so `outNow` and `returned` do NOT depend on anything ' +
+  'having been raised since midnight — report them even when `dispatchesRaised` and `leftGate` are 0, and never ' +
+  'say the fleet has done nothing while units are out. `today.outNowByDestination` says where those units are ' +
+  'headed; use it if the gate split is empty. ' +
   '(3) Where the fleet is working now, from `working.byArea` — name the areas and how many units are in each, ' +
   'e.g. "On the ground, 22 units are working FARM#212 and 9 are at the FACTORY SITE." ' +
   '(4) Today\'s exceptions: fuel issues from `today.fuelIssues.raised` and `.needInvestigating`, plus ' +
@@ -501,8 +560,10 @@ export const SYSTEM_PROMPT =
   'the absence into words as part of a larger clause: "158 parked and nothing moving", "no overspeeding alerts". ' +
   'A brief that omits an empty figure is CORRECT and shorter; one that lists zeroes is the failure. ' +
   'The fleet day begins at local midnight, so early in it there is genuinely nothing to ' +
-  'report, and a brief is allowed to be SHORT. If `today.quiet` is true or `today.leftGate` is 0, the gate sentence ' +
-  'becomes exactly "Nothing has been dispatched yet today." If `today.fuelIssues.raised` is 0 and there are no ' +
+  'report, and a brief is allowed to be SHORT. If `today.quiet` is true, the gate sentence ' +
+  'becomes exactly "Nothing has been dispatched yet today." — but ONLY then: when `outNow` or `returned` is above ' +
+  'zero the day is not empty, so report those instead of claiming nothing has happened. ' +
+  'If `today.fuelIssues.raised` is 0 and there are no ' +
   'overspeeding alerts or keep-out breaches, the exceptions sentence becomes exactly "No exceptions have been ' +
   'raised today." If `working.byArea` is empty, drop the working sentence entirely rather than reporting that no ' +
   'area is occupied. Never list zero figures one after another, and never write "unknown", "no data", ' +
@@ -586,15 +647,24 @@ export function buildFleetFallback(facts: {
     : 'The fleet is quiet.')
 
   if (today.leftGate > 0) {
-    const split = today.byDestination
-      .filter(d => d.leftGate > 0)
-      .map(d => `${d.leftGate} to ${d.destination}`)
+    const split = today.byDestination.map(d => `${d.units} to ${d.destination}`)
     parts.push(split.length
-      ? `${today.leftGate} units have left the gate ${today.sinceLabel}, with ${split.join(' and ')}.`
-      : `${today.leftGate} units have left the gate ${today.sinceLabel}.`)
-  } else {
+      ? `${today.leftGate} ${today.leftGate === 1 ? 'unit has' : 'units have'} left the gate ${today.sinceLabel}, with ${split.join(' and ')}.`
+      : `${today.leftGate} ${today.leftGate === 1 ? 'unit has' : 'units have'} left the gate ${today.sinceLabel}.`)
+  } else if (today.outNow === 0) {
     parts.push('Nothing has been dispatched yet today.')
   }
+
+  // What is on the road, and what is home. On a nineteen-hour round trip these
+  // are the two figures that describe the day, and neither depends on anything
+  // having been raised since midnight.
+  const run: string[] = []
+  if (today.outNow > 0) {
+    run.push(`${today.outNow} ${today.outNow === 1 ? 'unit is' : 'units are'} out`
+      + (today.outNowOverdue > 0 ? `, ${today.outNowOverdue} of them overdue` : ''))
+  }
+  if (today.returned > 0) run.push(`${today.returned} ${today.returned === 1 ? 'has' : 'have'} returned today`)
+  if (run.length) parts.push(`${run.join(', and ')}.`)
 
   if (working.byArea.length) {
     const where = working.byArea.slice(0, 3).map(a => `${a.units} in ${a.area}`)
