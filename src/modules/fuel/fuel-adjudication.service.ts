@@ -45,6 +45,13 @@ export interface AdjudicateOptions {
   limit?: number
   /** Judge rows this old or older; defaults to the settle window. */
   now?: Date
+  /**
+   * Only announce drains that began at or after this. Without it, the first
+   * run over a backlog would replay every drain in it — the ledger holds 30
+   * days — onto a feed that is meant to show what is happening now. The sync
+   * this replaced had the same guard for the same reason.
+   */
+  notifyCutoff?: Date
 }
 
 export interface AdjudicateOutcome {
@@ -134,8 +141,10 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
       },
     })
 
-    // Only a surviving drain is news. A redistribution never reaches the feed.
+    // Only a surviving drain is news. A redistribution never reaches the feed,
+    // and neither does one too old to be news — see notifyCutoff.
     if (!opts.notify || verdict.verdict === 'REDISTRIBUTION') continue
+    if (opts.notifyCutoff && t.beganAt < opts.notifyCutoff) continue
 
     const plate = t.vehicle.registrationPlate
     const where = t.initialLocation ? ` at ${t.initialLocation}` : ''

@@ -115,6 +115,21 @@ describe('adjudicatePendingDrains', () => {
     expect(out).toMatchObject({ redistribution: 1, unverified: 0 })
   })
 
+  it('does not narrate a backlog onto the live feed', async () => {
+    // The ledger holds 30 days. The first pass over it must record verdicts
+    // without replaying every old drain as though it just happened.
+    setLevels([...STEADY, ...DRAINING, 160_000, 159_000, 158_000, 158_000])
+
+    const out = await adjudicatePendingDrains({
+      apply: true, notify: true, now: NOW,
+      notifyCutoff: new Date('2026-08-04T13:30:00Z'),   // after this drain began
+    })
+
+    expect(out.loss).toBe(1)                       // still judged
+    expect(prismaMock.fuelTheft.update).toHaveBeenCalled()
+    expect(publishNotificationDurable).not.toHaveBeenCalled()   // but not announced
+  })
+
   it('writes nothing on a dry run', async () => {
     setLevels([...STEADY, ...DRAINING, 200_000, 200_000, 200_000, 200_000])
 
