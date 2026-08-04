@@ -244,7 +244,11 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   // still run on a cycle where every report failed.
   if (env.FUEL_ADJUDICATION_ENABLED) {
     try {
-      const verdicts = await adjudicatePendingDrains({ apply: true, notify: true })
+      // Same age gate the sync used for its own feed items: a backlog being
+      // worked through must not narrate weeks of history onto the live feed.
+      const verdicts = await adjudicatePendingDrains({
+        apply: true, notify: true, notifyCutoff: cutoff,
+      })
       result.adjudicated   = verdicts.examined
       result.redistributed = verdicts.redistribution
       result.published    += verdicts.published
