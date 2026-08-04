@@ -128,4 +128,25 @@ describe('collectToday', () => {
     expect(today.leftGate).toBe(0)
     expect(today.stillInYard).toBe(0)
   })
+
+  it('flags a shift with nothing in it as quiet, so the brief can skip the zeroes', async () => {
+    // 00:40 local: the fleet day rolled over forty minutes ago and nothing has
+    // happened in it. Reported as one flag, not four zeros to be narrated.
+    prismaMock.dispatch.findMany.mockResolvedValue([] as never)
+    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
+
+    expect((await collectToday('org-1')).quiet).toBe(true)
+  })
+
+  it('is not quiet when either side has something in it', async () => {
+    prismaMock.dispatch.findMany.mockResolvedValue([dispatch('a', 'OPAPO')] as never)
+    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
+    prismaMock.notification.findMany.mockResolvedValue([] as never)
+    expect((await collectToday('org-1')).quiet).toBe(false)
+
+    // Nothing dispatched, but a drain was flagged — still worth a briefing.
+    prismaMock.dispatch.findMany.mockResolvedValue([] as never)
+    prismaMock.fuelTheft.findMany.mockResolvedValue([theft('LOSS', 10_000)] as never)
+    expect((await collectToday('org-1')).quiet).toBe(false)
+  })
 })

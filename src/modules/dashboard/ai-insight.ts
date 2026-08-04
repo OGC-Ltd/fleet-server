@@ -130,6 +130,17 @@ export async function collectToday(orgId: string) {
     asOfLocal: clockFmt.format(now),
     /** 'this morning' before noon, so the model cannot narrate an afternoon as one. */
     sinceLabel: Number(clockFmt.format(now).slice(0, 2)) < 12 ? 'this morning' : 'so far today',
+    /**
+     * Has anything actually happened yet?
+     *
+     * The fleet day starts at local midnight, so a brief generated in the small
+     * hours is asked to describe a shift that has not begun — and the first
+     * version of this prompt dutifully narrated it: "left gate: 0 this morning;
+     * no destinations listed. Fuel issues raised: 0". Four zeros is not a
+     * briefing. Stated as one boolean so the prompt can branch on it instead of
+     * inferring emptiness from a scatter of zeroes it has to check one by one.
+     */
+    quiet: dispatches.length === 0 && thefts.length === 0,
     dispatchesRaised: dispatches.length,
     leftGate:         departed.size,
     /** Raised but not yet seen past the barrier — still standing in the yard. */
@@ -252,8 +263,15 @@ const SYSTEM_PROMPT =
   'Likewise `raised` fuel issues are not all actionable: only `needInvestigating` are confirmed losses. ' +
   'Name destinations EXACTLY as spelled in the JSON. Do not restate the active/total vehicle counts — the card ' +
   'already prints them immediately before your text — but let the ratio inform your health verdict. ' +
-  'If a figure is 0 or a list is empty, either say so plainly ("no fuel issues raised today") or omit it and spend ' +
-  'the words on the long-window aggregates instead; never write "unknown", "no data" or "not reported". ' +
+  'WRITE PROSE, NOT A FIELD DUMP. Never print a JSON key — not "leftGate", "needInvestigating", "dispatchesRaised" ' +
+  'nor any other — and never use the "label: value" form. Write the flowing sentences an operator would say out ' +
+  'loud: "70 units have left the gate this morning, 50 to WEIGHBRIDGE Y and 20 to WEIGHBRIDGE X". ' +
+  'DO NOT NARRATE ZEROES. The fleet day begins at local midnight, so early in it there is genuinely nothing to ' +
+  'report, and a list of zeros is not a briefing. When `today.quiet` is true, give the quiet ONE short clause ' +
+  '("nothing has been dispatched yet today") and spend every remaining word on the live fleet state and the ' +
+  '7-30 day aggregates — which trend, which drivers, which incidents. When only one side is empty, drop that ' +
+  'sentence entirely rather than reporting its zero. Never write "unknown", "no data", "not reported", ' +
+  '"none listed" or "0" for something that simply has not happened yet. ' +
   'No markdown, no preamble, no bullet points, no hedging. ' +
   'Classify overall operational risk with this rubric — the level MUST match the tone of your msg: ' +
   '"Low" = broadly positive (good timeliness, stable or improving trends, few conduct cases/incidents, few confirmed fuel losses); ' +
