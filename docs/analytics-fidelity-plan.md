@@ -107,6 +107,92 @@ false positives without suppressing a drain anyone believes was real.
 
 ---
 
+### DISCOVERY — the operator is right, and it is measurable
+
+Run 2026-08-04, read-only, trailing 30 days.
+
+**Scale of the claim.** 1,052 drains / 58,330 L on KASULU and 885 drains /
+22,844 L on SUKARI. 83% and 76% respectively begin at speed 0.
+
+**Two of the plan's four proposed signals are dead.**
+
+- *Tank fill fraction is not a discriminator.* At the trough, recovered and
+  persisted drains sit at 0.62 vs 0.63 (KASULU) — identical — and 0.25 vs 0.14
+  (SUKARI), which is the OPPOSITE of the predicted direction. Drop it.
+- *Slope is weak.* Altitude turns out to be populated on **100%** of fixes, so
+  it can be tested rather than assumed. SUKARI recovered drains swing 85 m
+  against 50 m for persisted ones — suggestive; KASULU is 22 m against 20 m —
+  nothing. Not reliable enough to decide on, though it corroborates the
+  operator's account on the hillier SUKARI ground.
+
+**The recovery test carries the whole thing, and it is decisive.** `fuelLevelMl`
+is present on 85–93% of fixes, so our own telemetry can be asked directly
+whether the fuel came back. Over the 250 most recent drains per org, excluding
+any drain with a filling in the window:
+
+| | KASULU | SUKARI |
+|---|---|---|
+| came back, no filling | 3,920 L (62 drains) | 775 L (42 drains) |
+| stayed down | 5,809 L (97 drains) | 781 L (31 drains) |
+| a filling explains it | 2,691 L | 1,721 L |
+| undecidable (no telemetry) | 7,673 L | 4,421 L |
+| **share of decidable loss volume that never left the tank** | **40%** | **50%** |
+| value wrongly reported as loss, this sample | **KES 703,177** | **KES 138,934** |
+
+Individual cases are unambiguous — `KTCB 295U` 66.4 L "lost" with 100% back and
+a 69 m altitude swing; `KTCC 850B` 22.6 L, 100% back, 73 m; `MUFINDI: DZ 13`
+31.7 L, 134% back. Every one at speed 0.
+
+**How long to wait is the key design number, and it is short.** Recovery is
+already visible at detection time in the median case, and:
+
+| wait | recoveries caught (KASULU / SUKARI) |
+|---|---|
+| 10 min | 85% / 90% |
+| **20 min** | **92% / 93%** |
+| 30 min | 94% / 93% |
+| 120 min | 100% / 98% |
+
+A ~20 minute hold removes over nine tenths of the false flags. That is the
+whole cost of the fix: notifications arrive 20 minutes later, and stop being
+wrong half the time.
+
+### Limitations of this discovery — read before acting
+
+- **The sample is the most recent 250 drains, not a random draw.** Volumes
+  above are indicative of rate, not a total. Extrapolating the rate across the
+  full 30 days suggests roughly KES 2.4M/month across both orgs currently
+  reported as loss that never left a tank — worth stating as an order of
+  magnitude and nothing finer.
+- **Undecidable volume is large** — 38% (KASULU) and 57% (SUKARI) of claimed
+  loss could not be judged, because telemetry around the event was too sparse.
+  The same coverage ceiling that limits departure timing limits this.
+- **Drains with a filling in the window were excluded entirely.** That bucket
+  contains both genuine theft-then-refuel and genuine recovery, and separating
+  them needs its own pass. The rates above are therefore measured on the
+  fill-free subset only.
+- **The 60% recovery threshold is a choice, not a measurement.** It wants
+  tuning against a hand-checked set before it decides anything in production.
+
+### Proposed design — adjudicate, do not delete
+
+1. **Hold, then judge.** A drain is not a loss until it has survived a settle
+   window of ~20 minutes and the level has not returned. The settle pass
+   (`FUEL_SETTLE_ENABLED`) already exists for re-examining events once they are
+   old enough; this is the same idea with a shorter clock and a verdict.
+2. **Verdict from our own level series**, not from the provider's claim:
+   recovered ≥ threshold with no filling → `redistribution`, else `loss`, and
+   `unverified` when the telemetry cannot say.
+3. **Keep every row, with a status and a reason.** Analytics counts only
+   `loss`. Nothing is deleted, so the rule stays auditable against Wialon and
+   an operator who saw a notification can find out what became of it.
+4. **Notify on the verdict, not the claim.** This is the deliberate trade: 20
+   minutes of delay against roughly half the alerts being wrong today.
+5. **`unverified` is surfaced as such** rather than silently counted either
+   way, because on SUKARI it is the majority of the volume.
+
+---
+
 ## Workstream 2 — "left the yard" fires ~800 m late
 
 ### Symptom (reported)
