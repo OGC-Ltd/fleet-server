@@ -44,7 +44,7 @@ beforeEach(() => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(prismaMock.fuelTheft.update as any).mockResolvedValue({})
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ;(prismaMock.fuelFilling.findFirst as any).mockResolvedValue(null)
+  ;(prismaMock.fuelFilling.findFirst as any).mockResolvedValue(null)   // no refuel unless a case sets one
 })
 
 describe('adjudicatePendingDrains', () => {
@@ -98,6 +98,21 @@ describe('adjudicatePendingDrains', () => {
     setLevels([...STEADY, ...DRAINING, 160_000, 159_000, 158_000, 158_000])
     await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
     expect(String(published()[0]![0]['text'])).not.toMatch(/security|alerted|notified|dispatched/i)
+  })
+
+  it('still judges a drain when a refuel happens LATER in the window', async () => {
+    // A filling two hours after the event cannot explain a level that came
+    // back five minutes in. 29-35% of live drains have a filling somewhere in
+    // the window; discarding them all would forfeit most of what is decidable.
+    setLevels([...STEADY, ...DRAINING, 190_000, 198_000, 200_000, 200_000])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelFilling.findFirst as any).mockResolvedValue({
+      filledAt: new Date('2026-08-04T15:00:00Z'),
+    })
+
+    const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    expect(out).toMatchObject({ redistribution: 1, unverified: 0 })
   })
 
   it('writes nothing on a dry run', async () => {

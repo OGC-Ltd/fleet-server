@@ -104,15 +104,18 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
         orderBy: { capturedAt: 'asc' },
       }),
       prisma.fuelFilling.findFirst({
-        where:  { vehicleId: t.vehicleId, filledAt: { gte: t.beganAt, lte: to } },
-        select: { id: true },
+        where:   { vehicleId: t.vehicleId, filledAt: { gte: t.beganAt, lte: to } },
+        select:  { filledAt: true },
+        // The EARLIEST filling is the one that closes the window — a later one
+        // cannot explain a rise the first already accounts for.
+        orderBy: { filledAt: 'asc' },
       }),
     ])
     const samples: LevelSample[] = rows.map(r => ({ capturedAt: r.capturedAt, fuelLevelMl: r.fuelLevelMl! }))
 
     const verdict = adjudicateDrain(
       { beganAt: t.beganAt, detectedAt: t.detectedAt, stolenMl: t.stolenMl },
-      samples, filling != null, now,
+      samples, filling?.filledAt ?? null, now,
     )
 
     if (verdict.verdict === 'PENDING') { out.stillPending++; continue }

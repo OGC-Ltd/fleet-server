@@ -33,7 +33,7 @@ describe('adjudicateDrain', () => {
   it('holds its judgement until the settle window has passed', () => {
     // Judging early is how a loss gets confirmed that was about to come back.
     const tooSoon = new Date(DETECTED.getTime() + (SETTLE_MINUTES - 1) * 60_000)
-    const out = adjudicateDrain(claim, window(STEADY_DRAIN, [200_000, 200_000, 200_000, 200_000]), false, tooSoon)
+    const out = adjudicateDrain(claim, window(STEADY_DRAIN, [200_000, 200_000, 200_000, 200_000]), null, tooSoon)
     expect(out.verdict).toBe('PENDING')
     expect(out.reason).toBe('settling')
   })
@@ -43,7 +43,7 @@ describe('adjudicateDrain', () => {
     // level reads low, then returns. 40 L "lost", all of it back.
     // before: steady at 200 L · the "drain" · and back again
     const samples = window(STEADY_DRAIN, [190_000, 198_000, 200_000, 200_000])
-    const out = adjudicateDrain(claim, samples, false, RIPE)
+    const out = adjudicateDrain(claim, samples, null, RIPE)
     expect(out.verdict).toBe('REDISTRIBUTION')
     expect(out.reason).toBe('level-recovered')
     expect(out.recoveredMl).toBe(40_000)
@@ -52,7 +52,7 @@ describe('adjudicateDrain', () => {
   it('calls it a loss when the level stays down', () => {
     // gone, and staying gone
     const samples = window(STEADY_DRAIN, [160_000, 159_000, 158_000, 158_000])
-    const out = adjudicateDrain(claim, samples, false, RIPE)
+    const out = adjudicateDrain(claim, samples, null, RIPE)
     expect(out.verdict).toBe('LOSS')
     expect(out.reason).toBe('level-stayed-down')
   })
@@ -60,7 +60,7 @@ describe('adjudicateDrain', () => {
   it('does not credit a partial rise below the threshold', () => {
     // Only ~25% back — consumption noise, not the tank refilling itself.
     const samples = window(STEADY_DRAIN, [170_000, 170_000, 170_000, 170_000])
-    const out = adjudicateDrain(claim, samples, false, RIPE)
+    const out = adjudicateDrain(claim, samples, null, RIPE)
     expect(out.verdict).toBe('LOSS')
     expect((out.recoveredMl ?? 0) / 40_000).toBeLessThan(RECOVERY_THRESHOLD)
   })
@@ -68,16 +68,18 @@ describe('adjudicateDrain', () => {
   it('will not judge a drain a filling could explain', () => {
     // A rise after a real refuel proves nothing either way, so the claim
     // stands — labelled unchecked rather than silently confirmed.
+    // The filling lands at 13:06, one minute after detection, so nothing after
+    // it can speak to a recovery and there is too little before it.
     const samples = window(STEADY_DRAIN, [200_000, 200_000, 200_000, 200_000])
-    const out = adjudicateDrain(claim, samples, true, RIPE)
+    const out = adjudicateDrain(claim, samples, T('2026-08-04T13:06:00Z'), RIPE)
     expect(out.verdict).toBe('UNVERIFIED')
-    expect(out.reason).toBe('filling-in-window')
+    expect(out.reason).toBe('filling-too-soon')
   })
 
   it('says unverified rather than guessing when telemetry is sparse', () => {
     // 38% of KASULU's and 57% of SUKARI's claimed loss volume lands here.
     const samples = series('2026-08-04T12:59:00Z', [200_000, 160_000])
-    const out = adjudicateDrain(claim, samples, false, RIPE)
+    const out = adjudicateDrain(claim, samples, null, RIPE)
     expect(out.verdict).toBe('UNVERIFIED')
     expect(out.reason).toBe('insufficient-telemetry')
   })
@@ -86,7 +88,7 @@ describe('adjudicateDrain', () => {
     // The two sources disagree about what happened. That is not evidence of a
     // recovery — it is a reason not to claim one.
     const samples = window([200_000, 200_000, 200_000, 200_000, 200_000], [200_000, 200_000, 200_000, 200_000])
-    const out = adjudicateDrain(claim, samples, false, RIPE)
+    const out = adjudicateDrain(claim, samples, null, RIPE)
     expect(out.verdict).toBe('UNVERIFIED')
     expect(out.reason).toBe('no-drop-observed')
   })
@@ -95,7 +97,7 @@ describe('adjudicateDrain', () => {
     // MUFINDI: DZ 13 measured 134% back — the level overshot its own baseline.
     // The excess is not recovered fuel and must not be recorded as such.
     const samples = window(STEADY_DRAIN, [215_000, 215_000, 215_000, 215_000])
-    const out = adjudicateDrain(claim, samples, false, RIPE)
+    const out = adjudicateDrain(claim, samples, null, RIPE)
     expect(out.verdict).toBe('REDISTRIBUTION')
     expect(out.recoveredMl).toBe(40_000)   // the drop, not the overshoot
   })

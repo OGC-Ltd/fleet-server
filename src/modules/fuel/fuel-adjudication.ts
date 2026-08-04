@@ -99,7 +99,8 @@ const MIN_SAMPLES = 3
 export function adjudicateDrain(
   claim: DrainClaim,
   samples: readonly LevelSample[],
-  hasFilling: boolean,
+  /** When a filling was recorded in the window, if one was. */
+  fillingAt: Date | null,
   now: Date,
 ): Adjudication {
   // Not yet ripe. Judging early is how you confirm a loss that was about to
@@ -109,16 +110,22 @@ export function adjudicateDrain(
   }
 
   const before = samples.filter(s => s.capturedAt <= claim.beganAt)
-  const after  = samples.filter(s => s.capturedAt >= claim.detectedAt)
-  if (before.length < MIN_SAMPLES || after.length < MIN_SAMPLES) {
-    return { verdict: 'UNVERIFIED', recoveredMl: null, reason: 'insufficient-telemetry' }
-  }
+  // Only readings BEFORE any filling can speak to a recovery — after one, a
+  // rise is explained by the fuel that was just put in. Cutting the window at
+  // the filling rather than discarding the whole case matters: a refuel two
+  // hours later says nothing about a level that came back five minutes after
+  // the drain, and on the live ledger 29-35% of drains have a filling
+  // somewhere in the window. Throwing those away would forfeit most of what
+  // is decidable.
+  const after = samples.filter(s =>
+    s.capturedAt >= claim.detectedAt && (fillingAt == null || s.capturedAt < fillingAt))
 
-  // A filling in the window explains any rise, so the recovery test cannot
-  // speak. The provider's claim stands, labelled as unchecked rather than
-  // silently confirmed.
-  if (hasFilling) {
-    return { verdict: 'UNVERIFIED', recoveredMl: null, reason: 'filling-in-window' }
+  if (before.length < MIN_SAMPLES || after.length < MIN_SAMPLES) {
+    // Distinguish "no readings" from "a filling landed too soon to see past" —
+    // they are different problems and only one is ours to fix.
+    return fillingAt != null && after.length < MIN_SAMPLES
+      ? { verdict: 'UNVERIFIED', recoveredMl: null, reason: 'filling-too-soon' }
+      : { verdict: 'UNVERIFIED', recoveredMl: null, reason: 'insufficient-telemetry' }
   }
 
   // The drop as OUR telemetry saw it — the highest level before it started
