@@ -582,6 +582,11 @@ model Trip {
   driverId                String?   @map("driver_id")          // nullable — may be unassigned
   reportingPeriodId       String    @map("reporting_period_id")
   routeId                 String?   @map("route_id")           // NULL = ad-hoc / unplanned trip
+  /// The completed dispatch this trip was measured from, when it came from one.
+  /// UNIQUE, so the builder can be re-run over any window without duplicating —
+  /// the same idempotency the fuel sync gets from matching. NULL for trips from
+  /// any other source (the retired simulator's rows, the REST create endpoint).
+  dispatchId              String?   @unique @map("dispatch_id")
   beganAt                 DateTime  @map("began_at")
   endedAt                 DateTime  @map("ended_at")
   initialLocation         String?   @map("initial_location")
