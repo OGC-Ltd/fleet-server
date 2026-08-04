@@ -24,7 +24,12 @@ import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import { getDriversOverview, DEFAULT_DRIVER_WINDOW_DAYS } from '../analytics/drivers-overview.cache.js'
 import { getDeliveriesAnalytics } from '../analytics/deliveries.cache.js'
-import { getFleetSnapshotCached } from '../telemetry/fleet-snapshot.cache.js'
+// The DECORATED snapshot, not fleet-snapshot.cache's raw rows. Movement state,
+// the provider's connection verdict, zone containment and the open trip are all
+// attached by this service rather than by the cached query — and they are
+// exactly the live signals this brief is built on.
+import { getFleetSnapshot } from '../telemetry/telemetry.service.js'
+import { resolveEstatePlaces } from '../../lib/zone-presence.js'
 import { getMaintenanceHistoryCached, getOrgVehicleMaintenance, DEFAULT_HISTORY_WINDOW_DAYS } from '../telemetry/maintenance.cache.js'
 
 export interface AiInsight {
@@ -84,7 +89,7 @@ export async function collectToday(orgId: string) {
   const dayStart = fleetDayStart()
   const now = new Date()
 
-  const [dispatches, thefts] = await Promise.all([
+  const [dispatches, thefts, feedCounts, overspeeding, latestFeed] = await Promise.all([
     prisma.dispatch.findMany({
       where:  { organisationId: orgId, dispatchedAt: { gte: dayStart } },
       select: { id: true, destination: true, actualReturnAt: true },
@@ -92,6 +97,30 @@ export async function collectToday(orgId: string) {
     prisma.fuelTheft.findMany({
       where:  { vehicle: { organisationId: orgId }, detectedAt: { gte: dayStart } },
       select: { verdict: true, stolenMl: true },
+    }),
+    // Today's Live Feed, by kind. Grouped rather than fetched: zone crossings
+    // alone run to ~2,900 a day on Kasulu and no brief needs them individually.
+    prisma.notification.groupBy({
+      by:      ['alertType'],
+      where:   { organisationId: orgId, occurredAt: { gte: dayStart } },
+      _count:  { _all: true },
+    }),
+    prisma.vehicleAlert.count({
+      where: { organisationId: orgId, type: 'overspeeding', triggeredAt: { gte: dayStart } },
+    }),
+    // The newest lines an operator would actually have read. Zone crossings are
+    // excluded for the reason lib/zone-taxonomy documents at length: a tractor
+    // working a field crosses boundaries continuously, and they crowd out
+    // everything that matters.
+    prisma.notification.findMany({
+      where:   {
+        organisationId: orgId,
+        occurredAt:     { gte: dayStart },
+        alertType:      { notIn: ['ZONE_ENTRY', 'ZONE_EXIT'] },
+      },
+      orderBy: { occurredAt: 'desc' },
+      take:    5,
+      select:  { text: true, severity: true, alertType: true, occurredAt: true },
     }),
   ])
 
@@ -159,12 +188,120 @@ export async function collectToday(orgId: string) {
         ? Math.round(losses.reduce((s, t) => s + t.stolenMl, 0) / 100) / 10
         : 0,
     },
+    /** Today's Live Feed by kind, plus the newest lines worth quoting. */
+    feed: {
+      byKind: Object.fromEntries(
+        feedCounts
+          .map(r => [r.alertType ?? 'other', r._count._all] as const)
+          .sort((a, b) => b[1] - a[1]),
+      ),
+      overspeedingAlerts: overspeeding,
+      latest: latestFeed.map(n => ({
+        at:       clockFmt.format(n.occurredAt),
+        severity: n.severity,
+        text:     n.text,
+      })),
+    },
+  }
+}
+
+/** One decorated snapshot row, as much of it as this module reads. */
+interface SnapRow {
+  vehicleId?: string
+  vehicleType?: string | null
+  lat?: number | null
+  lng?: number | null
+  speedKmh?: number | null
+  engineOn?: boolean
+  lowFuel?: boolean
+  inMaintenance?: boolean
+  connectionOnline?: boolean | null
+  movement?: { state?: 'moving' | 'idling' | 'resting' } | null
+  zones?: { breach?: boolean } | null
+  trip?: { leg?: string; destination?: string | null } | null
+}
+
+/**
+ * What the fleet is doing THIS MINUTE.
+ *
+ * The counts an operator reads off the topbar, taken from the same decorated
+ * snapshot the map renders so the card cannot disagree with the screen beside
+ * it. `movement.state` is the tracker's verdict, not a speed threshold: a truck
+ * stopped at a weighbridge with the engine running is idling, not parked, and
+ * inventing a "speed > 0" rule here would have contradicted the vehicle cards.
+ *
+ * Connection is the PROVIDER's verdict (`connectionOnline`), never inferred
+ * from fix age — see lib/connection-state. `null` means the poller has no
+ * current answer, which is why unknown is counted separately rather than being
+ * folded into offline and reported as a fleet-wide outage.
+ */
+function collectLiveState(snapshot: SnapRow[]) {
+  const state = (s: string) => snapshot.filter(v => v.movement?.state === s).length
+  const legs = new Map<string, number>()
+  for (const v of snapshot) {
+    const leg = v.trip?.leg
+    if (leg) legs.set(leg, (legs.get(leg) ?? 0) + 1)
+  }
+  return {
+    vehicles:      snapshot.length,
+    online:        snapshot.filter(v => v.connectionOnline === true).length,
+    offline:       snapshot.filter(v => v.connectionOnline === false).length,
+    connectionUnknown: snapshot.filter(v => v.connectionOnline == null).length,
+    enginesOn:     snapshot.filter(v => v.engineOn).length,
+    inTransit:     state('moving'),
+    idling:        state('idling'),
+    parked:        state('resting'),
+    lowFuel:       snapshot.filter(v => v.lowFuel).length,
+    inMaintenance: snapshot.filter(v => v.inMaintenance).length,
+    insideKeepOutZone: snapshot.filter(v => v.zones?.breach).length,
+    /** Units on an open run, by where the geometry says they are on it. */
+    onRunByLeg: Object.fromEntries([...legs.entries()].sort((a, b) => b[1] - a[1])),
+  }
+}
+
+/**
+ * WHERE the fleet is working, by the estate's own named features.
+ *
+ * The operator's question — "how many units are in the factory area, how many
+ * out on the farms" — is answered from each unit's own fix resolved against the
+ * plotted overlay, not from the provider's idea of place. `resolveEstatePlaces`
+ * returns every containing feature most specific first, so a machine inside
+ * FARM#212 and also inside the 2500 Ha Area is attributed to FARM#212: the
+ * smallest true statement rather than the largest.
+ *
+ * Only units the provider currently calls online are placed. An offline unit's
+ * last known fix is where it was when it stopped reporting, which on a fleet
+ * with 20-minute coverage gaps is not where it is working now.
+ */
+async function collectWorkingAreas(orgId: string, snapshot: SnapRow[]) {
+  const byArea = new Map<string, { area: string; category: string; units: number }>()
+  let positioned = 0
+  let outsideAnyEstateFeature = 0
+
+  for (const v of snapshot) {
+    if (v.connectionOnline !== true) continue
+    if (v.lat == null || v.lng == null) continue
+    positioned++
+    const places = await resolveEstatePlaces(orgId, v.lat, v.lng)
+    const here = places[0]
+    if (!here) { outsideAnyEstateFeature++; continue }
+    const row = byArea.get(here.id) ?? { area: here.name, category: here.category, units: 0 }
+    row.units++
+    byArea.set(here.id, row)
+  }
+
+  const ranked = [...byArea.values()].sort((a, b) => b.units - a.units)
+  return {
+    positioned,
+    byArea: ranked.slice(0, 6),
+    areasNotShown: Math.max(0, ranked.length - 6),
+    outsideAnyEstateFeature,
   }
 }
 
 async function collectFacts(orgId: string) {
   const [snapshot, drivers, deliveries, history, maint, today] = await Promise.all([
-    getFleetSnapshotCached(orgId),
+    getFleetSnapshot(orgId) as Promise<SnapRow[]>,
     getDriversOverview(orgId, DEFAULT_DRIVER_WINDOW_DAYS),
     getDeliveriesAnalytics(orgId, 30),
     getMaintenanceHistoryCached(orgId, DEFAULT_HISTORY_WINDOW_DAYS),
@@ -172,20 +309,23 @@ async function collectFacts(orgId: string) {
     collectToday(orgId),
   ])
 
-  const activeCount = snapshot.filter(v => v.engineOn).length
-  const totalCount  = snapshot.length
+  // Areas are resolved from the snapshot, so this waits on it rather than
+  // joining the parallel batch above.
+  const working = await collectWorkingAreas(orgId, snapshot)
+
+  const fleetNow    = collectLiveState(snapshot)
+  const activeCount = fleetNow.enginesOn
+  const totalCount  = fleetNow.vehicles
   const roster      = drivers.drivers
   const weekAgo     = Date.now() - 7 * 86_400_000
   const hist30      = history.slice(-30)
   const hist14      = history.slice(-14)
 
   const facts = {
-    fleetNow: {
-      vehicles: totalCount,
-      enginesOn: activeCount,
-      lowFuel: snapshot.filter(v => v.lowFuel).length,
-      inMaintenance: snapshot.filter(v => (v as { inMaintenance?: boolean }).inMaintenance).length,
-    },
+    // ── right now: online/offline, in transit, idling, breaches ──
+    fleetNow,
+    // ── where the fleet is working, by estate feature ──
+    working,
     // ── the shift in progress — see collectToday ──
     today,
     // ── Drivers page ──
@@ -260,43 +400,55 @@ async function collectFacts(orgId: string) {
  */
 export const SYSTEM_PROMPT =
   'You are the duty operations analyst for a Kenyan haulage fleet, briefing the fleet manager mid-shift. ' +
-  'You receive a JSON object of MEASURED facts. Write EXACTLY THREE short sentences, at most 60 words in total, ' +
-  'and nothing else: ' +
-  '(1) Fleet health and your risk verdict — e.g. "Fleet health is good, though risk is high." Do NOT state the ' +
-  'active or total unit counts: the card prints "115/510 active:" immediately before your text, so repeating them ' +
-  'reads as a stutter. Let that ratio inform the verdict without naming it. ' +
+  'You receive a JSON object of MEASURED facts. Write FOUR OR FIVE short sentences, at most 95 words in total, ' +
+  'covering these in order: ' +
+  '(1) How the fleet is running right now and your risk verdict, from `fleetNow`: how many are online, and the ' +
+  'split between `inTransit`, `idling` and `parked` — e.g. "The fleet is working steadily, with 96 units online, ' +
+  '41 in transit and 18 idling." Do NOT state the active or total unit counts: the card prints "115/510 active:" ' +
+  'immediately before your text, so repeating them reads as a stutter. ' +
   '(2) Today\'s gate movement broken down by destination, from `today.leftGate`, `today.sinceLabel` (use it ' +
   'verbatim) and `today.byDestination` — e.g. "We have had 70 units leave the gate this morning, with 20 going to ' +
   'WEIGHBRIDGE X and 50 going to WEIGHBRIDGE Y." ' +
-  '(3) Today\'s fuel exceptions, from `today.fuelIssues.raised` and `today.fuelIssues.needInvestigating` — e.g. ' +
-  '"There are 19 fuel issues raised, 5 of which need investigating." ' +
-  'NOTHING ELSE BELONGS IN THE BRIEF. Do not mention 30-day trends, tonnage, deliveries, timeliness, drivers, ' +
-  'ratings, conduct cases, depots, products, maintenance, services or garage visits: those figures are in the ' +
+  '(3) Where the fleet is working now, from `working.byArea` — name the areas and how many units are in each, ' +
+  'e.g. "On the ground, 22 units are working FARM#212 and 9 are at the FACTORY SITE." ' +
+  '(4) Today\'s exceptions: fuel issues from `today.fuelIssues.raised` and `.needInvestigating`, plus ' +
+  '`today.feed.overspeedingAlerts` and `fleetNow.insideKeepOutZone` when either is above zero — e.g. "There are 19 ' +
+  'fuel issues raised, 5 of which need investigating, and 3 overspeeding alerts." ' +
+  '(5) OPTIONAL, only if it earns its words: the single most notable line from `today.feed.latest`, retold in your ' +
+  'own words with its time — e.g. "Latest: KTCB 295U flagged for a fuel drop at 09:12." Prefer a critical or ' +
+  'warning severity. Skip this sentence entirely if the latest items are routine. ' +
+  'STAY ON THE LIVE SHIFT. Do not mention 30-day trends, tonnage, deliveries, timeliness, driver names, ratings, ' +
+  'conduct cases, depots, products, maintenance schedules, services or garage visits: those figures are in the ' +
   'payload ONLY to inform your risk verdict, and naming any of them in the text is a failure. Do not add a ' +
-  'recommendation, an action, or a closing remark. Three sentences, then stop. ' +
+  'recommendation or a closing remark. ' +
   'THE NUMBERS ARE THE POINT. Quote them exactly as given; never estimate, re-derive, round differently or invent ' +
   'one. `leftGate` is units SEEN clearing the barrier and is the figure sentence 2 reports — never substitute ' +
   '`dispatchesRaised`, which is only the paperwork. `raised` fuel issues are not all actionable: only ' +
-  '`needInvestigating` are confirmed losses, and sentence 3 must keep the two apart. Name destinations EXACTLY as ' +
-  'spelled in the JSON. ' +
+  '`needInvestigating` are confirmed losses, and sentence 4 must keep the two apart. `online`, `inTransit`, ' +
+  '`idling` and `parked` are four different counts — never add them together or use one for another. Name ' +
+  'destinations and areas EXACTLY as spelled in the JSON. ' +
   'WRITE PROSE, NOT A FIELD DUMP. Never print a JSON key — not "leftGate", "needInvestigating", "dispatchesRaised" ' +
   'nor any other — and never use the "label: value" form. Begin with a capital letter and write complete sentences. ' +
   'Agree singular and plural with the actual figure — "There is 1 fuel issue raised", never "There are 1 fuel ' +
   'issues" — and write "none of which" rather than "0 of which". Write the risk level in lower case inside the ' +
   'sentence ("risk is medium"), since it is prose and not a label. ' +
   'DO NOT NARRATE ZEROES. The fleet day begins at local midnight, so early in it there is genuinely nothing to ' +
-  'report. If `today.quiet` is true or `today.leftGate` is 0, sentence 2 becomes exactly "Nothing has been ' +
-  'dispatched yet today." If `today.fuelIssues.raised` is 0, sentence 3 becomes exactly "No fuel issues have been ' +
-  'raised today." Never list zero figures one after another, and never write "unknown", "no data", "not reported" ' +
-  'or "none listed". ' +
+  'report, and a brief is allowed to be SHORT. If `today.quiet` is true or `today.leftGate` is 0, the gate sentence ' +
+  'becomes exactly "Nothing has been dispatched yet today." If `today.fuelIssues.raised` is 0 and there are no ' +
+  'overspeeding alerts or keep-out breaches, the exceptions sentence becomes exactly "No exceptions have been ' +
+  'raised today." If `working.byArea` is empty, drop the working sentence entirely rather than reporting that no ' +
+  'area is occupied. Never list zero figures one after another, and never write "unknown", "no data", ' +
+  '"not reported" or "none listed". ' +
   'No markdown, no preamble, no bullet points, no hedging. ' +
   'Classify overall operational risk with this rubric — the level MUST match the tone of your msg: ' +
-  '"Low" = broadly positive (good timeliness, stable or improving trends, few conduct cases/incidents, few confirmed fuel losses); ' +
-  '"Medium" = notable but contained issues or mixed trends; ' +
-  '"High" = ONLY for serious, systemic problems (timeliness under ~50%, sharply worsening incidents, repeated confirmed ' +
-  'fuel losses, or a large share of the fleet down). ' +
-  'Never pair a positive summary with High risk, and never call risk High off `raised` fuel issues that have not been ' +
-  'confirmed as losses. Reply with STRICT JSON: {"msg": string, "risk": "Low"|"Medium"|"High"}.'
+  '"Low" = broadly positive (most units online, few confirmed fuel losses, no keep-out breaches, stable or ' +
+  'improving 30-day trends); ' +
+  '"Medium" = notable but contained issues or mixed signals; ' +
+  '"High" = ONLY for serious, systemic problems (a large share of the fleet offline or down, repeated confirmed ' +
+  'fuel losses, multiple keep-out breaches, sharply worsening incidents, or 30-day timeliness under ~50%). ' +
+  'Never pair a positive summary with High risk, and never call risk High off `raised` fuel issues that have not ' +
+  'been confirmed as losses, nor off `connectionUnknown`, which means the poller has no answer rather than that ' +
+  'the units are down. Reply with STRICT JSON: {"msg": string, "risk": "Low"|"Medium"|"High"}.'
 
 async function generateFor(orgId: string): Promise<void> {
   if (generating.has(orgId)) return
