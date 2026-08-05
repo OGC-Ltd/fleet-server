@@ -19,6 +19,9 @@ router.get('/fuel-efficiency',      validateQuery(analyticsRangeSchema), ctrl.fu
 // Ledger-backed fuel + cost. Distinct from /fuel-efficiency above, which reads
 // the telemetry fuelUsedMl channel — empty on this fleet's trackers.
 router.get('/fuel-cost',            validateQuery(fuelCostQuerySchema),  ctrl.fuelCost)
+// Today on the ground — local midnight → now. No query params: the window is
+// the fleet day, which is not something a caller gets to choose.
+router.get('/operations-today',     ctrl.operationsToday)
 router.get('/speeding',             validateQuery(speedingQuerySchema),   ctrl.speeding)
 router.get('/violation-heatmap',    validateQuery(analyticsRangeSchema), ctrl.violationHeatmap)
 

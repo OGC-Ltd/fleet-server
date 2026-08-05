@@ -61,6 +61,29 @@ export const fuelCost: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+/**
+ * Today's operational figures — a DIFFERENT window from the rest of this
+ * module (local midnight → now, not the trailing month). Litres are priced
+ * here rather than in the repository, at the same configured rate `fuelCost`
+ * uses, so the two cards on the Analytics page can never quote a different
+ * pump price for the same fuel.
+ */
+export const operationsToday: RequestHandler = async (req, res, next) => {
+  try {
+    const data = await repo.operationsToday(p(req, 'orgId'))
+    const pricePerLitre = env.FUEL_PRICE_PER_LITRE
+    sendSuccess(res, {
+      ...data,
+      fuel: {
+        ...data.fuel,
+        litresFilled: Math.round(data.fuel.filledMl / 100) / 10,
+        cost:         Math.round((data.fuel.filledMl / 1000) * pricePerLitre),
+      },
+      price: { pricePerLitre, currency: env.FUEL_CURRENCY, source: 'configured' as const },
+    })
+  } catch (err) { next(err) }
+}
+
 export const speeding: RequestHandler = async (req, res, next) => {
   try {
     const data = await repo.speedingEvents(p(req, 'orgId'), req.query as unknown as SpeedingQuery)
