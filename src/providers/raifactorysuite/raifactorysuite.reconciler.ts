@@ -45,8 +45,20 @@ import { handleDispatch } from '../../modules/webhooks/raifactorysuite-events.se
  */
 const ALERT_WINDOW = 200
 
-/** Dispatch window. The endpoint caps at 1000 and ignores offset entirely. */
-const DISPATCH_WINDOW = 500
+/**
+ * Dispatch window. The endpoint caps at 1000 and ignores offset entirely, so
+ * this is the ONLY lookback there is — a run that falls out of it can never
+ * receive its closure, and stays open in our copy for ever.
+ *
+ * 500 was about four days at this fleet's ~130 dispatches a day, and the tail
+ * showed: measured 2026-08-05, we held 193 dispatches open while the provider
+ * held 171, and six of the difference were runs it had already COMPLETED or
+ * CANCELLED days earlier. They sat in "out now" indefinitely because nothing
+ * ever re-read them. All six were inside the provider's 1000 rows.
+ *
+ * So take the whole window the endpoint allows. It is one request either way.
+ */
+const DISPATCH_WINDOW = 1000
 
 export interface ReconcilerHandle {
   stop: () => void

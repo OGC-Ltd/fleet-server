@@ -133,6 +133,33 @@ describe('collectToday', () => {
     ])
   })
 
+  it('bounds "out now" to runs released today, as the factory board does', async () => {
+    // The correction. Unbounded, this counted every run the provider had ever
+    // left open: 193 on 2026-08-05 against 142 on the factory's own screen.
+    // The query must carry the fleet-day floor, or the tail creeps back.
+    mockDispatches({ openRuns: Array.from({ length: 139 }, () => openRun('OPAPO')) })
+
+    const today = await collectToday('org-1')
+
+    expect(today.outNow).toBe(139)
+    const open = (prismaMock.dispatch.findMany.mock.calls as unknown as Array<[DispatchArgs]>)
+      .map(c => c[0]).find(a => a?.where?.actualReturnAt === null)!
+    expect(open.where).toMatchObject({ dispatchedAt: { gte: expect.any(Date) } })
+  })
+
+  it('keeps stale open paperwork out of the headline, but still reports it', async () => {
+    // Runs open from earlier days are what the provider forgot to close — 31 of
+    // them that day, six older than a week. They must not inflate `outNow`, and
+    // they must not vanish either: the gap is how the drift gets noticed.
+    prismaMock.dispatch.count.mockResolvedValue(31 as never)
+    mockDispatches({ openRuns: [openRun('OPAPO')] })
+
+    const today = await collectToday('org-1')
+
+    expect(today.outNow).toBe(1)
+    expect(today.outNowStale).toBe(31)
+  })
+
   it('counts runs closed today however long ago they were raised', async () => {
     prismaMock.dispatch.count.mockResolvedValue(4 as never)
     const today = await collectToday('org-1')
