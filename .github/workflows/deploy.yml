@@ -103,6 +103,7 @@ jobs:
       - name: open an ssh channel to the box
         env:
           SSH_KEY:  ${{ secrets.EC2_SSH_KEY }}
+          HOST:     ${{ secrets.EC2_HOST }}
           HOST_KEY: ${{ secrets.EC2_HOST_KEY }}
         run: |
           set -euo pipefail
@@ -112,8 +113,24 @@ jobs:
           # Pinned host key rather than ssh-keyscan: keyscan trusts whatever
           # answers on the day, and this connection carries the code that is
           # about to run in production.
-          printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          #
+          # The KEY is the security property. The hostname at the start of each
+          # line is only the label ssh matches on — and the two have to agree,
+          # which is not obvious and fails opaquely: a secret pasted from
+          # `ssh-keyscan <dns-name>` gives "Host key verification failed" the
+          # moment EC2_HOST holds the IP instead, or the public DNS rerolls.
+          # So the pinned keys are re-labelled to whatever EC2_HOST is; nothing
+          # about what is trusted changes. Hashed entries (|1|...) cannot be
+          # re-labelled and pass through untouched.
+          printf '%s\n' "$HOST_KEY" \
+            | awk -v h="$HOST" '/^\|/ { print; next } NF { $1 = h; print }' \
+            > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
+          # Fingerprints are public information, and they are the fastest way to
+          # spot a wrong or truncated paste — the failure would otherwise say
+          # only "verification failed", with nothing to compare against.
+          echo "pinned $(grep -c . ~/.ssh/known_hosts) host key(s):"
+          ssh-keygen -lf ~/.ssh/known_hosts | sed 's/^/  /'
 
       - name: push this commit into the box's working tree
         env:

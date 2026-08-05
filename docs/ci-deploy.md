@@ -16,11 +16,25 @@ Settings → Secrets and variables → Actions.
 | --- | --- | --- |
 | `EC2_SSH_KEY` | Private key for `ubuntu@` on the box — the whole PEM including the `-----BEGIN`/`-----END` lines | the contents of `keys/logistics.pem` |
 | `EC2_HOST` | The box's public DNS name | EC2 console, or the host in your working `ssh` command |
-| `EC2_HOST_KEY` | The box's host key, as a `known_hosts` line | `ssh-keyscan -H <host>` run once **from a machine you already trust**, pasted whole |
+| `EC2_HOST_KEY` | The box's host keys, as `known_hosts` lines | `ssh-keyscan <host>` run once **from a machine you already trust**, pasted whole — all three lines, without `-H` |
 
 `EC2_HOST_KEY` is pinned rather than discovered with `ssh-keyscan` inside the
 job, because keyscan trusts whatever answers on the day and this connection
 carries the code that is about to run in production.
+
+Paste the **unhashed** output (no `-H`). The workflow re-labels each line's
+hostname field to whatever `EC2_HOST` holds before writing `known_hosts`, so the
+two cannot silently disagree — pasting keys scanned from the DNS name while
+`EC2_HOST` is the IP would otherwise fail with a bare
+`Host key verification failed` and nothing pointing at the cause. Only the label
+is rewritten; the key material, which is the thing being trusted, is untouched.
+Hashed (`-H`) entries still work but cannot be re-labelled, so they must match
+`EC2_HOST` exactly.
+
+Verify a paste against the fingerprints — the workflow prints them at the start
+of every deploy:
+
+    ssh-keygen -lf <(ssh-keyscan <host> 2>/dev/null)
 
 ## The host name is the weak point
 
