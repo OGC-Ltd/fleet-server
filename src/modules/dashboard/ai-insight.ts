@@ -602,8 +602,9 @@ export const SYSTEM_PROMPT =
   '`needInvestigating` are confirmed losses, and sentence 4 must keep the two apart. `online`, `inTransit`, ' +
   '`idling` and `parked` are four different counts — never add them together or use one for another. Name ' +
   'destinations and areas EXACTLY as spelled in the JSON. ' +
-  'WRITE PROSE, NOT A FIELD DUMP. Never print a JSON key — not "leftGate", "needInvestigating", "dispatchesRaised" ' +
-  'nor any other — and never use the "label: value" form. Begin with a capital letter and write complete sentences. ' +
+  'WRITE PROSE, NOT A FIELD DUMP. Never print a JSON key — not "leftGate", "needInvestigating", "dispatchesRaised", ' +
+  '"outNow", "outNowOverdue", "outNowStale" nor any other — and never use the "label: value" form. Say "138 units ' +
+  'are still out", never "outNow stands at 138". Begin with a capital letter and write complete sentences. ' +
   'Agree singular and plural with the actual figure — "There is 1 fuel issue raised", never "There are 1 fuel ' +
   'issues" — and write "none of which" rather than "0 of which". Write the risk level in lower case inside the ' +
   'sentence ("risk is medium"), since it is prose and not a label. ' +
@@ -644,6 +645,31 @@ function citableFigures(facts: unknown): Set<string> {
   const out = new Set<string>()
   for (const m of JSON.stringify(facts).matchAll(/\d+(?:\.\d+)?/g)) out.add(m[0])
   return out
+}
+
+/**
+ * Did the model print a field name instead of writing English?
+ *
+ * Same reasoning as `fabricatedFigures` below: the prompt forbids it, and a
+ * prompt is a request. Observed in production on 2026-08-05 — "Today outNow
+ * stands at 138, with no overdue units" — where every figure was measured and
+ * correct, so the fabrication guard had no reason to fire. A brief that names
+ * its own JSON keys reads as a leaked debug line to the one person it is
+ * written for.
+ *
+ * Syntactic and cheap, like its sibling: any camelCase token from the facts
+ * payload appearing verbatim in the prose. Ordinary English never contains
+ * `outNowOverdue`, so there is nothing to weigh up.
+ */
+const FACT_KEYS = [
+  'leftGate', 'stillInYard', 'dispatchesRaised', 'outNow', 'outNowOverdue', 'outNowStale',
+  'outNowByDestination', 'byDestination', 'destinationsNotShown', 'destinationNotRecorded',
+  'needInvestigating', 'fuelIssues', 'inTransit', 'connectionKnown', 'noTelemetryEver',
+  'insideKeepOutZone', 'byArea', 'sinceLabel', 'fleetNow', 'outNowDestinationsNotShown',
+]
+
+export function leakedFieldNames(msg: string): string[] {
+  return FACT_KEYS.filter(k => msg.includes(k))
 }
 
 /**
@@ -766,11 +792,18 @@ async function generateFor(orgId: string): Promise<void> {
     // complete brief written from the facts, so the bar for taking the model's
     // wording is that it invented nothing.
     const invented = fabricatedFigures(parsed.msg, facts)
-    const msg = invented.length ? buildFleetFallback(facts) : parsed.msg
+    const leaked   = leakedFieldNames(parsed.msg)
+    const msg = invented.length || leaked.length ? buildFleetFallback(facts) : parsed.msg
     if (invented.length) {
       logger.warn(
         { orgId, invented, rejected: parsed.msg },
         'AI insight: model quoted figures that are not in the data — the facts-only brief stands',
+      )
+    }
+    if (leaked.length) {
+      logger.warn(
+        { orgId, leaked, rejected: parsed.msg },
+        'AI insight: model printed field names instead of prose — the facts-only brief stands',
       )
     }
 
