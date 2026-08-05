@@ -79,7 +79,13 @@ export async function deliveriesAnalytics(orgId: string, q: DeliveriesQuery) {
     const product = t.cargoManifest?.description ?? 'Unspecified'
     const kg      = t.cargoManifest?.arrivalWeightKg ?? 0
     const km      = t.mileageKm ?? 0
-    const depot   = t.finalLocation ?? 'Unknown'
+    // Dispatchers type the destination freehand and the casing wanders, so group
+    // on the same UPPER(TRIM()) key ai-insight and dispatch.repository use. This
+    // was the one place that grouped on the raw string, and it showed: August
+    // reported 98 destinations served, with OPAPO and Opapo, OYANI and Oyani,
+    // MIYORO and miyoro each counted as two places and their trips split
+    // between them.
+    const depot   = t.finalLocation?.trim().toUpperCase() || 'Unknown'
     const dayKey  = fleetDayKey(t.beganAt)
 
     const expectedHours = t.avgSpeedKmh && t.avgSpeedKmh > 0 && km ? km / t.avgSpeedKmh : null
