@@ -744,6 +744,20 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
  * today sitting beside a "331 completed trips" that means the month is exactly
  * how a card lies without a single wrong number in it.
  *
+ * DEPARTURE IS THE SIGN-OUT, not the gate crossing. This card used to count
+ * only departures MEASURED off the vehicle's own fixes (lib/yard-departure),
+ * and on a fleet where most units have no tracker that is a census of the
+ * trackers, not of the yard: measured 2026-08-05, 55 tractors were signed out
+ * before 06:00 and the card said 5. Of those 55, 33 are on vehicles with no
+ * Wialon unit bound at all (they carry the RaiFactorySuite UUID as `deviceId`
+ * and have never produced a fix), 7 had a tracker that stayed silent, and of
+ * the 15 that did report only 5 cleared the barrier before the hour — the rest
+ * genuinely rolled later. The yard signs a vehicle out; that is the record the
+ * operator keeps and the one the factory's own books show, so it is the record
+ * this card counts. Where telemetry DID watch the barrier we keep the measured
+ * time beside the row (`gateAt`) rather than in place of it — it is the answer
+ * to "how long did it then stand there", not to "did it go".
+ *
  * WHAT IS DELIBERATELY NOT HERE, because the live fleet has no data behind it:
  *
  *   · FUEL COST SPLIT BY FUEL TYPE. Nothing records a fuel type — not on
@@ -770,7 +784,7 @@ export async function operationsToday(orgId: string) {
   const dayStart = fleetDayStart()
   const now = new Date()
 
-  const [fleet, fillings, gateRows, truckDispatches, unresolvedDispatches] = await Promise.all([
+  const [fleet, fillings, tractorDispatches, truckDispatches, unresolvedDispatches] = await Promise.all([
     // Registry state, not connectivity. `isActive` is what the provider still
     // lists; ONLINE/OFFLINE is the poller's verdict and lives on the decorated
     // snapshot, which this query has no business reaching for.
@@ -785,17 +799,18 @@ export async function operationsToday(orgId: string) {
       where:  { vehicle: { organisationId: orgId }, filledAt: { gte: dayStart } },
       select: { filledMl: true, filledAt: true },
     }),
-    // Gate crossings OBSERVED today. Keyed on when the crossing happened, not
-    // on when the paperwork was raised — this fleet dispatches through the
-    // night, so the two routinely fall on different days.
-    prisma.notification.findMany({
+    // Tractors SIGNED OUT today — the yard's own record of leaving, which
+    // exists for every unit whether or not it carries a tracker. Same shape as
+    // the truck query below; the two differ only by vehicle type, and neither
+    // can see paperwork whose plate never resolved (reported separately).
+    prisma.dispatch.findMany({
       where: {
         organisationId: orgId,
-        occurredAt:     { gte: dayStart },
-        feedId:         { startsWith: 'yd-' },
+        dispatchedAt:   { gte: dayStart },
         vehicle:        { vehicleType: 'TRACTOR' },
       },
-      select: { feedId: true, occurredAt: true, text: true, plate: true },
+      select:  { id: true, plate: true, driverName: true, destination: true, dispatchedAt: true },
+      orderBy: { dispatchedAt: 'asc' },
     }),
     prisma.dispatch.findMany({
       where: {
@@ -814,49 +829,49 @@ export async function operationsToday(orgId: string) {
     }),
   ])
 
-  // A departure whose time was NOT observed still produces a feed line — the
-  // vehicle was never seen at the gate, so lib/yard-departure says so in words
-  // rather than stamping the first fix it happened to receive (see the
-  // `bounded` branch there). Those rows carry a timestamp that is not a
-  // departure time, so they must not land in an hour bucket. There is no
-  // precision column to filter on yet, so the wording is the only signal.
-  const OBSERVED = (text: string) => !text.includes('departure time not observed')
-  const observed = gateRows.filter(r => OBSERVED(r.text))
-
   // Local hour in the fleet's timezone. EAT is a fixed +3 with no DST, so the
   // shift-and-read is exact — no Intl round trip needed per row.
   const localHour = (d: Date) => new Date(d.getTime() + 3 * 3_600_000).getUTCHours()
-  const before = (h: number) => observed.filter(r => localHour(r.occurredAt) < h).length
+  const before = (h: number) => tractorDispatches.filter(d => localHour(d.dispatchedAt) < h).length
 
-  // WHO actually went out early — plate and crew, not just a count.
+  // WHO went out early — plate and crew, not just a count.
+  const earlyRows = tractorDispatches.filter(d => localHour(d.dispatchedAt) < 6)
+
+  // The measured barrier crossing for those runs, where telemetry caught one.
+  // Keyed `yd-<dispatchId>` by lib/yard-departure, so this is one indexed read
+  // over the early rows rather than a scan of the day's feed.
   //
-  // The crew comes from the DISPATCH the crossing belongs to (feedId is
-  // `yd-<dispatchId>`, see lib/yard-departure), not from the feed sentence.
-  // The sentence has the name in it, but parsing a name back out of prose that
-  // is written for humans and changes wording per precision level is a bug
-  // waiting for the first driver with a middle name.
-  const earlyRows = observed.filter(r => localHour(r.occurredAt) < 6)
-  const earlyDispatchIds = earlyRows.map(r => r.feedId.slice(3))
-  const earlyDispatches = earlyDispatchIds.length
-    ? await prisma.dispatch.findMany({
-        where:  { id: { in: earlyDispatchIds } },
-        select: { id: true, driverName: true, destination: true, plate: true },
+  // A departure the fixes could not TIME still produces a feed line (the
+  // `bounded` branch there — the unit was never seen at the gate). Those rows
+  // carry a timestamp that is not a crossing time, so they must not be quoted
+  // as one; the run still counts, on its sign-out clock, like every other. The
+  // wording is the only signal there is — no precision column exists yet.
+  const gateNotes = earlyRows.length
+    ? await prisma.notification.findMany({
+        where:  { organisationId: orgId, feedId: { in: earlyRows.map(d => `yd-${d.id}`) } },
+        select: { feedId: true, occurredAt: true, text: true },
       })
     : []
-  const dispatchById = new Map(earlyDispatches.map(d => [d.id, d]))
+  const gateAtById = new Map(
+    gateNotes
+      .filter(n => !n.text.includes('departure time not observed'))
+      .map(n => [n.feedId.slice(3), n.occurredAt]),
+  )
 
   const earlyList = earlyRows
-    .map(r => {
-      const d = dispatchById.get(r.feedId.slice(3))
-      return {
-        plate:       r.plate ?? d?.plate ?? null,
-        // Free text from the provider, verbatim. Null when the dispatch is gone
-        // — never a placeholder name, which would read as a real crew member.
-        driver:      d?.driverName ?? null,
-        destination: d?.destination ?? null,
-        at:          r.occurredAt.toISOString(),
-      }
-    })
+    .map(d => ({
+      plate: d.plate,
+      // Free text from the provider, verbatim — never a placeholder, which
+      // would read as a real crew member.
+      driver:      d.driverName,
+      destination: d.destination,
+      /** When the yard signed it out. This is the departure. */
+      at:          d.dispatchedAt.toISOString(),
+      /** When telemetry watched it clear the barrier, for the minority of
+       *  units that carry a tracker and reported. Null is the normal case and
+       *  means "not measured", never "did not leave". */
+      gateAt:      gateAtById.get(d.id)?.toISOString() ?? null,
+    }))
     .sort((a, b) => a.at.localeCompare(b.at))
 
   const filledMl = fillings.reduce((s, f) => s + f.filledMl, 0)
@@ -880,15 +895,18 @@ export async function operationsToday(orgId: string) {
       fillings: fillings.length,
     },
 
-    /** Tractors seen clearing the barrier before each local hour today. */
+    /** Tractors signed out before each local hour today. Cumulative: before05
+     *  includes everything before 04, so they must not be added up. */
     earlyDepartures: {
-      tractorsOut:     observed.length,
+      tractorsOut:     tractorDispatches.length,
       before04:        before(4),
       before05:        before(5),
       before06:        before(6),
-      /** Left today, but with no fix at the gate to time it by. */
-      timeNotObserved: gateRows.length - observed.length,
-      /** The pre-06:00 crossings themselves — plate, crew, where, when. */
+      /** How many of the pre-06:00 runs telemetry also watched clear the
+       *  barrier — the measurement's own coverage, stated so nobody reads the
+       *  count above as a GPS-confirmed figure. */
+      gateConfirmed:   earlyList.filter(r => r.gateAt != null).length,
+      /** The pre-06:00 sign-outs themselves — plate, crew, where, when. */
       list:            earlyList,
     },
 

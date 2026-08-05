@@ -181,10 +181,19 @@ export async function handleDispatch(
   // one stops the steady-state repeat.
   if (!narrate || alreadyKnown) return true
 
+  // The sign-out IS the departure, and this line is where the feed says so.
+  //
+  // It used to read "dispatched to X" and leave "has it actually gone" to the
+  // telemetry-derived gate line in lib/yard-departure. That reaches only the
+  // units with a tracker bound — a minority of this fleet — so for most of the
+  // yard the feed narrated the paperwork and then never mentioned the vehicle
+  // leaving at all. The yard signs a unit out and it goes; that is the record
+  // the operator keeps, and the measured crossing (when there is one) now
+  // CONFIRMS this line with a time rather than being the only claim of it.
   const dest = d.destinationOrPurpose ? ` to ${d.destinationOrPurpose}` : ''
   feed(
     organisationId, `dp-${d.id}`, when, 'info',
-    `${d.vehicleNumberPlate} · ${d.driverName} dispatched${dest}.`,
+    `${d.vehicleNumberPlate} · ${d.driverName} signed out${dest} — left the premises.`,
     { alertType: 'DISPATCH', plate: d.vehicleNumberPlate, vehicleId: vehicle?.id ?? null },
   )
   return true
@@ -206,13 +215,15 @@ const DISPATCH_ECHO_MS = 60_000
 /**
  * Narrate a gate crossing. No coordinates are involved.
  *
- * Except that an EXIT is not a gate crossing. The provider emits it inside the
- * dispatch transaction, so it asserts a departure at the moment the paperwork
- * is raised — on 2026-08-04 the feed had KTCC 870B leaving the yard while GPS
- * showed it stationary in the compound, 440 m from where it started, and the
- * Active Trip card correctly said it had not left. An EXIT that echoes its own
- * dispatch is therefore dropped, and the real departure is derived from the
- * vehicle's own fixes in lib/yard-departure.
+ * An EXIT that echoes its own dispatch is dropped — not because the departure
+ * it asserts is doubted (the sign-out is now exactly what the dispatch line
+ * above narrates as leaving), but because it is the SAME sign-out arriving
+ * twice: the provider emits it inside the dispatch transaction, median 9 ms
+ * later. Narrating both would post two sentences about one act, 9 ms apart,
+ * on all ~115 sign-outs a day. One event, one line.
+ *
+ * An EXIT with no dispatch behind it still narrates: then it is the only
+ * record of that crossing, and dropping it would lose the departure entirely.
  *
  * RETURN is left alone: nothing else observes a vehicle coming home, the
  * provider records it at the weighbridge, and it is not duplicated by anything.
@@ -238,7 +249,7 @@ export async function handleMovement(m: MovementEvent): Promise<boolean> {
     if (echoed) {
       logger.debug(
         { plate: m.vehicleNumberPlate, dispatch: echoed.id },
-        'Movement EXIT echoes its dispatch — not narrated; the measured departure comes from telemetry',
+        'Movement EXIT echoes its dispatch — not narrated; the sign-out line already says it left',
       )
       return true
     }
