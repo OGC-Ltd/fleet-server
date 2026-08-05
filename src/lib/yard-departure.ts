@@ -1,18 +1,17 @@
 /**
- * "Left the gate" — measured, not declared.
+ * WHEN it cleared the gate — measured, not declared.
  *
  * ## Why this exists
  *
- * The provider already sends a MOVEMENT/EXIT event and the feed used to narrate
- * it as a gate crossing. It is not one. Measured over seven days on the live
- * account, 281 of 283 dispatches (99.3%) were followed by their EXIT event
- * within one second — median gap 9 ms, p90 13 ms. The provider emits it inside
- * the dispatch transaction, so it carries no fact the dispatch line does not
- * already carry.
- *
- * So the provider's claim is suppressed at the webhook (see
- * raifactorysuite-events.handleMovement) and the real event is derived here from
- * the vehicle's own fixes.
+ * Not to decide whether a vehicle left: the yard signs it out, and the feed
+ * says so on that record (see raifactorysuite-events.handleDispatch), for every
+ * unit including the majority here that carry no tracker. This module answers
+ * the question the paperwork cannot — at what time the barrier was actually
+ * crossed, and therefore how long the unit stood in the yard after being signed
+ * out. Measured over seven days on the live account, 281 of 283 dispatches
+ * (99.3%) had their MOVEMENT/EXIT event within one second of the sign-out
+ * (median 9 ms), because the provider emits it inside the dispatch transaction:
+ * it is the sign-out clock again, not an observation of the gate.
  *
  * ## Why the gate, and not a radius round the yard
  *
@@ -200,20 +199,26 @@ async function announce(p: YardDepartureInput, st: VehicleState, precision: Prec
   const at   = new Date(p.capturedAt)
   const who  = p.driverName ? ` · ${p.driverName}` : ''
   const dest = dispatch.destination ? ` to ${dispatch.destination}` : ''
-  // How long it actually stood in the yard after being dispatched — the number
+  // How long it actually stood in the yard after being signed out — the number
   // the provider's version could never carry, because it fired at zero.
   const waitedMs = at.getTime() - dispatch.dispatchedAt.getTime()
   const waited   = waitedMs >= 60_000
-    ? ` ${Math.round(waitedMs / 60_000)} min after dispatch`
+    ? ` ${Math.round(waitedMs / 60_000)} min after sign-out`
     : ''
 
+  // CONFIRMS the sign-out, and does not restate it. The feed already announced
+  // this vehicle leaving when the yard signed it out (see the dispatch line in
+  // raifactorysuite-events) — that is the record every unit produces. What
+  // these fixes add, for the minority carrying a tracker, is WHEN the barrier
+  // was actually crossed and therefore how long the unit then stood there.
   const text =
-    precision === 'gate' ? `${p.plate}${who} left the gate${dest}${waited}.`
-    : precision === 'yard' ? `${p.plate}${who} left the yard${dest}${waited}.`
+    precision === 'gate' ? `${p.plate}${who} cleared the gate${dest}${waited}.`
+    : precision === 'yard' ? `${p.plate}${who} cleared the yard${dest}${waited}.`
     // Never seen at the gate — say what is known and not more. Stamping the
-    // first fix we happened to receive as the departure time would be exactly
-    // the provider's mistake in a different costume.
-    : `${p.plate}${who} has left${dest} — departure time not observed (no fix at the gate).`
+    // first fix we happened to receive as the crossing time would be exactly
+    // the provider's mistake in a different costume. The departure itself is
+    // not in doubt here; only its time is.
+    : `${p.plate}${who} is clear of the yard${dest} — departure time not observed (no fix at the gate).`
 
   await publishNotification({
     orgId:     p.orgId,

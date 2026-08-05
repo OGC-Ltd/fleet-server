@@ -74,7 +74,7 @@ describe('trackYardDeparture', () => {
     expect(published()).toHaveLength(1)
     const item = published()[0]![0]
     expect(item['text']).toBe(
-      'KTCC 870B · AUGUSTINE OWINO NYAMWOK left the gate to kwoyo u k 27 min after dispatch.',
+      'KTCC 870B · AUGUSTINE OWINO NYAMWOK cleared the gate to kwoyo u k 27 min after sign-out.',
     )
     expect(item['alertType']).toBe('MOVEMENT_EXIT')
     expect(item['source']).toBe('telemetry')
@@ -119,13 +119,14 @@ describe('trackYardDeparture', () => {
 
   it('bounds the claim when the vehicle was never seen at the gate', async () => {
     // 9 of 54 replayed departures had no fix at the gate at all, behind
-    // coverage gaps. We know it left; we do not know when, and we say so.
+    // coverage gaps. We know it left — the sign-out said so — but we do not
+    // know when it crossed, and the sentence must not imply a measured time.
     await trackYardDeparture(input(CLEAR))   // seed: already past the gate
     await trackYardDeparture(input(FAR))     // crosses the hub radius
 
     expect(published()).toHaveLength(1)
     expect(published()[0]![0]['text']).toBe(
-      'KTCC 870B · AUGUSTINE OWINO NYAMWOK has left to kwoyo u k — departure time not observed (no fix at the gate).',
+      'KTCC 870B · AUGUSTINE OWINO NYAMWOK is clear of the yard to kwoyo u k — departure time not observed (no fix at the gate).',
     )
   })
 
@@ -140,7 +141,7 @@ describe('trackYardDeparture', () => {
 
     await trackYardDeparture(input(FAR))
     expect(published()).toHaveLength(1)
-    expect(published()[0]![0]['text']).toContain('left the yard')
+    expect(published()[0]![0]['text']).toContain('cleared the yard')
   })
 
   it('does not call a vehicle with no open dispatch a departure', async () => {
@@ -176,6 +177,6 @@ describe('trackYardDeparture', () => {
     })
     await trackYardDeparture(input(AT_GATE))
     await trackYardDeparture(input(CLEAR))
-    expect(published()[0]![0]['text']).toBe('KTCC 870B · AUGUSTINE OWINO NYAMWOK left the gate to OPAPO.')
+    expect(published()[0]![0]['text']).toBe('KTCC 870B · AUGUSTINE OWINO NYAMWOK cleared the gate to OPAPO.')
   })
 })
