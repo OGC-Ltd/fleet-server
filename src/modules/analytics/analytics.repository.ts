@@ -1,5 +1,6 @@
 ﻿import { prisma } from '../../lib/prisma.js'
 import { getSimFleetVehicleIds } from '../../lib/sim-fleet.js'
+import { fleetDayStart } from '../../lib/provider-time.js'
 import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics.schema.js'
 
 // A delivery counts as "interrupted"/delayed when it took materially longer than
@@ -732,3 +733,175 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
   }
 }
 
+
+/**
+ * TODAY on the ground — the operational figures a duty manager reads mid-shift.
+ *
+ * A DIFFERENT WINDOW from everything else in this file. The rest of the
+ * Analytics page is month-to-date; this is the fleet day in progress, from
+ * local midnight (fleetDayStart — Ndhiwa's midnight, not UTC's) to now. The
+ * caller is expected to label it as such, because a "48 dispatched" that means
+ * today sitting beside a "331 completed trips" that means the month is exactly
+ * how a card lies without a single wrong number in it.
+ *
+ * WHAT IS DELIBERATELY NOT HERE, because the live fleet has no data behind it:
+ *
+ *   · FUEL COST SPLIT BY FUEL TYPE. Nothing records a fuel type — not on
+ *     FuelFilling, not on Vehicle, nowhere in the schema — and cost is not
+ *     recorded either: it is litres × env.FUEL_PRICE_PER_LITRE, ONE configured
+ *     rate (see fuel-pricing.ts). A per-type split would be the same total cut
+ *     by a column that does not exist.
+ *   · VEHICLES DISPATCHED PER WEIGHBRIDGE. Dispatch destinations are cane
+ *     collection zones typed freehand by the dispatcher — 61 distinct names on
+ *     SUKARI (NYAONDO, OPAPO, WICH DHWAO …) and not one weighbridge among them.
+ *     Weigh-in/weigh-out events arrive with the RaiFactorySuite weighbridge
+ *     feed, which is why the Weighbridges tab is still an empty state.
+ *   · A DRIVER VIOLATIONS LIST. Measured 2026-08-05 on SUKARI: the VehicleAlert
+ *     table is empty, GeofenceViolation returns nothing over 30 days, every
+ *     FuelTheft row has driverId null, and drivers/overview reports 0
+ *     overspeeding and 0 theft cases for all 549 drivers. The only evidence of
+ *     a violation on this fleet is raw telemetry over 80 km/h
+ *     (speedingEvents above), which carries a vehicle and a time but no driver.
+ *     Attributing those to the open dispatch's driverName is derivable and may
+ *     be worth doing — but it is an inference, and it needs to be built and
+ *     validated deliberately rather than smuggled in behind a count.
+ */
+export async function operationsToday(orgId: string) {
+  const dayStart = fleetDayStart()
+  const now = new Date()
+
+  const [fleet, fillings, gateRows, truckDispatches, unresolvedDispatches] = await Promise.all([
+    // Registry state, not connectivity. `isActive` is what the provider still
+    // lists; ONLINE/OFFLINE is the poller's verdict and lives on the decorated
+    // snapshot, which this query has no business reaching for.
+    prisma.vehicle.groupBy({
+      by:      ['vehicleType'],
+      where:   { organisationId: orgId, isActive: true },
+      _count:  { _all: true },
+    }),
+    // Measured litres off the fuel probes, same ledger the month card reads —
+    // just clamped to the day so it is a RUNNING total rather than a period one.
+    prisma.fuelFilling.findMany({
+      where:  { vehicle: { organisationId: orgId }, filledAt: { gte: dayStart } },
+      select: { filledMl: true, filledAt: true },
+    }),
+    // Gate crossings OBSERVED today. Keyed on when the crossing happened, not
+    // on when the paperwork was raised — this fleet dispatches through the
+    // night, so the two routinely fall on different days.
+    prisma.notification.findMany({
+      where: {
+        organisationId: orgId,
+        occurredAt:     { gte: dayStart },
+        feedId:         { startsWith: 'yd-' },
+        vehicle:        { vehicleType: 'TRACTOR' },
+      },
+      select: { feedId: true, occurredAt: true, text: true, plate: true },
+    }),
+    prisma.dispatch.findMany({
+      where: {
+        organisationId: orgId,
+        dispatchedAt:   { gte: dayStart },
+        vehicle:        { vehicleType: 'TRUCK' },
+      },
+      select:  { plate: true, driverName: true, destination: true, dispatchedAt: true },
+      orderBy: { dispatchedAt: 'desc' },
+    }),
+    // Paperwork whose plate never resolved to our registry has NO vehicle row
+    // and therefore no type — it cannot be counted as a truck or excluded as
+    // one. Reported separately so the truck figure is not quietly short.
+    prisma.dispatch.count({
+      where: { organisationId: orgId, dispatchedAt: { gte: dayStart }, vehicleId: null },
+    }),
+  ])
+
+  // A departure whose time was NOT observed still produces a feed line — the
+  // vehicle was never seen at the gate, so lib/yard-departure says so in words
+  // rather than stamping the first fix it happened to receive (see the
+  // `bounded` branch there). Those rows carry a timestamp that is not a
+  // departure time, so they must not land in an hour bucket. There is no
+  // precision column to filter on yet, so the wording is the only signal.
+  const OBSERVED = (text: string) => !text.includes('departure time not observed')
+  const observed = gateRows.filter(r => OBSERVED(r.text))
+
+  // Local hour in the fleet's timezone. EAT is a fixed +3 with no DST, so the
+  // shift-and-read is exact — no Intl round trip needed per row.
+  const localHour = (d: Date) => new Date(d.getTime() + 3 * 3_600_000).getUTCHours()
+  const before = (h: number) => observed.filter(r => localHour(r.occurredAt) < h).length
+
+  // WHO actually went out early — plate and crew, not just a count.
+  //
+  // The crew comes from the DISPATCH the crossing belongs to (feedId is
+  // `yd-<dispatchId>`, see lib/yard-departure), not from the feed sentence.
+  // The sentence has the name in it, but parsing a name back out of prose that
+  // is written for humans and changes wording per precision level is a bug
+  // waiting for the first driver with a middle name.
+  const earlyRows = observed.filter(r => localHour(r.occurredAt) < 6)
+  const earlyDispatchIds = earlyRows.map(r => r.feedId.slice(3))
+  const earlyDispatches = earlyDispatchIds.length
+    ? await prisma.dispatch.findMany({
+        where:  { id: { in: earlyDispatchIds } },
+        select: { id: true, driverName: true, destination: true, plate: true },
+      })
+    : []
+  const dispatchById = new Map(earlyDispatches.map(d => [d.id, d]))
+
+  const earlyList = earlyRows
+    .map(r => {
+      const d = dispatchById.get(r.feedId.slice(3))
+      return {
+        plate:       r.plate ?? d?.plate ?? null,
+        // Free text from the provider, verbatim. Null when the dispatch is gone
+        // — never a placeholder name, which would read as a real crew member.
+        driver:      d?.driverName ?? null,
+        destination: d?.destination ?? null,
+        at:          r.occurredAt.toISOString(),
+      }
+    })
+    .sort((a, b) => a.at.localeCompare(b.at))
+
+  const filledMl = fillings.reduce((s, f) => s + f.filledMl, 0)
+
+  return {
+    asOf:      now.toISOString(),
+    dayStart:  dayStart.toISOString(),
+    /** The fleet-local calendar day these figures cover. */
+    day:       fleetDayKey(now),
+
+    fleet: {
+      /** Registry-active units, and what they are. Not a connectivity figure. */
+      active: fleet.reduce((s, r) => s + r._count._all, 0),
+      byType: Object.fromEntries(fleet.map(r => [r.vehicleType, r._count._all])),
+    },
+
+    /** Running total since local midnight. Litres measured; cost is priced by
+     *  the caller at the server's rate, exactly as the month card is. */
+    fuel: {
+      filledMl,
+      fillings: fillings.length,
+    },
+
+    /** Tractors seen clearing the barrier before each local hour today. */
+    earlyDepartures: {
+      tractorsOut:     observed.length,
+      before04:        before(4),
+      before05:        before(5),
+      before06:        before(6),
+      /** Left today, but with no fix at the gate to time it by. */
+      timeNotObserved: gateRows.length - observed.length,
+      /** The pre-06:00 crossings themselves — plate, crew, where, when. */
+      list:            earlyList,
+    },
+
+    dispatches: {
+      trucks: truckDispatches.length,
+      truckList: truckDispatches.map(d => ({
+        plate:       d.plate,
+        driver:      d.driverName,
+        destination: d.destination,
+        at:          d.dispatchedAt.toISOString(),
+      })),
+      /** Raised today against a plate that is not in our registry. */
+      plateUnresolved: unresolvedDispatches,
+    },
+  }
+}
