@@ -78,6 +78,28 @@ jobs:
         with:
           fetch-depth: 0
 
+      # An unset secret is an empty string, not an error. Without this the run
+      # writes an empty key file, reports "open an ssh channel to the box" as a
+      # SUCCESS, and fails several steps later on
+      # "ssh: Could not resolve hostname : Name or service not known" — which
+      # names nothing you can act on. Fail here, listing what is missing.
+      - name: check the deploy secrets are set
+        env:
+          SSH_KEY:  ${{ secrets.EC2_SSH_KEY }}
+          HOST:     ${{ secrets.EC2_HOST }}
+          HOST_KEY: ${{ secrets.EC2_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${SSH_KEY}" ]  || missing="${missing} EC2_SSH_KEY"
+          [ -n "${HOST}" ]     || missing="${missing} EC2_HOST"
+          [ -n "${HOST_KEY}" ] || missing="${missing} EC2_HOST_KEY"
+          if [ -n "${missing}" ]; then
+            echo "::error::missing repository secrets:${missing} — see docs/ci-deploy.md"
+            exit 1
+          fi
+          echo "all three deploy secrets are present"
+
       - name: open an ssh channel to the box
         env:
           SSH_KEY:  ${{ secrets.EC2_SSH_KEY }}
