@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { fabricatedFigures, buildFleetFallback } from '../../src/modules/dashboard/ai-insight.js'
+import { fabricatedFigures, leakedFieldNames, buildFleetFallback } from '../../src/modules/dashboard/ai-insight.js'
 
 const facts = {
   fleetNow: {
@@ -149,5 +149,22 @@ describe('buildFleetFallback', () => {
     // No connectivity claim when the poller has no answer, and no zeroes.
     expect(msg).not.toMatch(/online|offline/)
     expect(msg).not.toMatch(/\b0\b/)
+  })
+})
+
+describe('leakedFieldNames', () => {
+  it('catches a brief that prints its own JSON keys', () => {
+    // Seen in production 2026-08-05. Every figure in it was measured, so the
+    // fabrication guard had no reason to fire — the sentence was still a
+    // leaked debug line to the person it is written for.
+    expect(leakedFieldNames('Today outNow stands at 138, with no overdue units, and 17 have returned.'))
+      .toEqual(['outNow'])
+  })
+
+  it('leaves ordinary prose alone', () => {
+    expect(leakedFieldNames(
+      'The fleet is running steadily, with 98 online, 24 in transit and 235 parked; risk is medium. '
+      + '138 units are still out and 17 have returned.',
+    )).toEqual([])
   })
 })
