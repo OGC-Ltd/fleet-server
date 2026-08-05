@@ -93,7 +93,7 @@ export async function collectToday(orgId: string) {
   const dayStart = fleetDayStart()
   const now = new Date()
 
-  const [dispatches, returnedToday, openRuns, gateRows, thefts, feedCounts, overspeeding, latestFeed] = await Promise.all([
+  const [dispatches, returnedToday, openRuns, openBeforeToday, gateRows, thefts, feedCounts, overspeeding, latestFeed] = await Promise.all([
     prisma.dispatch.findMany({
       where:  { organisationId: orgId, dispatchedAt: { gte: dayStart } },
       select: { id: true, destination: true, actualReturnAt: true },
@@ -105,20 +105,48 @@ export async function collectToday(orgId: string) {
     prisma.dispatch.count({
       where: { organisationId: orgId, actualReturnAt: { gte: dayStart } },
     }),
-    // What is out RIGHT NOW.
+    // What is out RIGHT NOW — on the SAME footing as the gate office's own
+    // board, because the two get read side by side and a dashboard that
+    // disagrees with the paperwork is worth less than no dashboard.
     //
     // CANCELLED is excluded and that is not a detail: measured on SUKARI
     // (2026-08-05) 47 of the 114 dispatches with no return time were cancelled
     // runs, so "114 units are out" would have overstated the fleet on the road
     // by 70%. OVERDUE is carried separately because the provider's own late
     // flag is the one an operator acts on.
+    //
+    // SCOPED TO THE FLEET DAY, which is the correction. Unbounded, this counted
+    // every run the provider had ever left open: 193 on 2026-08-05 against 142
+    // on the factory's own screen and 139 open runs raised that day. The tail is
+    // paperwork nobody closed — 31 runs older than a day, six older than a week
+    // — and it grows for ever, so the figure drifted further from the truth
+    // every day it ran.
+    //
+    // The cost of the bound is the overnight case, and it is real: this fleet's
+    // round trip is about nineteen hours, so a unit released at 22:00 is still
+    // on the road at 06:00 and is NOT counted here after midnight. The factory's
+    // board has the same blind spot, and agreeing with the operator's own record
+    // beats being separately right. `outNowStale` carries what the bound drops,
+    // so the difference is always visible rather than silently missing.
     prisma.dispatch.findMany({
       where:  {
         organisationId: orgId,
         actualReturnAt: null,
         status:         { in: ['DISPATCHED', 'OVERDUE'] },
+        dispatchedAt:   { gte: dayStart },
       },
       select: { destination: true, status: true },
+    }),
+    // Open runs raised BEFORE today. Not added to `outNow` — reported beside it
+    // so a long tail shows up as the reconciliation problem it is instead of
+    // inflating the headline.
+    prisma.dispatch.count({
+      where: {
+        organisationId: orgId,
+        actualReturnAt: null,
+        status:         { in: ['DISPATCHED', 'OVERDUE'] },
+        dispatchedAt:   { lt: dayStart },
+      },
     }),
     // Gate crossings OBSERVED today, keyed on when the crossing happened rather
     // than on when the paperwork was raised.
@@ -224,10 +252,20 @@ export async function collectToday(orgId: string) {
     stillInYard:      Math.max(0, dispatches.length - departedIds.length),
     /** Runs CLOSED today — units that have got back. */
     returned:         returnedToday,
-    /** Units out on a live run right now. CANCELLED paperwork excluded. */
+    /**
+     * Units out on a live run right now, on the factory's own definition:
+     * released today and not yet back. CANCELLED paperwork excluded.
+     */
     outNow:           openRuns.length,
     /** Of those, flagged late by the provider. */
     outNowOverdue:    overdue,
+    /**
+     * Runs still open from BEFORE today. Almost always paperwork the provider
+     * never closed rather than units genuinely still on the road, which is why
+     * it is not in `outNow`. Never narrated — it is here so the gap between our
+     * figure and the factory's board is inspectable.
+     */
+    outNowStale:      openBeforeToday,
     /** Where today's gate departures went. */
     byDestination:    gate.ranked.slice(0, 6),
     destinationsNotShown: Math.max(0, gate.ranked.length - 6),
@@ -541,10 +579,11 @@ export const SYSTEM_PROMPT =
   '(`today.outNowOverdue` of them overdue) and `today.returned` back already. E.g. "We have had 70 units leave the ' +
   'gate this morning, with 20 going to WEIGHBRIDGE X and 50 going to WEIGHBRIDGE Y; 67 are still out, 24 of them ' +
   'overdue, and 4 have returned." Use two sentences for this if one will not carry it. ' +
-  'A round trip on this fleet runs about nineteen hours, so `outNow` and `returned` do NOT depend on anything ' +
-  'having been raised since midnight — report them even when `dispatchesRaised` and `leftGate` are 0, and never ' +
+  '`outNow` is units released TODAY and not yet back — the same definition the factory\'s own dispatch board ' +
+  'uses, so the two agree. Report it and `returned` even when `dispatchesRaised` and `leftGate` are 0, and never ' +
   'say the fleet has done nothing while units are out. `today.outNowByDestination` says where those units are ' +
-  'headed; use it if the gate split is empty. ' +
+  'headed; use it if the gate split is empty. Never mention `outNowStale` or add it to anything: those are open ' +
+  'runs from earlier days, which is unclosed paperwork rather than units on the road. ' +
   '(3) Where the fleet is working now, from `working.byArea` — name the areas and how many units are in each, ' +
   'e.g. "On the ground, 22 units are working FARM#212 and 9 are at the FACTORY SITE." ' +
   '(4) Today\'s exceptions: fuel issues from `today.fuelIssues.raised` and `.needInvestigating`, plus ' +
