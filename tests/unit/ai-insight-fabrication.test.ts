@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { fabricatedFigures, leakedFieldNames, buildFleetFallback } from '../../src/modules/dashboard/ai-insight.js'
+import { fabricatedFigures, leakedFieldNames, placeCase, buildFleetFallback } from '../../src/modules/dashboard/ai-insight.js'
 
 const facts = {
   fleetNow: {
@@ -166,5 +166,29 @@ describe('leakedFieldNames', () => {
       'The fleet is running steadily, with 98 online, 24 in transit and 235 parked; risk is medium. '
       + '138 units are still out and 17 have returned.',
     )).toEqual([])
+  })
+})
+
+describe('placeCase', () => {
+  it('stops the brief shouting its grouping keys', () => {
+    // The keys are uppercase so OPAPO and Opapo count as one place. That is a
+    // grouping decision, and it was leaking into the prose.
+    expect(placeCase('OPAPO')).toBe('Opapo')
+    expect(placeCase('KOGUTA PRI SCHOOL')).toBe('Koguta Pri School')
+    expect(placeCase('WICH DHWAO')).toBe('Wich Dhwao')
+    expect(placeCase('FACTORY SITE')).toBe('Factory Site')
+  })
+
+  it('leaves anything a human already cased alone', () => {
+    expect(placeCase('Kanyabie Ober')).toBe('Kanyabie Ober')
+    expect(placeCase('Main river malagarasi3')).toBe('Main river malagarasi3')
+    expect(placeCase('kwoyo u k')).toBe('kwoyo u k')
+  })
+
+  it('keeps single characters and rides over punctuation', () => {
+    expect(placeCase('KWOYO U K')).toBe('Kwoyo U K')
+    expect(placeCase('SARAMBA A')).toBe('Saramba A')
+    expect(placeCase('FARM#212')).toBe('Farm#212')
+    expect(placeCase('OMBASA NORTH KANYAMGONA')).toBe('Ombasa North Kanyamgona')
   })
 })

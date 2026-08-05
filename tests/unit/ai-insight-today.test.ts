@@ -95,8 +95,8 @@ describe('collectToday', () => {
     expect(today.stillInYard).toBe(4)
     expect(today.sinceLabel).toBe('this morning')
     expect(today.byDestination).toEqual([
-      { destination: 'WEIGHBRIDGE Y', units: 50 },
-      { destination: 'WEIGHBRIDGE X', units: 20 },
+      { destination: 'Weighbridge Y', units: 50 },
+      { destination: 'Weighbridge X', units: 20 },
     ])
   })
 
@@ -110,7 +110,7 @@ describe('collectToday', () => {
 
     expect(today.dispatchesRaised).toBe(0)
     expect(today.leftGate).toBe(1)
-    expect(today.byDestination).toEqual([{ destination: 'OPAPO', units: 1 }])
+    expect(today.byDestination).toEqual([{ destination: 'Opapo', units: 1 }])
     expect(today.quiet).toBe(false)
   })
 
@@ -128,8 +128,8 @@ describe('collectToday', () => {
     expect(today.outNow).toBe(67)
     expect(today.outNowOverdue).toBe(24)
     expect(today.outNowByDestination).toEqual([
-      { destination: 'NYAONDO', units: 43 },
-      { destination: 'OPAPO',   units: 24 },
+      { destination: 'Nyaondo', units: 43 },
+      { destination: 'Opapo',   units: 24 },
     ])
   })
 
@@ -178,7 +178,7 @@ describe('collectToday', () => {
 
     const today = await collectToday('org-1')
 
-    expect(today.byDestination).toEqual([{ destination: 'WEIGHBRIDGE X', units: 2 }])
+    expect(today.byDestination).toEqual([{ destination: 'Weighbridge X', units: 2 }])
     expect(today.destinationNotRecorded).toBe(2)
   })
 
