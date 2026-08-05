@@ -1,5 +1,9 @@
 /**
- * What "N/M active" on the Fleet AI Insight card actually counts.
+ * What the active/reporting pair actually counts.
+ *
+ * The Fleet AI Insight card printed it as an "N/M active" prefix until that was
+ * taken off; it now feeds the risk verdict and the hourly log, where a figure
+ * built on stale frames misleads just as readily.
  *
  * The snapshot takes each vehicle's newest ping with no recency bound, so
  * `engine_on` is whatever its last-ever frame said. Measured on SUKARI

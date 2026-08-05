@@ -334,8 +334,12 @@ export function collectLiveState(snapshot: SnapRow[]) {
    * So the count is bounded by the same staleness rule the movement tracker
    * uses — a vehicle that has stopped reporting is not running, we have simply
    * not heard from it — and the denominator is the reporting fleet. On that
-   * data the card goes from 54/597 to 20/280, and both figures now mean
-   * something an operator can act on.
+   * data the pair goes from 54/597 to 20/280.
+   *
+   * The card no longer prints that ratio (see collectFacts), so these two feed
+   * the risk verdict and the hourly log rather than the screen — but the
+   * bounding still matters there for exactly the same reason: a fleet judged
+   * on 566-day-old engine flags is judged on nothing.
    *
    * `vehicles` is kept for context and for the risk verdict, but it is NOT the
    * denominator and the units missing from it are not "down".
@@ -423,8 +427,14 @@ async function collectFacts(orgId: string) {
   const working = await collectWorkingAreas(orgId, snapshot)
 
   const fleetNow    = collectLiveState(snapshot)
-  // The card's "N/M active:" prefix. Running now, over the fleet that reports —
-  // see collectLiveState for why neither is the registry figure.
+  // These used to be printed by the card as an "N/M active:" prefix; it now
+  // renders the brief alone, because the brief's first sentence already says
+  // how the fleet is running and two disagreeing headline numbers is one too
+  // many. They stay on the response because the deployed dash bundle is not
+  // upgraded in lockstep with this service and older builds still read them —
+  // dropping the fields would paint "undefined/undefined active" until dash
+  // catches up. Running now, over the fleet that reports; see collectLiveState
+  // for why neither is the registry figure.
   const activeCount = fleetNow.enginesOn
   const totalCount  = fleetNow.reporting
   const roster      = drivers.drivers
@@ -504,10 +514,12 @@ async function collectFacts(orgId: string) {
  * Everything else in the payload exists ONLY to inform the risk verdict. The
  * model chooses the wording; it never chooses the content.
  *
- * The unit counts are NOT among them. FleetAIInsightCard prints "115/510
- * active:" immediately before this text, so a sentence that also says "115 out
- * of 510 units active" stutters on the card. The ratio still sets the health
- * verdict — it is simply the card's job to print it, not the model's.
+ * The unit counts are NOT among them, and no longer because they would stutter
+ * against a prefix: the card prints the brief alone now, and the ratio was
+ * taken off it deliberately. Reinstating it in prose would put it straight
+ * back. `online`, `inTransit`, `idling` and `parked` are what sentence 1
+ * reports; the active/reporting pair sets the health verdict and stays out of
+ * the text.
  */
 export const SYSTEM_PROMPT =
   'You are the duty operations analyst for a Kenyan haulage fleet, briefing the fleet manager mid-shift. ' +
@@ -515,8 +527,9 @@ export const SYSTEM_PROMPT =
   'covering these in order: ' +
   '(1) How the fleet is running right now and your risk verdict, from `fleetNow`: how many are online, and the ' +
   'split between `inTransit`, `idling` and `parked` — e.g. "The fleet is working steadily, with 96 units online, ' +
-  '41 in transit and 18 idling." Do NOT state the active or total unit counts: the card prints "115/510 active:" ' +
-  'immediately before your text, so repeating them reads as a stutter. ' +
+  '41 in transit and 18 idling." Do NOT state how many units are active out of how many in total, and never write ' +
+  'a figure of the "N of M" or "N/M" form about the fleet: that ratio was deliberately removed from the card, and ' +
+  'the online, in-transit, idling and parked counts are what describe the fleet here. ' +
   'If `fleetNow.connectionKnown` is false, `online` and `offline` are null because the poller has no current ' +
   'answer — SAY NOTHING about connectivity at all, describe the fleet from the movement counts alone, and never ' +
   'write "0 online", which would assert a fleet-wide blackout that is not in evidence. ' +
