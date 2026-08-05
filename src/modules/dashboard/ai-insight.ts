@@ -49,6 +49,29 @@ export interface AiInsightResponse {
 }
 
 const REFRESH_MS = 60 * 60_000   // regenerate each org's brief hourly
+
+/**
+ * A place name as prose rather than as a database key.
+ *
+ * Only words that are ENTIRELY uppercase are re-cased. That is the whole
+ * subtlety: it fixes the shouted grouping keys ("OPAPO", "KOGUTA PRI SCHOOL")
+ * while leaving anything a human already cased alone — "Kanyabie Ober" and
+ * "Main river malagarasi3" come back untouched, where a blanket title-case
+ * would have flattened both.
+ *
+ * Single characters keep their case: "KWOYO U K" is "Kwoyo U K", not
+ * "Kwoyo u k". Digits and punctuation ride along, so "FARM#212" reads
+ * "Farm#212".
+ *
+ * Deliberately NOT applied to the feed sentences in `latest`: those are free
+ * text carrying registration plates, and KTCC 759G is not a word.
+ */
+export function placeCase(name: string): string {
+  return name.replace(/[\p{L}\p{N}#]+/gu, (word) => {
+    if (word.length < 2 || word !== word.toUpperCase()) return word
+    return word[0] + word.slice(1).toLowerCase()
+  })
+}
 const insights = new Map<string, AiInsightResponse>()
 const generating = new Set<string>()
 
@@ -203,6 +226,12 @@ export async function collectToday(orgId: string) {
   // Dispatchers type the destination freehand and the casing wanders, so group
   // on the same UPPER(TRIM()) key DispatchDestination uses. Unnamed destinations
   // are counted apart rather than pooled under a made-up label.
+  //
+  // GROUPED on the upper key, PRESENTED in place case — the two are different
+  // jobs. The key has to be uppercase or OPAPO and Opapo count as two places;
+  // the label does not, and quoting the key put six shouted names in one
+  // sentence ("5 to OPAPO, 5 to KOGUTA PRI SCHOOL, 4 to ADEK"), which reads as
+  // a brief losing its temper about a normal morning.
   const tally = (rows: Array<{ destination: string | null }>) => {
     const byDest = new Map<string, number>()
     let notRecorded = 0
@@ -212,7 +241,7 @@ export async function collectToday(orgId: string) {
       byDest.set(key, (byDest.get(key) ?? 0) + 1)
     }
     const ranked = [...byDest.entries()]
-      .map(([destination, units]) => ({ destination, units }))
+      .map(([destination, units]) => ({ destination: placeCase(destination), units }))
       .sort((a, b) => b.units - a.units)
     return { ranked, notRecorded }
   }
@@ -436,7 +465,9 @@ async function collectWorkingAreas(orgId: string, snapshot: SnapRow[]) {
     const places = await resolveEstatePlaces(orgId, v.lat, v.lng)
     const here = places[0]
     if (!here) { outsideAnyEstateFeature++; continue }
-    const row = byArea.get(here.id) ?? { area: here.name, category: here.category, units: 0 }
+    // Same treatment as the destinations — the estate's own feature names are
+    // shouted ("FACTORY SITE", "FARM#212") and the brief reads them aloud.
+    const row = byArea.get(here.id) ?? { area: placeCase(here.name), category: here.category, units: 0 }
     row.units++
     byArea.set(here.id, row)
   }
