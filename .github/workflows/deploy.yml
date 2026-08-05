@@ -120,17 +120,36 @@ jobs:
           # `ssh-keyscan <dns-name>` gives "Host key verification failed" the
           # moment EC2_HOST holds the IP instead, or the public DNS rerolls.
           # So the pinned keys are re-labelled to whatever EC2_HOST is; nothing
-          # about what is trusted changes. Hashed entries (|1|...) cannot be
-          # re-labelled and pass through untouched.
-          printf '%s\n' "$HOST_KEY" \
-            | awk -v h="$HOST" '/^\|/ { print; next } NF { $1 = h; print }' \
-            > ~/.ssh/known_hosts
+          # about what is trusted changes, only the label.
+          #
+          # Every shape the key is plausibly pasted in is accepted: ssh-keyscan
+          # output, CRLF from a Windows paste, hashed (-H) entries which cannot
+          # be re-labelled and pass through, and the bare "ssh-rsa AAAA..."
+          # lines of /etc/ssh/ssh_host_*_key.pub, which carry no hostname at
+          # all. That last one is not hypothetical: rewriting field 1 blindly
+          # overwrote the KEY TYPE on such a paste and surfaced as
+          # "is not a public key file".
+          printf '%s\n' "$HOST_KEY" | tr -d '\r' | awk -v h="$HOST" '
+            /^[[:space:]]*$/ { next }
+            /^#/             { next }
+            /^\|/            { print; next }
+            $1 ~ /^(ssh-|ecdsa-|sk-ssh-|sk-ecdsa-)/ { print h, $0; next }
+            { $1 = h; print }
+          ' > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
-          # Fingerprints are public information, and they are the fastest way to
-          # spot a wrong or truncated paste — the failure would otherwise say
-          # only "verification failed", with nothing to compare against.
+          # Validated HERE, where the cause is still visible. ssh's own verdict
+          # is "Host key verification failed", which cannot tell a malformed
+          # paste from a missing secret from a genuinely wrong key. The dump
+          # reports field counts only — never key material.
+          if ! ssh-keygen -lf ~/.ssh/known_hosts > /tmp/host-fingerprints 2>/dev/null; then
+            echo "::error::EC2_HOST_KEY is not usable known_hosts content — paste the full output of: ssh-keyscan <host>"
+            awk '{ t  = ($1 ~ /^\|/) ? "hashed" : $2
+                   ok = (t ~ /^(ssh-|ecdsa-|sk-)/ || t == "hashed") ? "ok" : "UNRECOGNISED"
+                   printf "  line %d: %d fields, key type %s\n", NR, NF, ok }' ~/.ssh/known_hosts
+            exit 1
+          fi
           echo "pinned $(grep -c . ~/.ssh/known_hosts) host key(s):"
-          ssh-keygen -lf ~/.ssh/known_hosts | sed 's/^/  /'
+          sed 's/^/  /' /tmp/host-fingerprints
 
       - name: push this commit into the box's working tree
         env:
