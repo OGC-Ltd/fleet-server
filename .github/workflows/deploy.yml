@@ -1,0 +1,145 @@
+# Build, test and deploy fleet-server to the production box.
+#
+# This automates the ritual that was previously done by hand over ssh:
+# `git pull` → `npm install` → `npm run build` → `pm2 restart fleet-server`.
+# It keeps the two properties that ritual had and that matter most:
+#
+#   · The box's git checkout stays the record of what is running. Code reaches
+#     it as a PUSH into its working tree (`receive.denyCurrentBranch=updateInstead`
+#     is set on this repo's clone there), not as a copied build output. A box
+#     carrying files no commit describes is what made past deploys a guess.
+#   · Nothing is built on the box until the same commit has compiled and passed
+#     its unit tests on a clean runner.
+#
+# The push is also the safety interlock: `updateInstead` REFUSES when the box's
+# working tree is dirty, so a deploy that would silently discard someone's
+# manual edit fails loudly instead.
+#
+# NOT automated on purpose: `prisma migrate deploy`. A schema change against the
+# shared RDS instance is not something to trigger from a merge — run it by hand.
+
+name: build and deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, and never cancel one half-way: a cancelled run can leave
+# the box built but not restarted.
+concurrency:
+  group: fleet-server-deploy
+  cancel-in-progress: false
+
+env:
+  # The version pm2 runs on the box (nvm v24.18.0). Building on a different
+  # major here would prove nothing about what will run there.
+  NODE_VERSION: '24.18.0'
+
+jobs:
+  build:
+    name: compile and unit-test
+    runs-on: ubuntu-latest
+    env:
+      # `postinstall` runs `prisma generate`, and prisma.config.ts THROWS unless
+      # DIRECT_URL parses — so `npm ci` itself needs one. Generate reads the
+      # schema and never opens a connection, so a placeholder is enough and no
+      # production credential goes near CI.
+      DIRECT_URL: postgresql://ci:ci@localhost:5432/ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: compile
+        run: npm run build
+
+      # Unit tests only. tests/integration expects a reachable database; this
+      # job deliberately has no credentials for one.
+      - name: unit tests
+        run: npm run test:unit
+
+  deploy:
+    name: deploy to the box
+    needs: build
+    runs-on: ubuntu-latest
+    # Lets you require a manual approval later (Settings → Environments) without
+    # touching this file.
+    environment: production
+    steps:
+      # Full history: the box's main must be a fast-forward of what we push, and
+      # a shallow clone cannot prove that.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: open an ssh channel to the box
+        env:
+          SSH_KEY:  ${{ secrets.EC2_SSH_KEY }}
+          HOST_KEY: ${{ secrets.EC2_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pinned host key rather than ssh-keyscan: keyscan trusts whatever
+          # answers on the day, and this connection carries the code that is
+          # about to run in production.
+          printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: push this commit into the box's working tree
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          export GIT_SSH_COMMAND='ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes'
+          # Fails if the box's tree is dirty or its main is not an ancestor of
+          # this commit. Both are conditions a human should look at, not
+          # conditions to force past.
+          git push "ssh://ubuntu@${HOST}/home/ubuntu/prod/fleet-server" HEAD:main
+
+      - name: install, build and restart
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" bash -s <<'REMOTE'
+          set -euo pipefail
+          # `bash -lc` over ssh does not load nvm — node, npm and pm2 are all
+          # "command not found" without this.
+          export PATH="$HOME/.nvm/versions/node/v24.18.0/bin:$PATH"
+          cd /home/ubuntu/prod/fleet-server
+
+          echo "--- deploying $(git log --oneline -1)"
+          npm install --no-audit --no-fund
+          npx prisma generate --config prisma.config.ts
+          # pm2 runs dist/, not src/ — skipping this restarts the OLD code.
+          npm run build
+          pm2 restart fleet-server --update-env
+          pm2 save
+          REMOTE
+
+      - name: confirm the service answers
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          # Polled from the box itself: nginx fronts port 80, but /health is the
+          # process we just restarted, on 3000.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" \
+                 'curl -fsS --max-time 5 http://127.0.0.1:3000/health'; then
+              echo; echo "fleet-server is up"; exit 0
+            fi
+            echo "not up yet (attempt ${attempt}) — retrying in 5s"; sleep 5
+          done
+          echo "::error::fleet-server did not answer /health after the restart"
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" \
+            'export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH; pm2 logs fleet-server --lines 60 --nostream'
+          exit 1
