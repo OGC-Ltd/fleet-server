@@ -63,6 +63,52 @@ describe('GET /analytics/fuel-efficiency', () => {
   })
 })
 
+describe('GET /analytics/fuel-cost', () => {
+  const filling = (filledAt: Date, filledMl: number) => ({
+    vehicleId: 'veh_01', filledAt, filledMl,
+    vehicle: { registrationPlate: 'KDL 201X', name: 'SINO ZZ4257V344JB1R' },
+  })
+
+  // An explicit `to` bypasses the warm cache and queries directly, which is
+  // what makes the aggregate assertable against mocked rows.
+  const query = { days: '2', to: '2026-08-03T12:00:00Z' }
+
+  it('costs the ledger at the configured rate', async () => {
+    prismaMock.fuelFilling.findMany.mockResolvedValue([
+      filling(new Date('2026-08-03T09:00:00Z'), 40_000),
+    ] as never)
+    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
+
+    const res = await request(app).get(`${BASE}/fuel-cost`).query(query)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.totals.litresFilled).toBe(40)
+    expect(res.body.data.totals.cost).toBeGreaterThan(0)
+    expect(res.body.data.price).toHaveProperty('source', 'configured')
+    // One entry per window day, zero-filled.
+    expect(res.body.data.byDay).toHaveLength(2)
+    expect(res.body.data.byVehicle[0]).toHaveProperty('registrationPlate', 'KDL 201X')
+  })
+
+  it('honours a caller-supplied price', async () => {
+    prismaMock.fuelFilling.findMany.mockResolvedValue([
+      filling(new Date('2026-08-03T09:00:00Z'), 10_000),
+    ] as never)
+    prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
+
+    const res = await request(app).get(`${BASE}/fuel-cost`).query({ ...query, pricePerLitre: '200' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.price).toMatchObject({ pricePerLitre: 200, source: 'request' })
+    expect(res.body.data.totals.cost).toBe(2000)   // 10 L × 200
+  })
+
+  it('rejects a non-positive price', async () => {
+    const res = await request(app).get(`${BASE}/fuel-cost`).query({ ...query, pricePerLitre: '0' })
+    expect(res.status).toBe(400)
+  })
+})
+
 describe('GET /analytics/speeding', () => {
   it('requires from and to params', async () => {
     const res = await request(app).get(`${BASE}/speeding`)

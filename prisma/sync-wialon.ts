@@ -30,6 +30,7 @@ import { PrismaClient } from '../generated/prisma/client.js'
 import { WialonClient, positionToTelemetry, type WialonUnit } from '../src/providers/wialon/wialon.client.js'
 import { tankCapacityOf } from '../src/providers/wialon/wialon.sensors.js'
 import { classifyUnit } from '../src/providers/wialon/wialon.vehicle-type.js'
+import { KASULU_WIALON_ACCOUNT_ID } from '../src/providers/wialon/wialon.account.js'
 
 const pool    = new pg.Pool({ connectionString: process.env.DIRECT_URL })
 const adapter = new PrismaPg(pool)
@@ -62,11 +63,29 @@ async function main() {
 
   const client = new WialonClient(TOKEN, API_URL)
   await client.login()
-  const units = await client.listUnits()
+
+  // ONLY Kasulu's own units. The token can see eight customers' fleets — 1,504
+  // units — and this script writes every unit it is handed into ORG_CODE as a
+  // vehicle. Unfiltered it would have created 1,286 spurious rows here. The
+  // account id is the boundary; see providers/wialon/wialon.account.
+  const units = await client.listUnits(KASULU_WIALON_ACCOUNT_ID)
   if (units.length === 0) {
     throw new Error('Wialon returned no units — refusing to deactivate the whole fleet on a bad response')
   }
-  console.log(`  ← ${units.length} units from Wialon`)
+  console.log(`  ← ${units.length} units from Wialon account ${KASULU_WIALON_ACCOUNT_ID}`)
+
+  // A registry sync should refresh a fleet, never replace one. If the unit list
+  // has shrunk or grown by more than half, something upstream changed shape —
+  // an account moved, the token lost a right — and the correct response is to
+  // stop and have someone look, not to deactivate or invent hundreds of rows.
+  const known = await prisma.vehicle.count({ where: { organisationId: org.id } })
+  if (known > 0 && (units.length < known / 2 || units.length > known * 2)) {
+    throw new Error(
+      `Refusing to sync: Wialon returned ${units.length} units for account ${KASULU_WIALON_ACCOUNT_ID}, ` +
+      `but ${ORG_CODE} holds ${known} vehicles. That is too large a change to apply unattended — ` +
+      `check the account id and the token's access before re-running.`,
+    )
+  }
 
   // One group for the org; Wialon gives us no classification to split on.
   const groupCode = `${ORG_CODE}_${GROUP_NAME.replace(/\s+/g, '_')}`

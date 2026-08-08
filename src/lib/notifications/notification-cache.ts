@@ -19,6 +19,21 @@
  * irrelevant — ZREVRANGEBYSCORE always returns a correctly ordered feed, and
  * trimming by age is ZREMRANGEBYSCORE rather than a scan.
  *
+ * ## Why the member is the feedId and not the payload
+ *
+ * A ZSET member is unique by VALUE. Storing `JSON.stringify(item)` therefore
+ * made the identity of a notification its exact serialised body, not its
+ * `feedId` — so a redelivery whose wording had drifted by one character became
+ * a SECOND member at the same score, and the cached page showed one event
+ * twice while Postgres (which upserts on `feedId`) held a single clean row.
+ * Fuel is exactly where that bites: Wialon refines a filling's volume, final
+ * level and location as settled readings arrive, so a republished event is
+ * routinely almost-but-not-quite identical.
+ *
+ * The ZSET now holds ids and a companion hash holds the payloads, which makes
+ * `feedId` the identity here too. Keeping the two in step needs one atomic
+ * step — see TRIM_SCRIPT.
+ *
  * ## It is a cache, not a store
  *
  * Every write here is preceded by a Postgres write (see notification.store).
@@ -46,10 +61,56 @@ export interface NotificationItem {
   [k: string]: unknown
 }
 
+/** ZSET of feedIds, scored by event time. */
 const key = (orgId: string) => `notif:feed:${orgId}`
+/** HASH of feedId → serialised item, in step with the ZSET above. */
+const dataKey = (orgId: string) => `notif:data:${orgId}`
 
 /** Trim to NOTIFICATION_CACHE_MAX newest AND drop anything past retention. */
 const retentionMs = () => env.NOTIFICATION_RETENTION_DAYS * 24 * 60 * 60_000
+
+/**
+ * Add one item and re-apply both bounds, atomically.
+ *
+ * Lua because the index and the payloads are now two keys: a trim that removed
+ * ids from the ZSET without removing the matching hash fields would leak a
+ * payload per evicted notification forever, and doing it as two round trips
+ * would leave that window open on every write. One script, one round trip, no
+ * interleaving.
+ *
+ * `ZREM`/`HDEL` per victim rather than `unpack(victims)`: the steady state is
+ * zero or one victim per call, and a bulk `unpack` of a large table is what
+ * blows the Lua stack on the one-off case that matters — an operator lowering
+ * NOTIFICATION_CACHE_MAX, where the first write after the change evicts
+ * thousands at once.
+ */
+export const TRIM_SCRIPT = `
+local z, h = KEYS[1], KEYS[2]
+local score, id, payload = ARGV[1], ARGV[2], ARGV[3]
+local max, cutoff, ttl   = tonumber(ARGV[4]), ARGV[5], tonumber(ARGV[6])
+
+redis.call('ZADD', z, score, id)
+redis.call('HSET', h, id, payload)
+
+-- Bound by count: rank 0 is the OLDEST in a ZSET, so ranks 0..-(max+1) are
+-- everything below the newest max.
+local victims = redis.call('ZRANGE', z, 0, -(max + 1))
+-- Bound by age: the same window the retention sweep enforces in Postgres, so
+-- the cache can never serve something the store has already deleted.
+for _, v in ipairs(redis.call('ZRANGEBYSCORE', z, '-inf', cutoff)) do
+  victims[#victims + 1] = v
+end
+
+for _, v in ipairs(victims) do
+  redis.call('ZREM', z, v)
+  redis.call('HDEL', h, v)
+end
+
+-- Belt and braces: an org that goes quiet forever should not pin memory.
+redis.call('EXPIRE', z, ttl)
+redis.call('EXPIRE', h, ttl)
+return #victims
+`
 
 /**
  * Add one notification to an org's cached feed.
@@ -64,23 +125,33 @@ export async function cacheNotification(orgId: string, item: NotificationItem): 
   const score = Date.parse(item.ts)
   if (!Number.isFinite(score)) return
 
+  const ttl = Math.ceil(retentionMs() / 1000)
+
   try {
-    await redis.multi()
-      // Score by event time so out-of-order arrivals land in the right place.
-      .zadd(key(orgId), score, JSON.stringify(item))
-      // Bound by count: keep the newest N (rank 0 is the OLDEST in a ZSET, so
-      // removing ranks 0..-(N+1) drops everything below the newest N).
-      .zremrangebyrank(key(orgId), 0, -(env.NOTIFICATION_CACHE_MAX + 1))
-      // Bound by age: same window the retention sweep enforces in Postgres, so
-      // the cache can never serve something the store has already deleted.
-      .zremrangebyscore(key(orgId), '-inf', Date.now() - retentionMs())
-      // Belt and braces: an org that goes quiet forever should not pin memory.
-      .expire(key(orgId), Math.ceil(retentionMs() / 1000))
-      .exec()
+    await redis.eval(
+      TRIM_SCRIPT, 2, key(orgId), dataKey(orgId),
+      String(score), item.id, JSON.stringify(item),
+      String(env.NOTIFICATION_CACHE_MAX), String(Date.now() - retentionMs()), String(ttl),
+    )
+    warnedWriteFailure = false
   } catch (err) {
-    logger.debug({ err, orgId }, 'Notification cache write failed — feed is unaffected')
+    // A transient failure here is genuinely uninteresting — the feed is
+    // unaffected and the next notification retries. A PERSISTENT one is not:
+    // a script that can never run means the cache silently stops being
+    // written, every read falls through to Postgres, and nothing says so.
+    // Debug-level logging would hide exactly that, so the first failure of a
+    // run is a warning and the repeats are not.
+    if (!warnedWriteFailure) {
+      warnedWriteFailure = true
+      logger.warn({ err, orgId }, 'Notification cache write failed — feed is unaffected, reads fall back to Postgres')
+    } else {
+      logger.debug({ err, orgId }, 'Notification cache write failed — feed is unaffected')
+    }
   }
 }
+
+/** One warning per outage, not one per notification. */
+let warnedWriteFailure = false
 
 /**
  * Read an org's cached feed, newest first.
@@ -94,10 +165,33 @@ export async function readCachedNotifications(orgId: string, limit: number): Pro
   if (!redis) return null
 
   try {
-    const raw = await redis.zrevrange(key(orgId), 0, limit - 1)
-    if (raw.length === 0) return null
-    return raw.flatMap((s) => {
-      try { return [JSON.parse(s) as NotificationItem] } catch { return [] }
+    const members = await redis.zrevrange(key(orgId), 0, limit - 1)
+    if (members.length === 0) return null
+
+    // A member written before this key held ids is the payload itself. Deploying
+    // over a warm cache would otherwise blank every org's first page until the
+    // ZSET churned through, which for a quiet org is days. Mixed sets read fine
+    // and the legacy members age out on their own.
+    const legacy = new Map<number, NotificationItem>()
+    const ids: string[] = []
+    members.forEach((m, i) => {
+      if (m.startsWith('{')) {
+        try { legacy.set(i, JSON.parse(m) as NotificationItem); return } catch { /* fall through */ }
+      }
+      ids.push(m)
+    })
+
+    const payloads = ids.length > 0 ? await redis.hmget(dataKey(orgId), ...ids) : []
+    let next = 0
+
+    return members.flatMap((_, i) => {
+      const fromLegacy = legacy.get(i)
+      if (fromLegacy) return [fromLegacy]
+      const raw = payloads[next++]
+      // A missing hash field means the two keys drifted — possible only if the
+      // hash was evicted independently. Skip it rather than serve a hole.
+      if (!raw) return []
+      try { return [JSON.parse(raw) as NotificationItem] } catch { return [] }
     })
   } catch (err) {
     logger.debug({ err, orgId }, 'Notification cache read failed — falling back to Postgres')
@@ -113,13 +207,19 @@ export async function primeCache(orgId: string, items: NotificationItem[]): Prom
   const redis = getCacheRedis()
   if (!redis || items.length === 0) return
 
+  const ttl = Math.ceil(retentionMs() / 1000)
+
   try {
-    const pipeline = redis.multi().del(key(orgId))
+    // Both keys are replaced together — priming the index while leaving stale
+    // payloads behind would keep evicted notifications alive in the hash.
+    const pipeline = redis.multi().del(key(orgId)).del(dataKey(orgId))
     for (const item of items) {
       const score = Date.parse(item.ts)
-      if (Number.isFinite(score)) pipeline.zadd(key(orgId), score, JSON.stringify(item))
+      if (!Number.isFinite(score)) continue
+      pipeline.zadd(key(orgId), score, item.id)
+      pipeline.hset(dataKey(orgId), item.id, JSON.stringify(item))
     }
-    await pipeline.expire(key(orgId), Math.ceil(retentionMs() / 1000)).exec()
+    await pipeline.expire(key(orgId), ttl).expire(dataKey(orgId), ttl).exec()
   } catch (err) {
     logger.debug({ err, orgId }, 'Notification cache prime failed')
   }
@@ -142,7 +242,20 @@ export async function trimCachedNotifications(): Promise<number> {
     do {
       const [next, keys] = await redis.scan(cursor, 'MATCH', 'notif:feed:*', 'COUNT', 100)
       cursor = next
-      for (const k of keys) trimmed += await redis.zremrangebyscore(k, '-inf', cutoff)
+      for (const k of keys) {
+        const orgId = k.slice('notif:feed:'.length)
+        // Read the victims before removing them, so their payloads go too. A
+        // ZREMRANGEBYSCORE on its own would strand one hash field per swept
+        // notification — 90 days of them, on the box's tightest resource.
+        const victims = await redis.zrangebyscore(k, '-inf', cutoff)
+        if (victims.length === 0) continue
+        const removed = await redis.zremrangebyscore(k, '-inf', cutoff)
+        // Legacy members are the payload, not an id; there is no hash field to
+        // drop for those.
+        const ids = victims.filter((v) => !v.startsWith('{'))
+        if (ids.length > 0) await redis.hdel(dataKey(orgId), ...ids)
+        trimmed += removed
+      }
     } while (cursor !== '0')
   } catch (err) {
     logger.warn({ err }, 'Notification cache trim failed')

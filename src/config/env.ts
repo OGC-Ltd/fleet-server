@@ -104,6 +104,59 @@ const schema = z.object({
   // BullMQ's repeatable jobs already de-duplicate on a shared Redis, so this
   // is belt-and-braces for the case where instances point at different Redises.
   RETENTION_SWEEP_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  // Fuel fillings and drains from Wialon's own reports onto the Live Feed.
+  // Like the retention sweep this needs Redis and is inert without it; unlike
+  // it, this one MUST run in-process, because the notification read path
+  // serves its first page from the Redis cache and an external CLI cannot
+  // write that cache — see lib/queues/fuel-events.ts.
+  // Set 'false' on additional instances so only ONE runs it.
+  FUEL_SYNC_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  // Every 15 minutes. The job executes a Wialon report only for vehicles whose
+  // own fuel readings actually moved, so a quiet cycle costs nothing.
+  FUEL_SYNC_CRON: z.string().optional().default('*/15 * * * *'),
+
+  // The settle pass — see lib/queues/fuel-events.ts. Each cycle re-reads a
+  // rotating slice of vehicles over a window that has finished maturing and
+  // makes the ledger EQUAL the provider's answer for it, deleting events
+  // Wialon has since retracted. Without it the ledger only ever grows, and
+  // retracted candidates inflated the fuel-loss figure permanently.
+  FUEL_SETTLE_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  // Vehicles per cycle. At the default cadence and ~460 instrumented vehicles
+  // this brings every one round in under six hours, for roughly a minute of
+  // extra Wialon time per cycle. Raise it to converge faster on a box that can
+  // afford it; 0 is the same as disabling the pass.
+  FUEL_SETTLE_BATCH: z.coerce.number().int().nonnegative().optional().default(20),
+
+  // Adjudicate the provider's drain claims against our own tank readings
+  // before they count as a loss or reach the feed. Measured over the 250 most
+  // recent drains per org, 40% (KASULU) and 50% (SUKARI) of decidable loss
+  // volume came back with no filling to explain it — fuel that moved off the
+  // probe on a slope and returned. Off means the ledger records Wialon's claim
+  // verbatim, as it did before; nothing is deleted either way.
+  FUEL_ADJUDICATION_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  // Completed dispatches → measured Trip rows (lib/queues/trips.ts). The trips
+  // table had no writer once the simulator was retired, so every surface
+  // reading it — the delivery half of Analytics, the Drivers roster, the org
+  // reports — reported zero against a fleet running thousands of dispatches.
+  // Set 'false' on additional instances so only ONE runs it.
+  TRIP_BUILD_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  // Every 10 minutes. A cycle only looks at dispatches closed in a short
+  // trailing window and does nothing when none have closed.
+  TRIP_BUILD_CRON: z.string().optional().default('*/10 * * * *'),
+
+  // Pump price for costing the fuel ledger (analytics/fuel-cost). NOTHING in
+  // the schema records what fuel cost — a filling stores litres, not money —
+  // so cost is always litres × a price supplied here, and the endpoint echoes
+  // the price it used. The default is the EPRA Nairobi diesel rate; set this
+  // on the box when the rate moves rather than editing the frontend constant
+  // the dashboard used to hardcode. A caller can still override per request.
+  FUEL_PRICE_PER_LITRE: z.coerce.number().positive().optional().default(179.36),
+  FUEL_CURRENCY:        z.string().optional().default('KES'),
 })
 
 // Production must talk to the real (remote) database endpoint. localhost URLs

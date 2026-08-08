@@ -7,3 +7,15 @@
 # that IS used lives in dash/public/estate-plan.geojson.
 ESTATE*.pdf
 ESTATE*.dwg
+
+# Throwaway one-off DB/API probe scripts (_age.mjs, _clock.mjs, …). Ad-hoc
+# queries written to answer one question, kept out of the repo deliberately.
+/_*.mjs
+
+# Runtime caches. The committed .geocode-cache.json / .road-route-cache.json are
+# SEEDS, read once when this directory is empty; the running process writes only
+# here. Keeping the two apart is what stops a file that rewrites itself every
+# few seconds from leaving the working tree permanently dirty — which on the
+# deploy box meant every `git push` was rejected until someone ran
+# `git checkout -- .`, a command whose other job is discarding real work.
+/.cache/

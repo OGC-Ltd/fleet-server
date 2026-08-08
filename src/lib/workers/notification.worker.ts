@@ -52,9 +52,12 @@ function shouldPush(key: string): boolean {
 
 function handleProviderAlert(a: ProviderAlertEvent): void {
   // 1. Live feed + durable history + hot cache, in one call.
-  //    `notify:false` is boot replay: the row is already in Postgres and in
-  //    the cache, so re-writing both would be churn — only the SSE emit is
-  //    wanted. It doubles as the "don't push" flag below.
+  //
+  //    Storage is its OWN flag. This used to pass `persist: a.notify`, which
+  //    conflated "don't wake anyone's phone for this" with "don't keep it" —
+  //    so the routine narration that sets notify:false (dispatches, gate
+  //    movements) was broadcast to open tabs and then dropped. Those are the
+  //    events an operator most often goes looking for afterwards.
   publishNotification({
     orgId:     a.orgId,
     id:        a.id,
@@ -65,7 +68,7 @@ function handleProviderAlert(a: ProviderAlertEvent): void {
     at:        a.at,
     plate:     a.plate,
     vehicleId: a.vehicleId,
-    persist:   a.notify,
+    persist:   a.persist ?? true,
   })
 
   if (!a.notify) return

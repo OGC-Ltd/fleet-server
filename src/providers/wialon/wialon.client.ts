@@ -20,6 +20,7 @@
 
 import { logger } from '../../lib/logger.js'
 import type { WialonSensor } from './wialon.sensors.js'
+import { BILLING_PROPS_FLAG } from './wialon.account.js'
 
 const DEFAULT_BASE = 'https://hst-api.wialon.com'
 
@@ -77,6 +78,13 @@ export interface WialonUnit {
    * 25 of them units Wialon considered offline.
    */
   netconn?: number
+  /**
+   * Id of the Wialon ACCOUNT that owns this unit — which customer's fleet it
+   * is. Requires flag 0x4, and equals that account's resource id. See
+   * wialon.account: this is the only reliable org boundary on a token that can
+   * see eight customers.
+   */
+  bact?: number
 }
 
 export class WialonClient {
@@ -144,6 +152,12 @@ export class WialonClient {
    * Every unit the account can see, with its last known position, its
    * configured sensors, and the last message's raw parameters.
    *
+   * `accountId` restricts the result to units OWNED by that Wialon account —
+   * see wialon.account for why anything writing to one organisation's registry
+   * must pass it. Omitted, this returns every unit the token can see, which
+   * today spans eight customers; that is what the live poller wants, because
+   * Sukari's vehicles are bound to Wialon units under a different account.
+   *
    * flags: 1 base | 8 custom fields | 0x400 last position + last message
    *        | 0x1000 sensors | 0x2000 counters | 0x200000 connection state.
    *        The sensors and `lmsg.p` make a fuel reading possible; 0x2000 is
@@ -153,18 +167,33 @@ export class WialonClient {
    *        found by probing all 32 bits against the live account, because the
    *        published flag tables do not list it.
    */
-  async listUnits(): Promise<WialonUnit[]> {
+  async listUnits(accountId?: number): Promise<WialonUnit[]> {
     const res = await this.call<{ items?: WialonUnit[]; totalItemsCount?: number }>(
       'core/search_items',
       {
         spec: { itemsType: 'avl_unit', propName: 'sys_name', propValueMask: '*', sortType: 'sys_name' },
         force: 1,
-        flags: 1 | 8 | 0x400 | 0x1000 | 0x2000 | 0x200000,
+        // 0x4 only when an account filter is asked for, so the live poller's
+        // sweep payload is unchanged.
+        flags: 1 | 8 | 0x400 | 0x1000 | 0x2000 | 0x200000 | (accountId != null ? BILLING_PROPS_FLAG : 0),
         from: 0,
         to: 0xFFFFFFFF,
       },
     )
-    return res.items ?? []
+    const items = res.items ?? []
+    if (accountId == null) return items
+
+    // Wialon has no server-side filter on `bact` — `propName: 'sys_billing_account'`
+    // is not a searchable property — so the sweep comes back whole and is
+    // narrowed here. The cost is bandwidth, not correctness.
+    const mine = items.filter(u => u.bact === accountId)
+    if (items.length > 0 && mine.length === 0) {
+      throw new Error(
+        `No units belong to Wialon account ${accountId}, though ${items.length} units are visible. ` +
+        `Refusing to continue: either the account id is wrong or the token lost access to it.`,
+      )
+    }
+    return mine
   }
 
   /**

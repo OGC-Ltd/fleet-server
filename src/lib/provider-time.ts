@@ -20,6 +20,26 @@
 /** East Africa Time. Kenya and Tanzania both observe UTC+3 year-round. */
 export const PROVIDER_UTC_OFFSET = '+03:00'
 
+/** Hours the fleet's wall clock runs ahead of UTC. EAT, and it has no DST. */
+const FLEET_UTC_OFFSET_H = 3
+
+/**
+ * Midnight at the START of the fleet's current day, as an instant.
+ *
+ * "Dispatched today" has to mean today in Ndhiwa, not today in UTC: the two
+ * diverge for the three hours after local midnight, which is exactly when a
+ * night shift's runs would silently drop off the board. Computed by shifting
+ * into local time, truncating the date, and shifting back — safe because EAT is
+ * a fixed offset, so there is no DST discontinuity to land on.
+ */
+export function fleetDayStart(now: Date = new Date()): Date {
+  const shifted = new Date(now.getTime() + FLEET_UTC_OFFSET_H * 3_600_000)
+  const midnightLocal = Date.UTC(
+    shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate(),
+  )
+  return new Date(midnightLocal - FLEET_UTC_OFFSET_H * 3_600_000)
+}
+
 const HAS_ZONE = /(?:Z|[+-]\d{2}:?\d{2})$/
 
 /**

@@ -45,8 +45,20 @@ import { handleDispatch } from '../../modules/webhooks/raifactorysuite-events.se
  */
 const ALERT_WINDOW = 200
 
-/** Dispatch window. The endpoint caps at 1000 and ignores offset entirely. */
-const DISPATCH_WINDOW = 500
+/**
+ * Dispatch window. The endpoint caps at 1000 and ignores offset entirely, so
+ * this is the ONLY lookback there is — a run that falls out of it can never
+ * receive its closure, and stays open in our copy for ever.
+ *
+ * 500 was about four days at this fleet's ~130 dispatches a day, and the tail
+ * showed: measured 2026-08-05, we held 193 dispatches open while the provider
+ * held 171, and six of the difference were runs it had already COMPLETED or
+ * CANCELLED days earlier. They sat in "out now" indefinitely because nothing
+ * ever re-read them. All six were inside the provider's 1000 rows.
+ *
+ * So take the whole window the endpoint allows. It is one request either way.
+ */
+const DISPATCH_WINDOW = 1000
 
 export interface ReconcilerHandle {
   stop: () => void
@@ -101,11 +113,26 @@ class RaiFactorySuiteReconciler {
 
     try {
       const dispatches = await this.client.listDispatches(DISPATCH_WINDOW)
-      // narrate:false — this window is re-read every cycle, so the webhook is
-      // the only thing that tells a dispatch's story. Here we only keep the
-      // driver↔vehicle assignment rows current.
+      // This used to pass narrate:false unconditionally, on the reasoning that
+      // the window is re-read every cycle and the `dispatch.created` webhook is
+      // the one thing that sees each dispatch exactly once. The webhook is not
+      // arriving: measured 2026-08-03, SUKARI had 1,813 dispatches on record
+      // and NOT ONE feed item of alertType DISPATCH, ever. Every dispatch in
+      // the system came through this reconciler, silently, so the Live Feed
+      // never mentioned the single most operationally significant event the
+      // provider reports.
+      //
+      // Narrating here is now safe because publishNotification dedupes on
+      // feedId plus a content fingerprint (see notifications/notification.store)
+      // — the same dispatch re-offered on the next cycle reaches nothing: no
+      // SSE frame, no row, no cache write. That mechanism did not exist when
+      // this was written.
+      //
+      // `primed` still gates the FIRST pass, exactly as the alerts path does:
+      // the window is a day wide, so a restart would otherwise replay a day of
+      // dispatches into the feed as though they had all just happened.
       for (const d of dispatches) {
-        if (await handleDispatch(d, { narrate: false, source: 'reconciler' })) dispatchesSeen++
+        if (await handleDispatch(d, { narrate: this.primed, source: 'reconciler' })) dispatchesSeen++
       }
     } catch (err) {
       failed = true

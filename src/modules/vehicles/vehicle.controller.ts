@@ -1,6 +1,7 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as service from './vehicle.service.js'
+import { getVehicleBrief } from './vehicle-brief.js'
 import type { CreateGroupDto, UpdateGroupDto, CreateVehicleDto, UpdateVehicleDto, CreateAssignmentDto, ListQuery } from './vehicle.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -81,5 +82,20 @@ export const endAssignment: RequestHandler = async (req, res, next) => {
   try {
     const result = await service.endAssignment(p(req, 'orgId'), p(req, 'vehicleId'), p(req, 'assignmentId'))
     sendSuccess(res, result)
+  } catch (err) { next(err) }
+}
+
+// ── Operator brief ───────────────────────────────────────────────────────────
+// GET /organisations/:orgId/vehicles/:vehicleId/brief
+//
+// Two or three sentences on what this unit has done today: who is driving,
+// since when, distance covered, fuel taken on, where it was sent and when it
+// is due back. Every figure is measured server-side; the model only phrases
+// them, and writes nothing when there is no key (see vehicle-brief).
+
+export const getBrief: RequestHandler = async (req, res, next) => {
+  try {
+    const brief = await getVehicleBrief(p(req, 'orgId'), p(req, 'vehicleId'))
+    sendSuccess(res, brief)
   } catch (err) { next(err) }
 }

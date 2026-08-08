@@ -17,6 +17,10 @@ router.patch('/vehicle-groups/:groupId', validateBody(updateGroupSchema), ctrl.u
 router.get('/vehicles', validateQuery(listQuerySchema), ctrl.list)
 router.post('/vehicles', validateBody(createVehicleSchema), ctrl.create)
 router.get('/vehicles/:vehicleId', ctrl.getOne)
+// Operator brief — 2-3 sentences on what this unit has done today. Generated
+// on demand (see vehicle-brief) rather than warmed, because a 597-vehicle
+// fleet cannot have every unit's narrative regenerated on a timer.
+router.get('/vehicles/:vehicleId/brief', ctrl.getBrief)
 router.patch('/vehicles/:vehicleId', validateBody(updateVehicleSchema), ctrl.update)
 router.delete('/vehicles/:vehicleId', ctrl.remove)
 

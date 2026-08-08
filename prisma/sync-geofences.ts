@@ -40,6 +40,7 @@ import pg from 'pg'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { PrismaClient } from '../generated/prisma/client.js'
 import { WialonClient } from '../src/providers/wialon/wialon.client.js'
+import { KASULU_WIALON_ACCOUNT_ID } from '../src/providers/wialon/wialon.account.js'
 
 const pool    = new pg.Pool({ connectionString: process.env.DIRECT_URL })
 const adapter = new PrismaPg(pool)
@@ -102,8 +103,22 @@ async function main() {
       force: 1, flags: 1 | 0x1000 | 0x2000 | 0x4000, from: 0, to: 100,
     },
   )
-  const resource = (res.items ?? [])[0]
-  if (!resource) throw new Error('No Wialon resource visible to this account')
+  // The RIGHT resource, by id — never `items[0]`.
+  //
+  // This used to take the first item and worked for exactly as long as the
+  // token could see one customer. It can now see eight, sorted by name, and
+  // the first is "AQAUMIST LTD" with ZERO zones — so the script had quietly
+  // become a no-op that reported success. Its neighbour "Mene-ngai" holds
+  // 6,169 zones; one change in Wialon's ordering and those would have been
+  // written into KASULU instead. See providers/wialon/wialon.account.
+  const resources = res.items ?? []
+  const resource = resources.find(r => r.id === KASULU_WIALON_ACCOUNT_ID)
+  if (!resource) {
+    throw new Error(
+      `Wialon resource ${KASULU_WIALON_ACCOUNT_ID} (${ORG_CODE}'s) is not visible to this token. ` +
+      `Visible resources: ${resources.map(r => `${r.id} "${r.nm}"`).join(', ') || 'none'}`,
+    )
+  }
 
   const zoneIds = Object.values(resource.zl ?? {}).map((z) => (z as { id: number }).id)
   if (zoneIds.length === 0) {
