@@ -68,6 +68,34 @@ export function isEstateFeature(category: ZoneCategory): boolean {
   return category !== 'sample'
 }
 
+/**
+ * Is arriving here an EVENT, or just where the work happens?
+ *
+ * Being an estate feature is not enough to be worth a feed line. The estate's
+ * categories divide cleanly into destinations — the factory, the logistics
+ * centres, the workshop, the dispensary — and the ground a machine spends its
+ * whole shift on: farm blocks, nurseries, the commercial area, haulage roads,
+ * drains, rivers, wetlands.
+ *
+ * Measured on KASULU over 17 hours (2026-08-04), 2,924 zone feed items:
+ *
+ *   farm 22.9% · commercial 21.4% · nursery 16.2% · road 7.6% · drain 0.8%
+ *   facility 14.1% · logistics 10.7% · factory 6.2%
+ *
+ * A tractor working a field crosses those boundaries continuously — the busiest
+ * emitted 527 lines in a day, one every three minutes, and the 3-minute dwell
+ * cannot help because the movement is real. The result was a feed where fuel
+ * events were 4.3% of the traffic and an operator reported never seeing a
+ * refuel at all.
+ *
+ * Presence is unaffected: containment still drives keep-out breaches and the
+ * "— inside FARM #215" context on the lines that DO get published. This governs
+ * narration only.
+ */
+export function isNarratableDestination(category: ZoneCategory): boolean {
+  return category === 'factory' || category === 'logistics' || category === 'facility'
+}
+
 const R = 6_371_000
 const rad = (d: number) => (d * Math.PI) / 180
 
