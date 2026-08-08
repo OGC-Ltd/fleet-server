@@ -73,7 +73,11 @@ export async function findTrack(vehicleId: string, orgId: string, q: TrackQuery)
     },
     orderBy: { capturedAt: 'desc' },
     take: TRACK_SCAN_CAP + 1,
-    select: { capturedAt: true, lat: true, lng: true },
+    // engineOn rides along for engineOffSinceMs below. It is one more column on
+    // rows already being read, not another query, and it never reaches the
+    // caller per-point — the thinning would drop it exactly where it matters
+    // (a unit standing still with the key out emits fixes that go nowhere).
+    select: { capturedAt: true, lat: true, lng: true, engineOn: true },
   })
 
   const truncated = rows.length > TRACK_SCAN_CAP
@@ -100,12 +104,42 @@ export async function findTrack(vehicleId: string, orgId: string, q: TrackQuery)
     if (!last || last.t !== t) points.push({ t, lat: lastRow.lat, lng: lastRow.lng })
   }
 
+  // When the key was last turned off, if it is still off.
+  //
+  // A track says where a unit WAS, and its last point is wherever the window
+  // ran out — which is not the same as the journey having ended. The signal
+  // that it ended is the ignition: 222 of 224 units report a real one
+  // (`engine operation` / io_239, see the Wialon adapter), so engineOn is an
+  // ignition line rather than a restatement of speed, and a unit can idle for
+  // an hour without its journey being over.
+  //
+  // Walk back from the newest row while the engine is off; the oldest row of
+  // that unbroken run is when it went off. `null` means the engine was on at
+  // the last fix — a journey still in progress has no end to date.
+  //
+  // The column is `Boolean @default(false)`, so a provider that sends no
+  // ignition at all reads as OFF rather than as unknown. That is safe for this
+  // fleet — the Wialon adapter always sets the field explicitly, falling back
+  // to speed on the two units with no ignition line — but it is why this reads
+  // `!== false` rather than trusting a truthiness test.
+  let engineOffSinceMs: number | null = null
+  let engineOffRunsPastWindow = false
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].engineOn !== false) break
+    engineOffSinceMs = rows[i].capturedAt.getTime()
+    // Every row in the window is an off reading, so it went off at or before
+    // the oldest one we can see and the caller must not read this as exact.
+    if (i === rows.length - 1) engineOffRunsPastWindow = true
+  }
+
   return {
     points,
     fixes,                                   // rows in the window before thinning
     truncated,                               // scan cap hit: earliest is not the window start
     firstAt: points[0]?.t ?? null,
     lastAt:  points[points.length - 1]?.t ?? null,
+    engineOffSinceMs,                        // key last turned off, or null if it is on
+    engineOffRunsPastWindow,                 // ...and it was already off when the window opened
   }
 }
 
