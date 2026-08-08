@@ -46,6 +46,24 @@ jobs:
       # schema and never opens a connection, so a placeholder is enough and no
       # production credential goes near CI.
       DIRECT_URL: postgresql://ci:ci@localhost:5432/ci
+      # And these two for the same reason, one step later. `config/env.ts` opens
+      # with `import 'dotenv/config'` and validates the result, calling
+      # process.exit(1) when a required key is missing. On a dev machine the
+      # values come from an untracked `.env`; a clean runner has no such file,
+      # so 13 of the 32 unit suites died on import with "expected string,
+      # received undefined" and never ran an assertion. That is what made the
+      # workflow's first run on main fail while `npm run test:unit` passed
+      # locally — reproduce it with
+      # `DOTENV_CONFIG_PATH=/nonexistent npx vitest run tests/unit`.
+      #
+      # Placeholders, deliberately: the unit suites mock the database (the ones
+      # that need a live one are tests/integration, which this job does not
+      # run), so nothing dials these. They exist to satisfy the schema, and no
+      # production credential belongs in an unprivileged build job.
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+      # min(32) in the schema — a shorter string fails validation just as an
+      # absent one does.
+      JWT_SECRET: ci-unit-tests-signing-secret-not-a-real-key
     steps:
       - uses: actions/checkout@v4
 
