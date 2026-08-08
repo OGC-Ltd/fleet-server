@@ -32,7 +32,7 @@ import { logger } from '../../lib/logger.js'
 import { env } from '../../config/env.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../telemetry-provider.js'
 import { WialonClient, type WialonPosition } from './wialon.client.js'
-import { readFuel, readIgnition } from './wialon.sensors.js'
+import { readFuel, readIgnition, readFuelProbeFault, type FuelProbeFault } from './wialon.sensors.js'
 import { noteConnection, connectionCounts } from '../../lib/connection-state.js'
 
 /** Mirrors sync-wialon.ts — the device key a Wialon unit is registered under. */
@@ -61,6 +61,17 @@ export class WialonLiveAdapter implements TelemetryProvider {
    * semantics: it is a real measurement, at most one reconcile interval old.
    */
   private lastFuelMl = new Map<number, number>()
+
+  /**
+   * unitId → the probe's fault, while it has one. Carried forward between
+   * reconciles exactly like the reading above, and for the same reason: the
+   * sensor data it is derived from only arrives on the full sweep.
+   *
+   * Presence in this map IS the fault state, so the entry must be DELETED the
+   * moment a probe reads sanely again — a stale entry would keep reporting a
+   * fault on a repaired unit for as long as the process lived.
+   */
+  private lastProbeFault = new Map<number, FuelProbeFault>()
 
   /**
    * unitId → total mileage (km) from Wialon's own counter. Carried forward for
@@ -175,6 +186,21 @@ export class WialonLiveAdapter implements TelemetryProvider {
       // Calibrated fuel from the probe's own table — see wialon.sensors.
       const fuel = readFuel(u.sens, u.lmsg?.p)
       if (fuel) this.lastFuelMl.set(u.id, Math.round(fuel.litres * 1000))
+      // Why there is no reading, when there is none. Set AND cleared every
+      // sweep so a repaired probe stops reporting a fault; see lastProbeFault.
+      const probeFault = readFuelProbeFault(u.sens, u.lmsg?.p)
+      if (probeFault) {
+        const prev = this.lastProbeFault.get(u.id)
+        this.lastProbeFault.set(u.id, probeFault)
+        if (!prev) {
+          logger.warn(
+            { unit: u.nm, raw: probeFault.raw, calibratedMax: probeFault.calibratedMax, reason: probeFault.reason },
+            'Fuel probe reporting outside its calibrated range — no level available',
+          )
+        }
+      } else {
+        this.lastProbeFault.delete(u.id)
+      }
       // Ignition (`engine operation` → io_239). Present on 222/224 units and
       // the only way to distinguish idling from parked.
       const ign = readIgnition(u.sens, u.lmsg?.p)
@@ -193,7 +219,7 @@ export class WialonLiveAdapter implements TelemetryProvider {
       if (seen != null && u.pos.t <= seen) { unchanged++; continue }
       this.lastFixAt.set(u.id, u.pos.t)
 
-      const frame = toFrame(u.id, u.nm, u.pos, this.lastFuelMl.get(u.id) ?? null, this.lastOdometerKm.get(u.id) ?? null, this.lastEngineHours.get(u.id) ?? null, this.lastIgnition.get(u.id) ?? null)
+      const frame = toFrame(u.id, u.nm, u.pos, this.lastFuelMl.get(u.id) ?? null, this.lastOdometerKm.get(u.id) ?? null, this.lastEngineHours.get(u.id) ?? null, this.lastIgnition.get(u.id) ?? null, this.lastProbeFault.has(u.id))
       if (frame) frames.push(frame)
     }
 
@@ -220,7 +246,7 @@ export class WialonLiveAdapter implements TelemetryProvider {
       if (seen != null && pos.t <= seen) { unchanged++; continue }
       this.lastFixAt.set(unitId, pos.t)
 
-      const frame = toFrame(unitId, this.unitNames.get(unitId) ?? String(unitId), pos, this.lastFuelMl.get(unitId) ?? null, this.lastOdometerKm.get(unitId) ?? null, this.lastEngineHours.get(unitId) ?? null, this.lastIgnition.get(unitId) ?? null)
+      const frame = toFrame(unitId, this.unitNames.get(unitId) ?? String(unitId), pos, this.lastFuelMl.get(unitId) ?? null, this.lastOdometerKm.get(unitId) ?? null, this.lastEngineHours.get(unitId) ?? null, this.lastIgnition.get(unitId) ?? null, this.lastProbeFault.has(unitId))
       if (frame) frames.push(frame)
     }
 
@@ -249,6 +275,7 @@ function toFrame(
   odometerKm: number | null,
   engineHours: number | null,
   ignitionOn: boolean | null,
+  fuelProbeFault: boolean,
 ): VehicleTelemetryFrame | null {
   if (!p || !Number.isFinite(p.y) || !Number.isFinite(p.x)) return null
   // A frame without a usable timestamp is unwritable (capturedAt is part of
@@ -297,6 +324,11 @@ function toFrame(
     // on guesses would fabricate alerts. Wialon's own Notifications are the
     // correct source for speeding/geofence events — it computes them against
     // real per-unit limits and can POST them to /webhook/rai.
+    //
+    // fuelProbeFault is the exception, and legitimately so: it is not inferred
+    // from the position payload at all but measured off the unit's own sensor
+    // config during the reconcile sweep, then carried in alongside the fuel
+    // reading it explains the absence of.
     flags: {
       overspeeding:        false,
       fuelInconsistency:   false,
@@ -307,6 +339,7 @@ function toFrame(
       lowBattery:          false,
       highEngineTemp:      false,
       lowOil:              false,
+      fuelProbeFault,
     },
 
     // odometer_km rides in the raw payload because that is where the fleet
