@@ -12,7 +12,16 @@ import path from 'node:path'
 import { logger } from './logger.js'
 
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org/reverse'
-const CACHE_FILE     = path.resolve(process.cwd(), '.geocode-cache.json')
+// Where the RUNNING process writes. Gitignored, because this file is rewritten
+// every few seconds: tracked, it left the working tree permanently dirty and
+// every `git push` into the box's tree was rejected until someone ran
+// `git checkout -- .` — a step whose other job is discarding real work.
+const CACHE_FILE     = path.resolve(process.cwd(), '.cache', 'geocode.json')
+// The committed WARM START, read only when the runtime file does not exist yet.
+// Worth keeping in the repo: Nominatim's usage policy caps us at roughly one
+// request per 1.1 s, so a genuinely cold box would spend many minutes labelling
+// places it already had answers for.
+const SEED_FILE      = path.resolve(process.cwd(), '.geocode-cache.json')
 const FETCH_GAP_MS   = 1_100     // Nominatim policy: max 1 req/s
 const BREAKER_MS     = 60_000    // back off this long after a fetch failure
 
@@ -29,11 +38,16 @@ const keyOf = (lat: number, lng: number) => `v2:${lat.toFixed(2)},${lng.toFixed(
 
 // ── disk cache ──────────────────────────────────────────────────────────────
 
-try {
-  const raw = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')) as Record<string, string>
-  for (const [k, v] of Object.entries(raw)) memory.set(k, v)
-  logger.info({ places: memory.size }, 'geocode cache loaded from disk')
-} catch { /* first boot — no cache yet */ }
+// Runtime file first, committed seed second — never both, so a stale seed can
+// never resurrect labels the running cache has already superseded.
+for (const [file, kind] of [[CACHE_FILE, 'runtime'], [SEED_FILE, 'seed']] as const) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, string>
+    for (const [k, v] of Object.entries(raw)) memory.set(k, v)
+    logger.info({ places: memory.size, kind }, 'geocode cache loaded from disk')
+    break
+  } catch { /* try the next one; neither existing is a normal first boot */ }
+}
 
 let saveTimer: NodeJS.Timeout | null = null
 function scheduleSave() {
@@ -41,8 +55,14 @@ function scheduleSave() {
   saveTimer = setTimeout(() => {
     saveTimer = null
     const obj = Object.fromEntries(memory)
-    fs.writeFile(CACHE_FILE, JSON.stringify(obj), (err) => {
-      if (err) logger.warn({ err }, 'geocode cache save failed')
+    // mkdir on every save rather than at import: it is one syscall every five
+    // seconds at most, and it means a deleted .cache/ heals itself instead of
+    // silently dropping every label learned after the deletion.
+    fs.mkdir(path.dirname(CACHE_FILE), { recursive: true }, (mkErr) => {
+      if (mkErr) { logger.warn({ err: mkErr }, 'geocode cache dir failed'); return }
+      fs.writeFile(CACHE_FILE, JSON.stringify(obj), (err) => {
+        if (err) logger.warn({ err }, 'geocode cache save failed')
+      })
     })
   }, 5_000)
 }

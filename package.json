@@ -35,13 +35,17 @@
     "sync:drivers": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-drivers.ts",
     "sync:wialon": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-wialon.ts",
     "sync:geofences": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-geofences.ts",
+    "sync:fuel": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-fuel-events.ts",
     "geofence:assign": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/geofence-assign.ts",
     "fix:rings": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/fix-ring-geofences.ts",
     "sync:sukari-gps": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-sukari-wialon.ts",
     "sync:alerts": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-alerts.ts",
     "sync:dispatches": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-dispatches.ts",
+    "sync:destinations": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-destinations.ts",
     "seed:silos": "tsx prisma/seed-silos.ts",
-    "backfill:notifications": "tsx prisma/backfill-notifications.ts"
+    "backfill:notifications": "tsx prisma/backfill-notifications.ts",
+    "build:trips": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/build-trips.ts",
+    "fuel:adjudicate": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/adjudicate-fuel.ts"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",

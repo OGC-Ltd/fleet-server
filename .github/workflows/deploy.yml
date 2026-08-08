@@ -1,0 +1,203 @@
+# Build, test and deploy fleet-server to the production box.
+#
+# This automates the ritual that was previously done by hand over ssh:
+# `git pull` → `npm install` → `npm run build` → `pm2 restart fleet-server`.
+# It keeps the two properties that ritual had and that matter most:
+#
+#   · The box's git checkout stays the record of what is running. Code reaches
+#     it as a PUSH into its working tree (`receive.denyCurrentBranch=updateInstead`
+#     is set on this repo's clone there), not as a copied build output. A box
+#     carrying files no commit describes is what made past deploys a guess.
+#   · Nothing is built on the box until the same commit has compiled and passed
+#     its unit tests on a clean runner.
+#
+# The push is also the safety interlock: `updateInstead` REFUSES when the box's
+# working tree is dirty, so a deploy that would silently discard someone's
+# manual edit fails loudly instead.
+#
+# NOT automated on purpose: `prisma migrate deploy`. A schema change against the
+# shared RDS instance is not something to trigger from a merge — run it by hand.
+
+name: build and deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, and never cancel one half-way: a cancelled run can leave
+# the box built but not restarted.
+concurrency:
+  group: fleet-server-deploy
+  cancel-in-progress: false
+
+env:
+  # The version pm2 runs on the box (nvm v24.18.0). Building on a different
+  # major here would prove nothing about what will run there.
+  NODE_VERSION: '24.18.0'
+
+jobs:
+  build:
+    name: compile and unit-test
+    runs-on: ubuntu-latest
+    env:
+      # `postinstall` runs `prisma generate`, and prisma.config.ts THROWS unless
+      # DIRECT_URL parses — so `npm ci` itself needs one. Generate reads the
+      # schema and never opens a connection, so a placeholder is enough and no
+      # production credential goes near CI.
+      DIRECT_URL: postgresql://ci:ci@localhost:5432/ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: compile
+        run: npm run build
+
+      # Unit tests only. tests/integration expects a reachable database; this
+      # job deliberately has no credentials for one.
+      - name: unit tests
+        run: npm run test:unit
+
+  deploy:
+    name: deploy to the box
+    needs: build
+    runs-on: ubuntu-latest
+    # Lets you require a manual approval later (Settings → Environments) without
+    # touching this file.
+    environment: production
+    steps:
+      # Full history: the box's main must be a fast-forward of what we push, and
+      # a shallow clone cannot prove that.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # An unset secret is an empty string, not an error. Without this the run
+      # writes an empty key file, reports "open an ssh channel to the box" as a
+      # SUCCESS, and fails several steps later on
+      # "ssh: Could not resolve hostname : Name or service not known" — which
+      # names nothing you can act on. Fail here, listing what is missing.
+      - name: check the deploy secrets are set
+        env:
+          SSH_KEY:  ${{ secrets.EC2_SSH_KEY }}
+          HOST:     ${{ secrets.EC2_HOST }}
+          HOST_KEY: ${{ secrets.EC2_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${SSH_KEY}" ]  || missing="${missing} EC2_SSH_KEY"
+          [ -n "${HOST}" ]     || missing="${missing} EC2_HOST"
+          [ -n "${HOST_KEY}" ] || missing="${missing} EC2_HOST_KEY"
+          if [ -n "${missing}" ]; then
+            echo "::error::missing repository secrets:${missing} — see docs/ci-deploy.md"
+            exit 1
+          fi
+          echo "all three deploy secrets are present"
+
+      - name: open an ssh channel to the box
+        env:
+          SSH_KEY:  ${{ secrets.EC2_SSH_KEY }}
+          HOST:     ${{ secrets.EC2_HOST }}
+          HOST_KEY: ${{ secrets.EC2_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pinned host key rather than ssh-keyscan: keyscan trusts whatever
+          # answers on the day, and this connection carries the code that is
+          # about to run in production.
+          #
+          # The KEY is the security property. The hostname at the start of each
+          # line is only the label ssh matches on — and the two have to agree,
+          # which is not obvious and fails opaquely: a secret pasted from
+          # `ssh-keyscan <dns-name>` gives "Host key verification failed" the
+          # moment EC2_HOST holds the IP instead, or the public DNS rerolls.
+          # So the pinned keys are re-labelled to whatever EC2_HOST is; nothing
+          # about what is trusted changes, only the label.
+          #
+          # Every shape the key is plausibly pasted in is accepted: ssh-keyscan
+          # output, CRLF from a Windows paste, hashed (-H) entries which cannot
+          # be re-labelled and pass through, and the bare "ssh-rsa AAAA..."
+          # lines of /etc/ssh/ssh_host_*_key.pub, which carry no hostname at
+          # all. That last one is not hypothetical: rewriting field 1 blindly
+          # overwrote the KEY TYPE on such a paste and surfaced as
+          # "is not a public key file".
+          printf '%s\n' "$HOST_KEY" | tr -d '\r' | awk -v h="$HOST" '
+            /^[[:space:]]*$/ { next }
+            /^#/             { next }
+            /^\|/            { print; next }
+            $1 ~ /^(ssh-|ecdsa-|sk-ssh-|sk-ecdsa-)/ { print h, $0; next }
+            { $1 = h; print }
+          ' > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          # Validated HERE, where the cause is still visible. ssh's own verdict
+          # is "Host key verification failed", which cannot tell a malformed
+          # paste from a missing secret from a genuinely wrong key. The dump
+          # reports field counts only — never key material.
+          if ! ssh-keygen -lf ~/.ssh/known_hosts > /tmp/host-fingerprints 2>/dev/null; then
+            echo "::error::EC2_HOST_KEY is not usable known_hosts content — paste the full output of: ssh-keyscan <host>"
+            awk '{ t  = ($1 ~ /^\|/) ? "hashed" : $2
+                   ok = (t ~ /^(ssh-|ecdsa-|sk-)/ || t == "hashed") ? "ok" : "UNRECOGNISED"
+                   printf "  line %d: %d fields, key type %s\n", NR, NF, ok }' ~/.ssh/known_hosts
+            exit 1
+          fi
+          echo "pinned $(grep -c . ~/.ssh/known_hosts) host key(s):"
+          sed 's/^/  /' /tmp/host-fingerprints
+
+      - name: push this commit into the box's working tree
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          export GIT_SSH_COMMAND='ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes'
+          # Fails if the box's tree is dirty or its main is not an ancestor of
+          # this commit. Both are conditions a human should look at, not
+          # conditions to force past.
+          git push "ssh://ubuntu@${HOST}/home/ubuntu/prod/fleet-server" HEAD:main
+
+      - name: install, build and restart
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" bash -s <<'REMOTE'
+          set -euo pipefail
+          # `bash -lc` over ssh does not load nvm — node, npm and pm2 are all
+          # "command not found" without this.
+          export PATH="$HOME/.nvm/versions/node/v24.18.0/bin:$PATH"
+          cd /home/ubuntu/prod/fleet-server
+
+          echo "--- deploying $(git log --oneline -1)"
+          npm install --no-audit --no-fund
+          npx prisma generate --config prisma.config.ts
+          # pm2 runs dist/, not src/ — skipping this restarts the OLD code.
+          npm run build
+          pm2 restart fleet-server --update-env
+          pm2 save
+          REMOTE
+
+      - name: confirm the service answers
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          # Polled from the box itself: nginx fronts port 80, but /health is the
+          # process we just restarted, on 3000.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" \
+                 'curl -fsS --max-time 5 http://127.0.0.1:3000/health'; then
+              echo; echo "fleet-server is up"; exit 0
+            fi
+            echo "not up yet (attempt ${attempt}) — retrying in 5s"; sleep 5
+          done
+          echo "::error::fleet-server did not answer /health after the restart"
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" \
+            'export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH; pm2 logs fleet-server --lines 60 --nostream'
+          exit 1

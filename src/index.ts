@@ -15,6 +15,8 @@ import { startAiInsightWarmer } from './modules/dashboard/ai-insight.js'
 import { WialonLiveAdapter } from './providers/wialon/wialon.adapter.js'
 import { startRaiFactorySuiteReconciler } from './providers/raifactorysuite/raifactorysuite.reconciler.js'
 import { startRetentionSweep } from './lib/queues/retention.js'
+import { startFuelSync } from './lib/queues/fuel-events.js'
+import { startTripBuild } from './lib/queues/trips.js'
 import { disconnectRedis } from './lib/redis.js'
 import { staticRoutePairs } from './providers/raifactorysuite/raifactorysuite.simulator.js'
 
@@ -74,6 +76,16 @@ async function main() {
   // after the instance is resized. Until then notifications persist to
   // Postgres and accumulate — see lib/queues/retention.ts.
   const retention = await startRetentionSweep()
+
+  // Fuel fillings and drains from Wialon's reports onto the Live Feed. This
+  // one has to run IN-PROCESS: the notification read path serves its first
+  // page from the Redis cache, and the equivalent CLI (`npm run sync:fuel`)
+  // cannot write that cache, so its items were durable but invisible.
+  // Also no-op without REDIS_URL — see lib/queues/fuel-events.ts.
+  const fuelSync = await startFuelSync()
+  // Completed dispatches → measured trips. Nothing else writes that table
+  // since the simulator was retired — see lib/queues/trips.
+  const tripBuild = await startTripBuild()
   // API-only instances re-emit live positions + feed off the shared DB
   // (read-only) so a dev dashboard still gets a live map — see lib/db-follower.
   const stopDbFollower = !env.POLL_ENABLED && env.FOLLOW_DB ? startDbFollower() : () => {}
@@ -83,6 +95,8 @@ async function main() {
     poller.stop()
     raiFactorySuite.stop()
     await retention.stop().catch((err) => logger.warn({ err }, 'Retention sweep shutdown failed'))
+    await fuelSync.stop().catch((err) => logger.warn({ err }, 'Fuel sync shutdown failed'))
+    await tripBuild.stop().catch((err) => logger.warn({ err }, 'Trip build shutdown failed'))
     // Freeze the simulation exactly where it is so the next start resumes it.
     await poller.flush().catch((err) => logger.warn({ err }, 'Simulation flush failed on shutdown'))
     stopDbFollower()

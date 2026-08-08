@@ -309,10 +309,122 @@ Behaviour worth knowing:
   unit + trigger minute — a duplicate POST for the same trigger is idempotent,
   while the same rule can fire again later.
 * Wialon sends **no severity**, so it is inferred from the rule NAME:
+  drain/siphon/stolen and fuel+theft/loss/drop → critical; fill/refuel → info;
   sos/panic/crash/theft → critical; enter/exit/ignition/start/stop → info;
   anything else → warning. Name rules descriptively.
 * The vehicle is matched on `%UNIT_ID%` where present, otherwise on `%UNIT%`
   against the registration plate (which for Kasulu IS the Wialon unit name).
+* The alert is filed under **the matched vehicle's own organisation**. Until
+  2026-08-02 every Wialon notification was attributed to KASULU, which put
+  Sukari's alerts in another company's feed — both orgs have units under this
+  one token. KASULU remains the fallback only when the unit cannot be matched.
+
+#### 5.5.1 Fuel rules — what to ask for
+
+Fuel fillings and drains are the events worth having on the Live Feed, and the
+receiver handles them today. Two extra body fields carry the amount:
+
+```
+  "volumeL":    "<the rule's filled / drained volume tag>",
+  "fuelLevelL": "<the rule's fuel level tag>"
+```
+
+Both are optional like everything else — without them a "Fuel theft" still
+reaches the feed, just as *"Fuel theft — MUFINDI - CTR 03 at Nyalulanga"* with
+no litres. With them it reads *"… 80.8 L (tank 679.1 L)"*, which is the
+difference between an alert an operator can act on and one they cannot: a drain
+is routine at 2 L and serious at 80 L.
+
+**The exact tag names differ per trigger type and must be read off the Wialon
+rule editor** — they are deliberately not guessed at here. Whoever authors the
+rule maps the volume tag into `volumeL` and the level tag into `fuelLevelL`.
+
+Worth stating plainly: **this is the only piece of live fuel alerting we cannot
+build ourselves.** The alternative — deriving drains from our own 2-minute
+samples — means inventing thresholds against probes that are known to be noisy
+and, on some units, uncalibrated. Wialon already computes these events with the
+probe's own filtering, which is why the ask is a configuration one.
+
+Until the rules exist, the fuel ledger is still populated from the same
+provider logic by `npm run sync:fuel` (§5.5.2) — that path needs no ACL and is
+running today.
+
+#### 5.5.2 Fuel fillings and drains — WORKING, no ACL needed
+
+Wialon's own *Advanced Fuel Analysis* report is read per unit and written to
+`fuel_fillings` / `fuel_thefts`, and the recent ones are published to the Live
+Feed. This needs no notification ACL — it uses report execution, which the
+token already has — so it is the path that works today.
+
+There are two callers of one implementation
+(`modules/fuel/fuel-sync.service.ts`):
+
+| | `lib/queues/fuel-events.ts` | `npm run sync:fuel` |
+|---|---|---|
+| Role | **the live path** | backfill / repair |
+| Runs | in-process, every `FUEL_SYNC_CRON` (15 min) | by hand |
+| Asks about | vehicles whose own fuel readings moved | every instrumented vehicle |
+| Feed items | yes | only with `--notify` |
+| Needs Redis | yes (BullMQ) | no |
+
+**Why the live path must be in-process.** `notification.reader` serves the
+first page from the Redis cache whenever the cache holds enough items and never
+falls through to Postgres. A CLI has no Redis, so `cacheNotification` is a
+no-op and its items are durable but invisible. Measured against the live box on
+2026-08-02, the same request returned **21** fuel items with `?before=`
+(Postgres) and **0** without it (cache). Inside the server,
+`publishNotification` writes SSE, Redis and Postgres together, so the feed, the
+cached page and the history cannot disagree.
+
+**Why the job is affordable at 15 minutes.** One report execution per vehicle
+takes seconds and Wialon serialises them per session, so sweeping all ~460
+instrumented vehicles takes tens of minutes. The job does not sweep: the poller
+already stores a calibrated level every couple of minutes, so a tank that has
+not moved cannot have been filled or drained. `findFuelCandidates` compares the
+window's min and max in one indexed query (~250 ms) and typically returns a
+handful. Measured cycle: **9 candidates → 2 ledger rows → 5 feed items in 19 s**.
+
+The candidate threshold is a **trigger, not a measurement** — every volume,
+time and place still comes from Wialon's report, so a crude threshold cannot put
+a wrong number on the feed. At worst it asks about a vehicle with no event, or
+a slow drain waits for the next cycle.
+
+The trigger window (45 min) is deliberately much shorter than the report window
+(3 h): the first answers "whose tank moved recently", the second gives Wialon
+the settled readings either side of an event to compute it. A 3-hour trigger
+window returns 47 vehicles and would re-execute each report about twelve times
+per event.
+
+##### The backfill CLI
+
+```
+npm run sync:fuel                            # dry run, all orgs, 7 days
+npm run sync:fuel -- --apply
+npm run sync:fuel -- --org SUKARI --days 30 --apply
+```
+
+| Org | Resource | Template |
+|---|---|---|
+| KASULU | 30394506 `Mufindi Paper Mills` | `MUFINDI- Advanced Fuel Analysis Report (Per Vehicle)` |
+| SUKARI | 28843152 `SUKARI INDURSTRIES LIMITED` | `SUKARI -Advanced Fuel Analysis Report (Per Vehicle)` |
+
+Templates are resolved **by name**, not by id — the ids are per-resource and an
+operator reordering their reports would otherwise silently repoint us at the
+wrong report. Two further things were measured rather than assumed, and the
+mapping depends on both (see `wialon.reports.ts`):
+
+* **Table order shifts per unit** — an empty table is omitted entirely, so
+  `unit_fillings` was at index 1 for one unit and index 0 for another. Tables
+  are located by `name`.
+* **Column order differs per template** — the standalone theft report says
+  "Beginning"/"Drained" where Advanced Fuel Analysis says "Start Time"/"Stolen",
+  and only the latter carries an initial speed. Cells are located by header
+  label.
+
+One report execution per vehicle, serialised (Wialon rejects concurrent calls on
+a session with error 1003), so a full run takes minutes. It is idempotent —
+rows are matched on vehicle + timestamp — so overlapping windows are safe and
+this is a nightly batch, not a poll.
 
 ### 5.6 Retranslator — do this before scaling past a pilot
 

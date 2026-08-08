@@ -52,7 +52,7 @@ const STOP_GRACE_MS = 3 * 60_000
  * it — so a stale run is reported as stopped, dated from that last fix, which
  * is the last moment we know anything about.
  */
-const STALE_FIX_MS = 60 * 60_000
+export const STALE_FIX_MS = 60 * 60_000
 
 export type RunState = 'moving' | 'idling' | 'resting'
 

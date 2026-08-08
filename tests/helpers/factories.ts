@@ -20,6 +20,16 @@ export function makeOrg(overrides: Partial<Organisation> = {}): Organisation {
     id: id(),
     name: 'Acme Fleet',
     code: 'ACME',
+    // Null by default: the yard is MEASURED from telemetry by
+    // sync:destinations, so a fresh organisation genuinely has none yet, and
+    // anything that reads it must cope with that.
+    hubLat: null,
+    hubLng: null,
+    // Likewise the gate: supplied by the operator per site, so absent until
+    // someone provides it — which is the case yard-departure falls back for.
+    gateLat: null,
+    gateLng: null,
+    gateRadiusM: null,
     createdAt: now(),
     updatedAt: now(),
     ...overrides,
@@ -97,6 +107,9 @@ export function makeTrip(overrides: Partial<Trip> = {}): Trip {
     id: id(),
     vehicleId: id(),
     driverId: null,
+    // Null by default: a factory trip is not from a dispatch unless a test says
+    // so. Only trips the builder measured carry this.
+    dispatchId: null,
     reportingPeriodId: id(),
     beganAt: now(),
     endedAt: now(),
@@ -152,6 +165,12 @@ export function makeTheft(overrides: Partial<FuelTheft> = {}): FuelTheft {
     stolenMl: 20_000,
     initialSpeedKmh: null,
     finalSpeedKmh: null,
+    // Unjudged by default, which is what the provider's claim starts as —
+    // see modules/fuel/fuel-adjudication.
+    verdict: 'PENDING',
+    verdictAt: null,
+    recoveredMl: null,
+    verdictReason: null,
     ...overrides,
   }
 }

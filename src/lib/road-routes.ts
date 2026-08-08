@@ -28,7 +28,11 @@ export interface RoadPath {
 }
 
 const OSRM_BASE   = 'https://router.project-osrm.org/route/v1/driving'
-const CACHE_FILE  = path.resolve(process.cwd(), '.road-route-cache.json')
+// Runtime file (gitignored) and the committed warm start — see lib/geocode for
+// why the two are separate. This one matters more on disk: the seed is 351 KB
+// and it was being rewritten in place, so every deploy tripped over it.
+const CACHE_FILE  = path.resolve(process.cwd(), '.cache', 'road-routes.json')
+const SEED_FILE   = path.resolve(process.cwd(), '.road-route-cache.json')
 const FETCH_GAP_MS = 350          // be polite to the public demo server
 const BREAKER_MS   = 60_000       // back off this long after a fetch failure
 
@@ -50,11 +54,14 @@ function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): nu
 
 // ── disk cache ──────────────────────────────────────────────────────────────
 
-try {
-  const raw = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')) as Record<string, RoadPath>
-  for (const [k, v] of Object.entries(raw)) memory.set(k, v)
-  logger.info({ routes: memory.size }, 'road-route cache loaded from disk')
-} catch { /* first boot — no cache yet */ }
+for (const [file, kind] of [[CACHE_FILE, 'runtime'], [SEED_FILE, 'seed']] as const) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, RoadPath>
+    for (const [k, v] of Object.entries(raw)) memory.set(k, v)
+    logger.info({ routes: memory.size, kind }, 'road-route cache loaded from disk')
+    break
+  } catch { /* try the next one; neither existing is a normal first boot */ }
+}
 
 let saveTimer: NodeJS.Timeout | null = null
 function scheduleSave() {
@@ -62,6 +69,7 @@ function scheduleSave() {
   saveTimer = setTimeout(() => {
     saveTimer = null
     try {
+      fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true })
       fs.writeFileSync(CACHE_FILE, JSON.stringify(Object.fromEntries(memory)))
     } catch (err) {
       logger.warn({ err }, 'road-route cache save failed')

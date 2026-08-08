@@ -69,15 +69,100 @@ export interface PublishNotificationInput {
 }
 
 /**
- * Emit a notification to the live feed, then durably record it.
+ * How long a published feedId stays suppressible.
  *
- * Synchronous by design — callers are event-bus handlers and telemetry
- * workers that must not be made async just to fire a notification.
+ * Sized off the widest republish window any emitter has: fuel publishes by
+ * event AGE over a 2-hour horizon (queues/fuel-events NOTIFY_AGE_MS), so an
+ * event is re-offered on every cycle for two hours. An hour of margin keeps a
+ * late straggler from slipping through as a fresh item.
  */
-export function publishNotification(input: PublishNotificationInput): NotificationItem {
-  const { orgId, id, source, alertType = null, severity, text, at, plate = null, vehicleId = null, persist = true, extra } = input
+const DEDUPE_TTL_MS = 3 * 60 * 60_000
 
-  const item: NotificationItem = {
+/** Bounded so a long-running process cannot grow this without limit. */
+const DEDUPE_MAX_ENTRIES = 20_000
+
+/** feedId → { fingerprint of the last published content, last seen }. */
+const published = new Map<string, { fp: number; at: number }>()
+
+/**
+ * FNV-1a, 32-bit. A hash rather than the text itself so 20,000 remembered
+ * notifications cost tens of KB instead of megabytes on a box that is already
+ * swapping. Collisions cost one suppressed republish of a corrected wording,
+ * which is why the fingerprint covers the fields an operator would notice.
+ */
+function fingerprint(input: PublishNotificationInput): number {
+  const s = `${input.severity}|${input.text}|${input.plate ?? ''}|${input.vehicleId ?? ''}|${input.at.getTime()}`
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return h >>> 0
+}
+
+/**
+ * Has this exact notification already been published?
+ *
+ * The feed's contract is that a `feedId` identifies one event, and Postgres
+ * already enforces that with a unique upsert. Nothing downstream of it did:
+ * SSE re-emitted, which put a duplicate React key in the dashboard panel, and
+ * the Redis cache stored the payload rather than the id, so a republish whose
+ * wording had drifted became a second cached row. Both are now impossible
+ * before they start, for every emitter rather than for fuel alone.
+ *
+ * Content-sensitive on purpose. A redelivery carrying a corrected volume, a
+ * resolved plate or a repaired timestamp is a genuine UPDATE and must go out;
+ * a byte-identical re-offer is noise. Comparing the fingerprint separates the
+ * two without the caller having to know which it is holding.
+ *
+ * In-process, deliberately. `publishNotification` is synchronous — its callers
+ * are poll-cycle handlers that must not be made async to fire a notification —
+ * so this cannot be a Redis round trip. That is correct for the single
+ * instance we run (additional instances set POLL_ENABLED=false and emit
+ * nothing); `SET <fp> NX EX` on the cache connection is the upgrade path if
+ * that ever changes. Same shape as notification.worker's push dedupe.
+ *
+ * Suppressing the SSE emit is safe even for a client that connected after the
+ * first emission: the dashboard replays this org's recent history from the
+ * durable store on connect, so a client never depends on catching a live frame.
+ */
+function admit(input: PublishNotificationInput): boolean {
+  const now  = Date.now()
+  const fp   = fingerprint(input)
+  const prev = published.get(input.id)
+
+  if (prev && prev.fp === fp && now - prev.at < DEDUPE_TTL_MS) {
+    // Touch it: as long as an emitter keeps re-offering the same event, keep
+    // suppressing it, rather than letting it lapse mid-storm and re-emit once.
+    prev.at = now
+    return false
+  }
+
+  published.set(input.id, { fp, at: now })
+
+  if (published.size > DEDUPE_MAX_ENTRIES) {
+    for (const [k, v] of published) if (now - v.at > DEDUPE_TTL_MS) published.delete(k)
+    // Still over after dropping the expired — evict oldest-first (Map iterates
+    // in insertion order) rather than let the map grow unbounded.
+    if (published.size > DEDUPE_MAX_ENTRIES) {
+      const excess = published.size - DEDUPE_MAX_ENTRIES
+      let n = 0
+      for (const k of published.keys()) { published.delete(k); if (++n >= excess) break }
+    }
+  }
+
+  return true
+}
+
+/** Test seam — the dedupe map is process-global and would leak between cases. */
+export function __resetPublishDedupe(): void {
+  published.clear()
+}
+
+/** The feed item as SSE, the cache and the dashboard all consume it. */
+function buildItem(input: PublishNotificationInput): NotificationItem {
+  const { id, severity, text, at, source, alertType = null, plate = null, vehicleId = null, extra } = input
+  return {
     id,
     time: clockFmt.format(at),
     ts:   at.toISOString(),
@@ -89,6 +174,23 @@ export function publishNotification(input: PublishNotificationInput): Notificati
     vehicleId,
     ...extra,
   }
+}
+
+/**
+ * Emit a notification to the live feed, then durably record it.
+ *
+ * Synchronous by design — callers are event-bus handlers and telemetry
+ * workers that must not be made async just to fire a notification.
+ *
+ * An exact republish of an already-published `feedId` is dropped here and
+ * reaches nothing: no SSE frame, no row, no cache write. See `admit`.
+ */
+export function publishNotification(input: PublishNotificationInput): NotificationItem {
+  const { orgId, id, persist = true } = input
+
+  const item = buildItem(input)
+
+  if (!admit(input)) return item
 
   // 1. Live dashboards first — never blocked by storage.
   emitDashboardFeed(orgId, item)
@@ -97,7 +199,19 @@ export function publishNotification(input: PublishNotificationInput): Notificati
 
   // 2. Durable record. Detached: a failed write logs and is dropped rather
   //    than propagating into a poll cycle or an HTTP handler.
-  void prisma.notification.upsert({
+  void writeNotification(input)
+    .catch((err) => logger.warn({ err, feedId: id }, 'Notification persist failed — item was still delivered live'))
+
+  // 3. Hot cache. No-op without Redis.
+  void cacheNotification(orgId, item)
+
+  return item
+}
+
+/** The durable write on its own, so both callers below share one upsert. */
+function writeNotification(input: PublishNotificationInput): Promise<unknown> {
+  const { orgId, id, source, alertType = null, severity, text, at, plate = null, vehicleId = null } = input
+  return prisma.notification.upsert({
     where:  { feedId: id },
     create: {
       feedId: id, organisationId: orgId, vehicleId, source,
@@ -107,10 +221,39 @@ export function publishNotification(input: PublishNotificationInput): Notificati
     // occurredAt is rewritten too so a re-sync repairs rows stored before a
     // timestamp fix (the same reason ingestAlerts rewrites createdAt).
     update: { severity, text, plate, vehicleId, occurredAt: at },
-  }).catch((err) => logger.warn({ err, feedId: id }, 'Notification persist failed — item was still delivered live'))
+  })
+}
 
-  // 3. Hot cache. No-op without Redis.
-  void cacheNotification(orgId, item)
+export interface DurablePublishResult {
+  item: NotificationItem
+  /**
+   * False when this was an exact republish and nothing was emitted or written.
+   * Callers report it so a cycle's log says what it actually did — the fuel
+   * sync re-offers every event inside a 2-hour window on each 15-minute cycle,
+   * and "published: 0, deduped: 6" is the honest description of the second one.
+   */
+  published: boolean
+}
 
-  return item
+/**
+ * Same feed item, but the durable write is AWAITED.
+ *
+ * `publishNotification` deliberately detaches persistence so a live poll cycle
+ * is never blocked by the pooler. That trade is wrong for a one-shot CLI: a
+ * script that publishes and exits would race its own writes and lose most of
+ * them, because nothing keeps the process alive for the detached promise.
+ *
+ * Same choke point, same row shape, same dedupe — only the timing differs.
+ */
+export async function publishNotificationDurable(input: PublishNotificationInput): Promise<DurablePublishResult> {
+  const item = buildItem(input)
+
+  // An exact republish costs a pooler round trip for an upsert that changes
+  // nothing, which on this connection is about a second. Skip the whole call.
+  if (!admit(input)) return { item, published: false }
+
+  emitDashboardFeed(input.orgId, item)
+  await writeNotification(input)
+  await cacheNotification(input.orgId, item)
+  return { item, published: true }
 }
