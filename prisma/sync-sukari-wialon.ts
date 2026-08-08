@@ -68,8 +68,25 @@ const norm = (s: string | null | undefined) => (s ?? '').toUpperCase().replace(/
  * Kenyan plates: 2-4 letters, 3-4 digits, optional trailing letter.
  * Anchored on the digits so fuel-economy suffixes ("2km/l") and asset names
  * ("BELL16", "TRAILER 60m") are not mistaken for registrations.
+ *
+ * `\s*` not `\s?` between the groups: operators type the separator by hand and
+ * double-space it often enough to matter — "SUKARI-HAULMASTER-KTCC  770G" fell
+ * out of the match entirely, so the plate never reached `norm` (which would
+ * have stripped the whitespace) and the unit was written off as unnameable.
+ * Spacing must not be load-bearing anywhere in this path.
  */
-const PLATE_RE = /\b([A-Z]{2,4}\s?\d{3,4}\s?[A-Z]?)\b/
+const PLATE_RE = /\b([A-Z]{2,4}\s*\d{3,4}\s*[A-Z]?)\b/
+
+/**
+ * A fuel-economy figure written into the unit name: "2km/l", "1.8km/l".
+ *
+ * Deliberately narrow — ONE digit with at most one decimal place. These are
+ * consumption figures for plant, and every one in the account is single-digit.
+ * A greedy `\d+` would eat the tail of a plate in the fused case below and
+ * turn "KDL 2312km/l" into "KDL ", losing a real registration to fix a
+ * cosmetic one.
+ */
+const FUEL_FIGURE_RE = /\s*\d(?:\.\d)?\s*km\/?l/gi
 
 /** Pull the plate and the descriptive type out of a Wialon unit name. */
 function parseUnitName(nm: string): { plate: string | null; type: string | null } {
@@ -79,8 +96,15 @@ function parseUnitName(nm: string): { plate: string | null; type: string | null 
   let plate: string | null = null
   let at = -1
   for (let i = 0; i < parts.length; i++) {
-    if (/km\/?l/i.test(parts[i]!)) continue          // "1.8km/l" is a fuel figure
-    const m = parts[i]!.match(PLATE_RE)
+    // The fuel figure is STRIPPED, not used to skip the whole segment. It is
+    // usually its own dash-delimited part ("…-KBV 715U-2km/l") and skipping
+    // was harmless, but it is sometimes fused straight onto the plate
+    // ("PRIME MOVER-FAW-KDL 231X2km/l") — and there the skip discarded a live
+    // registration. KDL 231X is a truck already in the registry; it sat
+    // unbound because of those five characters.
+    const part = parts[i]!.replace(FUEL_FIGURE_RE, '').trim()
+    if (!part) continue                              // the part was only a fuel figure
+    const m = part.match(PLATE_RE)
     if (m && /\d/.test(m[1]!)) { plate = norm(m[1]); at = i; break }
   }
   // Everything before the plate describes the machine: "PRIME MOVER-FAW" etc.
