@@ -84,6 +84,35 @@ describe('adjudicateDrain', () => {
     expect(out.reason).toBe('insufficient-telemetry')
   })
 
+  it('says unverified when a few millilitres of noise stand in for a 40 L claim', () => {
+    // The KTCC 850B case of 2026-08-07: ruled REDISTRIBUTION on 19 ml recovered
+    // against a 25.8 L claim, because the recovery ratio was measured against a
+    // drop our series barely saw. A wobble that settles is not proof that
+    // 40 litres came back — it is proof we never saw 40 litres leave.
+    const samples = window(
+      [199_970, 199_970, 199_970, 199_970, 199_970],   // a 30 ml dip
+      [200_000, 200_000, 200_000, 200_000],            // fully "recovered"
+    )
+    const out = adjudicateDrain(claim, samples, null, RIPE)   // claim is 40 L
+    expect(out.verdict).toBe('UNVERIFIED')
+    expect(out.reason).toBe('drop-not-observed')
+    // Nothing is written off on evidence this thin.
+    expect(out.recoveredMl).toBeNull()
+  })
+
+  it('still judges a drop that is merely smaller than claimed, not absent', () => {
+    // The guard must not swallow the ordinary case. Wialon and our own series
+    // measure over different windows, so they disagree by degrees all the time;
+    // 30 L observed against a 40 L claim is the same event, not a different one.
+    const samples = window(
+      [185_000, 175_000, 170_000, 170_000, 170_000],   // 30 L down, over half the claim
+      [200_000, 200_000, 200_000, 200_000],            // and back
+    )
+    const out = adjudicateDrain(claim, samples, null, RIPE)
+    expect(out.verdict).toBe('REDISTRIBUTION')
+    expect(out.reason).toBe('level-recovered')
+  })
+
   it('says unverified when our own series never saw the level fall', () => {
     // The two sources disagree about what happened. That is not evidence of a
     // recovery — it is a reason not to claim one.

@@ -46,6 +46,30 @@
 export const RECOVERY_THRESHOLD = 0.6
 
 /**
+ * How much of the CLAIMED volume our own series must have seen fall before a
+ * recovery test on it means anything.
+ *
+ * A recovery ratio is only as good as the drop it is measured against. Nine of
+ * 37 REDISTRIBUTION verdicts over the 30 days to 2026-08-08 had recovered less
+ * than a fifth of what was claimed — 181.4 L cleared in total, including
+ * KTCC 850B at 19 ml against 25.8 L and KCX 802S at 4.2 L against 41.3 L.
+ *
+ * There is no clean gap in the data to sit this on. Recovered-over-claimed
+ * across those 37 runs 0.001 · 0.068 · 0.097 … 0.179 · 0.254 · 0.274 · 0.401 ·
+ * 0.43 · 0.482 · 0.531 · 0.769 · 0.829, then 21 of them at 0.8 and above (some
+ * well over 1, because our window can see more come back than was claimed
+ * gone). So the population that clearly means something is the ≥0.8 cluster,
+ * and the rest is a continuum. Half the claim is the round number inside it,
+ * chosen to sit ABOVE the grey band rather than in it.
+ *
+ * Erring high is the safe direction: this only ever moves a drain to
+ * UNVERIFIED, which stays IN the loss figures. Nothing is written off by it,
+ * and a real theft cannot be hidden by it — the opposite of the failure it
+ * fixes, where an unobserved claim was written off on noise.
+ */
+export const OBSERVED_DROP_MIN_RATIO = 0.5
+
+/**
  * How long after detection a drain must be left before judging it.
  *
  * Recovery is already visible at detection time in the median case. Measured
@@ -140,6 +164,18 @@ export function adjudicateDrain(
     // Our series never saw the level fall. That is not evidence of a recovery,
     // it is evidence the two sources disagree about what happened.
     return { verdict: 'UNVERIFIED', recoveredMl: null, reason: 'no-drop-observed' }
+  }
+  // ...and the same is true when it saw a fall far too SMALL to be the one
+  // claimed. The recovery ratio below is measured against `drop`, so without
+  // this a few millilitres of probe noise that wobbled and settled would clear
+  // a claim of tens of litres: KTCC 850B on 2026-08-07 was ruled REDISTRIBUTION
+  // on 19 ml recovered against a 25,830 ml claim — a ratio of 0.0007 — which is
+  // not evidence the fuel came back, but evidence we never saw it leave.
+  //
+  // `drop <= 0` was the only version of this check, so anything above zero was
+  // treated as the claimed event no matter its size.
+  if (claim.stolenMl > 0 && drop < claim.stolenMl * OBSERVED_DROP_MIN_RATIO) {
+    return { verdict: 'UNVERIFIED', recoveredMl: null, reason: 'drop-not-observed' }
   }
 
   const peakAfter   = Math.max(...after.map(s => s.fuelLevelMl))
