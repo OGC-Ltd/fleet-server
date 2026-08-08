@@ -38,6 +38,25 @@ export async function findPings(vehicleId: string, orgId: string, q: TelemetryLi
  */
 const TRACK_SCAN_CAP = 5000
 
+/**
+ * How long the unit must send NOTHING before the line may be broken.
+ *
+ * 12 missed polls at the 30 s cadence. The point of breaking a track is to
+ * refuse to draw a stretch we have no evidence for — one production track
+ * contained a 9.4 km single hop across a 1.7 h silence, drawn as a straight
+ * line through open country — so the test belongs on real reporting silence
+ * and nothing else. See `gapBefore` in findTrack.
+ */
+const TRACK_HOLE_MS = 6 * 60_000
+
+/** A drawn point. `gapBefore` means the unit went quiet before reaching it. */
+export interface TrackPoint {
+  t: number
+  lat: number
+  lng: number
+  gapBefore?: true
+}
+
 /** Metres between two lat/lng points (equirectangular — exact enough here). */
 function metresBetween(aLat: number, aLng: number, bLat: number, bLng: number) {
   const R = 6371000, rad = Math.PI / 180
@@ -84,15 +103,37 @@ export async function findTrack(vehicleId: string, orgId: string, q: TrackQuery)
   if (truncated) rows.pop()
 
   const fixes = rows.length
-  const points: { t: number; lat: number; lng: number }[] = []
+  const points: TrackPoint[] = []
   // Ascending, dropping fixes with no position and any that have not moved far
   // enough from the last one kept.
+  //
+  // `gapBefore` marks the points the caller must NOT join a line to, and it has
+  // to be decided here because only this loop can tell the two silences apart.
+  // Thinning removes every fix a standing vehicle emits, so by the time the
+  // client sees the points, "reported from one spot for ten minutes" and "sent
+  // nothing for ten minutes" look identical — both are two surviving points ten
+  // minutes apart. The client was breaking the line on that, so a tracker that
+  // never missed a beat had its route cut into pieces wherever the unit paused.
+  // Measured 2026-08-08 on a prime mover: 2,107 fixes, 28 s apart, no holes at
+  // all — drawn as nine separate runs.
+  let prevFixT: number | null = null
+  let holeBefore = false
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]
     if (r.lat == null || r.lng == null || !Number.isFinite(r.lat) || !Number.isFinite(r.lng)) continue
+
+    // Measured against every positioned row, kept or thinned — that is what
+    // makes this a statement about the DATA rather than about the drawing.
+    const t = r.capturedAt.getTime()
+    if (prevFixT != null && t - prevFixT > TRACK_HOLE_MS) holeBefore = true
+    prevFixT = t
+
     const prev = points[points.length - 1]
     if (prev && metresBetween(prev.lat, prev.lng, r.lat, r.lng) < q.minSpacingM) continue
-    points.push({ t: r.capturedAt.getTime(), lat: r.lat, lng: r.lng })
+    // The hole belongs to the next point actually drawn, so it survives however
+    // many thinned-away fixes follow it.
+    points.push(holeBefore ? { t, lat: r.lat, lng: r.lng, gapBefore: true } : { t, lat: r.lat, lng: r.lng })
+    holeBefore = false
   }
 
   // Always keep the final fix, so the track reaches where the vehicle actually
@@ -101,7 +142,9 @@ export async function findTrack(vehicleId: string, orgId: string, q: TrackQuery)
   if (lastRow?.lat != null && lastRow.lng != null) {
     const last = points[points.length - 1]
     const t = lastRow.capturedAt.getTime()
-    if (!last || last.t !== t) points.push({ t, lat: lastRow.lat, lng: lastRow.lng })
+    if (!last || last.t !== t) {
+      points.push(holeBefore ? { t, lat: lastRow.lat, lng: lastRow.lng, gapBefore: true } : { t, lat: lastRow.lat, lng: lastRow.lng })
+    }
   }
 
   // When the key was last turned off, if it is still off.
