@@ -58,6 +58,17 @@ export interface VehicleTelemetryFrame {
     lowBattery:          boolean   // batteryVoltageV < 11.5 V
     highEngineTemp:      boolean   // engineTempC > 105 °C — vehicle must stop
     lowOil:              boolean   // oilLevelPct < 10 % — vehicle must stop
+    /**
+     * The fuel probe is reporting outside its calibrated range — a hardware
+     * fault, not a level. Distinguishes "the probe is broken" from "no probe
+     * fitted", which both otherwise surface as a null fuelLevelMl.
+     *
+     * Optional because it is provider-specific: only Wialon's BLE probes
+     * report it, and it is deliberately NOT an AlertType — it describes a
+     * standing maintenance condition, not an event, and raising one alert per
+     * ping for a probe that has been faulty for weeks would bury the feed.
+     */
+    fuelProbeFault?:     boolean
   }
 
   // ── Raw vendor envelope (stored in vehicle_telemetry_raws) ────────────────

@@ -164,6 +164,7 @@ export async function findFleetSnapshot(orgId: string) {
     captured_at: Date; leg: unknown
     odometer_km: number | null; engine_hours: number | null; maintenance: unknown; phase: string | null
     last_moved_at: Date | null
+    fuel_probe_fault: boolean | null
   }
   const pings = await prisma.$queryRaw<PingRow[]>`
     SELECT p.* FROM unnest(ARRAY[${Prisma.join(vehicleIds)}]::text[]) AS v(id)
@@ -178,6 +179,10 @@ export async function findFleetSnapshot(orgId: string) {
         (r.payload->>'engine_hours')::float AS engine_hours,
         r.payload->'_sim'->'maintenance' AS maintenance,
         r.payload->'_sim'->>'phase' AS phase,
+        -- Why fuel_level_ml is null, when it is: the probe is reporting
+        -- outside its calibrated range. Written by the Wialon adapter into
+        -- the flags blob; absent (SQL NULL) for every other provider.
+        (r.payload->'flags'->>'fuelProbeFault')::boolean AS fuel_probe_fault,
         -- Newest ping with actual movement — powers the "stationary for …"
         -- readout on parked vehicles (same index walk, newest-first, stops at
         -- the first moving row).
@@ -225,6 +230,10 @@ export async function findFleetSnapshot(orgId: string) {
         // Capacity travels with the snapshot so the card can render the fuel
         // gauge as "44 / 95 L", not just a bare percentage.
         tankCapacityLitres: v.tankCapacityLitres ?? null,
+        // Separates "the probe is broken" from "no probe fitted" — both of
+        // which leave fuelLevelMl null, and only one of which is a job for
+        // the workshop.
+        fuelProbeFault: ping?.fuel_probe_fault ?? false,
         fuelUsedMl:     ping?.fuel_used_ml ?? null,
         cargoWeightKg:  ping?.cargo_weight_kg ?? null,
         cargoDesc:      ping?.cargo_desc ?? null,
