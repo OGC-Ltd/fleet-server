@@ -22,6 +22,12 @@ export interface WialonSensor {
   p:    string                  // parameter it reads, e.g. "io_270"
   m?:   string                  // metric, e.g. "l"
   tbl?: CalibrationPoint[]      // calibration table; may be empty
+  /**
+   * Wialon's per-sensor config, as a JSON STRING (not an object). Its `ci` map
+   * is what the account's engineers wrote to explain out-of-band values — see
+   * describeProbeValue.
+   */
+  c?:   string
 }
 
 const FUEL_SENSOR_TYPE = 'fuel level'
@@ -49,11 +55,45 @@ export function tankCapacityFromSensorName(name: string): number | null {
  * segment that applies is the last one whose `x` is at or below the reading.
  * Returns null when there is no table — a reading we cannot calibrate is not
  * a fuel level, and inventing one would be worse than showing nothing.
+ *
+ * ## Why a reading ABOVE the table is rejected outright
+ *
+ * The table is the domain over which the probe was actually calibrated. Above
+ * its highest point there is no measurement to convert — and on these probes a
+ * high reading is not a full tank, it is a fault code.
+ *
+ * The BLE probes on this account carry a second sensor on the SAME parameter
+ * ("22.BLE Probe Status", io_270) whose value labels state it outright:
+ *
+ *      2 … 4094  "Healthy"                — the real operating range
+ *      4095      "Full / Short Circuit / Water / Metallic / Dirt — Contact Support"
+ *      6500      "Lost Contact with Tubes Error — Needs Replacement"
+ *      7000      "Fuel Contamination Error — Needs Tank Flashing"
+ *
+ * So the two SUKARI winches sitting at io_270 = 7000 are reporting contaminated
+ * probes, not fuel. Extrapolating the last segment turned that into 403.9 L in
+ * a 160 L tank (252%) and 1722.5 L in a 270 L tank (638%); CLAMPING to the top
+ * of the table is worse still, because it yields exactly 160.0 L and 270.0 L —
+ * a full tank, indistinguishable from a healthy reading. A fault must not be
+ * able to render as a plausible level. Null is the only honest answer, and the
+ * caller already treats null as "no reading" rather than as empty.
+ *
+ * Measured live across all 1,504 units on the account, 34 read above their
+ * table: 5 at the 6500/7000 fault codes, the rest pegged at or just past 4095,
+ * which the vendor's own labelling flags as "Contact Support" rather than as a
+ * trustworthy full tank. None of them is a level we can stand behind.
+ *
+ * Note this rejects only readings ABOVE the table. Below its floor the first
+ * segment still applies, and the Math.max(0) below catches the slight negative
+ * a near-empty tank can compute.
  */
 export function calibrateFuel(raw: number, tbl: CalibrationPoint[] | undefined): number | null {
   if (!Number.isFinite(raw) || !tbl || tbl.length === 0) return null
 
   const sorted = [...tbl].sort((p, q) => p.x - q.x)
+  // Off the end of the calibrated scale is not a measurement — see above.
+  if (raw > sorted.at(-1)!.x) return null
+
   let seg = sorted[0]!
   for (const point of sorted) {
     if (point.x <= raw) seg = point
@@ -71,6 +111,125 @@ export interface FuelReading {
   litres:   number
   /** Tank capacity from the sensor name, when stated. */
   capacityL: number | null
+}
+
+export interface FuelProbeFault {
+  /** The value the probe reported — the thing to quote when raising a ticket. */
+  raw: number
+  /** Top of the calibrated range, which `raw` exceeded. */
+  calibratedMax: number
+  /**
+   * The account's OWN explanation of this value, when one is configured.
+   * e.g. "Fuel Contamination Error - Needs Tank Flashing".
+   */
+  reason: string | null
+}
+
+/**
+ * The account's label for a value on a given parameter, if any sensor on that
+ * parameter defines one.
+ *
+ * These BLE probes carry a second, `custom`-typed sensor on the SAME parameter
+ * as the fuel probe, purely to name its out-of-band values — for io_270:
+ *
+ *      2 … 4094  "Healthy"        4095  "Full / Short Circuit / Water / Dirt …"
+ *      6500      "Lost Contact with Tubes Error - Needs Replacement"
+ *      7000      "Fuel Contamination Error - Needs Tank Flashing"
+ *
+ * That is the fleet engineer's own diagnosis of the fault, which beats anything
+ * we could infer, so it is preferred over a generic message wherever present.
+ *
+ * Wialon stores these in the sensor's `c` config as a JSON *string* whose `ci`
+ * maps a threshold to `{ t: label }`, applied to every value at or above it
+ * until the next threshold. Parsed defensively: `c` is operator-authored and a
+ * malformed one must cost us the label, not the fault detection.
+ */
+function describeProbeValue(
+  sensors: Record<string, WialonSensor>,
+  param: string,
+  value: number,
+): string | null {
+  let best: { at: number; text: string } | null = null
+
+  for (const sensor of Object.values(sensors)) {
+    if (sensor.p !== param || !sensor.c) continue
+
+    let ci: Record<string, { t?: string }> | undefined
+    try {
+      ci = (JSON.parse(sensor.c) as { ci?: Record<string, { t?: string }> }).ci
+    } catch { continue }
+    if (!ci) continue
+
+    for (const [key, entry] of Object.entries(ci)) {
+      const at = Number(key)
+      if (!Number.isFinite(at) || at > value) continue
+      if (!entry?.t) continue
+      if (!best || at > best.at) best = { at, text: entry.t }
+    }
+  }
+  return best?.text ?? null
+}
+
+/**
+ * Top of a 12-bit probe line. Every labelled account on this token treats a
+ * value here or above as "Contact Support" at best, and the documented hard
+ * faults (6500 "Lost Contact with Tubes", 7000 "Contamination") sit beyond it.
+ * Used only where the account configured no label of its own.
+ */
+const PROBE_LINE_CEILING = 4095
+/** The account's way of saying the hardware is fine — see the rule below. */
+const HEALTHY_LABEL = /^\s*healthy\s*$/i
+
+/**
+ * Is the unit's fuel probe reporting a HARDWARE FAULT?
+ *
+ * Companion to `calibrateFuel` returning null: that refuses to invent a level,
+ * this says why, so a broken probe is distinguishable from a vehicle with no
+ * sensor fitted. Only faults qualify, and that distinction is the whole point
+ * of the function — measured against the live account, "reading above the
+ * calibration table" alone would flag 40 units, of which roughly half are
+ * healthy probes whose table simply stops short of the top of their range
+ * (raw 3986 against a table ending at 3720, and the like). Those need a longer
+ * calibration table, not a workshop, and calling them faults would bury the
+ * dozen that genuinely are broken.
+ *
+ * So a fault needs three things:
+ *   1. NO usable reading from any of the unit's fuel sensors. A unit whose
+ *      main tank reads fine is not faulty because a second probe is off — that
+ *      contradiction was live on six units before this guard.
+ *   2. A reading above the calibrated range.
+ *   3. Evidence it is genuinely abnormal: the account's own label says so, or
+ *      — where no label is configured — the value is at/above the line ceiling.
+ */
+export function readFuelProbeFault(
+  sensors: Record<string, WialonSensor> | undefined,
+  params: Record<string, unknown> | undefined,
+): FuelProbeFault | null {
+  if (!sensors || !params) return null
+  // (1) A working reading anywhere on the unit outranks any fault below it.
+  if (readFuel(sensors, params)) return null
+
+  for (const sensor of Object.values(sensors)) {
+    if (sensor.t !== FUEL_SENSOR_TYPE) continue
+    if (!sensor.tbl || sensor.tbl.length === 0) continue
+
+    const raw = params[sensor.p]
+    if (typeof raw !== 'number') continue
+
+    // (2) Inside the calibrated range there is nothing to report.
+    const calibratedMax = Math.max(...sensor.tbl.map(p => p.x))
+    if (raw <= calibratedMax) continue
+
+    // (3) Abnormal, on the account's word or on the line's physical limit.
+    const reason = describeProbeValue(sensors, sensor.p, raw)
+    const abnormal = reason != null
+      ? !HEALTHY_LABEL.test(reason)
+      : raw >= PROBE_LINE_CEILING
+    if (!abnormal) continue
+
+    return { raw, calibratedMax, reason }
+  }
+  return null
 }
 
 /**
