@@ -484,6 +484,17 @@ model Geofence {
   /// is within widthM/2 of the centre-line — how Wialon models haulage roads,
   /// drains and rivers.
   widthM         Float?     @map("width_m")
+  /// DERIVED PostGIS shape — a CIRCLE's centre buffered by radiusM, a POLYGON's
+  /// ring, a LINE's centre-line buffered by widthM/2. The columns above stay the
+  /// source of truth; the `geofences_geom_sync` trigger keeps this in step with
+  /// them, so nothing in the app ever writes it. Exists for set-based work the
+  /// Json columns cannot do — validating rings, exact areas, and matching
+  /// telemetry history against a boundary. Live containment is still evaluated
+  /// in memory by lib/zone-presence.ts and does not read this.
+  ///
+  /// Prisma has no geography type: `Unsupported` means it is never returned by
+  /// findMany/findFirst. Read it through $queryRaw.
+  geom           Unsupported("geography(Geometry, 4326)")?
   isActive       Boolean    @default(true) @map("is_active")
   createdAt      DateTime   @default(now()) @map("created_at")
   updatedAt      DateTime   @updatedAt @map("updated_at")
