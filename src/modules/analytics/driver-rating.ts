@@ -39,7 +39,7 @@ export interface DriverRatingInput {
 export interface DriverRatingResult {
   score: number
   rating: number
-  band: 'Inactive' | 'Poor' | 'Weak' | 'Fair' | 'Good' | 'Very Good' | 'Excellent'
+  band: 'Inactive' | 'Poor' | 'Needs Improvement' | 'Fair' | 'Good' | 'Very Good' | 'Excellent'
 }
 
 export function calculateDriverRating(input: DriverRatingInput): DriverRatingResult {
@@ -113,7 +113,7 @@ export function calculateDriverRating(input: DriverRatingInput): DriverRatingRes
     band = 'Fair'
   } else if (score >= DRIVER_RATING_CONFIG.weakMin) {
     rating = 3
-    band = 'Weak'
+    band = 'Needs Improvement'
   } else if (score >= DRIVER_RATING_CONFIG.poorMin) {
     rating = 2.5
     band = 'Poor'
