@@ -42,6 +42,17 @@ export class TooManyRequestsError extends AppError {
   }
 }
 
+/**
+ * The request was valid but the database could not answer it in the time it is
+ * allowed. Distinct from a 500: nothing is broken, the work was simply too big,
+ * and the same call with a narrower window will succeed.
+ */
+export class ServiceUnavailableError extends AppError {
+  constructor(message = 'Service unavailable') {
+    super(message, 503)
+  }
+}
+
 /** Thrown when a Zod parse fails — carries structured field errors. */
 export class ValidationError extends AppError {
   public readonly errors: Record<string, string[]>

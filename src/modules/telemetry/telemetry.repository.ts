@@ -1,6 +1,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { Prisma } from '../../../generated/prisma/client.js'
 import { ALERT_SOURCE } from '../../lib/alerts.js'
+import { logger } from '../../lib/logger.js'
 import type { TelemetryListQuery, TrackQuery } from './telemetry.schema.js'
 
 export async function findPings(vehicleId: string, orgId: string, q: TelemetryListQuery) {
@@ -57,8 +58,17 @@ export interface TrackPoint {
   gapBefore?: true
 }
 
+/** Does this vehicle belong to this org? The guard every track path shares. */
+export async function vehicleExistsInOrg(vehicleId: string, orgId: string) {
+  const vehicle = await prisma.vehicle.findFirst({
+    where: { id: vehicleId, organisationId: orgId },
+    select: { id: true },
+  })
+  return vehicle !== null
+}
+
 /** Metres between two lat/lng points (equirectangular — exact enough here). */
-function metresBetween(aLat: number, aLng: number, bLat: number, bLng: number) {
+export function metresBetween(aLat: number, aLng: number, bLat: number, bLng: number) {
   const R = 6371000, rad = Math.PI / 180
   const dLat = (bLat - aLat) * rad
   const dLng = (bLng - aLng) * rad * Math.cos(((aLat + bLat) / 2) * rad)
@@ -176,6 +186,9 @@ export async function findTrack(vehicleId: string, orgId: string, q: TrackQuery)
   }
 
   return {
+    resolution: 'full' as const,             // every fix in the window was read
+    sampleBucketSec: null,                   // ...so nothing here stands for a bucket
+    samples: null,
     points,
     fixes,                                   // rows in the window before thinning
     truncated,                               // scan cap hit: earliest is not the window start
@@ -184,6 +197,351 @@ export async function findTrack(vehicleId: string, orgId: string, q: TrackQuery)
     engineOffSinceMs,                        // key last turned off, or null if it is on
     engineOffRunsPastWindow,                 // ...and it was already off when the window opened
   }
+}
+
+// ───────────────────────── long windows & zone timeline ────────────────────
+
+/**
+ * Samples taken across a long window, and PostGIS probes allowed for the zone
+ * timeline. Both are budgets on WORK, not on time, which is what makes a
+ * 30-day request cost the same as a 3-day one.
+ *
+ * The number comes off the plans, not off a preference. Measured against prod
+ * 2026-08-09, one unit:
+ *
+ *   window   fixes    plain fetch     zone timeline
+ *   12 h      3,073        331 ms            439 ms
+ *   24 h      6,855        513 ms            806 ms
+ *   48 h     17,804      9,221 ms          >45 s (cancelled)
+ *   30 d    160,890      >60 s (cancelled)
+ *
+ * The cliff is not CPU, it is random heap IO: one unit's pings are scattered
+ * through an 807 MB heap interleaved with 330 other units, and the instance has
+ * 225 MB of shared_buffers to cache it with. Past ~20k rows almost every fetch
+ * misses.
+ *
+ * A bucketed LATERAL never hits that cliff. `ORDER BY captured_at LIMIT 1`
+ * inside each bucket is an index range scan that stops on its first row, so the
+ * work is O(buckets) and completely independent of how many fixes the window
+ * actually holds. 1,000 buckets over 30 days costs what 1,000 buckets over a
+ * day costs.
+ *
+ * The budgets are small because a bucket probe is not free. Each one is an
+ * index descent plus a heap fetch that, on a cold cache, is a random read.
+ * Measured end-to-end against prod on the busiest unit, 30-day request:
+ *
+ *   TRACK_SAMPLE_BUDGET 1500 -> 19.9 s     400 -> 5.7 s
+ *   ZONE_PROBE_BUDGET    350 -> 15.2 s     300 -> ~3.9 s (after the
+ *                                          fence_area fix below)
+ *
+ * ZONE_PROBE_BUDGET is lower again because each sample also costs a GiST probe
+ * against geofences — and memoisation does NOT save a moving unit, whose
+ * coordinates are distinct by definition (13,239 misses out of 13,379 on a
+ * 30-day moving-fix scan).
+ *
+ * These are COLD-cache numbers on a 1 GB instance, which is the case that has
+ * to fit. Both budgets would rise a long way once
+ * prisma/postgis/03-track-covering-index.sql is applied, since that is what
+ * removes the random read. Re-measure before raising them.
+ */
+const TRACK_SAMPLE_BUDGET = 400
+const ZONE_PROBE_BUDGET   = 300
+
+/**
+ * Hard ceiling on the two raw queries below, enforced by Postgres rather than
+ * by hope.
+ *
+ * On 2026-08-09 an unbounded maintenance query pinned this instance until every
+ * backend was stuck on IO and the API stopped answering. Nothing that reads
+ * this table on a request path may be able to do that again: `SET LOCAL` inside
+ * the transaction means the server cancels the statement itself, even if the
+ * client has gone away.
+ */
+const RAW_QUERY_TIMEOUT_MS = 8_000
+
+/** Bucket width for a window, in whole seconds, never below the poll cadence. */
+function bucketSeconds(from: Date, to: Date, budget: number) {
+  const spanSec = Math.max(1, (to.getTime() - from.getTime()) / 1000)
+  // Floor of 30 s: below the reporting cadence extra buckets buy no detail,
+  // they just come back empty and cost a probe each.
+  return Math.max(30, Math.ceil(spanSec / budget))
+}
+
+/**
+ * The part of the requested window the unit actually reported in.
+ *
+ * Worth two extra index probes because the alternative is hundreds of wasted
+ * ones. Telemetry on this fleet only begins 2026-07-26, so a 30-day request
+ * today spends half its bucket budget probing prehistory that cannot contain a
+ * fix — measured at 19.9 s for a window whose real span was 14 days. Clamping
+ * first spends the whole budget on the range that has data, and makes the
+ * buckets finer for free.
+ *
+ * `min`/`max` with an equality on vehicle_id are index probes, not a scan.
+ */
+async function reportedSpan(vehicleId: string, from: Date, to: Date) {
+  const span = await prisma.vehicleTelemetry.aggregate({
+    where: {
+      vehicleId,
+      capturedAt: { gte: from, lte: to },
+      lat: { not: null },
+      lng: { not: null },
+    },
+    _min: { capturedAt: true },
+    _max: { capturedAt: true },
+  })
+
+  const lo = span._min.capturedAt
+  const hi = span._max.capturedAt
+  if (!lo || !hi) return null                  // unit said nothing in this window
+  // A single fix gives a zero-length span; widen it so generate_series emits
+  // one bucket rather than none.
+  return { lo, hi: hi > lo ? hi : new Date(lo.getTime() + 1000) }
+}
+
+/**
+ * Prisma's own ceiling on the interactive transaction, which is a SEPARATE
+ * clock from the statement timeout and defaults to 5 s.
+ *
+ * It has to outlive the database-side guard, and getting this wrong is not a
+ * tuning detail — it inverts which mechanism fires. Caught end-to-end on
+ * 2026-08-09: a 30-day sampled fetch ran 5.7 s, comfortably inside its 8 s
+ * statement timeout and on course to succeed, but Prisma's default 5 s expired
+ * first and threw P2028. That is not a `query_canceled`, so it fell straight
+ * past the handler below and surfaced as a 500 on a request that should have
+ * returned data.
+ *
+ * Neither the mocked unit tests nor the small-fixture database test could see
+ * this: one never opens a transaction and the other never runs long enough.
+ */
+const TX_TIMEOUT_MS = RAW_QUERY_TIMEOUT_MS + 2_000
+
+/**
+ * Runs `fn` with a statement timeout. A timeout is returned as `null` rather
+ * than thrown: both callers are enrichments on a track that has already been
+ * fetched, and losing the enrichment must not lose the track.
+ */
+async function withTimeout<T>(label: string, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T | null> {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${RAW_QUERY_TIMEOUT_MS}`)
+      return fn(tx)
+    }, { timeout: TX_TIMEOUT_MS })
+  } catch (err) {
+    // 57014 = query_canceled, the statement timeout doing its job. P2028 is
+    // Prisma's own transaction expiry — it should now be unreachable given the
+    // headroom above, but it means exactly the same thing to a caller and must
+    // degrade the same way rather than becoming a 500.
+    const code = (err as { code?: string })?.code
+    const msg  = err instanceof Error ? err.message : String(err)
+    if (code === '57014' || code === 'P2028' || /statement timeout|canceling statement|expired transaction/i.test(msg)) {
+      // Worth a line: a timeout here is the instance telling us the budgets
+      // above are no longer right for the data volume, and it is otherwise
+      // invisible to ops because the caller still gets a usable response.
+      logger.warn({ query: label, timeoutMs: RAW_QUERY_TIMEOUT_MS }, 'Track query hit its statement timeout')
+      return null
+    }
+    throw err
+  }
+}
+
+/** One positioned sample, plus whether its bucket was the first after silence. */
+export interface SampledFix {
+  captured_at: Date
+  lat: number
+  lng: number
+  engine_on: boolean
+  /** The bucket before this one held no fix at all — real reporting silence. */
+  gap_before: boolean
+}
+
+/**
+ * A track over a window too long to read fix-by-fix.
+ *
+ * One fix per time bucket, oldest first. Gap detection survives the
+ * downsampling because an EMPTY bucket is evidence in its own right: the
+ * LATERAL looked for a fix in that span and the unit had not sent one. That is
+ * the same claim `findTrack` makes from consecutive timestamps, just at bucket
+ * resolution instead of ping resolution — so the caller still gets an honest
+ * broken line rather than a straight hop across a silence.
+ */
+export async function findSampledFixes(vehicleId: string, from: Date, to: Date) {
+  const span = await reportedSpan(vehicleId, from, to)
+  if (!span) return { rows: [], bucketSec: 0 }
+
+  const bucketSec = bucketSeconds(span.lo, span.hi, TRACK_SAMPLE_BUDGET)
+
+  const rows = await withTimeout('sampled-track', tx => tx.$queryRaw<SampledFix[]>`
+    WITH buckets AS (
+      SELECT b AS bucket_start
+      FROM generate_series(${span.lo}::timestamptz, ${span.hi}::timestamptz,
+                           make_interval(secs => ${bucketSec}::int)) AS b
+    ),
+    picked AS (
+      SELECT b.bucket_start, t.captured_at, t.lat, t.lng, t.engine_on
+      FROM buckets b
+      LEFT JOIN LATERAL (
+        SELECT t."captured_at", t."lat", t."lng", t."engine_on"
+        FROM "vehicle_telemetries" t
+        WHERE t."vehicle_id"  = ${vehicleId}
+          AND t."captured_at" >= b.bucket_start
+          AND t."captured_at" <  b.bucket_start + make_interval(secs => ${bucketSec}::int)
+          AND t."lat" IS NOT NULL AND t."lng" IS NOT NULL
+        ORDER BY t."captured_at"
+        LIMIT 1
+      ) t ON true
+    ),
+    flagged AS (
+      -- The empty buckets ARE the gap evidence, so the flag has to be computed
+      -- while they are still in the set. Filtering them in this same query
+      -- level would not work: WHERE runs before window functions, so lag()
+      -- would only ever see buckets that found a fix and no gap could be
+      -- detected at all.
+      SELECT captured_at, lat, lng, engine_on,
+             -- The PREVIOUS bucket came back empty, and this one did not.
+             (lag(captured_at)   OVER (ORDER BY bucket_start) IS NULL
+              AND lag(bucket_start) OVER (ORDER BY bucket_start) IS NOT NULL) AS gap_before
+      FROM picked
+    )
+    SELECT captured_at, lat, lng, engine_on, gap_before
+    FROM flagged
+    WHERE captured_at IS NOT NULL
+    ORDER BY captured_at
+  `)
+
+  return rows === null ? null : { rows, bucketSec }
+}
+
+/** One continuous stay inside one zone — or outside every zone, when null. */
+export interface ZoneVisitRow {
+  zone_id:    string | null
+  zone_name:  string | null
+  zone_type:  string | null
+  /** Inside this zone raises a violation; the other 99 are context only. */
+  enforced:   boolean | null
+  entered_at: Date
+  left_at:    Date
+  samples:    bigint
+}
+
+/**
+ * Where a unit has been, as a sequence of zone visits.
+ *
+ * Two things about this query are not obvious and are both deliberate.
+ *
+ * **It takes the smallest enclosing zone, not every match.** Measured on prod
+ * 2026-08-09: a single ping on this estate falls inside SIXTEEN geofences at
+ * once — all 67 circular zones carry r = 1000 m and blanket the site, and
+ * `FARM #215` alone overlaps 84 others. A plain join reports the unit in
+ * sixteen places simultaneously, with identical counts, which looks like
+ * working output. `ORDER BY ST_Area(f.geom) LIMIT 1` is the same smallest-first
+ * rule lib/zone-presence.ts already applies in memory; the two must not
+ * disagree about where a vehicle is.
+ *
+ * **A LEFT join, so "nowhere" is a visit too.** A unit leaving the estate is
+ * the single most interesting thing a backtrack can show, and an inner join
+ * would delete exactly that segment from the timeline.
+ *
+ * Consecutive samples in the same zone collapse into one visit by the usual
+ * gaps-and-islands pair of window functions, so a unit that enters, leaves and
+ * re-enters reads as three visits rather than one smeared range.
+ */
+export async function findZoneTimeline(vehicleId: string, orgId: string, from: Date, to: Date) {
+  const span = await reportedSpan(vehicleId, from, to)
+  if (!span) return { rows: [], bucketSec: 0 }
+
+  const bucketSec = bucketSeconds(span.lo, span.hi, ZONE_PROBE_BUDGET)
+
+  const rows = await withTimeout('zone-timeline', tx => tx.$queryRaw<ZoneVisitRow[]>`
+    WITH fence_area AS MATERIALIZED (
+      -- Every fence's true area, computed ONCE.
+      --
+      -- The obvious spelling of this query puts ST_Area straight in the
+      -- LATERAL's ORDER BY, which recomputes it for all ~15 matching fences on
+      -- every probe — 5,000-odd spheroid area calculations over rings of up to
+      -- 872 vertices. Measured 15.2 s that way against 3.9 s like this, for
+      -- identical output.
+      --
+      -- Planar ST_Area(geom::geometry) is the tempting shortcut. Measured
+      -- 2026-08-09, it is not a correctness problem here but it is not a win
+      -- either: 62 of the 107 fences rank differently under it, yet ZERO pairs
+      -- whose areas differ by more than 1% ever invert — the reshuffling is
+      -- entirely among the 67 identical-radius circles, so it would not change
+      -- which fence is picked. It is simply slower than this (4.4 s vs 3.9 s)
+      -- while being approximate. MATERIALIZED keeps the exact spheroid number
+      -- and pays for it once, so there is nothing to trade away.
+      SELECT f."id",
+             ST_Area(f."geom")                              AS area_m2,
+             (f."is_active" AND f."mode" = 'BLOCKLIST')     AS enforced
+      FROM "geofences" f
+      WHERE f."organisation_id" = ${orgId} AND f."geom" IS NOT NULL
+    ),
+    buckets AS (
+      SELECT b AS bucket_start
+      FROM generate_series(${span.lo}::timestamptz, ${span.hi}::timestamptz,
+                           make_interval(secs => ${bucketSec}::int)) AS b
+    ),
+    samples AS (
+      SELECT t.captured_at, t.lat, t.lng
+      FROM buckets b
+      CROSS JOIN LATERAL (
+        SELECT t."captured_at", t."lat", t."lng"
+        FROM "vehicle_telemetries" t
+        WHERE t."vehicle_id"  = ${vehicleId}
+          AND t."captured_at" >= b.bucket_start
+          AND t."captured_at" <  b.bucket_start + make_interval(secs => ${bucketSec}::int)
+          AND t."lat" IS NOT NULL AND t."lng" IS NOT NULL
+        ORDER BY t."captured_at"
+        LIMIT 1
+      ) t
+    ),
+    attributed AS (
+      SELECT s.captured_at,
+             z.id AS zone_id, z.name AS zone_name, z.type::text AS zone_type,
+             z.enforced
+      FROM samples s
+      LEFT JOIN LATERAL (
+        -- NOT filtered by is_active, deliberately. 99 of the 107 fences here
+        -- were bulk-imported from Wialon and never switched on, and
+        -- lib/zone-presence.ts still reports them — it uses is_active only to
+        -- decide whether being inside one is ENFORCED, never whether the
+        -- vehicle is inside it. Filtering here would make a backtrack disagree
+        -- with the live map about where the same unit was, and would empty the
+        -- timeline almost completely: the first draft of this query returned a
+        -- single null-zone visit for a fortnight of movement.
+        --
+        -- The join to fence_area only supplies the sort key. Candidate
+        -- selection still runs against the real table so geofences_geom_idx
+        -- can drive it — a GiST index cannot be used against a CTE.
+        SELECT f."id", f."name", f."type", fa.enforced
+        FROM "geofences" f
+        JOIN fence_area fa ON fa."id" = f."id"
+        WHERE f."organisation_id" = ${orgId}
+          AND ST_Intersects(f."geom", ST_SetSRID(ST_MakePoint(s.lng, s.lat), 4326)::geography)
+        ORDER BY fa.area_m2
+        LIMIT 1
+      ) z ON true
+    ),
+    marked AS (
+      SELECT *,
+             CASE WHEN zone_id IS DISTINCT FROM lag(zone_id) OVER (ORDER BY captured_at)
+                  THEN 1 ELSE 0 END AS is_new_visit
+      FROM attributed
+    ),
+    numbered AS (
+      SELECT *, sum(is_new_visit) OVER (ORDER BY captured_at ROWS UNBOUNDED PRECEDING) AS visit_no
+      FROM marked
+    )
+    SELECT zone_id, zone_name, zone_type, bool_or(enforced) AS enforced,
+           min(captured_at) AS entered_at,
+           max(captured_at) AS left_at,
+           count(*)         AS samples
+    FROM numbered
+    GROUP BY visit_no, zone_id, zone_name, zone_type
+    ORDER BY min(captured_at)
+  `)
+
+  return rows === null ? null : { rows, bucketSec }
 }
 
 export async function findLatest(vehicleId: string, orgId: string) {

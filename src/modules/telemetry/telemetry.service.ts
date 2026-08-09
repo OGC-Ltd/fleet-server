@@ -1,8 +1,13 @@
-import { findPings, findTrack, findLatest, findActiveAlerts, findAlertHistoryCounts } from './telemetry.repository.js'
+import {
+  findPings, findTrack, findLatest, findActiveAlerts, findAlertHistoryCounts,
+  findSampledFixes, findZoneTimeline, vehicleExistsInOrg, metresBetween,
+  type TrackPoint,
+} from './telemetry.repository.js'
 import { getMaintenanceHistoryCached, getOrgVehicleMaintenance } from './maintenance.cache.js'
 import { getFleetSnapshotCached } from './fleet-snapshot.cache.js'
 import type { TelemetryListQuery, TrackQuery } from './telemetry.schema.js'
-import { NotFoundError } from '../../core/errors/errors.js'
+import { TRACK_MAX_WINDOW_DAYS, TRACK_FULL_FIDELITY_HOURS } from './telemetry.schema.js'
+import { NotFoundError, BadRequestError, ServiceUnavailableError } from '../../core/errors/errors.js'
 import { assignedZoneStatus } from '../../lib/zone-presence.js'
 import { movementState } from '../../lib/movement-state.js'
 import { connectionStatus } from '../../lib/connection-state.js'
@@ -20,10 +25,144 @@ export async function listPings(vehicleId: string, orgId: string, q: TelemetryLi
   return result
 }
 
+/**
+ * A vehicle's travelled track, and optionally the zones it passed through.
+ *
+ * ## Two fidelities, because one does not stretch to a month
+ *
+ * Up to TRACK_FULL_FIDELITY_HOURS the track is every fix the unit sent, thinned
+ * by distance in findTrack — unchanged, and still the path the map uses.
+ *
+ * Beyond that it switches to one fix per time bucket. This is not a nicety: a
+ * 30-day window on a busy unit is 160,890 fixes, and reading them cost over a
+ * minute on prod before the statement was cancelled, because the rows are
+ * scattered through an 807 MB heap the instance can only cache 225 MB of. The
+ * bucketed form does bounded index probes instead, so a month costs about what
+ * a day costs. See the budgets in telemetry.repository.
+ *
+ * `resolution` tells the caller which one it got. Nothing infers it from the
+ * window, and no field silently changes meaning between the two — a sampled
+ * track reports `samples`, a full one reports `fixes`, and a client that
+ * ignores `resolution` cannot accidentally read one as the other.
+ */
 export async function getVehicleTrack(vehicleId: string, orgId: string, q: TrackQuery) {
-  const result = await findTrack(vehicleId, orgId, q)
+  const to   = q.to   ?? new Date()
+  const from = q.from ?? null
+
+  if (from && from >= to) {
+    throw new BadRequestError('`from` must be earlier than `to`')
+  }
+
+  const windowMs    = from ? to.getTime() - from.getTime() : null
+  const windowHours = windowMs === null ? null : windowMs / 3_600_000
+
+  if (windowHours !== null && windowHours > TRACK_MAX_WINDOW_DAYS * 24) {
+    // Refused, not clamped. A caller that asked for a year and received a month
+    // labelled as a month would draw conclusions from a window it never
+    // requested; better it learns the limit than misreads the answer.
+    throw new BadRequestError(
+      `Track window may not exceed ${TRACK_MAX_WINDOW_DAYS} days (asked for ${Math.round(windowHours / 24)})`,
+    )
+  }
+
+  // No explicit `from` keeps the original behaviour exactly: newest fixes up to
+  // the scan cap, however far back that reaches.
+  const sampled = windowHours !== null && windowHours > TRACK_FULL_FIDELITY_HOURS
+
+  const result = sampled
+    ? await buildSampledTrack(vehicleId, orgId, from!, to, q)
+    : await findTrack(vehicleId, orgId, q)
+
   if (!result) throw new NotFoundError('Vehicle not found')
-  return result
+
+  // Best-effort, and always present in the response.
+  //
+  // The three states are kept distinct on purpose. `null` means nobody asked;
+  // `timedOut` means someone asked and PostGIS ran past its budget. Collapsing
+  // those into one empty value would let a client render "this unit visited no
+  // zones" for a query that never actually ran.
+  const timeline = q.zones
+    ? await findZoneTimeline(
+        vehicleId, orgId,
+        from ?? new Date(result.firstAt ?? to.getTime()),
+        to,
+      )
+    : undefined
+
+  return {
+    ...result,
+    zones:
+      timeline === undefined ? null
+      : timeline === null    ? { timedOut: true as const, bucketSec: null, visits: null }
+      : {
+          timedOut: false as const,
+          // Sample spacing is part of the answer: a visit shorter than the
+          // bucket can fall between two probes and never appear at all, and the
+          // caller needs the number to know how much to trust a short one.
+          bucketSec: timeline.bucketSec,
+          visits: timeline.rows.map(v => ({
+            zoneId:    v.zone_id,
+            name:      v.zone_name,
+            type:      v.zone_type,
+            enteredAt: v.entered_at.getTime(),
+            leftAt:    v.left_at.getTime(),
+            samples:   Number(v.samples),
+            // Most fences here are context rather than policy — 99 of 107 were
+            // imported from Wialon and never switched on. Passing the live
+            // path's own enforcement rule through means a backtrack cannot
+            // imply a violation the map would not have raised.
+            enforced:  v.enforced ?? false,
+            // A null zone is a real, meaningful segment: the unit was outside
+            // every fence the org has drawn. Named so no client has to guess.
+            outside:   v.zone_id === null,
+          })),
+        },
+  }
+}
+
+/** The long-window path — see getVehicleTrack. Same shape, sampled contents. */
+async function buildSampledTrack(
+  vehicleId: string, orgId: string, from: Date, to: Date, q: TrackQuery,
+) {
+  if (!(await vehicleExistsInOrg(vehicleId, orgId))) return null
+
+  const sample = await findSampledFixes(vehicleId, from, to)
+  if (sample === null) {
+    throw new ServiceUnavailableError(
+      'Track window too large to serve right now — narrow the window and retry',
+    )
+  }
+
+  // Distance thinning still applies: a unit parked for a week fills every
+  // bucket with the same coordinate, and those add nothing to a polyline.
+  const points: TrackPoint[] = []
+  for (const r of sample.rows) {
+    const t = r.captured_at.getTime()
+    const prev = points[points.length - 1]
+    // `gap_before` must survive thinning — it belongs to the next point
+    // actually drawn, exactly as in findTrack.
+    if (prev && !r.gap_before && metresBetween(prev.lat, prev.lng, r.lat, r.lng) < q.minSpacingM) continue
+    points.push(r.gap_before ? { t, lat: r.lat, lng: r.lng, gapBefore: true } : { t, lat: r.lat, lng: r.lng })
+  }
+
+  return {
+    resolution: 'sampled' as const,
+    /** Seconds of wall clock each sample stands for. */
+    sampleBucketSec: sample.bucketSec,
+    samples: sample.rows.length,
+    points,
+    // Deliberately absent rather than guessed: this path never read every fix
+    // in the window, so it cannot say how many there were, and reporting the
+    // sample count as `fixes` would be a lie a client would happily plot.
+    fixes: null,
+    truncated: false,
+    firstAt: points[0]?.t ?? null,
+    lastAt:  points[points.length - 1]?.t ?? null,
+    // Engine state is a claim about the newest fix, which sampling may have
+    // skipped over. Left null here rather than inferred from a sample.
+    engineOffSinceMs: null,
+    engineOffRunsPastWindow: false,
+  }
 }
 
 interface SnapshotPosition { lat: number | null; lng: number | null; capturedAt: string | null }
