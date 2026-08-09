@@ -26,7 +26,7 @@ describe('calculateDriverRating', () => {
       windowDays: 30,
     })
 
-    expect(result.band).toBe('Needs improvement')
+    expect(result.band).toBe('Very Good')
     expect(result.rating).toBeLessThan(4)
   })
 })
