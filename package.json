@@ -26,6 +26,8 @@
     "test:coverage": "vitest run --coverage",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
+    "test:db": "vitest run tests/integration/track-sql.db.test.ts",
+    "test:db:setup": "psql \"$TEST_DATABASE_URL\" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS postgis' -f tests/helpers/track-test-schema.sql -f prisma/migrations/20260808120000_postgis_geofence_geometry/migration.sql",
     "seed": "tsx prisma/seed.ts",
     "seed:aquamist": "tsx prisma/seed-aquamist.ts",
     "seed:orgs": "tsx prisma/seed-orgs.ts",
