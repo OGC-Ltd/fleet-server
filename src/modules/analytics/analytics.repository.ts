@@ -2,6 +2,7 @@
 import { getSimFleetVehicleIds } from '../../lib/sim-fleet.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics.schema.js'
+import { calculateDriverRating } from './driver-rating.js'
 
 // A delivery counts as "interrupted"/delayed when it took materially longer than
 // its moving time (distance ÷ average speed) implies — i.e. it spent a lot of
@@ -529,17 +530,34 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   for (const d of drivers) {
     const dTrips = tripsByDriver.get(d.id) ?? []
     const dThefts = theftsByDriver.get(d.id) ?? []
-    const rating = Math.floor((d.driverRatingScore ?? 0) * 10) / 10
-
-    // ── Roster row: lifetime aggregates ──
+    const lifetimeOverspeed = overspeedTripsByDriver.get(d.id)?.size ?? 0
     let lifetimeKm = 0, lifetimeKg = 0
     for (const t of dTrips) {
       lifetimeKm += t.mileageKm ?? 0
       lifetimeKg += t.cargoManifest?.arrivalWeightKg ?? 0
     }
+
+    const latestTripAt = dTrips.reduce<Date | null>((latest, t) => {
+      if (!latest || t.beganAt > latest) return t.beganAt
+      return latest
+    }, null)
+    const daysSinceLastTrip = latestTripAt ? Math.floor((Date.now() - latestTripAt.getTime()) / 86_400_000) : 999
+
+    const ratingResult = calculateDriverRating({
+      baseScore: d.driverRatingScore ?? 5,
+      trips: dTrips.length,
+      mileageKm: lifetimeKm,
+      tonnes: toTonnes(lifetimeKg),
+      incentiveBonus: 0,
+      fuelTheftCases: dThefts.length,
+      overspeedingCases: lifetimeOverspeed,
+      daysSinceLastTrip,
+    })
+    const rating = ratingResult.rating
+
+    // ── Roster row: lifetime aggregates ──
     // Employment status escalated by lifetime conduct (see conductStatus) —
     // the roster badge and the detail header both use this derived value.
-    const lifetimeOverspeed = overspeedTripsByDriver.get(d.id)?.size ?? 0
     const status = conductStatus(d.status, dTrips.length, dThefts.length, lifetimeOverspeed)
     roster.push({
       id:                d.id,
@@ -704,12 +722,25 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
     ).length
   }
 
+  const finalDriverRating = driver
+    ? calculateDriverRating({
+        baseScore: driver.driverRatingScore ?? 5,
+        trips: trips.length,
+        mileageKm: trips.reduce((sum, t) => sum + (t.mileageKm ?? 0), 0),
+        tonnes: toTonnes(trips.reduce((sum, t) => sum + (t.cargoManifest?.arrivalWeightKg ?? 0), 0)),
+        incentiveBonus: 0,
+        fuelTheftCases,
+        overspeedingCases,
+        daysSinceLastTrip: trips.length > 0 ? Math.floor((Date.now() - trips[trips.length - 1].beganAt.getTime()) / 86_400_000) : 999,
+      })
+    : null
+
   return {
     driver: driver && {
       id:            driver.id,
       fullName:      driver.fullName,
       status:        driver.status,
-      rating:        Math.floor((driver.driverRatingScore ?? 0) * 10) / 10,
+      rating:        finalDriverRating?.rating ?? 0,
       licenceNumber: driver.licenceNumber,
       employeeId:    driver.employeeId,
     },

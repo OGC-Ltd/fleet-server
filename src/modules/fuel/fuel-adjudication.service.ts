@@ -29,10 +29,10 @@ import { adjudicateDrain, SETTLE_MINUTES, type LevelSample, type Verdict } from 
  * event so the pre-drop baseline is a real reading and not the drop already in
  * progress — Wialon re-clamps `beganAt` while a drain is running.
  */
-const LOOKBEHIND_MS = 30 * 60_000
+export const LOOKBEHIND_MS = 30 * 60_000
 
 /** How far past detection to look for the level returning. */
-const LOOKAHEAD_MS = 3 * 60 * 60_000
+export const LOOKAHEAD_MS = 3 * 60 * 60_000
 
 export interface AdjudicateOptions {
   /** Restrict to one organisation. Omitted = every org. */
