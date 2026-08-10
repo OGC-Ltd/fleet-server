@@ -53,6 +53,10 @@ enum FuelLossVerdict {
   LOSS           // the level stayed down: fuel really went
   REDISTRIBUTION // the level returned with no filling: it never left the tank
   UNVERIFIED     // telemetry too sparse to say either way; counted, but labelled
+  /// The fuel probe failed, not the tank. Excluded from loss and never
+  /// announced: blaming a driver for a dead sensor is the one outcome here
+  /// that is worse than missing a theft. See modules/fuel/fuel-adjudication.
+  SENSOR_FAULT
 }
 
 /// Shape of a geofence boundary.

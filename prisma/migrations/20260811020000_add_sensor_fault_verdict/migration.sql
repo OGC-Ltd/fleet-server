@@ -1,0 +1,12 @@
+-- A drain caused by a dead fuel probe is neither a loss nor a redistribution.
+--
+-- Measured 2026-08-11: 37 of 298 probes (12.4%) sit at exactly zero, and five
+-- fell to zero inside one day from as high as 256 L. One reached the ledger as
+-- a 55 L "theft" (KDL 182X, 2026-08-07, 55 L -> 0 L). Because only
+-- REDISTRIBUTION is excluded from the loss figures and skipped for
+-- notification, a probe that dies and stays dead would be confirmed as a loss
+-- and announced against whoever was driving.
+--
+-- ALTER TYPE ... ADD VALUE cannot run inside a transaction block on PostgreSQL,
+-- hence its own migration with nothing else in it.
+ALTER TYPE "FuelLossVerdict" ADD VALUE IF NOT EXISTS 'SENSOR_FAULT';

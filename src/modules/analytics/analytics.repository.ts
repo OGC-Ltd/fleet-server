@@ -3,6 +3,20 @@ import { getSimFleetVehicleIds } from '../../lib/sim-fleet.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics.schema.js'
 import { calculateDriverRating } from './driver-rating.js'
+import type { FuelLossVerdict } from '../../../generated/prisma/client.js'
+
+/**
+ * Verdicts that are NOT counted as fuel loss.
+ *
+ * REDISTRIBUTION: our own level series showed the fuel come back with no
+ * filling to explain it, so it never left the tank.
+ * SENSOR_FAULT:   the probe failed, not the tank — a dead FLS reports a full
+ *                 tank draining to nothing (see modules/fuel/fuel-adjudication).
+ *
+ * Everything else still counts, including UNVERIFIED, where the telemetry could
+ * not check the claim. We subtract what we can DISPROVE, not what we doubt.
+ */
+const NOT_A_LOSS: FuelLossVerdict[] = ['REDISTRIBUTION', 'SENSOR_FAULT']
 
 // A delivery counts as "interrupted"/delayed when it took materially longer than
 // its moving time (distance ÷ average speed) implies — i.e. it spent a lot of
@@ -234,16 +248,12 @@ export async function fuelConsumption(orgId: string, q: DeliveriesQuery) {
     // that starts at 23:50 and is detected at 00:05 belongs to the night it
     // happened, which is the day an operator will go looking for it.
     //
-    // REDISTRIBUTION rows are excluded: our own level series showed the fuel
-    // coming back with no filling to explain it, so it never left the tank.
-    // Everything else still counts — including UNVERIFIED, where the telemetry
-    // could not check the claim. We subtract what we can DISPROVE, not what we
-    // merely doubt. See modules/fuel/fuel-adjudication.
+    // Verdicts that are not a loss are excluded — see NOT_A_LOSS.
     prisma.fuelTheft.findMany({
       where:  {
         vehicle: { organisationId: orgId },
         beganAt: { gte: from, lte: to },
-        verdict: { not: 'REDISTRIBUTION' },
+        verdict: { notIn: NOT_A_LOSS },
       },
       select: { vehicleId: true, beganAt: true, stolenMl: true, vehicle: vehicleSelect },
       orderBy: { beganAt: 'asc' },
@@ -479,7 +489,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       where:  {
         driverId: { in: driverIds },
         vehicle:  { organisationId: orgId },
-        verdict:  { not: 'REDISTRIBUTION' },
+        verdict:  { notIn: NOT_A_LOSS },
       },
       select: { driverId: true, beganAt: true },
     }),
@@ -705,7 +715,7 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
     where: {
       driverId, vehicle: { organisationId: orgId },
       beganAt: { gte: from, lte: to },
-      verdict: { not: 'REDISTRIBUTION' },
+      verdict: { notIn: NOT_A_LOSS },
     },
   })
 
