@@ -45,15 +45,54 @@ export function createWarmCache<T>(opts: {
   const store = new Map<string, { data: T; fetchedAt: number; refreshing: boolean }>()
   const maxEntries = opts.maxEntries ?? 500
 
-  const refresh = async (key: string): Promise<T> => {
-    const data = await opts.compute(key)
-    if (store.size >= maxEntries && !store.has(key)) {
-      let oldest: string | null = null, oldestAt = Infinity
-      for (const [k, e] of store) if (e.fetchedAt < oldestAt) { oldestAt = e.fetchedAt; oldest = k }
-      if (oldest) store.delete(oldest)
-    }
-    store.set(key, { data, fetchedAt: Date.now(), refreshing: false })
-    return data
+  /**
+   * One computation per key at a time, shared by everyone who asks for it.
+   *
+   * Without this the same work ran up to three times concurrently, because
+   * there were two independent ways in and neither knew about the other: a
+   * cold-key `get()` called `refresh` directly with nothing recording that it
+   * had, and the periodic sweep calls this function through the registry,
+   * bypassing the `refreshing` flag on the entry entirely.
+   *
+   * That is not free on this database. `open-trips` computes
+   * findOpenTripsByVehicle, measured at ~6.0 s per call against the live fleet
+   * (88 open trips for SUKARI). Three of those in flight together is ~18 s of
+   * work on an instance with roughly 1 GB of RAM, and on 2026-08-10 03:00-04:00
+   * it took the API down with it: `Query read timeout` on open-trips,
+   * fleet-snapshot and dashboard-summary alike, telemetry poll ticks skipping
+   * for minutes, and one poll cycle stretching to 418 s. The logs show the two
+   * entry points racing plainly — "warm-cache sweep refresh failed" and
+   * "warm-cache background refresh failed" for the same key, seconds apart.
+   *
+   * Deduplicating does not make the 6 s query faster; it stops us paying for it
+   * three times over. Same shape as the frontend's services/snapshot.js, which
+   * already learned this lesson against the same endpoint.
+   */
+  const inflight = new Map<string, Promise<T>>()
+
+  const refresh = (key: string): Promise<T> => {
+    const running = inflight.get(key)
+    if (running) return running
+
+    const p = (async () => {
+      const data = await opts.compute(key)
+      if (store.size >= maxEntries && !store.has(key)) {
+        let oldest: string | null = null, oldestAt = Infinity
+        for (const [k, e] of store) if (e.fetchedAt < oldestAt) { oldestAt = e.fetchedAt; oldest = k }
+        if (oldest) store.delete(oldest)
+      }
+      store.set(key, { data, fetchedAt: Date.now(), refreshing: false })
+      return data
+    })()
+
+    inflight.set(key, p)
+    // Cleared on failure too, or one rejection would wedge the key forever and
+    // the cache would serve that entry stale until the process restarted.
+    // `void` because the settle handler is bookkeeping — callers await `p`.
+    void p.catch(() => undefined).finally(() => {
+      if (inflight.get(key) === p) inflight.delete(key)
+    })
+    return p
   }
 
   const get = async (key: string): Promise<T> => {
