@@ -166,9 +166,14 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     // carried by "lost" vs "reported lost" and by the severity, not by a
     // trailing explanation. The place string alone runs to a full line on this
     // fleet, and a caveat nobody finishes reading is not a caveat.
+    // "Suspicious", never "lost". A LOSS verdict means the level did not come
+    // back inside the settle window — strong evidence, not proof. The
+    // adjudicator removes what it can DISPROVE rather than confirming what is
+    // left, and it cannot see a probe that failed without ever reporting. The
+    // message's job is to send someone to look, not to name a thief.
     const text = verdict.verdict === 'LOSS'
-      ? `FUEL DROP: ${plate} — ${L(t.stolenMl)} lost${where}${tank}`
-      : `FUEL DROP: ${plate} — ${L(t.stolenMl)} reported lost${where}${tank}`
+      ? `FUEL DROP: ${plate} — ${L(t.stolenMl)} suspicious${where}${tank}`
+      : `FUEL DROP: ${plate} — ${L(t.stolenMl)} reported, unverified${where}${tank}`
 
     const { published } = await publishNotificationDurable({
       orgId:     t.vehicle.organisationId,

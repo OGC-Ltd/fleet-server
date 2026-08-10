@@ -73,7 +73,9 @@ describe('adjudicatePendingDrains', () => {
     expect(item['severity']).toBe('critical')
     expect(item['alertType']).toBe('fuelInconsistency')
     expect(item['text']).toContain('FUEL DROP: CTR 03')
-    expect(item['text']).toContain('40 L lost')
+    // Never "lost": a LOSS verdict is the level failing to come back, which
+    // is strong evidence and not proof. The alert sends someone to look.
+    expect(item['text']).toContain('40 L suspicious')
     expect(item['text']).toContain('Nyalulanga')
     expect(item['text']).toContain('Tank now 160 L')
     // The event's own time, never the moment we got round to judging it.
@@ -92,7 +94,7 @@ describe('adjudicatePendingDrains', () => {
     expect(out).toMatchObject({ unverified: 1, loss: 0 })
     const item = published()[0]![0]
     expect(item['severity']).toBe('warning')          // a confirmed loss is 'critical'
-    expect(item['text']).toContain('reported lost')
+    expect(item['text']).toContain('reported, unverified')
     expect(item['text']).not.toMatch(/unconfirmed|no tank readings/)
   })
 
