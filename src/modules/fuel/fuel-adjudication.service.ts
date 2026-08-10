@@ -59,6 +59,8 @@ export interface AdjudicateOutcome {
   loss:           number
   redistribution: number
   unverified:     number
+  /** Drains blamed on a dead fuel probe rather than on the tank. */
+  sensorFault:    number
   stillPending:   number
   published:      number
   /** Millilitres reclassified as never having left the tank. */
@@ -66,7 +68,7 @@ export interface AdjudicateOutcome {
 }
 
 const EMPTY: AdjudicateOutcome = {
-  examined: 0, loss: 0, redistribution: 0, unverified: 0,
+  examined: 0, loss: 0, redistribution: 0, unverified: 0, sensorFault: 0,
   stillPending: 0, published: 0, recoveredMl: 0,
 }
 
@@ -107,7 +109,10 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     const [rows, filling] = await Promise.all([
       prisma.vehicleTelemetry.findMany({
         where:   { vehicleId: t.vehicleId, capturedAt: { gte: from, lte: to }, fuelLevelMl: { not: null } },
-        select:  { capturedAt: true, fuelLevelMl: true },
+        // engineOn is what separates a dead probe from a tank drained empty —
+        // an engine cannot run on an empty tank. Without it the dropout rule
+        // stays silent and the ordinary recovery test decides.
+        select:  { capturedAt: true, fuelLevelMl: true, engineOn: true },
         orderBy: { capturedAt: 'asc' },
       }),
       prisma.fuelFilling.findFirst({
@@ -118,7 +123,9 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
         orderBy: { filledAt: 'asc' },
       }),
     ])
-    const samples: LevelSample[] = rows.map(r => ({ capturedAt: r.capturedAt, fuelLevelMl: r.fuelLevelMl! }))
+    const samples: LevelSample[] = rows.map(r => ({
+      capturedAt: r.capturedAt, fuelLevelMl: r.fuelLevelMl!, engineOn: r.engineOn,
+    }))
 
     const verdict = adjudicateDrain(
       { beganAt: t.beganAt, detectedAt: t.detectedAt, stolenMl: t.stolenMl },
@@ -143,7 +150,13 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
 
     // Only a surviving drain is news. A redistribution never reaches the feed,
     // and neither does one too old to be news — see notifyCutoff.
-    if (!opts.notify || verdict.verdict === 'REDISTRIBUTION') continue
+    //
+    // Nor does a SENSOR_FAULT. A dead probe reads a full tank draining to
+    // nothing, and announcing that names whoever happened to be driving for a
+    // theft that never occurred — the one outcome here worse than missing a
+    // real one. 37 of 298 probes sit at exactly zero; five died inside a day.
+    if (!opts.notify || verdict.verdict === 'REDISTRIBUTION'
+                     || verdict.verdict === 'SENSOR_FAULT') continue
     if (opts.notifyCutoff && t.beganAt < opts.notifyCutoff) continue
 
     const plate = t.vehicle.registrationPlate
@@ -179,4 +192,5 @@ function tally(out: AdjudicateOutcome, v: Verdict): void {
   if (v === 'LOSS')                out.loss++
   else if (v === 'REDISTRIBUTION') out.redistribution++
   else if (v === 'UNVERIFIED')     out.unverified++
+  else if (v === 'SENSOR_FAULT')   out.sensorFault++
 }

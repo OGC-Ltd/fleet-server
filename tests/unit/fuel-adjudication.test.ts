@@ -122,6 +122,134 @@ describe('adjudicateDrain', () => {
     expect(out.reason).toBe('no-drop-observed')
   })
 
+  // ── single-sample noise ───────────────────────────────────────────────────
+  //
+  // Every quantity the verdict rests on is an extremum, so one bad reading used
+  // to set it. Live telemetry makes ~5 L single-ping jumps at the 99th
+  // percentile on a probe whose median step is 0 ml, so this is the ordinary
+  // case and not a contrived one.
+
+  it('does not write off a theft on one spuriously high reading afterwards', () => {
+    // The expensive direction, and the reason this filter exists. The level
+    // stays down — a real loss — but one glitch reads full. Ungated, that sets
+    // `peakAfter`, the recovery ratio clears the threshold, and the drain is
+    // reclassified REDISTRIBUTION: the ONE verdict that leaves the loss figures.
+    const samples = window(STEADY_DRAIN, [160_000, 200_000, 160_000, 159_000])
+    const out = adjudicateDrain(claim, samples, null, RIPE)
+    expect(out.verdict).toBe('LOSS')
+    expect(out.reason).toBe('level-stayed-down')
+  })
+
+  it('does not invent a drop from one spuriously low reading', () => {
+    // The mirror image: nothing happened, but a single dropout reads near-empty
+    // during the window. That fabricates a 160 L drop out of a steady tank.
+    const samples = window([200_000, 40_000, 200_000, 200_000, 200_000],
+                           [200_000, 200_000, 200_000, 200_000])
+    const out = adjudicateDrain(claim, samples, null, RIPE)
+    expect(out.verdict).toBe('UNVERIFIED')
+    expect(out.reason).toBe('no-drop-observed')
+  })
+
+  it('does not inflate the baseline from one spike before the drain', () => {
+    // A high spike in the before-window exaggerates the drop, which flatters
+    // the observed-vs-claimed ratio and shrinks the measured recovery.
+    const before = series('2026-08-04T12:55:00Z',
+      [200_000, 260_000, 200_000, 200_000, 200_000, 200_000])
+    const samples = [...before, ...series('2026-08-04T13:01:00Z',
+      [...STEADY_DRAIN, 200_000, 200_000, 200_000, 200_000])]
+    const out = adjudicateDrain(claim, samples, null, RIPE)
+    expect(out.verdict).toBe('REDISTRIBUTION')
+    expect(out.recoveredMl).toBe(40_000)   // the real 40 L, not 100 L
+  })
+
+  it('still sees a drop that lasts two readings', () => {
+    // The filter must not be so wide that it erases short drains. SUKARI's
+    // median drain is 2.3 minutes at a ~30 s ping, so anything sustained for
+    // two readings has to survive intact.
+    const samples = window([200_000, 200_000, 200_000, 160_000, 160_000],
+                           [160_000, 160_000, 159_000, 158_000])
+    const out = adjudicateDrain(claim, samples, null, RIPE)
+    expect(out.verdict).toBe('LOSS')
+    expect(out.reason).toBe('level-stayed-down')
+  })
+
+  // ── a dead fuel probe ─────────────────────────────────────────────────────
+  //
+  // 37 of 298 probes sit at exactly zero, and five fell to zero inside one day
+  // from as high as 256 L. One reached the ledger: KDL 182X, 55 L "stolen",
+  // 55 L -> 0 L on 2026-08-07. Confirmed as a LOSS it would have named a driver
+  // for a theft that never happened.
+
+  const running  = (s: LevelSample): LevelSample => ({ ...s, engineOn: true })
+  const stopped  = (s: LevelSample): LevelSample => ({ ...s, engineOn: false })
+
+  it('ignores a probe that reads zero for the whole window', () => {
+    // The window opens 30 min BEFORE the drain, so zero throughout means the
+    // tank read empty before the "theft" began — there was nothing to take.
+    // No engine evidence needed: this is not a claim about the machine.
+    const samples = window([0, 0, 0, 0, 0], [0, 0, 0, 0])
+      .map(s => ({ ...s, fuelLevelMl: 0 }))
+    const out = adjudicateDrain(claim, samples, null, RIPE)
+    expect(out.verdict).toBe('SENSOR_FAULT')
+    expect(out.reason).toBe('fsl-dead')
+  })
+
+  it('ignores a probe stuck on one value while the engine runs', () => {
+    // A working machine burns fuel. A gauge that never moves is not reading it.
+    const samples = window([200_000, 200_000, 200_000, 200_000, 200_000],
+                           [200_000, 200_000, 200_000, 200_000]).map(running)
+    const out = adjudicateDrain(claim, samples, null, RIPE)
+    expect(out.verdict).toBe('SENSOR_FAULT')
+    expect(out.reason).toBe('fsl-dead')
+  })
+
+  it('does not call a parked vehicle a dead probe', () => {
+    // A steady level with the engine OFF is the normal case, not a fault — it
+    // must still come back as "we never saw the level fall".
+    const samples = window([200_000, 200_000, 200_000, 200_000, 200_000],
+                           [200_000, 200_000, 200_000, 200_000]).map(stopped)
+    const out = adjudicateDrain(claim, samples, null, RIPE)
+    expect(out.verdict).toBe('UNVERIFIED')
+    expect(out.reason).toBe('no-drop-observed')
+  })
+
+  it('blames the probe, not the driver, when the level flatlines at zero with the engine running', () => {
+    // An engine cannot run on an empty tank. If the readings are zero while the
+    // machine is still turning, the probe is what failed.
+    const samples = window([200_000, 0, 0, 0, 0], [0, 0, 0, 0]).map(running)
+    const out = adjudicateDrain(claim, samples, null, RIPE)
+    expect(out.verdict).toBe('SENSOR_FAULT')
+    expect(out.reason).toBe('fsl-dropout')
+    expect(out.recoveredMl).toBeNull()
+  })
+
+  it('does NOT excuse a tank genuinely drained to empty', () => {
+    // The most serious theft there is looks identical in the level series. What
+    // separates it is that the engine stops — so with no engine running at
+    // zero, this must still be judged on the level alone.
+    const samples = window([200_000, 0, 0, 0, 0], [0, 0, 0, 0]).map(stopped)
+    const out = adjudicateDrain(claim, samples, null, RIPE)
+    expect(out.verdict).not.toBe('SENSOR_FAULT')
+    expect(out.verdict).toBe('LOSS')
+  })
+
+  it('stays silent when the provider sent no engine state at all', () => {
+    // Conservative on purpose: with no evidence either way it risks calling a
+    // sensor fault a loss, not a loss a sensor fault.
+    const samples = window([200_000, 0, 0, 0, 0], [0, 0, 0, 0])
+    const out = adjudicateDrain(claim, samples, null, RIPE)
+    expect(out.verdict).not.toBe('SENSOR_FAULT')
+  })
+
+  it('does not call a partial drop a dropout', () => {
+    // The rule is for readings pinned at ZERO. A tank that fell to 160 L is a
+    // drain to be judged normally, engine running or not.
+    const samples = window(STEADY_DRAIN, [160_000, 159_000, 158_000, 158_000]).map(running)
+    const out = adjudicateDrain(claim, samples, null, RIPE)
+    expect(out.verdict).toBe('LOSS')
+    expect(out.reason).toBe('level-stayed-down')
+  })
+
   it('never reports more recovered than was lost', () => {
     // MUFINDI: DZ 13 measured 134% back — the level overshot its own baseline.
     // The excess is not recovered fuel and must not be recorded as such.
