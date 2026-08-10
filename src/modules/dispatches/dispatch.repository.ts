@@ -396,6 +396,29 @@ export async function coveredSince(
   const utc = (d: Date) => d.toISOString().replace('T', ' ').replace('Z', '')
   const sinceCase = safe.map(p => `('${p.vehicleId}', TIMESTAMP '${utc(p.since)}')`).join(',')
 
+  /**
+   * The earliest bound anyone asked for, as a planner-visible constant.
+   *
+   * Both this and the `= ANY($1)` inside the CTE below are LOGICALLY REDUNDANT:
+   * the join to `bounds` already implies them, and the result set is identical
+   * with or without. They are there for the planner, which cannot see through
+   * the VALUES list.
+   *
+   * Without them `captured_at >= b.since` is a join-dependent predicate, so
+   * nothing constrains the outer relation and the plan was a PARALLEL SEQ SCAN
+   * of the whole table — 1,725,998 rows per worker across three workers on a
+   * 5.17M-row table, 98,972 blocks read from disk, for an answer of 3,728 rows.
+   * Measured on prod 2026-08-10 with the 98 vehicles the open-trips cache asks
+   * about:
+   *
+   *   as shipped              5,206 ms   seq scan, 98,972 block reads
+   *   with these two lines       59 ms   index scan, 0 reads (28,377 cache hits)
+   *
+   * Same 3,728 rows either way. That 5.2 s was 85% of findOpenTripsByVehicle's
+   * 6.2 s, which is what the warm-cache sweep runs every 60 s per org.
+   */
+  const floor = safe.reduce((min, p) => (p.since < min ? p.since : min), safe[0]!.since)
+
   const rows = await prisma.$queryRawUnsafe<{
     vehicle_id: string; covered_m: number; fix_count: bigint; first_fix: Date; last_fix: Date
     first_lat: number | null; first_lng: number | null; first_moving: Date | null
@@ -409,6 +432,11 @@ export async function coveredSince(
         JOIN bounds b ON b.vehicle_id = t.vehicle_id
        WHERE t.captured_at >= b.since
          AND t.lat IS NOT NULL AND t.lng IS NOT NULL
+         -- Redundant by construction, and the difference between an index scan
+         -- and a seq scan of the whole table. See the floor constant above for
+         -- the measurements. Do not "tidy these away" as duplicates of the join.
+         AND t.captured_at >= TIMESTAMP '${utc(floor)}'
+         AND t.vehicle_id  = ANY($1)
       WINDOW w AS (PARTITION BY t.vehicle_id ORDER BY t.captured_at)
     ),
     hops AS (
