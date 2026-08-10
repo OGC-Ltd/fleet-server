@@ -1,7 +1,8 @@
 # Build, test and deploy fleet-server to the production box.
 #
 # This automates the ritual that was previously done by hand over ssh:
-# `git pull` → `npm install` → `npm run build` → `pm2 restart fleet-server`.
+# `git pull` → `npm install` → `npm run build` → `pm2 restart server`.
+# (The pm2 app is `server`; see the note at the restart step.)
 # It keeps the two properties that ritual had and that matter most:
 #
 #   · The box's git checkout stays the record of what is running. Code reaches
@@ -197,7 +198,22 @@ jobs:
           npx prisma generate --config prisma.config.ts
           # pm2 runs dist/, not src/ — skipping this restarts the OLD code.
           npm run build
-          pm2 restart fleet-server --update-env
+
+          # The pm2 app is `server`, NOT `fleet-server`.
+          #
+          # This said `fleet-server` until 2026-08-10. The box was running two
+          # pm2 apps off this same directory — `server`, which held port 3000
+          # and did the polling, and `fleet-server`, which held neither and had
+          # restarted 67 times. Both read the same .env, so both polled, and
+          # the two raced each other into a steady stream of
+          # `Unique constraint failed on (device_id, captured_at)`.
+          #
+          # `fleet-server` has been deleted and `server` kept. Restarting the
+          # old name now silently restarts NOTHING: pm2 exits non-zero on an
+          # unknown app, but before that it was worse — the deploy "succeeded"
+          # while the API went on serving the previous build out of memory.
+          # The /health check below is what catches that, so keep it.
+          pm2 restart server --update-env
           pm2 save
           REMOTE
 
@@ -217,5 +233,5 @@ jobs:
           done
           echo "::error::fleet-server did not answer /health after the restart"
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" \
-            'export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH; pm2 logs fleet-server --lines 60 --nostream'
+            'export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH; pm2 logs server --lines 60 --nostream'
           exit 1

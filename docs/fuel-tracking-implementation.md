@@ -296,9 +296,9 @@ so **check the failed count, not just the written count.**
 Pause it for the duration rather than editing `.env` (which is root-owned on the box):
 
 ```
-FUEL_SYNC_ENABLED=false pm2 restart fleet-server --update-env    # log: "fuel event sync NOT started"
+FUEL_SYNC_ENABLED=false pm2 restart server --update-env    # log: "fuel event sync NOT started"
 npx tsx prisma/sync-fuel-events.ts --days 7 --apply              # NOT npm run — see below
-FUEL_SYNC_ENABLED=true  pm2 restart fleet-server --update-env
+FUEL_SYNC_ENABLED=true  pm2 restart server --update-env
 ```
 
 `--update-env` is what makes pm2 pick the variable up, and it is also what makes the restore

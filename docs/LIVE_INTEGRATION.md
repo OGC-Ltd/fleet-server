@@ -530,7 +530,7 @@ Then on the box (the **build step is mandatory** — pm2 runs `dist/`, not `src/
 source ~/.nvm/nvm.sh
 npx prisma generate --config prisma.config.ts
 npm run build
-pm2 restart fleet-server --update-env
+pm2 restart server --update-env
 ```
 
 If the push is rejected for a dirty tree, `git checkout -- .` first — the
@@ -549,7 +549,7 @@ sudo grep "/webhook/rai" /var/log/nginx/access.log | tail -20
 select source, count(*) from provider_alerts group by source;   -- webhook vs backfill
 
 # is anything unmapped?
-pm2 logs fleet-server --lines 200 --nostream | grep "do not map yet"
+pm2 logs server --lines 200 --nostream | grep "do not map yet"
 ```
 
 ### Gotchas that have already cost time
