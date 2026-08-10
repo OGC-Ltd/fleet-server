@@ -65,5 +65,12 @@ The workflow polls `/health` after the restart and prints the last 60 lines of
 ```bash
 ssh -i keys/logistics.pem ubuntu@<host>
 export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH
-cd ~/prod/fleet-server && git reset --hard <previous-sha> && npm run build && pm2 restart fleet-server
+cd ~/prod/fleet-server && git reset --hard <previous-sha> && npm run build && pm2 restart server
 ```
+
+The pm2 app is **`server`**, not `fleet-server`. There were two apps on this
+directory until 2026-08-10 — `server` held port 3000 and did the polling,
+`fleet-server` held neither and raced it into duplicate-key errors — and the
+second was deleted. Restarting the old name during a rollback is the worst
+moment to discover it restarts nothing, so check `/health`'s `uptime` afterwards:
+seconds means it came back, hours means you are still on the bad build.
