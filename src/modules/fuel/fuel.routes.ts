@@ -13,6 +13,9 @@ router.get('/fillings', validateQuery(listFillingQuerySchema), ctrl.listFillings
 router.get('/fillings/:fillingId', ctrl.getFilling)
 router.post('/fillings', ingestLimiter, validateBody(createFillingSchema), ctrl.createFilling)
 
+// Whole-fleet, no pagination: the FSL table draws every vehicle at once.
+router.get('/tank-state', ctrl.listTankState)
+
 router.get('/thefts', validateQuery(listTheftQuerySchema), ctrl.listThefts)
 router.get('/thefts/:theftId', ctrl.getTheft)
 router.post('/thefts', ingestLimiter, validateBody(createTheftSchema), ctrl.createTheft)
