@@ -171,6 +171,24 @@ describe('adjudicatePendingDrains', () => {
     expect(item['text']).toContain('reported, not confirmed')
   })
 
+  it('does not let a filling the tank never received close the window', async () => {
+    // Fillings are adjudicated too, and 307 of 5,794 are REDISTRIBUTION — the
+    // up-swings of oscillating probes, claiming 13,075 L while those tanks
+    // collectively FELL 3,689 L. One of those truncating a drain's recovery
+    // window is how `filling-too-soon` reached 438 rows.
+    //
+    // PENDING fillings must still count: unjudged is not disproved.
+    setLevels([...STEADY, ...DRAINING, 160_000, 159_000, 158_000, 158_000])
+
+    await adjudicatePendingDrains({ apply: true, notify: false, now: NOW })
+
+    expect(prismaMock.fuelFilling.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ verdict: { not: 'REDISTRIBUTION' } }),
+      }),
+    )
+  })
+
   it('does not ask about the probe unless the drain was confirmed', async () => {
     // The profile costs a second query per drain and only a CONFIRMED drain
     // can be downgraded by it — 417 of 2,571 rows on the live ledger.
