@@ -34,7 +34,7 @@ async function main() {
   console.log(`    settle window ${SETTLE_MINUTES} min · recovery threshold ${(RECOVERY_THRESHOLD * 100).toFixed(0)}%\n`)
 
   const orgs = await prisma.organisation.findMany({ select: { id: true, code: true, name: true } })
-  let grandRedistributed = 0, grandRecoveredMl = 0, grandLoss = 0, grandUnverified = 0
+  let grandRedistributed = 0, grandRecoveredMl = 0, grandDrain = 0, grandRefill = 0
 
   for (const org of orgs) {
     if (ONLY_ORG && org.code !== ONLY_ORG) continue
@@ -51,25 +51,25 @@ async function main() {
       orgId: org.id, apply: APPLY, notify: false, limit: LIMIT,
     })
 
-    const decidable = out.loss + out.redistribution
+    const decidable = out.drainConfirmed + out.redistribution
     console.log(`  ── ${org.code} (${org.name})`)
     console.log(`     ${pending} pending · ${out.examined} examined this pass`)
-    console.log(`     ${out.loss} confirmed loss`)
+    console.log(`     ${out.drain} drain (${out.drainConfirmed} confirmed by our own levels)`)
     console.log(`     ${out.redistribution} redistribution — ${(out.recoveredMl / 1000).toFixed(0)} L that never left the tank`)
-    console.log(`     ${out.unverified} unverified (telemetry could not check)`)
+    console.log(`     ${out.refill} refill (a filling explains it)`)
     if (decidable > 0) {
-      console.log(`     → ${((out.redistribution / decidable) * 100).toFixed(0)}% of decidable drains were not losses`)
+      console.log(`     → ${((out.redistribution / decidable) * 100).toFixed(0)}% of decidable events were undulation, not a drain`)
     }
     if (out.stillPending > 0) console.log(`     ${out.stillPending} still inside their settle window`)
     console.log()
 
     grandRedistributed += out.redistribution
     grandRecoveredMl   += out.recoveredMl
-    grandLoss          += out.loss
-    grandUnverified    += out.unverified
+    grandDrain         += out.drain
+    grandRefill        += out.refill
   }
 
-  console.log(`  ── total: ${grandLoss} loss · ${grandRedistributed} redistribution (${(grandRecoveredMl / 1000).toFixed(0)} L) · ${grandUnverified} unverified`)
+  console.log(`  ── total: ${grandDrain} drain · ${grandRedistributed} redistribution (${(grandRecoveredMl / 1000).toFixed(0)} L) · ${grandRefill} refill`)
   if (!APPLY) console.log('\n  Dry run — nothing written. Re-run with:  npm run fuel:adjudicate -- --apply')
   console.log()
 }

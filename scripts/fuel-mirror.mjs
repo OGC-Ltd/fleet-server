@@ -92,8 +92,11 @@ for (const [name, org] of ORGS) {
 
   const claimedMl = drains.reduce((s, d) => s + d.stolenMl, 0)
   const totalFill = fills.reduce((s, f) => s + f.filledMl, 0)
-  // What /analytics/fuel-cost reports as lost: everything except REDISTRIBUTION.
-  const lostMl = drains.filter(d => d.verdict !== 'REDISTRIBUTION').reduce((s, d) => s + d.stolenMl, 0)
+  // What /analytics/fuel-cost counts as having left the tank. Mirrors
+  // analytics.repository's NO_FUEL_LEFT — kept in step by hand, because this is
+  // a standalone analysis script with no import path into src.
+  const NO_FUEL_LEFT = new Set(['REDISTRIBUTION', 'REFILL', 'SENSOR_FAULT'])
+  const lostMl = drains.filter(d => !NO_FUEL_LEFT.has(d.verdict)).reduce((s, d) => s + d.stolenMl, 0)
 
   console.log('='.repeat(74))
   console.log(`${name} — ${drains.length} drains · ${fills.length} fillings (${L(totalFill)} L)`)
@@ -127,7 +130,7 @@ for (const [name, org] of ORGS) {
     if (hit) { used.add(hit); hits.push({ d, f: hit }) }
   }
 
-  const reclaimedMl = hits.filter(h => h.d.verdict !== 'REDISTRIBUTION').reduce((s, h) => s + h.d.stolenMl, 0)
+  const reclaimedMl = hits.filter(h => !NO_FUEL_LEFT.has(h.d.verdict)).reduce((s, h) => s + h.d.stolenMl, 0)
   const excludedMl  = hits.reduce((s, h) => s + h.f.filledMl, 0)
   const stationary  = hits.filter(h => (h.d.initialSpeedKmh ?? 0) === 0).length
   const bigFills    = hits.filter(h => {

@@ -49,11 +49,11 @@ describe('adjudicateDrain', () => {
     expect(out.recoveredMl).toBe(40_000)
   })
 
-  it('calls it a loss when the level stays down', () => {
+  it('calls it a drain when the level stays down', () => {
     // gone, and staying gone
     const samples = window(STEADY_DRAIN, [160_000, 159_000, 158_000, 158_000])
     const out = adjudicateDrain(claim, samples, null, RIPE)
-    expect(out.verdict).toBe('LOSS')
+    expect(out.verdict).toBe('DRAIN')
     expect(out.reason).toBe('level-stayed-down')
   })
 
@@ -61,30 +61,31 @@ describe('adjudicateDrain', () => {
     // Only ~25% back — consumption noise, not the tank refilling itself.
     const samples = window(STEADY_DRAIN, [170_000, 170_000, 170_000, 170_000])
     const out = adjudicateDrain(claim, samples, null, RIPE)
-    expect(out.verdict).toBe('LOSS')
+    expect(out.verdict).toBe('DRAIN')
     expect((out.recoveredMl ?? 0) / 40_000).toBeLessThan(RECOVERY_THRESHOLD)
   })
 
-  it('will not judge a drain a filling could explain', () => {
+  it('calls it a refill when a filling explains it', () => {
     // A rise after a real refuel proves nothing either way, so the claim
     // stands — labelled unchecked rather than silently confirmed.
     // The filling lands at 13:06, one minute after detection, so nothing after
     // it can speak to a recovery and there is too little before it.
     const samples = window(STEADY_DRAIN, [200_000, 200_000, 200_000, 200_000])
     const out = adjudicateDrain(claim, samples, T('2026-08-04T13:06:00Z'), RIPE)
-    expect(out.verdict).toBe('UNVERIFIED')
-    expect(out.reason).toBe('filling-too-soon')
+    expect(out.verdict).toBe('REFILL')
+    expect(out.reason).toBe('filling-in-window')
   })
 
-  it('says unverified rather than guessing when telemetry is sparse', () => {
+  it('does not claim confirmation when telemetry is sparse', () => {
     // 38% of KASULU's and 57% of SUKARI's claimed loss volume lands here.
     const samples = series('2026-08-04T12:59:00Z', [200_000, 160_000])
     const out = adjudicateDrain(claim, samples, null, RIPE)
-    expect(out.verdict).toBe('UNVERIFIED')
+    expect(out.verdict).toBe('DRAIN')
+    expect(out.confirmed).toBe(false)
     expect(out.reason).toBe('insufficient-telemetry')
   })
 
-  it('says unverified when a few millilitres of noise stand in for a 40 L claim', () => {
+  it('does not confirm when a few millilitres of noise stand in for a 40 L claim', () => {
     // The KTCC 850B case of 2026-08-07: ruled REDISTRIBUTION on 19 ml recovered
     // against a 25.8 L claim, because the recovery ratio was measured against a
     // drop our series barely saw. A wobble that settles is not proof that
@@ -94,7 +95,8 @@ describe('adjudicateDrain', () => {
       [200_000, 200_000, 200_000, 200_000],            // fully "recovered"
     )
     const out = adjudicateDrain(claim, samples, null, RIPE)   // claim is 40 L
-    expect(out.verdict).toBe('UNVERIFIED')
+    expect(out.verdict).toBe('DRAIN')
+    expect(out.confirmed).toBe(false)
     expect(out.reason).toBe('drop-not-observed')
     // Nothing is written off on evidence this thin.
     expect(out.recoveredMl).toBeNull()
@@ -113,12 +115,13 @@ describe('adjudicateDrain', () => {
     expect(out.reason).toBe('level-recovered')
   })
 
-  it('says unverified when our own series never saw the level fall', () => {
+  it('does not confirm when our own series never saw the level fall', () => {
     // The two sources disagree about what happened. That is not evidence of a
     // recovery — it is a reason not to claim one.
     const samples = window([200_000, 200_000, 200_000, 200_000, 200_000], [200_000, 200_000, 200_000, 200_000])
     const out = adjudicateDrain(claim, samples, null, RIPE)
-    expect(out.verdict).toBe('UNVERIFIED')
+    expect(out.verdict).toBe('DRAIN')
+    expect(out.confirmed).toBe(false)
     expect(out.reason).toBe('no-drop-observed')
   })
 
@@ -129,14 +132,14 @@ describe('adjudicateDrain', () => {
   // percentile on a probe whose median step is 0 ml, so this is the ordinary
   // case and not a contrived one.
 
-  it('does not write off a theft on one spuriously high reading afterwards', () => {
+  it('does not write off a drain on one spuriously high reading afterwards', () => {
     // The expensive direction, and the reason this filter exists. The level
     // stays down — a real loss — but one glitch reads full. Ungated, that sets
     // `peakAfter`, the recovery ratio clears the threshold, and the drain is
     // reclassified REDISTRIBUTION: the ONE verdict that leaves the loss figures.
     const samples = window(STEADY_DRAIN, [160_000, 200_000, 160_000, 159_000])
     const out = adjudicateDrain(claim, samples, null, RIPE)
-    expect(out.verdict).toBe('LOSS')
+    expect(out.verdict).toBe('DRAIN')
     expect(out.reason).toBe('level-stayed-down')
   })
 
@@ -146,7 +149,8 @@ describe('adjudicateDrain', () => {
     const samples = window([200_000, 40_000, 200_000, 200_000, 200_000],
                            [200_000, 200_000, 200_000, 200_000])
     const out = adjudicateDrain(claim, samples, null, RIPE)
-    expect(out.verdict).toBe('UNVERIFIED')
+    expect(out.verdict).toBe('DRAIN')
+    expect(out.confirmed).toBe(false)
     expect(out.reason).toBe('no-drop-observed')
   })
 
@@ -169,7 +173,7 @@ describe('adjudicateDrain', () => {
     const samples = window([200_000, 200_000, 200_000, 160_000, 160_000],
                            [160_000, 160_000, 159_000, 158_000])
     const out = adjudicateDrain(claim, samples, null, RIPE)
-    expect(out.verdict).toBe('LOSS')
+    expect(out.verdict).toBe('DRAIN')
     expect(out.reason).toBe('level-stayed-down')
   })
 
@@ -177,7 +181,7 @@ describe('adjudicateDrain', () => {
   //
   // 37 of 298 probes sit at exactly zero, and five fell to zero inside one day
   // from as high as 256 L. One reached the ledger: KDL 182X, 55 L "stolen",
-  // 55 L -> 0 L on 2026-08-07. Confirmed as a LOSS it would have named a driver
+  // 55 L -> 0 L on 2026-08-07. Confirmed as a DRAIN it would have named a driver
   // for a theft that never happened.
 
   const running  = (s: LevelSample): LevelSample => ({ ...s, engineOn: true })
@@ -209,7 +213,8 @@ describe('adjudicateDrain', () => {
     const samples = window([200_000, 200_000, 200_000, 200_000, 200_000],
                            [200_000, 200_000, 200_000, 200_000]).map(stopped)
     const out = adjudicateDrain(claim, samples, null, RIPE)
-    expect(out.verdict).toBe('UNVERIFIED')
+    expect(out.verdict).toBe('DRAIN')
+    expect(out.confirmed).toBe(false)
     expect(out.reason).toBe('no-drop-observed')
   })
 
@@ -230,7 +235,7 @@ describe('adjudicateDrain', () => {
     const samples = window([200_000, 0, 0, 0, 0], [0, 0, 0, 0]).map(stopped)
     const out = adjudicateDrain(claim, samples, null, RIPE)
     expect(out.verdict).not.toBe('SENSOR_FAULT')
-    expect(out.verdict).toBe('LOSS')
+    expect(out.verdict).toBe('DRAIN')
   })
 
   it('stays silent when the provider sent no engine state at all', () => {
@@ -246,7 +251,7 @@ describe('adjudicateDrain', () => {
     // drain to be judged normally, engine running or not.
     const samples = window(STEADY_DRAIN, [160_000, 159_000, 158_000, 158_000]).map(running)
     const out = adjudicateDrain(claim, samples, null, RIPE)
-    expect(out.verdict).toBe('LOSS')
+    expect(out.verdict).toBe('DRAIN')
     expect(out.reason).toBe('level-stayed-down')
   })
 

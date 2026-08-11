@@ -62,10 +62,10 @@ export const RECOVERY_THRESHOLD = 0.6
  * and the rest is a continuum. Half the claim is the round number inside it,
  * chosen to sit ABOVE the grey band rather than in it.
  *
- * Erring high is the safe direction: this only ever moves a drain to
- * UNVERIFIED, which stays IN the loss figures. Nothing is written off by it,
- * and a real theft cannot be hidden by it — the opposite of the failure it
- * fixes, where an unobserved claim was written off on noise.
+ * Erring high is the safe direction: failing this check leaves the row a DRAIN
+ * and only withholds confirmation, so the volume still counts. Nothing is
+ * written off by it and no real drain can be hidden by it — the opposite of the
+ * failure it fixes, where an unobserved claim was written off on noise.
  */
 export const OBSERVED_DROP_MIN_RATIO = 0.5
 
@@ -147,7 +147,40 @@ export interface DrainClaim {
   stolenMl:   number
 }
 
-export type Verdict = 'PENDING' | 'LOSS' | 'REDISTRIBUTION' | 'UNVERIFIED' | 'SENSOR_FAULT'
+/**
+ * What happened to the fuel — a description of the event, not an accusation.
+ *
+ * The vocabulary changed on 2026-08-11 at the operator's instruction: a level
+ * that moves is a REFILL, a DRAIN or a REDISTRIBUTION, and nothing here says
+ * "loss", "theft" or "stolen". The old set carried LOSS and UNVERIFIED, and
+ * both were the wrong shape:
+ *
+ *   LOSS asserted where the fuel went. We cannot see that. All we observe is
+ *   that the level fell and did not come back, which is what DRAIN says and as
+ *   far as the telemetry can honestly go. Whether a drain was theft, a
+ *   transfer, or a machine working hard is not a question this data answers,
+ *   and the word decided it for the reader.
+ *
+ *   UNVERIFIED was not a description of the fuel at all — it was a description
+ *   of OUR evidence, promoted to a verdict. It made 1,938 of 2,571 rows
+ *   unreadable: an operator could not tell whether the fuel had gone. That
+ *   distinction is real and it is kept, but it belongs on `confirmed` and in
+ *   `reason`, beside the verdict rather than instead of it.
+ *
+ * So the verdict answers "what happened" and `confirmed` answers "how sure are
+ * we", which are separate questions that were previously mashed into one field.
+ */
+export type Verdict =
+  /** Too recent to judge — the level may still come back. */
+  | 'PENDING'
+  /** A filling explains the movement: fuel went IN, it did not leave. */
+  | 'REFILL'
+  /** The level went down and did not come back. */
+  | 'DRAIN'
+  /** The level came back with no filling: undulation, it never left the tank. */
+  | 'REDISTRIBUTION'
+  /** The probe failed, not the tank. Not a fuel event at all. */
+  | 'SENSOR_FAULT'
 
 export interface Adjudication {
   verdict:     Verdict
@@ -155,6 +188,212 @@ export interface Adjudication {
   recoveredMl: number | null
   /** Short slug naming the rule that decided, for auditing. */
   reason:      string
+  /**
+   * Did OUR OWN telemetry corroborate the verdict, or is this the provider's
+   * claim passed through because we could not check it?
+   *
+   * Derived from `reason`, never stored: `verdictReason` is already a column
+   * and a second one that must agree with it is a second one that can disagree
+   * with it. This is what carries the confidence that UNVERIFIED used to, and
+   * it is what decides whether a drain is announced as critical or as a report
+   * we could not confirm.
+   */
+  confirmed:   boolean
+}
+
+/** The reasons that mean we watched the level ourselves and saw the outcome. */
+const CONFIRMED_REASONS: ReadonlySet<string> = new Set(['level-stayed-down', 'level-recovered'])
+
+/** Did our own telemetry corroborate this, or are we relaying the claim? */
+export const isConfirmed = (reason: string): boolean => CONFIRMED_REASONS.has(reason)
+
+/**
+ * The reasons that mean "we could not look", as opposed to "we looked and the
+ * claim did not survive it".
+ *
+ * Both outcomes below are produced by an ABSENCE of readings rather than by
+ * anything the readings say, which makes them the two a re-judgement can reach
+ * for a reason having nothing to do with the drain: the telemetry that existed
+ * when the row was first judged may simply not be there any more.
+ * (`filling-in-window` belongs here despite being a REFILL verdict — it is
+ * `insufficient-telemetry` in the case where a filling happens to sit in the
+ * window, so an empty window with a refuel in it lands on this one, and a
+ * confirmed drain must not be turned into a refill by the readings expiring.)
+ *
+ * A backfill must never overwrite a verdict that WAS decided on evidence with
+ * one that says we have none. That trades a judgement for the absence of a
+ * judgement, on nothing but data ageing out. See
+ * `prisma/readjudicate-fuel.ts`, which is the only caller.
+ */
+const NO_EVIDENCE_REASONS: ReadonlySet<string> = new Set(['insufficient-telemetry', 'filling-in-window'])
+
+/** True when this adjudication reports an absence of readings, not a finding. */
+export const isUncheckable = (a: Adjudication): boolean =>
+  !a.confirmed && NO_EVIDENCE_REASONS.has(a.reason)
+
+// ─── the probe trust gate ──────────────────────────────────────────────────
+//
+// Everything above reasons about ONE event: did the level fall, did it come
+// back. This asks a different question — is this particular instrument worth
+// believing at all — and it is deliberately kept separate because it is a fact
+// about the machine rather than about the drain.
+//
+// ## What was asked for, and why it is not what shipped
+//
+// The operator's case on `MUFINDI: DZ 07` (-61.7, -51.6, +51.6, +23.9, -23.7 L
+// in 55 min) came with a diagnosis: a part-full tank on undulating ground, and
+// *"without the original tank state you cannot make a decision on if this is a
+// theft or not."* The event is real. The diagnosis, tested, is not.
+//
+// `vehicles.tankCapacityLitres` is populated for 466 units and does not agree
+// with the probes: the median unit's sustained maximum is 0.64 of its declared
+// capacity, 120 of 299 never read above half of it, and 16 read ABOVE it —
+// `MUFINDI: DZ 16` sustains 7,204 L on a declared 540 L tank. Observed maximum
+// is no better as a substitute: max over sustained-max runs to 12x at p99.
+// So the denominator of a fill fraction is unreliable in both directions.
+//
+// Worse, on the 119 units where the two sources DO corroborate each other
+// (within 20%), the hypothesis itself fails. Parked half-hours, by fill:
+//
+//   fill      windows   swing p50  p90  p95   share >=10 L
+//     0- 10%       77         0    1    1        3.90%
+//    40- 50%      524         1   17   23       18.70%
+//    70- 80%      703         3   19   36       21.76%
+//    90-100%      922         1   15   20       16.49%
+//
+// A fuller tank swings MORE, not less — which is physically unsurprising, since
+// there is more fuel free to move and a probe near the bottom of its range has
+// little above it to move away. A gate that suppressed verdicts on part-full
+// tanks would have suppressed the wrong ones. (This is a second, separate
+// failure of fill fraction: §"Why the level series and nothing else" above
+// records it failing as a CLASSIFIER. It now also fails as a TRUST GATE.)
+//
+// ## What the data does support
+//
+// The same question asked of the MACHINE instead of the tank. Big parked
+// swings are not spread across the fleet — they are concentrated:
+//
+//   97 of 139 units never swing >=25 L while parked
+//   80% of all >=25 L swings come from 13 vehicles (9% of the fleet)
+//
+// and unlike fill fraction, it predicts the verdict. Over the 82 units with a
+// parked-swing profile and a drain, at 25 L / 5%:
+//
+//   swingy probes: 132 REDISTRIBUTION / 238 LOSS  ->  36% came back
+//   steady probes:  36 REDISTRIBUTION / 226 LOSS  ->  14% came back
+//
+// against fill fraction's 0.62 vs 0.63.
+//
+// Read that 2.6x with its date on it: it was measured BEFORE the 2026-08-11
+// backfill, which moved 187 rows out of LOSS and so changed both populations.
+// Re-measured against the ledger as it now stands the same split gives 41% vs
+// 28%, a separation of 1.47x. That is the number this gate actually ships on,
+// and it is the smaller one — quoting the pre-backfill figure for a rule
+// deployed after it would be measuring against verdicts we have since
+// withdrawn. The direction and the concentration survive; the magnitude was
+// partly the old ledger's over-confidence, which is what the backfill removed.
+//
+// `MUFINDI: DZ 07`, the case that started this, swings >=25 L in 9 of its 12
+// parked half-hours with a worst of 116 L — see MIN_SWING_WINDOWS for why the
+// obvious form of this rule missed it.
+
+/**
+ * How large a parked swing counts as the probe moving on its own.
+ *
+ * 25 L, which is the median claim on the whole ledger (p50 27.0 L, p25 16.2,
+ * p75 45.1). That is the point of the number: a probe over this line moves, on
+ * a machine standing still, by more than a typical drain claims was stolen.
+ *
+ * Chosen against the alternatives rather than assumed. Separation of
+ * REDISTRIBUTION from LOSS across the grid (pre-backfill ledger, see the note
+ * above on why that matters): 15 L/5% 1.95x, 15 L/10% 2.51x, 25 L/5% 2.60x,
+ * 25 L/10% 2.27x, 40 L/5% 2.14x. 25 L at 5% is the best cell, and the
+ * neighbours degrade gently, so it is not perched on a spike.
+ */
+export const SWING_ML = 25_000
+
+/**
+ * What share of a probe's parked windows must swing before it is distrusted.
+ *
+ * Both conditions earn their place. Dropping the share and keeping only the
+ * count below gives 0.95x separation — i.e. nothing.
+ */
+export const SWING_SHARE = 0.05
+
+/**
+ * How many windows must actually have swung.
+ *
+ * This counts the EVIDENCE, not the opportunity, and the difference decided the
+ * operator's own case. The obvious guard is a minimum number of PARKED windows,
+ * on the reasoning that a machine with three of them clears 5% on a single one.
+ * That guard excluded `MUFINDI: DZ 07`: 12 parked half-hours, 9 of them
+ * swinging, a 75% share and the worst single swing on the fleet at 116 L. It is
+ * not a thin case, it is the strongest one — it simply spends its time working
+ * rather than standing still, which is what a dozer does.
+ *
+ * Measured against the ledger as it stands after the 2026-08-11 backfill,
+ * separation of REDISTRIBUTION from LOSS on the machines each rule selects:
+ *
+ *   >=20 parked windows, >=5% share    1.27x   (excludes DZ 07)
+ *   >=10 parked windows, >=5% share    1.39x
+ *   >=3 SWINGING windows, >=5% share   1.47x   (includes DZ 07)
+ *   >=5 swinging windows, >=5% share   1.39x
+ *   >=3 swinging windows, no share     0.95x
+ *
+ * Three swinging windows also drops `MUFINDI - DZ 20` (1 swing in 20 parked)
+ * and `MUFINDI: EX 14` (2 in 20), which is the thin evidence the parked-window
+ * guard was reaching for and did not catch.
+ */
+export const MIN_SWING_WINDOWS = 3
+
+/** A vehicle's probe as its own recent history describes it. */
+export interface ProbeProfile {
+  /** Half-hours the machine stood still with enough readings to measure. */
+  parkedWindows: number
+  /** How many of those swung at least SWING_ML from trough to peak. */
+  swingWindows:  number
+}
+
+/** Does this probe move about on a machine that is standing still? */
+export const probeSwings = (p: ProbeProfile | null | undefined): boolean =>
+  p != null && p.parkedWindows > 0 &&
+  p.swingWindows >= MIN_SWING_WINDOWS &&
+  p.swingWindows / p.parkedWindows >= SWING_SHARE
+
+/**
+ * Withdraw the CONFIRMATION from a drain measured on a probe that cannot hold
+ * still. The verdict itself does not change.
+ *
+ * This is where the new vocabulary earns itself. Under the old set the gate
+ * moved a row LOSS -> UNVERIFIED, which was one field doing two jobs: it
+ * downgraded our confidence AND it stopped describing what happened to the
+ * fuel. With `verdict` and `confirmed` separated the gate touches only the
+ * second — the level still fell and stayed down, so it is still a DRAIN, and
+ * what we withdraw is the claim that our own telemetry settles it.
+ *
+ * Applied to a confirmed DRAIN and nothing else:
+ *
+ *   NOT to REDISTRIBUTION, though the instrument is equally suspect there. A
+ *   REDISTRIBUTION says the fuel came back, and withdrawing it would push the
+ *   volume back toward being reported as gone — the exact opposite of what the
+ *   operator wants on DZ 07, whose recovered drains are the ones they agree
+ *   with. The gate exists to stop us asserting more than we can support, not to
+ *   unpick the cases where we already declined to.
+ *
+ *   NOT to an unconfirmed drain: there is nothing left to withdraw.
+ *
+ * No volume moves in either direction — a DRAIN counts the same whether or not
+ * it is confirmed. What changes is that the drain stops being announced as
+ * critical against whoever was driving.
+ *
+ * Kept out of `adjudicateDrain` so the level-series reasoning stays one thing:
+ * this is evidence about the instrument, arrives from a different query, and is
+ * fetched lazily by the service for the minority of rows that reach a confirmed
+ * drain.
+ */
+export function applyProbeTrustGate(a: Adjudication, profile: ProbeProfile | null): Adjudication {
+  if (a.verdict !== 'DRAIN' || !a.confirmed || !probeSwings(profile)) return a
+  return { verdict: 'DRAIN', recoveredMl: a.recoveredMl, reason: 'probe-swings', confirmed: false }
 }
 
 /**
@@ -264,7 +503,7 @@ export function adjudicateDrain(
   // Not yet ripe. Judging early is how you confirm a loss that was about to
   // come back — the failure mode this whole module exists to prevent.
   if (now.getTime() - claim.detectedAt.getTime() < SETTLE_MINUTES * 60_000) {
-    return { verdict: 'PENDING', recoveredMl: null, reason: 'settling' }
+    return { verdict: 'PENDING', recoveredMl: null, reason: 'settling', confirmed: false }
   }
 
   // ── is the probe working at all? ─────────────────────────────────────────
@@ -292,7 +531,7 @@ export function adjudicateDrain(
     const running = samples.filter(s => s.engineOn === true).length
     const flat = Math.min(...vals) === Math.max(...vals)
     if (vals.every(v => v === 0) || (flat && running >= DROPOUT_MIN_RUNNING)) {
-      return { verdict: 'SENSOR_FAULT', recoveredMl: null, reason: 'fsl-dead' }
+      return { verdict: 'SENSOR_FAULT', recoveredMl: null, reason: 'fsl-dead', confirmed: true }
     }
   }
 
@@ -314,11 +553,19 @@ export function adjudicateDrain(
     s.capturedAt >= claim.detectedAt && (fillingAt == null || s.capturedAt < fillingAt))
 
   if (before.length < MIN_SAMPLES || after.length < MIN_SAMPLES) {
-    // Distinguish "no readings" from "a filling landed too soon to see past" —
-    // they are different problems and only one is ours to fix.
+    // A filling landed so soon after the drain that there is no unrefuelled
+    // window left to read. Fuel demonstrably went IN, and we cannot see it
+    // having gone out: that is a REFILL. This is the largest single category on
+    // the ledger — 435 rows — and calling them all drains would report a
+    // refuelling round as a month of theft.
+    //
+    // Distinct from having no readings at all, which says nothing about the
+    // fuel and stays a DRAIN: the provider saw a fall and we could not check
+    // it, so we relay the claim rather than contradicting it. `confirmed`
+    // carries that difference — see the Verdict doc.
     return fillingAt != null && after.length < MIN_SAMPLES
-      ? { verdict: 'UNVERIFIED', recoveredMl: null, reason: 'filling-too-soon' }
-      : { verdict: 'UNVERIFIED', recoveredMl: null, reason: 'insufficient-telemetry' }
+      ? { verdict: 'REFILL', recoveredMl: null, reason: 'filling-in-window',      confirmed: false }
+      : { verdict: 'DRAIN',  recoveredMl: null, reason: 'insufficient-telemetry', confirmed: false }
   }
 
   // Is this a dead probe rather than a drain? Tested BEFORE the drop rules,
@@ -334,7 +581,7 @@ export function adjudicateDrain(
       baselineBefore >= DROPOUT_MIN_BASELINE_ML &&
       rawAfter.every(s => s.fuelLevelMl === 0) &&
       rawAfter.filter(s => s.engineOn === true).length >= DROPOUT_MIN_RUNNING) {
-    return { verdict: 'SENSOR_FAULT', recoveredMl: null, reason: 'fsl-dropout' }
+    return { verdict: 'SENSOR_FAULT', recoveredMl: null, reason: 'fsl-dropout', confirmed: true }
   }
 
   // The drop as OUR telemetry saw it — the highest level before it started
@@ -347,8 +594,12 @@ export function adjudicateDrain(
   const drop     = baseline - trough
   if (drop <= 0) {
     // Our series never saw the level fall. That is not evidence of a recovery,
-    // it is evidence the two sources disagree about what happened.
-    return { verdict: 'UNVERIFIED', recoveredMl: null, reason: 'no-drop-observed' }
+    // it is evidence the two sources disagree about what happened — so the
+    // provider's claim stands as a DRAIN, unconfirmed. If a filling sits in the
+    // window it is the better explanation of a level that never fell.
+    return fillingAt != null
+      ? { verdict: 'REFILL', recoveredMl: null, reason: 'filling-in-window', confirmed: false }
+      : { verdict: 'DRAIN',  recoveredMl: null, reason: 'no-drop-observed',  confirmed: false }
   }
   // ...and the same is true when it saw a fall far too SMALL to be the one
   // claimed. The recovery ratio below is measured against `drop`, so without
@@ -360,13 +611,15 @@ export function adjudicateDrain(
   // `drop <= 0` was the only version of this check, so anything above zero was
   // treated as the claimed event no matter its size.
   if (claim.stolenMl > 0 && drop < claim.stolenMl * OBSERVED_DROP_MIN_RATIO) {
-    return { verdict: 'UNVERIFIED', recoveredMl: null, reason: 'drop-not-observed' }
+    return { verdict: 'DRAIN', recoveredMl: null, reason: 'drop-not-observed', confirmed: false }
   }
 
   const peakAfter   = Math.max(...after.map(s => s.fuelLevelMl))
   const recoveredMl = Math.max(0, Math.min(peakAfter - trough, drop))
 
+  // The only two outcomes we watched happen ourselves, and so the only two
+  // that come back confirmed.
   return (peakAfter - trough) / drop >= RECOVERY_THRESHOLD
-    ? { verdict: 'REDISTRIBUTION', recoveredMl, reason: 'level-recovered' }
-    : { verdict: 'LOSS', recoveredMl, reason: 'level-stayed-down' }
+    ? { verdict: 'REDISTRIBUTION', recoveredMl, reason: 'level-recovered',  confirmed: true }
+    : { verdict: 'DRAIN',          recoveredMl, reason: 'level-stayed-down', confirmed: true }
 }

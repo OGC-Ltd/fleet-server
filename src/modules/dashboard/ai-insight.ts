@@ -22,6 +22,7 @@ import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
 import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
+import { isConfirmed } from '../fuel/fuel-adjudication.js'
 import { getDriversOverview, DEFAULT_DRIVER_WINDOW_DAYS } from '../analytics/drivers-overview.cache.js'
 import { getDeliveriesAnalytics } from '../analytics/deliveries.cache.js'
 // The DECORATED snapshot, not fleet-snapshot.cache's raw rows. Movement state,
@@ -106,11 +107,14 @@ const clockFmt = new Intl.DateTimeFormat('en-GB', {
  *     On this fleet the two routinely differ by hours — about a quarter of open
  *     dispatches are still standing in the yard — so collapsing them into one
  *     number would report trucks as gone that are parked outside the office.
- *   - a fuel issue NEEDS INVESTIGATING only on a LOSS verdict: the level stayed
- *     down, so the fuel really went. PENDING is still inside its settle window
- *     and REDISTRIBUTION has been actively disproved (see fuel-adjudication) —
- *     lumping those in is how "19 raised" becomes 19 chases, which is the exact
- *     over-reporting the adjudicator was written to stop.
+ *   - a fuel issue NEEDS INVESTIGATING only on a CONFIRMED DRAIN: our own level
+ *     series watched it fall and not come back. PENDING is still inside its
+ *     settle window, REDISTRIBUTION has been actively disproved and REFILL is
+ *     fuel going IN (see fuel-adjudication) — lumping those in is how "19
+ *     raised" becomes 19 chases, which is the exact over-reporting the
+ *     adjudicator was written to stop. An UNCONFIRMED drain is not on that list
+ *     either: the provider saw a fall we could not check, which is worth
+ *     counting but is not worth sending someone out on.
  */
 export async function collectToday(orgId: string) {
   const dayStart = fleetDayStart()
@@ -185,7 +189,10 @@ export async function collectToday(orgId: string) {
     }),
     prisma.fuelTheft.findMany({
       where:  { vehicle: { organisationId: orgId }, detectedAt: { gte: dayStart } },
-      select: { verdict: true, stolenMl: true },
+      // verdictReason comes along because confirmation is derived from it —
+      // see isConfirmed. A DRAIN we watched happen and one we merely relayed
+      // are the same verdict and a very different call on somebody's morning.
+      select: { verdict: true, stolenMl: true, verdictReason: true },
     }),
     // Today's Live Feed, by kind. Grouped rather than fetched: zone crossings
     // alone run to ~2,900 a day on Kasulu and no brief needs them individually.
@@ -251,7 +258,8 @@ export async function collectToday(orgId: string) {
   const overdue = openRuns.filter(r => r.status === 'OVERDUE').length
 
   const verdicts = (v: string) => thefts.filter(t => t.verdict === v)
-  const losses   = verdicts('LOSS')
+  const drains   = verdicts('DRAIN')
+  const confirmedDrains = drains.filter(t => isConfirmed(t.verdictReason ?? ''))
 
   return {
     asOfLocal: clockFmt.format(now),
@@ -304,12 +312,14 @@ export async function collectToday(orgId: string) {
     outNowDestinationsNotShown: Math.max(0, out.ranked.length - 6),
     fuelIssues: {
       raised:            thefts.length,
-      needInvestigating: losses.length,
+      needInvestigating: confirmedDrains.length,
       stillSettling:     verdicts('PENDING').length,
       ruledOut:          verdicts('REDISTRIBUTION').length,
-      unverifiable:      verdicts('UNVERIFIED').length,
-      litresConfirmedLost: losses.length
-        ? Math.round(losses.reduce((s, t) => s + t.stolenMl, 0) / 100) / 10
+      explainedByRefuel: verdicts('REFILL').length,
+      /** Reported as a fall we could not check. Counted, not chased. */
+      notConfirmed:      drains.length - confirmedDrains.length,
+      litresDrained: confirmedDrains.length
+        ? Math.round(confirmedDrains.reduce((s, t) => s + t.stolenMl, 0) / 100) / 10
         : 0,
     },
     /** Today's Live Feed by kind, plus the newest lines worth quoting. */
@@ -630,7 +640,9 @@ export const SYSTEM_PROMPT =
   'THE NUMBERS ARE THE POINT. Quote them exactly as given; never estimate, re-derive, round differently or invent ' +
   'one. `leftGate` is units SEEN clearing the barrier and is the figure sentence 2 reports — never substitute ' +
   '`dispatchesRaised`, which is only the paperwork. `raised` fuel issues are not all actionable: only ' +
-  '`needInvestigating` are confirmed losses, and sentence 4 must keep the two apart. `online`, `inTransit`, ' +
+  '`needInvestigating` are drains our own telemetry confirmed, and sentence 4 must keep the two apart. ' +
+  'NEVER call a fuel event a theft, a loss or stolen fuel, and never name or imply a driver: the data shows that ' +
+  'fuel left a tank, never where it went. Say "fuel drain" or "fuel issue". `online`, `inTransit`, ' +
   '`idling` and `parked` are four different counts — never add them together or use one for another. Name ' +
   'destinations and areas EXACTLY as spelled in the JSON. ' +
   'WRITE PROSE, NOT A FIELD DUMP. Never print a JSON key — not "leftGate", "needInvestigating", "dispatchesRaised", ' +
