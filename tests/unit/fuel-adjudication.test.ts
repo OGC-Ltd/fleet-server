@@ -271,3 +271,49 @@ describe('adjudicateDrain', () => {
     expect(out.recoveredMl).toBe(40_000)   // the drop, not the overshoot
   })
 })
+
+describe('adjudicateDrain — the trough is the lowest point AFTER the drain, not just during it', () => {
+  const BEGAN = new Date('2026-08-10T14:37:00Z')
+  const DET   = new Date('2026-08-10T14:50:00Z')
+  const NOW   = new Date('2026-08-10T16:00:00Z')
+  /** Readings every 3 minutes from 14:10. */
+  const at = (i: number) => new Date(Date.parse('2026-08-10T14:10:00Z') + i * 180_000)
+  const series = (mls: number[]) => mls.map((fuelLevelMl, i) => ({ capturedAt: at(i), fuelLevelMl }))
+
+  it('confirms a drain whose fall starts after the provider closed its window', () => {
+    // MUFINDI - EX 09, 2026-08-10. Wialon claimed 220 -> 199 L between 14:37
+    // and 14:50; the level had barely moved by 14:50 and then fell 21 L and
+    // stayed down for half an hour, parked with the engine off. Measuring the
+    // trough inside the claim's own window scored that as a 1 L drop and threw
+    // the whole thing out as `drop-not-observed`.
+    const out = adjudicateDrain(
+      { beganAt: BEGAN, detectedAt: DET, stolenMl: 21_400 },
+      series([
+        213_500, 211_000, 218_200, 220_700, 221_700, 220_500,   // 14:10–14:25, baseline
+        220_100, 219_400,                                        // through the claim window
+        212_700, 203_700, 199_100, 199_100, 199_100, 198_900,    // the real fall, after it
+        198_800, 198_800, 198_700,
+      ]),
+      null, NOW,
+    )
+    expect(out).toMatchObject({ verdict: 'DRAIN', reason: 'level-stayed-down', confirmed: true })
+  })
+
+  it('does not read a late fall as a recovery', () => {
+    // The trap the wider search opens: peak 200 before the fall, trough 150
+    // after it, and a recovery ratio of 1.0 off a level that never came back.
+    // The peak must be measured from the low point onward.
+    const out = adjudicateDrain(
+      { beganAt: BEGAN, detectedAt: DET, stolenMl: 50_000 },
+      series([
+        200_000, 200_000, 200_000, 200_000, 200_000, 200_000,
+        200_000, 200_000,
+        200_000, 200_000, 190_000, 170_000, 150_000, 150_000,
+        150_000, 150_000, 150_000,
+      ]),
+      null, NOW,
+    )
+    expect(out.verdict).toBe('DRAIN')
+    expect(out.confirmed).toBe(true)
+  })
+})

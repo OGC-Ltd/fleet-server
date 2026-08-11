@@ -611,8 +611,38 @@ export function adjudicateDrain(
   // the claim's own initial/final levels, so the recovery is judged against
   // the same series that would show it returning.
   const baseline = Math.max(...before.map(s => s.fuelLevelMl))
+  // The trough is the lowest level reached ANYWHERE after the drain started —
+  // during the provider's own window OR in the settle window after it.
+  //
+  // It used to be taken from the provider's window alone, and that silently
+  // under-called real drains whose fall lags the event. `MUFINDI - EX 09` on
+  // 2026-08-10: Wialon claimed 220 -> 199 L between 14:37 and 14:50, and our
+  // own readings show
+  //
+  //     14:37  220.5L     14:52  212.7L     15:09  199.1L
+  //     14:49  219.4L     14:58  203.7L     15:30  198.8L
+  //
+  // — a 21 L fall that matches the claim almost exactly and holds for half an
+  // hour, on a machine parked with the engine off. But the level had barely
+  // moved by 14:50, so the trough came out ~219, the measured drop ~1 L, and
+  // OBSERVED_DROP_MIN_RATIO threw it out as `drop-not-observed`: "we never saw
+  // it fall". We had seen it fall; we were looking two minutes too early.
+  //
+  // Searching the whole post-drain span cannot manufacture a drop that is not
+  // there: a level that never falls still yields a trough at the baseline.
+  //
+  // It does move the RECOVERY test, though, and that has to move with it. The
+  // recovery is "did the level come back UP AFTER its low point", so the peak
+  // must be measured from the trough onwards. Taking the maximum of the whole
+  // after-window, as this did while the trough was pinned inside the
+  // provider's window, would now write off the very drains this is meant to
+  // catch: a level that sits at 200 L and falls to 150 L late would yield
+  // peak 200, trough 150, recovery ratio 1.0 — a perfect "it came back" read
+  // off a fall that never recovered at all.
   const during   = level.filter(s => s.capturedAt >= claim.beganAt && s.capturedAt <= claim.detectedAt)
-  const trough   = Math.min(...(during.length ? during : after).map(s => s.fuelLevelMl))
+  const post     = [...during, ...after]
+  const lowest   = post.reduce((lo, s) => s.fuelLevelMl < lo.fuelLevelMl ? s : lo, post[0]!)
+  const trough   = lowest.fuelLevelMl
   const drop     = baseline - trough
   if (drop <= 0) {
     // Our series never saw the level fall. That is not evidence of a recovery,
@@ -634,7 +664,9 @@ export function adjudicateDrain(
     return { verdict: 'DRAIN', recoveredMl: null, reason: 'drop-not-observed', confirmed: false }
   }
 
-  const peakAfter   = Math.max(...after.map(s => s.fuelLevelMl))
+  // Only readings at or after the low point can speak to a recovery from it.
+  const recovery    = after.filter(s => s.capturedAt >= lowest.capturedAt)
+  const peakAfter   = recovery.length ? Math.max(...recovery.map(s => s.fuelLevelMl)) : trough
   const recoveredMl = Math.max(0, Math.min(peakAfter - trough, drop))
 
   // The only two outcomes we watched happen ourselves, and so the only two
