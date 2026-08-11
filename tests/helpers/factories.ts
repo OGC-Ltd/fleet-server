@@ -147,6 +147,12 @@ export function makeFilling(overrides: Partial<FuelFilling> = {}): FuelFilling {
     initialFuelLevelMl: null,
     filledMl: 50_000,
     finalFuelLevelMl: null,
+    // Unjudged by default, matching a freshly synced row — see
+    // modules/fuel/fuel-filling-adjudication.
+    verdict: 'PENDING',
+    verdictAt: null,
+    verdictReason: null,
+    observedRiseMl: null,
     ...overrides,
   }
 }

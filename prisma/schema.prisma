@@ -768,12 +768,25 @@ model FuelFilling {
   filledMl           Int      @map("filled_ml")
   finalFuelLevelMl   Int?     @map("final_fuel_level_ml")
 
+  /// Our verdict on the provider's claim that this was a refuelling — see
+  /// FuelEventVerdict and modules/fuel/fuel-filling-adjudication. Rows stay on
+  /// the ledger whatever the verdict, so the rule can always be audited back.
+  verdict        FuelEventVerdict @default(PENDING)
+  verdictAt      DateTime?        @map("verdict_at")
+  verdictReason  String?          @map("verdict_reason")
+  /// Millilitres our OWN telemetry saw arrive. `filledMl` is left exactly as
+  /// the provider reported it, so the two can always be compared; on 210 rows
+  /// this is zero or negative against a positive claim.
+  observedRiseMl Int?             @map("observed_rise_ml")
+
   vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
   reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
 
   @@index([vehicleId, filledAt])
   @@index([reportingPeriodId])
   @@index([filledAt])
+  /// Drives the adjudication sweep.
+  @@index([verdict, filledAt])
   @@map("fuel_fillings")
 }
 
