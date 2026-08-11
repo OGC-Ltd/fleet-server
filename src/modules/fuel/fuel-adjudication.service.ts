@@ -183,7 +183,23 @@ export async function judgeDrain(
       orderBy: { capturedAt: 'asc' },
     }),
     prisma.fuelFilling.findFirst({
-      where:   { vehicleId: drain.vehicleId, filledAt: { gte: drain.beganAt, lte: to } },
+      where:   {
+        vehicleId: drain.vehicleId,
+        filledAt:  { gte: drain.beganAt, lte: to },
+        // A filling only closes the recovery window if fuel actually arrived.
+        // Since 2026-08-11 fillings are adjudicated too, and 307 of 5,794 are
+        // REDISTRIBUTION — the up-swings of oscillating probes, claiming
+        // 13,075 L while those tanks collectively FELL 3,689 L. Letting one of
+        // those truncate a drain's evidence is how `filling-too-soon` reached
+        // 438 rows, and how a -27.7 L undulation on MUFINDI - EX 22 came to be
+        // classified a refill: the "fillings" that closed its window were the
+        // same probe swing as the drop.
+        //
+        // PENDING fillings still count. Unjudged is not disproved, and assuming
+        // a filling is real until shown otherwise is the conservative
+        // direction — it withholds confirmation rather than inventing it.
+        verdict:   { not: 'REDISTRIBUTION' },
+      },
       select:  { filledAt: true },
       // The EARLIEST filling is the one that closes the window — a later one
       // cannot explain a rise the first already accounts for.
