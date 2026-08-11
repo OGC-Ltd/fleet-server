@@ -302,14 +302,38 @@ form. Two rows need confirming before implementing, as they may be typos:
 - `connection off · engine on · stationary → online idling` — makes a unit with
   the connection off count as online.
 
-## E. Smaller, flagged
+## E. Smaller — both rectified 2026-08-11
 
-- **Express `trust proxy`** is false behind nginx, so express-rate-limit may key
-  the whole fleet to nginx's IP — one shared 100 req/60s bucket. Spawned task
-  carries the detail.
-- **`telemetry.worker.ts` still divides by a 200 L fallback** for the SSE fuel
-  percentage. `db-follower` and the snapshot were fixed; this one was left
-  because that file carries uncommitted gate-arrival work.
+- ~~**Express `trust proxy`**~~ — **false alarm, no action needed.**
+  `src/app.ts:43` already sets `app.set("trust proxy", 1)` and it is present in
+  the deployed `dist/src/app.js`. The ValidationError lines that prompted this
+  sat at line 41 of a 287-line error log and predate the fix; nothing recent
+  contains one. Read `pm2 logs` with that in mind — the file persists across
+  restarts, so old stack traces resurface in any `--lines N` window.
+- ~~**The 200 L fallback on the live path**~~ — **fixed** (`5655eee`).
+  `db-follower` and the snapshot were corrected earlier; the poller was still
+  handing `telemetry.worker` a 200 L guess for the 355 of 815 active vehicles
+  with no stated capacity, so a vehicle's gauge changed meaning depending on
+  which update it arrived on. Fixed in `poller.ts` rather than the worker,
+  because that file carries the uncommitted gate-arrival work: passing 0 makes
+  the worker's truthiness guard yield null, matching the other two paths. The
+  worker is its only consumer.
+
+## F. Redis eviction policy — NOT addressed, and it matters more now
+
+The box's Redis runs `volatile-lru`; BullMQ warns on every boot that it should
+be `noeviction`. Under memory pressure Redis may evict keys, and BullMQ's keys
+ARE the job state — so a scheduled job can silently vanish rather than fail
+loudly.
+
+This was survivable when the queue held one nightly prune. It now carries three
+jobs, two of them added today (`fuel:adjudicate-fillings` 04:05,
+`fuel:probe-health` 04:23), on a t3.micro that is already swapping. A silently
+dropped filling sweep leaves new fillings at PENDING, which then lets phantom
+fillings truncate drain evidence again — the exact failure §B exists to stop.
+
+It is a Redis config change, not a code change, so it is out of scope for a
+commit here and wants an ops decision.
 
 ---
 
