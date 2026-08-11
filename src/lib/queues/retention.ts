@@ -39,9 +39,22 @@ import { env } from '../../config/env.js'
 import { logger } from '../logger.js'
 import { prisma } from '../prisma.js'
 import { trimCachedNotifications } from '../notifications/notification-cache.js'
+import { sweepProbeHealth } from '../../modules/fuel/fuel-probe-health.service.js'
 
 export const RETENTION_QUEUE = 'maintenance'
 const PRUNE_JOB = 'notifications:prune'
+/**
+ * The fuel-probe health sweep rides on this queue rather than on the fuel
+ * sync's.
+ *
+ * The fuel queue cycles every 15 minutes around a Wialon session; this reads
+ * a 30-day window of our own telemetry and needs to run once a day. Every
+ * reason the header gives for retention living here applies to it unchanged —
+ * once across the fleet, caught up rather than skipped, failures inspectable —
+ * and it is a maintenance job in the literal sense: its output is a list of
+ * machines that need a fitter.
+ */
+const PROBE_JOB = 'fuel:probe-health'
 
 /**
  * Rows deleted per statement. Deliberately small: this runs against the same
@@ -189,7 +202,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   // schedulers are cleared first — otherwise changing the time leaves the
   // previous one firing forever alongside the new one.
   for (const r of await queue.getRepeatableJobs()) {
-    if (r.name === PRUNE_JOB) await queue.removeRepeatableByKey(r.key)
+    if (r.name === PRUNE_JOB || r.name === PROBE_JOB) await queue.removeRepeatableByKey(r.key)
   }
 
   await queue.add(PRUNE_JOB, {}, {
@@ -202,7 +215,20 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
+  await queue.add(PROBE_JOB, {}, {
+    // 04:23 UTC — 07:23 in Nairobi, so the day's list of machines needing a
+    // fitter is on the feed as the workshop opens rather than overnight where
+    // it scrolls away before anyone reads it. Clear of the prune above, which
+    // holds a connection to the same pooler in batches.
+    repeat:            { pattern: '23 4 * * *' },
+    removeOnComplete:  { count: 30 },
+    removeOnFail:      { count: 30 },
+    attempts:          3,
+    backoff:           { type: 'exponential', delay: 60_000 },
+  })
+
   worker = new Worker(RETENTION_QUEUE, async (job: Job) => {
+    if (job.name === PROBE_JOB) return sweepProbeHealth({ notify: true })
     if (job.name !== PRUNE_JOB) return
     return runRetentionSweep()
   }, {
@@ -215,7 +241,10 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
 
   worker.on('failed', (job, err) => logger.error({ err, jobId: job?.id }, 'Retention job failed'))
 
-  logger.info({ queue: RETENTION_QUEUE, cron: '17 3 * * *', retentionDays: env.NOTIFICATION_RETENTION_DAYS }, 'Retention sweep scheduled')
+  logger.info({
+    queue: RETENTION_QUEUE, cron: '17 3 * * *', probeCron: '23 4 * * *',
+    retentionDays: env.NOTIFICATION_RETENTION_DAYS,
+  }, 'Maintenance jobs scheduled')
 
   return {
     async stop() {
