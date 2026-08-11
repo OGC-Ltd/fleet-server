@@ -220,9 +220,10 @@ max/min pair would invent or erase a delivery on noise alone.
 the measurement stay side by side. Dash draws a REDISTRIBUTION filling amber
 (`dash 2bec463`).
 
-**Still open here:** the sweep is a CLI only — it is NOT wired into a schedule,
-so new fillings sit at PENDING until someone runs it. It should join the daily
-maintenance queue beside the probe-health job.
+Scheduled daily at 04:05 UTC on the `maintenance` queue, **before** the
+probe-health job at 04:23. That order is load-bearing: `adjudicateDrain` cuts
+its recovery window at the first filling in the window, so judging fillings
+first is what stops a phantom one truncating a drain's evidence.
 
 ### Original note, kept for the reasoning
 

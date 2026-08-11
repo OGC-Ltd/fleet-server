@@ -40,6 +40,7 @@ import { logger } from '../logger.js'
 import { prisma } from '../prisma.js'
 import { trimCachedNotifications } from '../notifications/notification-cache.js'
 import { sweepProbeHealth } from '../../modules/fuel/fuel-probe-health.service.js'
+import { adjudicateFillings } from '../../modules/fuel/fuel-filling-adjudication.service.js'
 
 export const RETENTION_QUEUE = 'maintenance'
 const PRUNE_JOB = 'notifications:prune'
@@ -55,6 +56,17 @@ const PRUNE_JOB = 'notifications:prune'
  * machines that need a fitter.
  */
 const PROBE_JOB = 'fuel:probe-health'
+/**
+ * Fillings are adjudicated on the same daily cadence, and for the same reason
+ * the probe sweep is here: it reads a window of our own telemetry and belongs
+ * nowhere near the 15-minute Wialon session.
+ *
+ * It runs BEFORE the probe sweep, and the order is load-bearing. A filling
+ * ruled REDISTRIBUTION is one the tank never received, and `adjudicateDrain`
+ * cuts its recovery window at the first filling in the window — so judging
+ * fillings first is what stops a phantom one truncating a drain's evidence.
+ */
+const FILLING_JOB = 'fuel:adjudicate-fillings'
 
 /**
  * Rows deleted per statement. Deliberately small: this runs against the same
@@ -202,7 +214,9 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   // schedulers are cleared first — otherwise changing the time leaves the
   // previous one firing forever alongside the new one.
   for (const r of await queue.getRepeatableJobs()) {
-    if (r.name === PRUNE_JOB || r.name === PROBE_JOB) await queue.removeRepeatableByKey(r.key)
+    if (r.name === PRUNE_JOB || r.name === PROBE_JOB || r.name === FILLING_JOB) {
+      await queue.removeRepeatableByKey(r.key)
+    }
   }
 
   await queue.add(PRUNE_JOB, {}, {
@@ -227,7 +241,18 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
+  await queue.add(FILLING_JOB, {}, {
+    // 04:05 UTC — before the probe sweep at 04:23, so a phantom filling is
+    // already marked by the time anything reads the fuel ledgers for the day.
+    repeat:            { pattern: '5 4 * * *' },
+    removeOnComplete:  { count: 30 },
+    removeOnFail:      { count: 30 },
+    attempts:          3,
+    backoff:           { type: 'exponential', delay: 60_000 },
+  })
+
   worker = new Worker(RETENTION_QUEUE, async (job: Job) => {
+    if (job.name === FILLING_JOB) return adjudicateFillings({ apply: true })
     if (job.name === PROBE_JOB) return sweepProbeHealth({ notify: true })
     if (job.name !== PRUNE_JOB) return
     return runRetentionSweep()
@@ -242,7 +267,8 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   worker.on('failed', (job, err) => logger.error({ err, jobId: job?.id }, 'Retention job failed'))
 
   logger.info({
-    queue: RETENTION_QUEUE, cron: '17 3 * * *', probeCron: '23 4 * * *',
+    queue: RETENTION_QUEUE, cron: '17 3 * * *',
+    fillingCron: '5 4 * * *', probeCron: '23 4 * * *',
     retentionDays: env.NOTIFICATION_RETENTION_DAYS,
   }, 'Maintenance jobs scheduled')
 
