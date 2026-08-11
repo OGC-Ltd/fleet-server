@@ -33,6 +33,22 @@ interface VehicleMeta {
   vehicleName:    string
   plate:          string
   tankCapacityMl: number
+  /**
+   * The capacity Wialon actually states, in litres, or null when it states
+   * none. Distinct from `tankCapacityMl` above, which falls back to 200 L so
+   * the low-fuel alert always has a denominator.
+   *
+   * That fallback must not reach the screen. A percentage computed against an
+   * assumed 200 L tank is a made-up number wearing a real one's clothes, and
+   * 356 of 822 vehicles have no stated capacity at all. Blank is the honest
+   * rendering for those, so this stays nullable all the way to the client.
+   *
+   * Source is Wialon and only Wialon: the operators encode the tank size in the
+   * fuel sensor's NAME, e.g. "2.Main Tank Fuel Level Qty (95L)", and
+   * `prisma/sync-wialon.ts` reads it with `tankCapacityOf`. Nothing here
+   * derives, infers or defaults it.
+   */
+  tankCapacityL:  number | null
   driverName:     string | null
 }
 
@@ -61,6 +77,7 @@ async function getMeta(): Promise<Map<string, VehicleMeta>> {
     vehicleName:    r.name,
     plate:          r.registrationPlate,
     tankCapacityMl: (r.tankCapacityLitres ?? 200) * 1000,
+    tankCapacityL:  r.tankCapacityLitres ?? null,
     driverName:     r.assignments[0]?.user.fullName ?? null,
   }]))
   metaLoadedAt = Date.now()
@@ -156,8 +173,16 @@ async function runOneCycle(): Promise<void> {
         speedKmh:     row.speed_kmh,
         engineOn:     row.engine_on,
         fuelLevelMl:  row.fuel_level_ml,
-        fuelLevelPct: row.fuel_level_ml != null
-          ? Math.round((row.fuel_level_ml / m.tankCapacityMl) * 100)
+        // No `tankCapacityL` on the wire here on purpose. It is static per
+        // vehicle, the fleet snapshot already carries it, and the dashboard
+        // holds it across live updates (`existing.tankCapacityL`) — so a live
+        // frame has nothing to add and the payload type stays put.
+        //
+        // Null unless Wialon stated a capacity. This used to divide by the
+        // 200 L fallback, so every unprovisioned vehicle showed a confident
+        // percentage of a tank size nobody had measured.
+        fuelLevelPct: row.fuel_level_ml != null && m.tankCapacityL
+          ? Math.round((row.fuel_level_ml / (m.tankCapacityL * 1000)) * 100)
           : null,
         cargoWeightKg: row.cargo_weight_kg,
         cargoDesc:    row.cargo_desc,
