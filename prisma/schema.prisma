@@ -41,21 +41,28 @@ enum FuelEventType {
   THEFT
 }
 
-/// What we concluded about a drain the provider reported.
+/// What happened to the fuel — a description of the event, never an accusation.
 ///
 /// Wialon's report decides that a level drop is a theft; measured over the 250
 /// most recent drains per org, 40% (KASULU) and 50% (SUKARI) of the DECIDABLE
-/// loss volume came back with no filling to explain it — fuel that moved away
-/// from the probe and returned, not fuel that left. So the provider's claim is
-/// adjudicated against our own level series before it counts as a loss.
-enum FuelLossVerdict {
+/// volume came back with no filling to explain it — fuel that moved away from
+/// the probe and returned, not fuel that left. So the provider's claim is
+/// adjudicated against our own level series before it is reported as anything.
+///
+/// The values changed on 2026-08-11 at the operator's instruction: LOSS and
+/// UNVERIFIED are gone. LOSS asserted where the fuel went, which telemetry
+/// cannot see; UNVERIFIED described our EVIDENCE rather than the fuel, and
+/// covered 1,938 of 2,571 rows, leaving the ledger unreadable. How sure we are
+/// now lives in verdictReason and in `isConfirmed` beside the verdict, not
+/// instead of it. See modules/fuel/fuel-adjudication.
+enum FuelEventVerdict {
   PENDING        // too recent to judge — the level may still come back
-  LOSS           // the level stayed down: fuel really went
-  REDISTRIBUTION // the level returned with no filling: it never left the tank
-  UNVERIFIED     // telemetry too sparse to say either way; counted, but labelled
-  /// The fuel probe failed, not the tank. Excluded from loss and never
+  REFILL         // a filling explains it: fuel went IN, it did not leave
+  DRAIN          // the level went down and did not come back
+  REDISTRIBUTION // the level returned with no filling: undulation, it never left
+  /// The fuel probe failed, not the tank. Not a fuel event at all, and never
   /// announced: blaming a driver for a dead sensor is the one outcome here
-  /// that is worse than missing a theft. See modules/fuel/fuel-adjudication.
+  /// that is worse than missing a real drain.
   SENSOR_FAULT
 }
 
@@ -785,11 +792,11 @@ model FuelTheft {
   initialSpeedKmh    Float?   @map("initial_speed_kmh")  // 0 = stationary drain
   finalSpeedKmh      Float?   @map("final_speed_kmh")
 
-  /// Our verdict on the provider's claim — see FuelLossVerdict and
+  /// Our verdict on the provider's claim — see FuelEventVerdict and
   /// modules/fuel/fuel-adjudication. Rows stay on the ledger whatever the
   /// verdict, so the rule can always be audited back against Wialon.
-  verdict       FuelLossVerdict @default(PENDING)
-  verdictAt     DateTime?       @map("verdict_at")
+  verdict       FuelEventVerdict @default(PENDING)
+  verdictAt     DateTime?        @map("verdict_at")
   /// Millilitres of the observed drop that came back, from our own telemetry.
   recoveredMl   Int?            @map("recovered_ml")
   /// Short slug naming which rule decided it, for auditing.

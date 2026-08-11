@@ -12,7 +12,8 @@
  *   - out now excludes CANCELLED. Measured on SUKARI, 47 of 114 dispatches with
  *     no return time were cancelled runs; counting them overstated the fleet on
  *     the road by 70%.
- *   - raised ≠ needs investigating. Only a LOSS verdict is a confirmed loss.
+ *   - raised ≠ needs investigating. Only a DRAIN our own telemetry confirmed
+ *     is worth sending somebody out on.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -26,7 +27,8 @@ import { collectToday } from '../../src/modules/dashboard/ai-insight.js'
 const raised = (id: string, destination: string | null) => ({ id, destination, actualReturnAt: null })
 /** A run open right now, as the `actualReturnAt: null` query returns it. */
 const openRun = (destination: string | null, status = 'DISPATCHED') => ({ destination, status })
-const theft = (verdict: string, stolenMl: number) => ({ verdict, stolenMl })
+const theft = (verdict: string, stolenMl: number, verdictReason: string | null = null) =>
+  ({ verdict, stolenMl, verdictReason })
 
 interface DispatchArgs { where?: { dispatchedAt?: unknown; actualReturnAt?: unknown; id?: unknown } }
 interface NotifArgs { where?: { feedId?: unknown } }
@@ -182,20 +184,26 @@ describe('collectToday', () => {
     expect(today.destinationNotRecorded).toBe(2)
   })
 
-  it('counts only confirmed losses as needing investigation', async () => {
+  it('counts only CONFIRMED drains as needing investigation', async () => {
+    // A drain we merely relayed from the provider is not a chase. Confirmation
+    // is derived from verdictReason, so the two DRAIN rows below are the same
+    // verdict and a very different call on somebody's morning.
     prismaMock.fuelTheft.findMany.mockResolvedValue([
-      ...Array.from({ length: 5 }, () => theft('LOSS', 20_000)),
-      ...Array.from({ length: 9 }, () => theft('PENDING', 5_000)),
-      ...Array.from({ length: 4 }, () => theft('REDISTRIBUTION', 30_000)),
-      theft('UNVERIFIED', 1_000),
+      ...Array.from({ length: 5 }, () => theft('DRAIN', 20_000, 'level-stayed-down')),
+      ...Array.from({ length: 9 }, () => theft('PENDING', 5_000, 'settling')),
+      ...Array.from({ length: 4 }, () => theft('REDISTRIBUTION', 30_000, 'level-recovered')),
+      theft('DRAIN', 1_000, 'insufficient-telemetry'),
+      theft('REFILL', 8_000, 'filling-in-window'),
     ] as never)
 
     const today = await collectToday('org-1')
 
     expect(today.fuelIssues).toEqual({
-      raised: 19, needInvestigating: 5, stillSettling: 9, ruledOut: 4, unverifiable: 1,
-      // Only the confirmed ones — 5 × 20 L. Redistribution volume never counts.
-      litresConfirmedLost: 100,
+      raised: 20, needInvestigating: 5, stillSettling: 9, ruledOut: 4,
+      explainedByRefuel: 1, notConfirmed: 1,
+      // Only the confirmed drains — 5 × 20 L. Redistribution and refill never
+      // count, and neither does a drain we could not check.
+      litresDrained: 100,
     })
   })
 

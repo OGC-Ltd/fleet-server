@@ -8,7 +8,9 @@ vi.mock('../../src/lib/notifications/notification.store.js', () => ({
 
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { publishNotificationDurable } from '../../src/lib/notifications/notification.store.js'
-import { adjudicatePendingDrains } from '../../src/modules/fuel/fuel-adjudication.service.js'
+import {
+  adjudicatePendingDrains, __resetProbeProfileCache,
+} from '../../src/modules/fuel/fuel-adjudication.service.js'
 
 const BEGAN    = new Date('2026-08-04T13:00:00Z')
 const DETECTED = new Date('2026-08-04T13:05:00Z')
@@ -37,14 +39,25 @@ const setLevels = (mls: number[]) =>
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (prismaMock.vehicleTelemetry.findMany as any).mockResolvedValue(levels(mls))
 
+/**
+ * The vehicle's parked-swing profile, which the trust gate reads for any drain
+ * that reaches LOSS. Steady by default — the gate is meant to be silent on the
+ * 97 of 139 machines that never swing.
+ */
+const setProbeProfile = (parked: number, swinging: number) =>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (prismaMock.$queryRaw as any).mockResolvedValue([{ parked: BigInt(parked), swinging: BigInt(swinging) }])
+
 beforeEach(() => {
   vi.mocked(publishNotificationDurable).mockClear()
+  __resetProbeProfileCache()   // module-global, keyed by vehicle — would leak between cases
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([DRAIN])
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(prismaMock.fuelTheft.update as any).mockResolvedValue({})
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(prismaMock.fuelFilling.findFirst as any).mockResolvedValue(null)   // no refuel unless a case sets one
+  setProbeProfile(200, 0)
 })
 
 describe('adjudicatePendingDrains', () => {
@@ -54,7 +67,7 @@ describe('adjudicatePendingDrains', () => {
 
     const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
 
-    expect(out).toMatchObject({ redistribution: 1, loss: 0, published: 0 })
+    expect(out).toMatchObject({ redistribution: 1, drain: 0, published: 0 })
     expect(out.recoveredMl).toBe(40_000)
     expect(publishNotificationDurable).not.toHaveBeenCalled()
     expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -68,14 +81,16 @@ describe('adjudicatePendingDrains', () => {
 
     const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
 
-    expect(out).toMatchObject({ loss: 1, redistribution: 0, published: 1 })
+    expect(out).toMatchObject({ drain: 1, drainConfirmed: 1, redistribution: 0, published: 1 })
     const item = published()[0]![0]
     expect(item['severity']).toBe('critical')
     expect(item['alertType']).toBe('fuelInconsistency')
-    expect(item['text']).toContain('FUEL DROP: CTR 03')
-    // Never "lost": a LOSS verdict is the level failing to come back, which
-    // is strong evidence and not proof. The alert sends someone to look.
-    expect(item['text']).toContain('40 L suspicious')
+    expect(item['text']).toContain('FUEL DRAIN: CTR 03')
+    // The level fell and did not come back. That is all this says — where the
+    // fuel went is not something a probe can see, so the words "loss",
+    // "theft", "stolen" and "suspicious" appear nowhere.
+    expect(item['text']).toContain('40 L down and not recovered')
+    expect(item['text']).not.toMatch(/loss|lost|theft|stolen|suspicious/i)
     expect(item['text']).toContain('Nyalulanga')
     expect(item['text']).toContain('Tank now 160 L')
     // The event's own time, never the moment we got round to judging it.
@@ -91,11 +106,11 @@ describe('adjudicatePendingDrains', () => {
 
     const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
 
-    expect(out).toMatchObject({ unverified: 1, loss: 0 })
+    expect(out).toMatchObject({ drain: 1, drainConfirmed: 0 })
     const item = published()[0]![0]
-    expect(item['severity']).toBe('warning')          // a confirmed loss is 'critical'
-    expect(item['text']).toContain('reported, unverified')
-    expect(item['text']).not.toMatch(/unconfirmed|no tank readings/)
+    expect(item['severity']).toBe('warning')          // a confirmed drain is 'critical'
+    expect(item['text']).toContain('reported, not confirmed')
+    expect(item['text']).not.toMatch(/loss|lost|theft|stolen|suspicious/i)
   })
 
   it('makes no claim of escalation', async () => {
@@ -116,7 +131,7 @@ describe('adjudicatePendingDrains', () => {
 
     const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
 
-    expect(out).toMatchObject({ redistribution: 1, unverified: 0 })
+    expect(out).toMatchObject({ redistribution: 1, refill: 0, drain: 0 })
   })
 
   it('does not narrate a backlog onto the live feed', async () => {
@@ -129,9 +144,42 @@ describe('adjudicatePendingDrains', () => {
       notifyCutoff: new Date('2026-08-04T13:30:00Z'),   // after this drain began
     })
 
-    expect(out.loss).toBe(1)                       // still judged
+    expect(out.drain).toBe(1)                       // still judged
     expect(prismaMock.fuelTheft.update).toHaveBeenCalled()
     expect(publishNotificationDurable).not.toHaveBeenCalled()   // but not announced
+  })
+
+  it('will not confirm a drain on a probe that swings while parked', async () => {
+    // The operator's DZ 07 case, reached by the route that survives
+    // measurement: not "the tank was part full" but "this probe moves 25 L on a
+    // machine standing still, in 9 of its 12 parked half-hours".
+    setLevels([...STEADY, ...DRAINING, 160_000, 159_000, 158_000, 158_000])
+    setProbeProfile(40, 30)
+
+    const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    expect(out).toMatchObject({ drain: 1, drainConfirmed: 0 })
+    // Still a DRAIN — the level fell and stayed down. What the gate withdraws
+    // is the claim that our own telemetry settles it.
+    expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ verdict: 'DRAIN', verdictReason: 'probe-swings' }),
+    }))
+    // Announced at warning severity rather than critical, so it stops reading
+    // as an accusation against whoever was driving.
+    const item = published()[0]![0]
+    expect(item['severity']).toBe('warning')
+    expect(item['text']).toContain('reported, not confirmed')
+  })
+
+  it('does not ask about the probe unless the drain was confirmed', async () => {
+    // The profile costs a second query per drain and only a CONFIRMED drain
+    // can be downgraded by it — 417 of 2,571 rows on the live ledger.
+    setLevels([...STEADY, ...DRAINING, 190_000, 198_000, 200_000, 200_000])
+
+    const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    expect(out.redistribution).toBe(1)
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
   })
 
   it('writes nothing on a dry run', async () => {
@@ -151,7 +199,7 @@ describe('adjudicatePendingDrains', () => {
 
     const out = await adjudicatePendingDrains({ apply: true, notify: false, now: NOW })
 
-    expect(out.loss).toBe(1)
+    expect(out.drain).toBe(1)
     expect(prismaMock.fuelTheft.update).toHaveBeenCalled()
     expect(publishNotificationDurable).not.toHaveBeenCalled()
   })
