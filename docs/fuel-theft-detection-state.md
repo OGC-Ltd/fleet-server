@@ -134,10 +134,29 @@ number of PARKED windows — excluded `MUFINDI: DZ 07`, the case that started al
 of this, because a dozer spends its days working and has few parked windows. It
 counts the swings, not the opportunities.
 
-⚠️ **The thresholds are now stale.** 25 L / 5% was chosen against verdicts the
-trough fix has since changed; the 1.47x separation no longer describes the
-current ledger. The gate currently touches 240 rows. Re-measure before trusting
-that number.
+**Re-measured 2026-08-11 against the settled ledger** — after the trough fix and
+the filling adjudication — and the constants hold. Separation of REDISTRIBUTION
+from confirmed DRAIN across the grid:
+
+| swing | min swings | share | units | separation |
+| --- | --- | --- | --- | --- |
+| **25 L** | **3** | **5%** | **18** | **2.64x** |
+| 15 L | 3 | 10% | 21 | 2.25x |
+| 25 L | 3 | 10% | 13 | 2.24x |
+| 25 L | 5 | 5% | 15 | 1.97x |
+| 40 L | 3 | 10% | 7 | 1.17x |
+
+Still the best cell, and better than the 1.47x measured mid-session: the trough
+fix and the filling work sharpened it rather than eroding it. 27% of decidable
+drains came back on the 18 machines the gate fires on, against 10% elsewhere.
+The neighbours degrade gently, so it is not perched on a spike.
+
+⚠️ **When you re-measure this, do NOT exclude `probe-swings` rows to "avoid
+scoring the gate on its own output".** That deletes the DRAIN side for exactly
+the vehicles the gate fires on, so every swingy machine reads 100% recovered and
+the grid reports a spurious 9.84x. Reconstruct the pre-gate ledger instead: a
+`probe-swings` row is one the level-series rules confirmed as a drain and the
+gate then withdrew, so count it AS a confirmed drain.
 
 ## 5. `fsl_dead`
 
