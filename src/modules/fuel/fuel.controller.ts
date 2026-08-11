@@ -1,6 +1,7 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as service from './fuel.service.js'
+import { getFleetTankState } from './fuel-tank-state.service.js'
 import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery } from './fuel.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -40,5 +41,20 @@ export const getTheft: RequestHandler = async (req, res, next) => {
 export const createTheft: RequestHandler = async (req, res, next) => {
   try {
     sendSuccess(res, await service.createTheft(req.body as CreateTheftDto), 201)
+  } catch (err) { next(err) }
+}
+
+/**
+ * Per-vehicle tank state for the Fuel FSL table: what the tank held when the
+ * machine started work, what it holds now, and how much the probe moved about
+ * while working. See modules/fuel/fuel-tank-state.
+ *
+ * Whole-fleet in one call on purpose — the table draws every vehicle, and a
+ * per-vehicle endpoint would have the dashboard fire 200 requests against a
+ * 100 req/60s limit.
+ */
+export const listTankState: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await getFleetTankState(p(req, 'orgId')))
   } catch (err) { next(err) }
 }
