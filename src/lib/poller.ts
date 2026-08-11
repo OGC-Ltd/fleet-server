@@ -120,7 +120,20 @@ async function refreshCache(): Promise<void> {
     vehicleId:      r.id,
     vehicleName:    r.name,
     plate:          r.registrationPlate,
-    tankCapacityMl: (r.tankCapacityLitres ?? 200) * 1000,
+    // ZERO, not a 200 L guess, when Wialon states no capacity — 355 of 815
+    // active vehicles. The consumer is telemetry.worker's fuelLevelPct, which
+    // reads `frame.fuelLevelMl != null && tankCapacityMl` and so yields null on
+    // a zero: exactly the honest answer, and the same one the fleet snapshot
+    // and db-follower already give. Until now the live SSE path invented a
+    // percentage against a tank nobody had measured, so the same vehicle's
+    // gauge changed meaning depending on which update it arrived on.
+    //
+    // Fixed HERE rather than in telemetry.worker because that file carries
+    // uncommitted gate-arrival work and must not be swept into this change.
+    // Capacity comes from Wialon and only Wialon — the operators write the tank
+    // size into the fuel sensor's name and sync-wialon reads it with
+    // `tankCapacityOf`. Nothing derives, infers or defaults it.
+    tankCapacityMl: (r.tankCapacityLitres ?? 0) * 1000,
     driverId:       r.assignments[0]?.userId ?? null,
     driverName:     r.assignments[0]?.user.fullName ?? null,
   }]))
