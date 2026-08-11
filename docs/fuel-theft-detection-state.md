@@ -196,7 +196,35 @@ The consumption half is the more valuable one and connects to
 km, because 215 of 310 probed units are plant or tractors. A stop-to-stop delta
 is a far better input than anything computed today.
 
-## B. The fillings ledger is not adjudicated at all
+## B. ~~The fillings ledger is not adjudicated at all~~ — DONE 2026-08-11
+
+`fuel-filling-adjudication.ts` (pure) + `.service.ts` + `prisma/adjudicate-fillings.ts`,
+migration `20260811090000_fuel_filling_verdict`. Applied to all 5,794 rows:
+
+| verdict | rows | claimed | observed |
+| --- | --- | --- | --- |
+| REFILL · insufficient-telemetry | 3,928 | 265,133 L | — |
+| REFILL · level-rose (confirmed) | 1,557 | 130,797 L | **133,791 L** |
+| REDISTRIBUTION · no-rise-observed | **307** | 13,075 L | **−3,689 L** |
+
+The confirmed set validates the rule: 133,791 L observed against 130,797 L
+claimed is 102%, near-exact. The 307 claim fuel arriving while the tanks went
+DOWN 3,689 L — `MUFINDI: DZ 04` claims +480 L against an observed −20 L.
+
+Uses MEDIANS either side, not the extrema the drain rules use: a drain asks how
+far down it ever went (an extreme), a filling asks what the level was before and
+what it is now (two steady states). On a probe that swings 25 L parked, a
+max/min pair would invent or erase a delivery on noise alone.
+
+`filledMl` is never edited; `observedRiseMl` holds what we saw, so the claim and
+the measurement stay side by side. Dash draws a REDISTRIBUTION filling amber
+(`dash 2bec463`).
+
+**Still open here:** the sweep is a CLI only — it is NOT wired into a schedule,
+so new fillings sit at PENDING until someone runs it. It should join the daily
+maintenance queue beside the probe-health job.
+
+### Original note, kept for the reasoning
 
 Drains are checked against our own telemetry. **Fillings are stored exactly as
 Wialon reports them, with no check.** Two cases found today:
