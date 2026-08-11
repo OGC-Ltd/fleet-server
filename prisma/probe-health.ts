@@ -44,4 +44,14 @@ async function main() {
 
 main()
   .catch(err => { console.error('\n❌  probe-health failed:', err); process.exit(1) })
-  .finally(async () => { await prisma.$disconnect() })
+  .finally(async () => {
+    await prisma.$disconnect()
+    // Explicit, and not paranoia. Publishing a notification opens a Redis
+    // connection through lib/notifications/notification-cache, and nothing
+    // closes it — so this script finished its 47 alerts and then sat on the
+    // box for three hours holding the event loop open. Disconnecting Prisma is
+    // not enough; that handle has no owner to close it from here.
+    //
+    // The adjudication CLIs need no such thing: they never publish.
+    process.exit(0)
+  })
