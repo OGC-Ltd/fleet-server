@@ -65,15 +65,22 @@ describe('adjudicateDrain', () => {
     expect((out.recoveredMl ?? 0) / 40_000).toBeLessThan(RECOVERY_THRESHOLD)
   })
 
-  it('calls it a refill when a filling explains it', () => {
+  it('does not call a drop a refill just because a filling closed the window', () => {
     // A rise after a real refuel proves nothing either way, so the claim
     // stands — labelled unchecked rather than silently confirmed.
     // The filling lands at 13:06, one minute after detection, so nothing after
     // it can speak to a recovery and there is too little before it.
     const samples = window(STEADY_DRAIN, [200_000, 200_000, 200_000, 200_000])
     const out = adjudicateDrain(claim, samples, T('2026-08-04T13:06:00Z'), RIPE)
-    expect(out.verdict).toBe('REFILL')
-    expect(out.reason).toBe('filling-in-window')
+    // Never REFILL. This is an ABSENCE of evidence — we cannot tell "the drop
+    // was spurious and they refuelled" from "fuel was taken and then they
+    // refuelled" — and on an oscillating probe the filling that closed the
+    // window is itself noise. MUFINDI - EX 22 ran -21.7, +29.1, +24.8, -27.7,
+    // +28.2 L inside four minutes and the -27.7 came out a REFILL, drawn green
+    // on the dashboard against a negative volume.
+    expect(out.verdict).toBe('DRAIN')
+    expect(out.confirmed).toBe(false)
+    expect(out.reason).toBe('filling-too-soon')
   })
 
   it('does not claim confirmation when telemetry is sparse', () => {

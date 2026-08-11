@@ -173,7 +173,16 @@ export interface DrainClaim {
 export type Verdict =
   /** Too recent to judge — the level may still come back. */
   | 'PENDING'
-  /** A filling explains the movement: fuel went IN, it did not leave. */
+  /**
+   * Fuel went IN. RESERVED, and never produced by this module: every row on
+   * `fuel_thefts` is a reported DROP, so a refill is not something a drain can
+   * turn out to be. Real refills are `fuel_fillings` rows and the dashboard
+   * renders those green.
+   *
+   * It briefly WAS assigned here, to drains whose recovery window a filling
+   * had closed, and the result was a negative volume drawn in green. See the
+   * filling-too-soon note in adjudicateDrain.
+   */
   | 'REFILL'
   /** The level went down and did not come back. */
   | 'DRAIN'
@@ -215,17 +224,16 @@ export const isConfirmed = (reason: string): boolean => CONFIRMED_REASONS.has(re
  * anything the readings say, which makes them the two a re-judgement can reach
  * for a reason having nothing to do with the drain: the telemetry that existed
  * when the row was first judged may simply not be there any more.
- * (`filling-in-window` belongs here despite being a REFILL verdict — it is
+ * (`filling-too-soon` belongs here for the same reason — it is
  * `insufficient-telemetry` in the case where a filling happens to sit in the
- * window, so an empty window with a refuel in it lands on this one, and a
- * confirmed drain must not be turned into a refill by the readings expiring.)
+ * window, so an empty window with a refuel in it lands on that reason instead.)
  *
  * A backfill must never overwrite a verdict that WAS decided on evidence with
  * one that says we have none. That trades a judgement for the absence of a
  * judgement, on nothing but data ageing out. See
  * `prisma/readjudicate-fuel.ts`, which is the only caller.
  */
-const NO_EVIDENCE_REASONS: ReadonlySet<string> = new Set(['insufficient-telemetry', 'filling-in-window'])
+const NO_EVIDENCE_REASONS: ReadonlySet<string> = new Set(['insufficient-telemetry', 'filling-too-soon'])
 
 /** True when this adjudication reports an absence of readings, not a finding. */
 export const isUncheckable = (a: Adjudication): boolean =>
@@ -553,19 +561,33 @@ export function adjudicateDrain(
     s.capturedAt >= claim.detectedAt && (fillingAt == null || s.capturedAt < fillingAt))
 
   if (before.length < MIN_SAMPLES || after.length < MIN_SAMPLES) {
-    // A filling landed so soon after the drain that there is no unrefuelled
-    // window left to read. Fuel demonstrably went IN, and we cannot see it
-    // having gone out: that is a REFILL. This is the largest single category on
-    // the ledger — 435 rows — and calling them all drains would report a
-    // refuelling round as a month of theft.
+    // Both are a DRAIN we could not check. The reason distinguishes them for
+    // auditing, but neither is a finding about where the fuel went.
     //
-    // Distinct from having no readings at all, which says nothing about the
-    // fuel and stays a DRAIN: the provider saw a fall and we could not check
-    // it, so we relay the claim rather than contradicting it. `confirmed`
-    // carries that difference — see the Verdict doc.
-    return fillingAt != null && after.length < MIN_SAMPLES
-      ? { verdict: 'REFILL', recoveredMl: null, reason: 'filling-in-window',      confirmed: false }
-      : { verdict: 'DRAIN',  recoveredMl: null, reason: 'insufficient-telemetry', confirmed: false }
+    // `filling-too-soon` briefly returned REFILL, on the reasoning that fuel
+    // demonstrably went IN so the reported drop was explained. That was wrong
+    // twice over and it shipped:
+    //
+    //   It is an ABSENCE of evidence, not a finding. We cannot tell "the drop
+    //   was spurious and they refuelled" from "fuel was taken and then they
+    //   refuelled" — the two are identical in this data. Calling it a refill
+    //   asserts the first. This module removes what it can DISPROVE, never
+    //   what it merely doubts, and that rule broke the principle.
+    //
+    //   The filling that closes the window is not necessarily real. On a probe
+    //   that oscillates, Wialon logs the up-swings as fillings and the
+    //   down-swings as thefts. `MUFINDI - EX 22` on 2026-08-10 ran
+    //   -21.7 L, +29.1, +24.8, -27.7 L, +28.2 inside four minutes: the -21.7 L
+    //   was correctly ruled REDISTRIBUTION, while the -27.7 L had its recovery
+    //   window cut by "fillings" that were the same noise, and came out a
+    //   REFILL. A negative volume then rendered green on the dashboard.
+    //
+    // So no drain row is ever a REFILL. A refill is a level INCREASE and lives
+    // in `fuel_fillings`; this table only ever holds reported drops.
+    return { verdict: 'DRAIN', recoveredMl: null, confirmed: false,
+             reason: fillingAt != null && after.length < MIN_SAMPLES
+               ? 'filling-too-soon'
+               : 'insufficient-telemetry' }
   }
 
   // Is this a dead probe rather than a drain? Tested BEFORE the drop rules,
@@ -595,11 +617,9 @@ export function adjudicateDrain(
   if (drop <= 0) {
     // Our series never saw the level fall. That is not evidence of a recovery,
     // it is evidence the two sources disagree about what happened — so the
-    // provider's claim stands as a DRAIN, unconfirmed. If a filling sits in the
-    // window it is the better explanation of a level that never fell.
-    return fillingAt != null
-      ? { verdict: 'REFILL', recoveredMl: null, reason: 'filling-in-window', confirmed: false }
-      : { verdict: 'DRAIN',  recoveredMl: null, reason: 'no-drop-observed',  confirmed: false }
+    // provider's claim stands as a DRAIN, unconfirmed. A filling in the window
+    // does NOT make it a refill: see the filling-too-soon note above.
+    return { verdict: 'DRAIN', recoveredMl: null, reason: 'no-drop-observed', confirmed: false }
   }
   // ...and the same is true when it saw a fall far too SMALL to be the one
   // claimed. The recovery ratio below is measured against `drop`, so without
