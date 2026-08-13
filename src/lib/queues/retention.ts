@@ -41,6 +41,7 @@ import { prisma } from '../prisma.js'
 import { trimCachedNotifications } from '../notifications/notification-cache.js'
 import { sweepProbeHealth } from '../../modules/fuel/fuel-probe-health.service.js'
 import { adjudicateFillings } from '../../modules/fuel/fuel-filling-adjudication.service.js'
+import { recordFuelTrends } from '../../modules/fuel/fuel-trend.service.js'
 
 export const RETENTION_QUEUE = 'maintenance'
 const PRUNE_JOB = 'notifications:prune'
@@ -67,6 +68,15 @@ const PROBE_JOB = 'fuel:probe-health'
  * fillings first is what stops a phantom one truncating a drain's evidence.
  */
 const FILLING_JOB = 'fuel:adjudicate-fillings'
+/**
+ * The day's fuel trend row per vehicle — opening, closing, and the motion-slosh
+ * moving average. See modules/fuel/fuel-trend.
+ *
+ * Runs LAST of the three and just after midnight EAT, so the day it records is
+ * complete: a turbulence average taken at noon is not a trend point, and a
+ * closing level taken before the day ends is not a close.
+ */
+const TREND_JOB = 'fuel:daily-trend'
 
 /**
  * Rows deleted per statement. Deliberately small: this runs against the same
@@ -214,7 +224,8 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   // schedulers are cleared first — otherwise changing the time leaves the
   // previous one firing forever alongside the new one.
   for (const r of await queue.getRepeatableJobs()) {
-    if (r.name === PRUNE_JOB || r.name === PROBE_JOB || r.name === FILLING_JOB) {
+    if (r.name === PRUNE_JOB || r.name === PROBE_JOB || r.name === FILLING_JOB
+     || r.name === TREND_JOB) {
       await queue.removeRepeatableByKey(r.key)
     }
   }
@@ -251,7 +262,20 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
+  await queue.add(TREND_JOB, {}, {
+    // 21:20 UTC = 00:20 EAT, i.e. twenty minutes into the NEXT fleet day, so
+    // the day being recorded has actually finished. `recordFuelTrends` is given
+    // a timestamp inside the day it should write, not "now".
+    repeat:            { pattern: '20 21 * * *' },
+    removeOnComplete:  { count: 30 },
+    removeOnFail:      { count: 30 },
+    attempts:          3,
+    backoff:           { type: 'exponential', delay: 60_000 },
+  })
+
   worker = new Worker(RETENTION_QUEUE, async (job: Job) => {
+    // Records the day that just ended, not the one starting.
+    if (job.name === TREND_JOB) return recordFuelTrends(new Date(Date.now() - 30 * 60_000))
     if (job.name === FILLING_JOB) return adjudicateFillings({ apply: true })
     if (job.name === PROBE_JOB) return sweepProbeHealth({ notify: true })
     if (job.name !== PRUNE_JOB) return
@@ -268,7 +292,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
 
   logger.info({
     queue: RETENTION_QUEUE, cron: '17 3 * * *',
-    fillingCron: '5 4 * * *', probeCron: '23 4 * * *',
+    fillingCron: '5 4 * * *', probeCron: '23 4 * * *', trendCron: '20 21 * * *',
     retentionDays: env.NOTIFICATION_RETENTION_DAYS,
   }, 'Maintenance jobs scheduled')
 

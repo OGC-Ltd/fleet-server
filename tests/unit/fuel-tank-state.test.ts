@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   deriveTankState, closingLevel, CLOSE_WINDOW_MINUTES, TURBULENCE_MIN_SAMPLES,
-  type LevelReading,
+  MOTION_MIN_KMH, type LevelReading,
 } from '../../src/modules/fuel/fuel-tank-state.js'
 
 const T0 = Date.parse('2026-08-13T04:00:00Z')
@@ -9,7 +9,7 @@ const T0 = Date.parse('2026-08-13T04:00:00Z')
 const at = (i: number) => new Date(T0 + i * 2 * 60_000)
 
 const run = (n: number, ml: number, engineOn: boolean, from = 0): LevelReading[] =>
-  Array.from({ length: n }, (_, i) => ({ capturedAt: at(from + i), fuelLevelMl: ml, engineOn }))
+  Array.from({ length: n }, (_, i) => ({ capturedAt: at(from + i), fuelLevelMl: ml, engineOn, speedKmh: 0 }))
 
 describe('closingLevel', () => {
   it('takes the median of the final window, not the last reading', () => {
@@ -79,30 +79,44 @@ describe('deriveTankState', () => {
     expect(out.consumedMl).toBe(-260_000)
   })
 
-  it('measures turbulence only while working', () => {
-    // 30-minute windows = 15 readings at this spacing. The parked run swings
-    // 100 L and must not count, or a probe settling after a shift would read as
-    // violent terrain.
-    const parked: LevelReading[] = Array.from({ length: 20 }, (_, i) => ({
-      capturedAt: at(i), fuelLevelMl: i % 2 ? 300_000 : 200_000, engineOn: false,
+  it('measures turbulence in MOTION, not merely engine-on', () => {
+    // Slosh is caused by travel over ground, not by the engine turning. A
+    // machine idling stationary for an hour produces a flat level; the swings
+    // worth trending come from the one crossing a rutted haul road.
+    //
+    // The stationary run here swings 100 L with the engine ON and must not
+    // count, or an idling probe would read as violent terrain.
+    const idling: LevelReading[] = Array.from({ length: 20 }, (_, i) => ({
+      capturedAt: at(i), fuelLevelMl: i % 2 ? 300_000 : 200_000, engineOn: true, speedKmh: 0,
     }))
-    const working: LevelReading[] = Array.from({ length: 40 }, (_, i) => ({
-      capturedAt: at(20 + i), fuelLevelMl: i % 2 ? 250_000 : 230_000, engineOn: true,
+    const moving: LevelReading[] = Array.from({ length: 40 }, (_, i) => ({
+      capturedAt: at(20 + i), fuelLevelMl: i % 2 ? 250_000 : 230_000, engineOn: true, speedKmh: 12,
     }))
-    expect(deriveTankState([...parked, ...working], 300_000).turbulenceMl).toBe(20_000)
+    const out = deriveTankState([...idling, ...moving], 300_000)
+    expect(out.turbulenceMl).toBe(20_000)
+    expect(out.motionWindows).toBeGreaterThan(0)
+  })
+
+  it('ignores GPS jitter below the motion threshold', () => {
+    // MOTION_MIN_KMH is 0.1: anything under it is a stationary machine's fix
+    // wandering, not travel.
+    const jitter: LevelReading[] = Array.from({ length: 40 }, (_, i) => ({
+      capturedAt: at(i), fuelLevelMl: i % 2 ? 250_000 : 230_000, engineOn: true,
+      speedKmh: MOTION_MIN_KMH / 2,
+    }))
+    expect(deriveTankState(jitter, 300_000).turbulenceMl).toBeNull()
   })
 
   it('will not compute turbulence from a handful of readings', () => {
     const thin: LevelReading[] = Array.from({ length: TURBULENCE_MIN_SAMPLES - 1 }, (_, i) => ({
-      capturedAt: at(i), fuelLevelMl: i % 2 ? 250_000 : 230_000, engineOn: true,
+      capturedAt: at(i), fuelLevelMl: i % 2 ? 250_000 : 230_000, engineOn: true, speedKmh: 12,
     }))
     expect(deriveTankState(thin, 300_000).turbulenceMl).toBeNull()
   })
 
-  it('says nothing about turbulence without engine state', () => {
-    // Turbulence is defined as what happens WHILE WORKING; a provider that does
-    // not say whether the engine was on cannot answer that. Two of the
-    // operator's five condemned units report it on zero readings.
+  it('says nothing about turbulence without speed', () => {
+    // Turbulence is defined as what happens IN MOTION; a provider that does not
+    // say whether the unit was moving cannot answer that.
     const noEngine: LevelReading[] = [
       ...Array.from({ length: 30 }, (_, i) => ({
         capturedAt: at(i), fuelLevelMl: i % 2 ? 250_000 : 230_000,

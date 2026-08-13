@@ -63,7 +63,17 @@ export interface LevelReading {
   capturedAt:  Date
   fuelLevelMl: number
   engineOn?:   boolean
+  /** Instantaneous speed. Turbulence is measured in MOTION — see below. */
+  speedKmh?:   number | null
 }
+
+/**
+ * Speed at or above which the unit counts as moving.
+ *
+ * 0.1 km/h, matching the operator's own motion threshold. Anything lower is GPS
+ * jitter on a stationary machine, not travel.
+ */
+export const MOTION_MIN_KMH = 0.1
 
 export interface TankState {
   /** Closing level of the PREVIOUS fleet day. */
@@ -79,19 +89,37 @@ export interface TankState {
    */
   consumedMl: number | null
   /**
-   * Mean level range per 30-minute window WHILE WORKING (engine on, moving or
-   * stationary), over the most recent TURBULENCE_WINDOWS of the day.
+   * Mean level range per 30-minute window WHILE THE UNIT IS MOVING, over the
+   * most recent TURBULENCE_WINDOWS.
    *
-   * The working counterpart of the parked-swing figure the drain trust gate
-   * uses (`getProbeProfile`): that one asks whether a probe can be believed at
-   * rest, this one describes what the machine is putting the fuel through —
-   * terrain, load and slope.
+   * ## This is for TREND LOGGING and must never reach theft detection
+   *
+   * A moving tank sloshes. The level jumps up and down and the provider logs
+   * some of those swings as drains and some as fillings, but they are artefacts
+   * of the fuel moving in the tank, not fuel entering or leaving it. The point
+   * of measuring them is to have a per-unit baseline that can be TRENDED — a
+   * probe whose slosh is drifting upward over weeks is telling you something
+   * about the machine or its mounting — not to judge any individual event.
+   *
+   * Nothing in `fuel-adjudication` reads this, and nothing should. The drain
+   * rules already have their own instrument for probe trustworthiness
+   * (`getProbeProfile`, measured while PARKED, which is a different question
+   * asked of different readings). Feeding a motion-slosh average into a theft
+   * verdict would let a machine excuse its own drains by working rough ground.
    */
   turbulenceMl: number | null
+  /**
+   * How many moving windows the average spans.
+   *
+   * Carried so a figure built on one window is not read as confidently as one
+   * built on eight — a trend line needs to say how much it is standing on.
+   */
+  motionWindows: number
 }
 
 export const UNKNOWN_TANK_STATE: TankState = {
-  initialMl: null, currentMl: null, consumedMl: null, turbulenceMl: null,
+  initialMl: null, currentMl: null, consumedMl: null,
+  turbulenceMl: null, motionWindows: 0,
 }
 
 /**
@@ -125,34 +153,41 @@ export function deriveTankState(
   previousDayCloseMl: number | null,
 ): TankState {
   const currentMl = closingLevel(dayReadings)
+  const { mean, windows } = motionTurbulence(dayReadings)
   return {
     initialMl:  previousDayCloseMl,
     currentMl,
     consumedMl: previousDayCloseMl != null && currentMl != null
       ? previousDayCloseMl - currentMl
       : null,
-    turbulenceMl: workingTurbulence(dayReadings),
+    turbulenceMl:  mean,
+    motionWindows: windows,
   }
 }
 
 /**
- * Mean level range per 30-minute window while the engine was on.
+ * Mean level range per 30-minute window while the unit was MOVING.
  *
- * Deliberately the SAME shape as the parked-swing measure in
- * `fuel-adjudication.service`'s `getProbeProfile` — 30-minute windows, range
- * within the window — so the two are directly comparable. High working with low
- * parked describes ground and load; high PARKED means the probe itself cannot
- * be trusted, and that already has a verdict gate.
+ * Motion, not engine-on. The fluctuation being measured is slosh — fuel moving
+ * about inside the tank — and that is caused by travel over ground, not by the
+ * engine turning. A machine idling stationary for an hour produces a flat
+ * level; the same machine crossing a rutted haul road produces the swings this
+ * average exists to track.
  *
- * Null without engine state. Turbulence is defined as what happens WHILE
- * WORKING, and a provider that does not say whether the engine was on cannot
- * answer that — two of the operator's five condemned units report it on zero
- * readings.
+ * Same 30-minute windows as `getProbeProfile`'s parked measure, so the two can
+ * be read side by side — but they answer different questions and must not be
+ * substituted for one another. Parked swing asks whether the probe can be
+ * believed at all and feeds a verdict; this is a trend line and feeds nothing.
+ *
+ * Null without speed. Turbulence is defined as what happens in motion, and a
+ * provider that does not say whether the unit was moving cannot answer it.
  */
-function workingTurbulence(readings: readonly LevelReading[]): number | null {
+function motionTurbulence(
+  readings: readonly LevelReading[],
+): { mean: number | null; windows: number } {
   const buckets = new Map<number, number[]>()
   for (const r of readings) {
-    if (r.engineOn !== true) continue
+    if (r.speedKmh == null || r.speedKmh < MOTION_MIN_KMH) continue
     const key = Math.floor(r.capturedAt.getTime() / (30 * 60_000))
     const b = buckets.get(key)
     if (b) b.push(r.fuelLevelMl)
@@ -165,6 +200,9 @@ function workingTurbulence(readings: readonly LevelReading[]): number | null {
     .map(([, v]) => Math.max(...v) - Math.min(...v))
     .slice(-TURBULENCE_WINDOWS)
 
-  if (ranges.length === 0) return null
-  return Math.round(ranges.reduce((a, b) => a + b, 0) / ranges.length)
+  if (ranges.length === 0) return { mean: null, windows: 0 }
+  return {
+    mean:    Math.round(ranges.reduce((a, b) => a + b, 0) / ranges.length),
+    windows: ranges.length,
+  }
 }
