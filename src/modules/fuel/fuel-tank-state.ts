@@ -119,17 +119,27 @@ export interface TankState {
    */
   turbulenceMl: number | null
   /**
-   * How many STOPS the moving average spans.
+   * How many STOPS the moving average actually spans.
    *
    * Carried so a figure built on one run is not read as confidently as one
    * built on eight — a trend line needs to say how much it is standing on.
+   * Reaches TURBULENCE_STOPS once the vehicle has made that many runs, however
+   * many days that took.
    */
   stopsAveraged: number
+  /**
+   * THIS day's per-run slosh values, in order — the raw T(r) of the formula.
+   *
+   * Returned so the caller can persist them. The moving average spans days, and
+   * averaging the last eight runs requires knowing what they were: a day's mean
+   * cannot be un-meaned back into its runs.
+   */
+  runSloshMl: number[]
 }
 
 export const UNKNOWN_TANK_STATE: TankState = {
   initialMl: null, currentMl: null, consumedMl: null,
-  turbulenceMl: null, stopsAveraged: 0,
+  turbulenceMl: null, stopsAveraged: 0, runSloshMl: [],
 }
 
 /**
@@ -161,9 +171,16 @@ export function closingLevel(readings: readonly LevelReading[]): number | null {
 export function deriveTankState(
   dayReadings: readonly LevelReading[],
   previousDayCloseMl: number | null,
+  /**
+   * Run slosh from BEFORE this day, oldest first, so the moving average can
+   * span midnight. Omitted, the average covers only this day's runs — which is
+   * a one- or two-run figure on most vehicles, not the eight it claims.
+   */
+  priorRunSloshMl: readonly number[] = [],
 ): TankState {
-  const currentMl = closingLevel(dayReadings)
-  const { mean, stops } = stopTurbulence(dayReadings)
+  const currentMl  = closingLevel(dayReadings)
+  const runSloshMl = dayRunSlosh(dayReadings)
+  const { mean, stops } = movingAverage([...priorRunSloshMl, ...runSloshMl])
   return {
     initialMl:  previousDayCloseMl,
     currentMl,
@@ -172,13 +189,33 @@ export function deriveTankState(
       : null,
     turbulenceMl:  mean,
     stopsAveraged: stops,
+    runSloshMl,
   }
 }
 
 /**
- * Turbulence: the moving average of per-stop slosh.
+ * TURB: the mean of the last TURBULENCE_STOPS run values.
  *
- * ## The formula
+ * The window is counted in RUNS and takes them wherever they fell. A vehicle
+ * that makes two runs a day reaches back four days for its eight; one that
+ * makes ten reaches back less than one. That is the point — the average
+ * describes the machine's recent journeys, not its recent calendar.
+ */
+export function movingAverage(runs: readonly number[]): { mean: number | null; stops: number } {
+  const recent = runs.slice(-TURBULENCE_STOPS)
+  if (recent.length === 0) return { mean: null, stops: 0 }
+  return {
+    mean:  Math.round(recent.reduce((a, b) => a + b, 0) / recent.length),
+    stops: recent.length,
+  }
+}
+
+/**
+ * T(r) for each run in this day — the per-run slosh values the moving average
+ * is later taken over. See `movingAverage` for the averaging step, which spans
+ * days rather than resetting at midnight.
+ *
+ * ## The formula, in full
  *
  * A RUN is the motion between two stops. A STOP is `STOP_MINUTES` of
  * continuous engine-off. Within a run, readings are grouped into 30-minute
@@ -191,7 +228,8 @@ export function deriveTankState(
  *                             of R(w)
  *
  *   moving average    TURB  = mean over the last N runs of T(r),
- *                             N = TURBULENCE_STOPS
+ *                             N = TURBULENCE_STOPS, taken across days —
+ *                             see `movingAverage`
  *
  * ## Why per WINDOW inside a run, and not the run's whole range
  *
@@ -208,6 +246,14 @@ export function deriveTankState(
  * yesterday dominate simply by being busier. Every run counts once, whatever
  * its length — the unit of the average is the journey, not the hour.
  *
+ * ## And why the window crosses midnight
+ *
+ * Measured 2026-08-13: vehicles average 1.3-2.0 runs a day. An eight-run
+ * average that restarted each night therefore spanned one or two runs — a daily
+ * figure wearing a moving average's name. The run values are persisted per day
+ * (`runSloshMl`) precisely so the window can reach back through them; a day's
+ * mean cannot be un-meaned into its runs.
+ *
  * ## This is a trend line and feeds nothing
  *
  * See the note on `TankState.turbulenceMl`. Slosh is not fuel entering or
@@ -217,9 +263,7 @@ export function deriveTankState(
  * Null without speed or engine state: runs cannot be cut without knowing when
  * the machine stopped, and slosh cannot be measured without knowing it moved.
  */
-function stopTurbulence(
-  readings: readonly LevelReading[],
-): { mean: number | null; stops: number } {
+function dayRunSlosh(readings: readonly LevelReading[]): number[] {
   // Cut the day into runs at each stop. A run accumulates every reading until
   // STOP_MINUTES of continuous engine-off closes it; the off readings
   // themselves are not part of the run, they are the stop.
@@ -246,15 +290,12 @@ function stopTurbulence(
   const perRun: number[] = []
   for (const run of runs) {
     const t = runSlosh(run)
-    if (t != null) perRun.push(t)
+    // Rounded here, because these are persisted and re-averaged later: keeping
+    // full precision in the array and rounding only at the end would make a
+    // stored row disagree with the same day recomputed.
+    if (t != null) perRun.push(Math.round(t))
   }
-
-  const recent = perRun.slice(-TURBULENCE_STOPS)
-  if (recent.length === 0) return { mean: null, stops: 0 }
-  return {
-    mean:  Math.round(recent.reduce((a, b) => a + b, 0) / recent.length),
-    stops: recent.length,
-  }
+  return perRun
 }
 
 /** T(r): mean of the 30-minute window ranges inside one run, moving only. */
