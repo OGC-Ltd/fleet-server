@@ -179,7 +179,7 @@ so an alert raised out of band is closed by the next ping.
 
 # OPEN — in priority order
 
-## A. ~~FSL columns~~ — DONE 2026-08-13
+## A. ~~FSL columns~~ — DONE 2026-08-13, extended 2026-08-14
 
 `Initial` / `Current` / `Turbulence` on the FSL table, and the table is scoped
 to one fleet DAY with a date picker (default today).
@@ -188,6 +188,44 @@ to one fleet DAY with a date picker (default today).
 latest reading, for today). Not a shift — a shift cannot be lined up with a
 date filter or added across dates. One day's Current IS the next day's Initial,
 verified on live data: 129 agree, 0 differ.
+
+### ⚠️ Every PAST day was empty until 2026-08-14 — a one-millisecond bug
+
+Reported by the operator: switching the picker to a previous day lost the
+mileage, the engine burn and the closing fuel level. It was not the new columns
+— it was the date picker, and it had been wrong since the picker shipped. Today
+was always fine, which is why it survived review.
+
+`asOfFromQuery` returned **midnight at the END of the requested day**. That
+instant belongs to the FOLLOWING fleet day, and `getFleetTankState` re-derives
+its own window from `fleetDayStart(asOf)` — so the window became `[asOf, asOf]`,
+zero milliseconds wide. Asking for the 13th:
+
+```
+asOf handed to service   2026-08-13T21:00:00.000Z   (= midnight EAT on the 14th)
+service dayStart         2026-08-13T21:00:00.000Z   (fleetDayStart of it = itself)
+window width             0 ms
+```
+
+Everything derived from the day's readings came back null: closing level,
+mileage, engine seconds, both expected burns, turbulence, stops.
+
+**It hid behind a plausible-looking symptom.** The previous-day lookup reaches
+back 24 hours from that same boundary, which spans exactly the day that was
+requested — so the table rendered the requested day's real closing level in the
+**Initial** column with Current blank. That reads as a telemetry gap, not an
+off-by-one, and it is the reason this went unnoticed.
+
+Fixed by ending the day at `dayStart + 86_400_000 - 1`, so `asOf` falls inside
+the day it names. `recordFuelTrends` had always bounded its day that way, which
+is why the persisted `fuel_daily_trends` rows were right the whole time while
+the live table was wrong — if you are ever comparing the two and they disagree,
+suspect the API's window before the data.
+
+Six regression tests in `tests/unit/fuel-tank-state-day.test.ts` pin the
+boundary, including that adjacent days do not overlap by even a millisecond —
+one day's Current is the next day's Initial, and a shared instant would
+double-count a reading into both.
 
 The closing level is a MEDIAN of the final 15 minutes, not the last reading. A
 one-sample error at the close would land in the day's consumption AND in
@@ -199,6 +237,82 @@ the busiest units.
 `consumed = initial − current` is what the TANK did, not what the machine
 burned: a refuelled day reads negative, and the fillings ledger is the other
 half. Folding them together would bury a measurement in a derivation.
+
+### The day's work: mileage, engine hours, and two expected burns
+
+Added 2026-08-14. Four more figures per vehicle per fleet day, and the split
+between them is the whole point:
+
+| field | kind | how |
+| --- | --- | --- |
+| `distanceM` | measurement | great-circle hops between fixes, dropping any over `MAX_HOP_KM` |
+| `engineSeconds` | measurement | gap between fixes charged to the earlier fix's engine state, capped at `MAX_ENGINE_GAP_SECONDS` |
+| `expectedBurnMl` | expectation | distance ÷ `KM_PER_LITRE` (2) |
+| `engineBurnMl` | expectation | engine hours × the vehicle's measured L/h |
+
+Both measurements come from ONE SQL pass over the day, and both need every fix
+— including the ones with no fuel reading that the levels query filters out.
+They are taken over different row sets on purpose: the hop chain uses only
+position-bearing fixes, so a fix with no lat/lng breaks no hop, while engine
+time uses every fix, because a unit reporting ignition without a position is
+still running its engine.
+
+**Engine hours is the primary basis, not distance.** `fuel-consumption-rates.md`
+is the measurement and it is emphatic: 215 of 310 probed units are plant or
+tractors, KASULU PLANT runs its engine on 58.3% of samples but moves in 19.3%
+and averages 1.5 km/h, and **position freezes at speed 0 on this telemetry**. A
+working excavator therefore reports ≈0 km while burning ~11 L/h — a distance
+model predicts nothing for it and the entire real burn presents as an
+unexplained drop. PLANT's measured 7.361 L/km is not a rate anyone can use; it
+is the arithmetic saying the denominator is wrong. Distance stays as the
+secondary check on road vehicles, where the two agree.
+
+Both expectations sit beside `consumedMl` and neither is derived from the
+other. The gap between them is the question worth asking.
+
+⚠️ **`MAX_ENGINE_GAP_SECONDS` (900) must stay equal to the 900 s that cuts a run
+in the rate derivation.** `engineBurnMl` is a rate calibrated under one
+time-integration convention multiplied by hours counted under another; if they
+diverge the product carries a silent bias. The cap errs SHORT on a sparse
+reporter, which is the safe direction — it understates the expectation rather
+than inventing burn to explain a drop with.
+
+### The rates, and why the fallback is a median
+
+`vehicle_fuel_rates`, one row per vehicle, written by
+`prisma/fuel-rates.ts` (`--apply`) and by `fuel:consumption-rates` **weekly**,
+02:40 UTC Sunday. Weekly because the derivation sorts the full fuel-carrying
+telemetry window against a 1 GB RDS, and a consumption rate does not move
+between Tuesday and Wednesday.
+
+The derivation is `fuel-consumption-rates.md` §6 unchanged: rates come from
+engine-on RUNS with no filling and no drain inside them, never from per-ping
+deltas, which accumulate probe noise into fictional consumption. A drain must
+never calibrate the expectation it will later be compared against.
+
+A vehicle under `MIN_RUNS` (3) falls back to the **median of its org+type's
+per-vehicle rates** — never the fleet aggregate. That aggregate is
+volume-weighted and a few heavy machines dominate it: Kasulu TRACTOR reads
+**12.47 L/h** aggregated against a per-vehicle median of **3.51**, and against
+Sukari's 4.71 the apparent 4x gap between the orgs reverses. Vehicles under
+`MIN_RUNS` contribute to nothing, not even the median — a rate too thin to
+trust for one machine is too thin to be evidence about twenty.
+
+No rate for a machine or its type gives `engineBurnMl = null`, **never 0**. A
+zero reads as "burned nothing" where the truth is "nobody has ever measured
+this one". The API echoes `engineRateLPerHour` and `engineRateBasis`
+(`vehicle` | `type`) so a borrowed rate is visible rather than implied.
+
+⚠️ **`RATE_WINDOW_DAYS` is 3 because 3 is what the box survives**, not because
+3 is right — 30 days is what per-vehicle rates should stand on, and coverage at
+3 days is 21 of 27 KASULU PLANT and 48 of 76 SUKARI tractors. `--days` widens
+it deliberately, with someone watching the instance.
+
+**None of this judges anything.** No verdict reads a rate or a burn.
+`fuel-consumption-rates.md` §5 lists why they could not carry one yet: three
+days of history, load not modelled, idle not separated from work, and rates
+derived from the very probe a detector would be watching — so a mis-calibrated
+probe yields a self-consistent wrong rate that cross-checks against nothing.
 
 ### Turbulence — the formula
 
@@ -351,11 +465,22 @@ be `noeviction`. Under memory pressure Redis may evict keys, and BullMQ's keys
 ARE the job state — so a scheduled job can silently vanish rather than fail
 loudly.
 
-This was survivable when the queue held one nightly prune. It now carries three
-jobs, two of them added today (`fuel:adjudicate-fillings` 04:05,
-`fuel:probe-health` 04:23), on a t3.micro that is already swapping. A silently
-dropped filling sweep leaves new fillings at PENDING, which then lets phantom
-fillings truncate drain evidence again — the exact failure §B exists to stop.
+This was survivable when the queue held one nightly prune. It now carries
+**five** jobs on a t3.micro that is already swapping:
+
+| job | when |
+| --- | --- |
+| `notifications:prune` | 03:17 UTC daily |
+| `fuel:adjudicate-fillings` | 04:05 UTC daily |
+| `fuel:probe-health` | 04:23 UTC daily |
+| `fuel:daily-trend` | 21:20 UTC daily |
+| `fuel:consumption-rates` | 02:40 UTC **Sunday** |
+
+A silently dropped filling sweep leaves new fillings at PENDING, which then lets
+phantom fillings truncate drain evidence again — the exact failure §B exists to
+stop. The rate job is the one that hides longest if it vanishes: it is weekly,
+so nothing looks wrong for seven days, and stale rates degrade quietly into
+expectations nobody re-checks. `derivedAt` on each row is how you tell.
 
 It is a Redis config change, not a code change, so it is out of scope for a
 commit here and wants an ops decision.

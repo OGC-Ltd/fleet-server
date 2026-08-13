@@ -76,6 +76,7 @@ export async function recordFuelTrends(asOf = new Date()): Promise<TrendOutcome[
           runSloshMl: r.runSloshMl,
           temporaryStops: r.temporaryStops, heavyStops: r.heavyStops,
           distanceM: r.distanceM, expectedBurnMl: r.expectedBurnMl,
+          engineSeconds: r.engineSeconds, engineBurnMl: r.engineBurnMl,
           computedAt: new Date(),
         },
         update: {
@@ -84,6 +85,7 @@ export async function recordFuelTrends(asOf = new Date()): Promise<TrendOutcome[
           runSloshMl: r.runSloshMl,
           temporaryStops: r.temporaryStops, heavyStops: r.heavyStops,
           distanceM: r.distanceM, expectedBurnMl: r.expectedBurnMl,
+          engineSeconds: r.engineSeconds, engineBurnMl: r.engineBurnMl,
           computedAt: new Date(),
         },
       })

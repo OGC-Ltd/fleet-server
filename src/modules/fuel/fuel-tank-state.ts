@@ -39,6 +39,8 @@
  * tank, and the events beside it say why it moved.
  */
 
+import { engineBurnMl, type RateBasis, type ResolvedRate } from './fuel-rate.js'
+
 /**
  * How much of the end of a day is averaged into its closing level.
  *
@@ -125,6 +127,26 @@ export const HEAVY_STOP_MINUTES = 60
  */
 export const KM_PER_LITRE = 2
 
+/**
+ * Longest gap between two readings that still counts as engine time, in
+ * seconds.
+ *
+ * Engine seconds are integrated between consecutive fixes and attributed to the
+ * EARLIER one's state, so a unit that reports engine-on and then goes silent
+ * for three hours would otherwise bank three hours of running it may never have
+ * done. Capped at fifteen minutes, the gap is charged at fifteen.
+ *
+ * Fifteen minutes because that is the cut `fuel-consumption-rates.md` §6 uses
+ * to break a run, and the two MUST agree: `engineBurnMl` is a rate derived
+ * under that convention multiplied by hours counted here. Integrating time one
+ * way and calibrating it another puts a silent bias straight into the product.
+ *
+ * The error runs SHORT on a sparse reporter, which is the safe direction — an
+ * under-counted hour understates the expectation rather than inventing burn to
+ * explain a drop with.
+ */
+export const MAX_ENGINE_GAP_SECONDS = 900
+
 export interface LevelReading {
   capturedAt:  Date
   fuelLevelMl: number
@@ -201,14 +223,48 @@ export interface TankState {
    * What the engine is EXPECTED to have burned over that distance, at
    * `KM_PER_LITRE`. An expectation, not a measurement — compare it against
    * `consumedMl`, which is what the tank actually did.
+   *
+   * The DISTANCE-based expectation of the pair; `engineBurnMl` is the other
+   * and is the better one for most of this fleet. See its note.
    */
   expectedBurnMl: number | null
+  /**
+   * Seconds the engine ran today. A MEASUREMENT, integrated from the telemetry
+   * — see `MAX_ENGINE_GAP_SECONDS` for how a silent stretch is treated.
+   *
+   * This is the quantity the fleet's work is actually made of: 215 of 310
+   * probed units are plant or tractors, which burn fuel while stationary, and
+   * position freezes at speed 0 on this telemetry — so a working excavator
+   * reports ≈0 km against a real shift's burn. Engine hours are what it has to
+   * show for the day.
+   */
+  engineSeconds: number | null
+  /**
+   * What the engine is expected to have burned over those hours, at the
+   * vehicle's measured litres-per-hour. The ENGINE-based half of the pair.
+   *
+   * The primary expectation for every type — `modules/fuel/fuel-rate` carries
+   * the reasoning and `docs/fuel-consumption-rates.md` the measurement. Null
+   * when no rate has been derived for the machine or its type, never zero: a
+   * zero would read as "burned nothing" where the truth is "we have never
+   * measured this one".
+   */
+  engineBurnMl: number | null
+  /** The rate `engineBurnMl` was computed at, echoed so the figure is auditable. */
+  engineRateLPerHour: number | null
+  /**
+   * Whether that rate is the vehicle's OWN or its org+type median. A borrowed
+   * rate is a weaker claim and the column should be able to say so.
+   */
+  engineRateBasis: RateBasis | null
 }
 
 export const UNKNOWN_TANK_STATE: TankState = {
   initialMl: null, currentMl: null, consumedMl: null,
   turbulenceMl: null, stopsAveraged: 0, runSloshMl: [],
   temporaryStops: 0, heavyStops: 0, distanceM: null, expectedBurnMl: null,
+  engineSeconds: null, engineBurnMl: null,
+  engineRateLPerHour: null, engineRateBasis: null,
 }
 
 /**
@@ -237,17 +293,31 @@ export function closingLevel(readings: readonly LevelReading[]): number | null {
  *
  * Pure: no clock, no database.
  */
-export function deriveTankState(
-  dayReadings: readonly LevelReading[],
-  previousDayCloseMl: number | null,
+export interface TankStateInputs {
   /**
    * Run slosh from BEFORE this day, oldest first, so the moving average can
    * span midnight. Omitted, the average covers only this day's runs — which is
    * a one- or two-run figure on most vehicles, not the eight it claims.
    */
-  priorRunSloshMl: readonly number[] = [],
+  priorRunSloshMl?: readonly number[]
   /** Ground covered today in metres, summed from the position fixes. */
-  distanceM: number | null = null,
+  distanceM?: number | null
+  /**
+   * Seconds the engine ran today, integrated from EVERY fix rather than the
+   * fuel-carrying ones — see the service, which measures it in the same pass as
+   * the distance and for the same reason.
+   */
+  engineSeconds?: number | null
+  /** This vehicle's resolved consumption rate, or null if it has none. */
+  rate?: ResolvedRate | null
+}
+
+export function deriveTankState(
+  dayReadings: readonly LevelReading[],
+  previousDayCloseMl: number | null,
+  {
+    priorRunSloshMl = [], distanceM = null, engineSeconds = null, rate = null,
+  }: TankStateInputs = {},
 ): TankState {
   const currentMl = closingLevel(dayReadings)
   const { runSloshMl, temporaryStops, heavyStops } = dayRuns(dayReadings)
@@ -269,6 +339,10 @@ export function deriveTankState(
     expectedBurnMl: distanceM == null
       ? null
       : Math.round((distanceM / 1000 / KM_PER_LITRE) * 1000),
+    engineSeconds,
+    engineBurnMl:       engineBurnMl(engineSeconds, rate),
+    engineRateLPerHour: rate?.lPerHour ?? null,
+    engineRateBasis:    rate?.basis    ?? null,
   }
 }
 

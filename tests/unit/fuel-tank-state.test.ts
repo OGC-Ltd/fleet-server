@@ -3,6 +3,7 @@ import {
   deriveTankState, closingLevel, CLOSE_WINDOW_MINUTES, TURBULENCE_MIN_SAMPLES,
   MOTION_MIN_KMH, TURBULENCE_STOPS, HEAVY_STOP_MINUTES, type LevelReading,
 } from '../../src/modules/fuel/fuel-tank-state.js'
+import type { ResolvedRate } from '../../src/modules/fuel/fuel-rate.js'
 
 const T0 = Date.parse('2026-08-13T04:00:00Z')
 /** One reading every 2 minutes. */
@@ -184,7 +185,7 @@ describe('deriveTankState', () => {
     const prior = [30_000, 30_000, 30_000]               // three earlier runs at 30 L
 
     const alone   = deriveTankState(today, 300_000)
-    const carried = deriveTankState(today, 300_000, prior)
+    const carried = deriveTankState(today, 300_000, { priorRunSloshMl: prior })
 
     expect(alone.stopsAveraged).toBe(1)
     expect(alone.turbulenceMl).toBe(10_000)
@@ -197,7 +198,7 @@ describe('deriveTankState', () => {
 
   it('never averages more than TURBULENCE_STOPS runs', () => {
     const prior = Array.from({ length: 40 }, () => 8_000)
-    const out = deriveTankState([], 300_000, prior)
+    const out = deriveTankState([], 300_000, { priorRunSloshMl: prior })
     expect(out.stopsAveraged).toBe(TURBULENCE_STOPS)
   })
 
@@ -242,7 +243,7 @@ describe('deriveTankState', () => {
 describe('mileage and expected burn', () => {
   it('converts distance to an expected burn at KM_PER_LITRE', () => {
     // "For every 2 km we expect 1 L." 40 km -> 20 L.
-    const out = deriveTankState([], 300_000, [], 40_000)
+    const out = deriveTankState([], 300_000, { distanceM: 40_000 })
     expect(out.distanceM).toBe(40_000)
     expect(out.expectedBurnMl).toBe(20_000)
   })
@@ -263,8 +264,59 @@ describe('mileage and expected burn', () => {
         capturedAt: at(i), fuelLevelMl: 250_000, engineOn: true, speedKmh: 20,
       })),
     ]
-    const out = deriveTankState(day, 300_000, [], 10_000)
+    const out = deriveTankState(day, 300_000, { distanceM: 10_000 })
     expect(out.expectedBurnMl).toBe(5_000)     // 10 km at 2 km/L
     expect(out.consumedMl).toBe(50_000)        // what the tank actually lost
+  })
+})
+
+describe('engine hours and engine burn', () => {
+  const rate = (lPerHour: number): ResolvedRate => ({ lPerHour, basis: 'vehicle', runs: 5 })
+
+  it('burns the measured rate over the hours the engine ran', () => {
+    // Two hours at 11.28 L/h — KASULU PLANT's measured aggregate.
+    const out = deriveTankState([], 300_000, { engineSeconds: 7_200, rate: rate(11.28) })
+    expect(out.engineSeconds).toBe(7_200)
+    expect(out.engineBurnMl).toBe(22_560)
+    expect(out.engineRateLPerHour).toBe(11.28)
+    expect(out.engineRateBasis).toBe('vehicle')
+  })
+
+  it('says nothing when the machine and its type have no measured rate', () => {
+    // Null, never zero. A zero reads as "burned nothing", where the truth is
+    // "nobody has ever measured this one".
+    const out = deriveTankState([], 300_000, { engineSeconds: 7_200, rate: null })
+    expect(out.engineSeconds).toBe(7_200)
+    expect(out.engineBurnMl).toBeNull()
+    expect(out.engineRateLPerHour).toBeNull()
+    expect(out.engineRateBasis).toBeNull()
+  })
+
+  it('reports a working excavator that covered no ground', () => {
+    // The case the whole engine-hours basis exists for. Position freezes at
+    // speed 0, so a machine that dug all day reports ~0 km: the distance
+    // expectation reads near zero against a real shift's burn, and only the
+    // engine-hours one describes what happened.
+    const out = deriveTankState([], 300_000, {
+      distanceM: 200, engineSeconds: 8 * 3_600, rate: rate(11.28),
+    })
+    expect(out.expectedBurnMl).toBe(100)        // 0.2 km at 2 km/L — near nothing
+    expect(out.engineBurnMl).toBe(90_240)       // 8 h at 11.28 L/h — the real shift
+  })
+
+  it('keeps both expectations, and neither is derived from the other', () => {
+    // A road vehicle, where the two bases are supposed to agree. They are still
+    // reported separately: the gap between them is the diagnostic.
+    const out = deriveTankState([], 300_000, {
+      distanceM: 100_000, engineSeconds: 4 * 3_600, rate: rate(6.98),
+    })
+    expect(out.expectedBurnMl).toBe(50_000)     // 100 km at 2 km/L
+    expect(out.engineBurnMl).toBe(27_920)       // 4 h at 6.98 L/h
+  })
+
+  it('says nothing about burn when the engine time is unknown', () => {
+    const out = deriveTankState([], 300_000, { engineSeconds: null, rate: rate(9) })
+    expect(out.engineSeconds).toBeNull()
+    expect(out.engineBurnMl).toBeNull()
   })
 })
