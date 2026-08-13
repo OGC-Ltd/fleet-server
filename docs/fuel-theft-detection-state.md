@@ -330,7 +330,66 @@ engine hours and engine burn. The case the basis exists for, in the data:
 An excavator working a face for 22 hours covers 9.7 km. The distance model
 prices that shift at under 5 L.
 
-### ⚠️ A dead ignition signal currently reads as "burned nothing"
+### Three defects found by measuring the deployed feature — all fixed 2026-08-14
+
+Shipping first and measuring after found three things, and they shared a
+shape: **a number that looked like a measurement and was not.** Recorded
+together because the pattern is the lesson, not the individual bugs.
+
+**1. Rates were bounded by DROP, never by RATE.** A run qualified on falling
+between 0.3 L and 200 L, so a twenty-minute run that fell 100 L implied
+**300 L/h** and passed every filter. It tracked tank size exactly as probe
+noise would:
+
+| unit | tank | derived | runs |
+| --- | --- | --- | --- |
+| `MUFINDI - DG 12` | 1696 L | **109.89 L/h** | 3 |
+| `MUFINDI - CTR 07` | 1081 L | 97.87 L/h | 1 |
+| `MUFINDI: CTR 23` | 1631 L | 32.29 L/h | **18** |
+
+A bigger tank makes a probe's proportional swing bigger in absolute litres, so
+the 200 L ceiling stops binding. `CTR 23` over 18 runs is the instructive one:
+not one bad afternoon, a probe reading high *consistently* — exactly the §5
+caveat about calibrating against the probe you will later compare with.
+`MAX_PLAUSIBLE_L_PER_HOUR` (40) now bounds per run AND on the aggregate.
+
+**2. The fallback was the dominant path and nobody had checked it.** **689 of
+815 active vehicles borrow a rate**; only 77 had their own. Two groups were
+serving a median of TWO machines — `KASULU UNSPECIFIED` at 4.42 and
+109.89 L/h, reaching 22 vehicles as ≈57 L/h.
+
+`MIN_GROUP_CONTRIBUTORS` (3) now applies to a group the bar `MIN_RUNS` applies
+to a vehicle, and **`UNSPECIFIED` is excluded outright** — it is the ABSENCE of
+a type, so grouping by it groups by ignorance. Surviving groups report their
+`spread`, because clearing the bar is not the same as being coherent.
+
+**3. The bound was in the code and not in the data.** Introducing the ceiling
+stopped the three impossible rates being *regenerated*, which is not the same
+as removing them: the derivation only upserts, so they survived and `DG 12`
+went on serving 109.89 L/h. To an upsert, a row missing from the output is
+indistinguishable from a machine idle all week — and keeping those is
+deliberate. Impossible rates are now pruned explicitly.
+
+⚠️ **Any future rule that narrows what the derivation accepts must also prune
+what it already stored.** This will recur otherwise.
+
+#### After the fixes, same day, live
+
+| | before | after |
+| --- | --- | --- |
+| served rates | up to 109.89 L/h | **1.18 – 27.76 L/h** |
+| UNSPECIFIED borrowing a group rate | 22 | **0** |
+| rows stored above the bound | 3 | **0** |
+
+KASULU, 2026-08-13: 133 vehicles, all with a closing level and mileage; 121
+with engine hours, 115 with an engine burn (65 own rate, 61 borrowed).
+
+⚠️ **48 of 133 borrow from a group spanning more than 4x.** That is the
+honesty gap that remains: the rate is not wrong so much as weakly evidenced,
+and `engineRateSpread` exists so the UI can mark it provisional. The real
+answer is behavioural grouping — see the open item below.
+
+### ~~A dead ignition signal reads as "burned nothing"~~ — FIXED 2026-08-14
 
 Found while verifying, NOT yet fixed. **21 of 133 KASULU vehicles reported zero
 engine seconds** for 2026-08-13, and 20 of those still reported distance —
@@ -348,14 +407,23 @@ its ignition"*, and `engineBurnMl` then renders **0.0 L** — the exact failure
 mode this module rejects everywhere else, where a rate we do not have gives
 `null` and never a zero. A zero here claims a measurement.
 
-The fix is the same shape as the probe-health sweep: a unit that never reports
-`engineOn` across a window has an ABSENT signal, and absent must give `null`
-burn rather than `0`. It cannot be decided from one day's rows alone — a
-genuinely parked machine looks identical inside the day — so it needs the
-history check, which is why it is written down here rather than guessed at.
+**Speed is the independent witness, and it settles this without any history
+query.** Speed does not come from the ignition wire, so a vehicle that MOVED is
+a vehicle whose engine ran, whatever the flag said. `resolveEngineSeconds`:
 
-Until then, read a 0.0 L engine burn as "unconfirmed", and note it also drags
-any fleet total down by however much those units actually burned.
+- moved, and never reported engine-on → the flag is **contradicted**; engine
+  time is unknown, so `null`
+- never moved, and never reported engine-on → **consistent**; it stood still,
+  and `0` is a real measurement worth showing
+
+The second case is why this is not simply "null whenever the total is zero" —
+a genuinely parked machine burned nothing and should say so. `MOTION_MIN_KMH`
+is the same 1 km/h the turbulence rule uses, so a stationary machine's fix
+wandering cannot void a real zero.
+
+Live on 2026-08-13: **12 units voided, 9 kept a real zero** — the
+discrimination the whole rule exists for. `MUFINDI: LMV 05` covered **206.8 km**
+with the flag silent, which is not a parked machine and not GPS drift.
 
 **None of this judges anything.** No verdict reads a rate or a burn.
 `fuel-consumption-rates.md` §5 lists why they could not carry one yet: three
@@ -452,6 +520,45 @@ third-largest category at 438 rows. Mirror `judgeDrain`: a real filling shows a
 sustained RISE, noise shows a spike that falls back. There is a spawned task
 carrying the full brief.
 
+## B2. Behavioural grouping, and the correlation study behind it — NOT STARTED
+
+The fallback guards above stop the worst failures; they do not fix the cause.
+**Most vehicles borrow a rate, and the thing they borrow it by — `vehicle_type`
+— is provider metadata, not a measurement.** 22 KASULU units are `UNSPECIFIED`
+and now correctly get nothing at all, which is honest but not useful.
+
+The right key is behaviour: for each vehicle, over its own history, does
+distance or engine-hours better explain its burn? A unit that tracks kilometres
+is a road vehicle whatever the registry says, and one that tracks hours is
+plant. That also gives `UNSPECIFIED` and `COMPANY_VEHICLE` a real home instead
+of a label-shaped hole.
+
+**Measure before building this.** The design above was shipped and then
+measured, which is how the three defects were found; do it the other way here.
+The study is per vehicle: correlate netted daily consumption against distance
+and against engine hours, and compare how tightly each predicts.
+
+⚠️ **It has a prerequisite.** `engine_seconds` only exists for days written
+since 2026-08-14, so the ~14 days of history in `fuel_daily_trends` are blank
+for it. `prisma/fuel-trends.ts` must backfill first — **oldest-first**, for the
+reason in §A — and that is 14 days × 2 orgs of full day scans against a 1 GB
+instance, so it wants watching rather than firing off.
+
+### Netting fillings to extend coverage — worth doing, with one caveat
+
+To learn a rate from whole days rather than runs, `consumed = initial − current`
+has to have refuelling added back, and **only `verdictReason = 'level-rose'`
+fillings may be used** — the raw Wialon ledger carries 307 rows claiming
+13,075 L against tanks that FELL 3,689 L, and those would poison every rate
+they touched. §B is what makes this possible.
+
+The caveat: the current run-based derivation excludes runs containing a
+**drain**, and a day-based one must exclude drain-carrying days too. A rate
+learned from days containing drains is inflated by the very fuel that went
+missing, which then raises the expectation and helps hide the next one. Use
+netting to REACH the units the runs method cannot (46 of 121 are still under
+`MIN_RUNS`), not to replace it.
+
 ## C. Remove MUFINDI units that "never appear on Controltech"
 
 Asked for; **cannot be done without a rule.** The obvious test — a vehicle in
@@ -477,6 +584,23 @@ visible in Controltech that is not in our data.
 
 **"Remove" should mean `isActive = false`, not deletion** — the schema comment
 says exactly that, and trips/alerts/drains and 5.5M telemetry rows FK these.
+
+## B3. The dash still shows none of this, and one label is now wrong
+
+`SensorPanel.jsx` reads `expectedBurnMl` only. `engineSeconds`, `engineBurnMl`,
+`engineRateLPerHour`, `engineRateBasis` and `engineRateSpread` are all served
+and none are drawn.
+
+⚠️ **The column the dash labels "Engine burn" is fed by `expectedBurnMl` —
+distance ÷ 2 km/L.** The server now also has a field literally called
+`engineBurnMl` meaning engine-hours × L/h, which is a different quantity.
+Whoever wires this WILL cross them. Settle it first: label them
+**"Expected (km)"** and **"Expected (hrs)"**, or rename the server field.
+
+The basis and spread are worth drawing, not just the number — 48 of 133
+vehicles borrow from a group spanning over 4x, and a borrowed rate presented
+identically to a measured one is the same category of lie this module keeps
+finding.
 
 ## D. Online/offline state classification
 
