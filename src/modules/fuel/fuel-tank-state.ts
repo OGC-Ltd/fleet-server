@@ -257,6 +257,16 @@ export interface TankState {
    * rate is a weaker claim and the column should be able to say so.
    */
   engineRateBasis: RateBasis | null
+  /**
+   * For a borrowed rate, how far apart the lending group's members are.
+   *
+   * Most vehicles borrow — 685 of 815 — so this is the common case rather than
+   * the exception, and the groups are not equally trustworthy: KASULU PLANT
+   * spans 1.5x across 21 machines, while SUKARI TRACTOR spans 6.8x across 8
+   * that stand in for 481. Surfaced so the UI can mark a wide group as
+   * provisional rather than presenting every borrowed rate identically.
+   */
+  engineRateSpread: number | null
 }
 
 export const UNKNOWN_TANK_STATE: TankState = {
@@ -264,7 +274,7 @@ export const UNKNOWN_TANK_STATE: TankState = {
   turbulenceMl: null, stopsAveraged: 0, runSloshMl: [],
   temporaryStops: 0, heavyStops: 0, distanceM: null, expectedBurnMl: null,
   engineSeconds: null, engineBurnMl: null,
-  engineRateLPerHour: null, engineRateBasis: null,
+  engineRateLPerHour: null, engineRateBasis: null, engineRateSpread: null,
 }
 
 /**
@@ -293,6 +303,51 @@ export function closingLevel(readings: readonly LevelReading[]): number | null {
  *
  * Pure: no clock, no database.
  */
+/**
+ * Engine seconds for the day, or null when the ignition signal is contradicted.
+ *
+ * ## The problem: a zero that means two different things
+ *
+ * `engineSeconds = 0` says the machine's engine never ran. On this fleet it
+ * also says the ignition wire is dead, and those are not the same claim.
+ * Measured 2026-08-14: of 357 vehicles reporting telemetry over seven days,
+ * **33 never once reported `engineOn`, and 27 of those sent 500+ pings**.
+ * `MUFINDI - EX 06` sent **15,357 pings without a single engine-on reading**;
+ * `MUFINDI: EX 07` is already recorded elsewhere in this codebase as reporting
+ * it on 0 of 11,965. Those machines did not rest for a week.
+ *
+ * Left alone, they render an engine burn of **0.0 L** — a zero claiming to be a
+ * measurement, which is the one thing this module refuses everywhere else.
+ *
+ * ## Speed is the independent witness
+ *
+ * The day's own rows can settle it without a history query, because SPEED does
+ * not come from the ignition wire. A vehicle that moved is a vehicle whose
+ * engine ran, whatever its ignition flag said. So:
+ *
+ * - moved, and never reported engine-on → the flag is CONTRADICTED, and the
+ *   day's engine time is unknown rather than zero. Null.
+ * - never moved, and never reported engine-on → consistent. It stood still and
+ *   0 is a real measurement worth showing.
+ *
+ * The second case is why this is not simply "null whenever the total is zero":
+ * a genuinely parked machine has burned nothing and should say so.
+ *
+ * `MOTION_MIN_KMH` is the same 1 km/h the turbulence rule uses, so a stationary
+ * machine's fix wandering cannot masquerade as movement and void a real zero.
+ */
+export function resolveEngineSeconds(
+  measuredSeconds: number | null,
+  /** Readings in the day that reported the engine ON. */
+  engineOnReadings: number,
+  /** Readings in the day taken at MOTION_MIN_KMH or above. */
+  movingReadings: number,
+): number | null {
+  if (measuredSeconds == null) return null
+  if (engineOnReadings === 0 && movingReadings > 0) return null
+  return measuredSeconds
+}
+
 export interface TankStateInputs {
   /**
    * Run slosh from BEFORE this day, oldest first, so the moving average can
@@ -343,6 +398,7 @@ export function deriveTankState(
     engineBurnMl:       engineBurnMl(engineSeconds, rate),
     engineRateLPerHour: rate?.lPerHour ?? null,
     engineRateBasis:    rate?.basis    ?? null,
+    engineRateSpread:   rate?.spread   ?? null,
   }
 }
 

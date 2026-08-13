@@ -51,6 +51,40 @@ export const RATE_WINDOW_DAYS = 3
 /** Longest gap that can sit inside one run, in seconds. Beyond it the run cuts. */
 const MAX_RUN_GAP_SECONDS = 900
 
+/**
+ * Litres per hour above which a figure is not a machine burning fuel.
+ *
+ * The derivation bounds a run's DROP — 0.3 L to 200 L — but bounding a drop is
+ * not the same as bounding a rate, and until 2026-08-14 nothing bounded the
+ * rate. A twenty-minute run that falls 100 L implies **300 L/h** and passed
+ * every filter.
+ *
+ * That is not hypothetical, and it correlates with tank size exactly as you
+ * would expect if the cause is probe noise rather than fuel:
+ *
+ * | unit | tank | derived |
+ * | --- | --- | --- |
+ * | `MUFINDI - DG 12` | 1696 L | **109.89 L/h** |
+ * | `MUFINDI - CTR 07` | 1081 L | 97.87 L/h |
+ * | `MUFINDI: CTR 23` | 1631 L | 32.29 L/h over 18 runs |
+ *
+ * A bigger tank makes a probe's proportional swing bigger in absolute litres,
+ * so the 200 L drop ceiling stops constraining anything. `CTR 23` is the
+ * instructive one: 18 runs, so this is not one bad afternoon but a probe
+ * reading high consistently — which is precisely the failure
+ * `fuel-consumption-rates.md` §5 warns about, a rate derived from the same
+ * probe it will be compared against, self-consistent and wrong.
+ *
+ * Forty is a PLAUSIBILITY bound, not a model: the largest measured type
+ * aggregate on this fleet is 12.47 L/h (Kasulu TRACTOR) and an excavator runs
+ * about 11, so 40 is over three times the heaviest class anyone has measured.
+ * It excludes 3 of 124 derived rates and nothing that looks like a machine.
+ *
+ * Applied PER RUN as well as to the result, so one impossible run is discarded
+ * instead of dragging an otherwise sound vehicle over the line.
+ */
+export const MAX_PLAUSIBLE_L_PER_HOUR = 40
+
 export interface RateDerivationOptions {
   /** Days of telemetry to read. Defaults to RATE_WINDOW_DAYS — read its note. */
   days?:  number
@@ -112,6 +146,10 @@ export async function deriveFuelRates(
       SELECT r.*, (r.l0 - r.l1) / 1000.0 AS litres FROM runs r
        WHERE r.eng AND r.n >= 10 AND r.hours >= 0.33
          AND r.l0 > r.l1 AND (r.l0 - r.l1) BETWEEN 300 AND 200000
+         -- Bound the implied RATE, not only the drop. r.hours >= 0.33 above
+         -- makes the division safe. See MAX_PLAUSIBLE_L_PER_HOUR: a 20-minute
+         -- run falling 100 L implies 300 L/h and cleared every other filter.
+         AND ((r.l0 - r.l1) / 1000.0) / r.hours <= ${MAX_PLAUSIBLE_L_PER_HOUR}
          AND NOT EXISTS (SELECT 1 FROM fuel_fillings f
                           WHERE f.vehicle_id = r.vehicle_id AND f.filled_at BETWEEN r.t0 AND r.t1)
          AND NOT EXISTS (SELECT 1 FROM fuel_thefts t
@@ -120,7 +158,15 @@ export async function deriveFuelRates(
     SELECT c.vehicle_id, count(*) AS runs,
            round((sum(c.litres) / nullif(sum(c.hours), 0))::numeric, 2)::float8 AS l_per_hour,
            round((sum(c.litres) / nullif(sum(c.km),    0))::numeric, 3)::float8 AS l_per_km
-      FROM clean c GROUP BY 1 HAVING sum(c.hours) > 0 ORDER BY 2 DESC`
+      FROM clean c GROUP BY 1
+     HAVING sum(c.hours) > 0
+        -- Backstop: a vehicle whose every run is individually plausible can
+        -- still aggregate to something that is not. Excluding it here is
+        -- deliberate — no rate at all beats a wrong one, because the fallback
+        -- below it (its type's median) is built from machines that were
+        -- measured properly.
+        AND sum(c.litres) / sum(c.hours) <= ${MAX_PLAUSIBLE_L_PER_HOUR}
+     ORDER BY 2 DESC`
 
   const derived = rows
     .map(r => ({
