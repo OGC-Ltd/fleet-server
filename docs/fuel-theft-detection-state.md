@@ -179,41 +179,66 @@ so an alert raised out of band is closed by the next ping.
 
 # OPEN — in priority order
 
-## A. FSL columns: initial/current fuel, and working turbulence
+## A. ~~FSL columns~~ — DONE 2026-08-13
 
-Asked for at the end of the session, **not started**. As I understood it:
+`Initial` / `Current` / `Turbulence` on the FSL table, and the table is scoped
+to one fleet DAY with a date picker (default today).
 
-1. `Tank` stops showing `current / capacity` and becomes the **initial** fuel
-   level in litres — the level at the *previous* stop.
-2. A **new column** holds the **current** level in litres.
-3. At each stop, roll the pair: `initial ← old current`, `current ← new
-   reading`; the difference is fuel consumed since the last stop.
-4. A **moving-average turbulence** figure measured while the unit was *working*
-   — engine on, whether moving or stationary.
+**Initial is the previous day's closing level; Current is this day's** (the
+latest reading, for today). Not a shift — a shift cannot be lined up with a
+date filter or added across dates. One day's Current IS the next day's Initial,
+verified on live data: 129 agree, 0 differ.
 
-**Three decisions the operator must make before this can be built:**
+The closing level is a MEDIAN of the final 15 minutes, not the last reading. A
+one-sample error at the close would land in the day's consumption AND in
+tomorrow's opening balance. `PREV_CLOSE_SAMPLES` must exceed the densest
+15 minutes any vehicle produces — measured p50 2, p99 77, **densest 376**, so
+it is 600. It was 60 first, which was above p99 and still silently wrong for
+the busiest units.
 
-- **What is a "stop"?** Engine off? Speed 0 held for N minutes? Arrival in a
-  geofence? This defines the whole column — a dozer that idles all day never
-  stops under one definition and stops constantly under another. Most important
-  of the three.
-- **Does capacity disappear?** They asked for `current / capacity` earlier that
-  same day and that is what shipped (`318 / 335 L`). If `Tank` becomes initial,
-  is capacity dropped or kept elsewhere?
-- **Turbulence over what window?** Last N stops, last 24h, or since the last
-  refill.
+`consumed = initial − current` is what the TANK did, not what the machine
+burned: a refuelled day reads negative, and the fillings ledger is the other
+half. Folding them together would bury a measurement in a derivation.
 
-**Most of the machinery already exists.** `getProbeProfile` in
-`fuel-adjudication.service.ts` measures level swing per 30-minute window but
-only while PARKED (to judge probe trustworthiness). The request is the same
-measure while WORKING — nearly the same query. The two together are genuinely
-informative: swing while parked means the probe is unreliable, swing while
-working describes terrain and load.
+### Turbulence — the formula
 
-The consumption half is the more valuable one and connects to
-`fuel-consumption-rates.md`: consumption must be per-vehicle ENGINE-HOURS, not
-km, because 215 of 310 probed units are plant or tractors. A stop-to-stop delta
-is a far better input than anything computed today.
+Slosh while MOVING, kept for trend logging in `fuel_daily_trends`.
+
+```
+A RUN is the motion between two stops. A STOP is STOP_MINUTES (15) of
+continuous engine-off. Within a run, readings group into 30-minute windows;
+a window counts only with >= TURBULENCE_MIN_SAMPLES readings at
+speedKmh >= MOTION_MIN_KMH (0.1).
+
+  window range    R(w) = max(level in w) - min(level in w)
+  run turbulence  T(r) = mean of R(w) over qualifying windows in run r
+  moving average  TURB = mean of T(r) over the last TURBULENCE_STOPS (8) runs,
+                         WHEREVER THEY FELL - the window crosses midnight
+```
+
+Three choices, each of which was wrong once before it was right:
+
+- **Per window inside a run**, not the run's whole range: a two-hour haul's
+  max−min measures the burn plus the slosh, and mostly the burn.
+- **Per run**, not per clock interval: the unit is the journey. Four windows of
+  20 L and one of 60 L average to 40 L per-run, 28 L per-window. A test pins it.
+- **Across days**, not resetting at midnight: vehicles average **1.3-2.0 runs a
+  day**, so an eight-run average that restarted nightly spanned one or two runs.
+  Each day stores its individual run values (`runSloshMl`) because a day's mean
+  cannot be un-meaned back into its runs.
+
+⚠️ **Backfill oldest-first.** `prisma/fuel-trends.ts` walks forwards for this
+reason: a day computed before its predecessors finds nothing behind it and
+reports a one-run average — the exact defect the carried window fixes.
+
+⚠️ **This feeds NOTHING that judges.** `fuel-adjudication` does not read
+`fuel_daily_trends` and must not. The drain rules have their own probe
+instrument (`getProbeProfile`, measured while PARKED). A motion-slosh average
+reaching a theft verdict would let a machine excuse its own drains by working
+rough ground. Stated at the type, the model and the migration.
+
+Written daily at 21:20 UTC (00:20 EAT — into the NEXT day, so the day recorded
+has finished). Idempotent on (vehicleId, day).
 
 ## B. ~~The fillings ledger is not adjudicated at all~~ — DONE 2026-08-11
 
