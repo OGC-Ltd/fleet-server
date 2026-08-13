@@ -12,8 +12,19 @@
 import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import {
-  deriveTankState, UNKNOWN_TANK_STATE, type LevelReading, type TankState,
+  closingLevel, deriveTankState, UNKNOWN_TANK_STATE,
+  type LevelReading, type TankState,
 } from './fuel-tank-state.js'
+
+/**
+ * Readings pulled per vehicle to reconstruct the previous day's close.
+ *
+ * A comfortable over-fetch of the ~30 that CLOSE_WINDOW_MINUTES spans at this
+ * fleet's ping rate. `closingLevel` applies the real time window to whatever it
+ * is handed, so over-fetching is free and under-fetching would silently change
+ * the answer.
+ */
+const PREV_CLOSE_SAMPLES = 60
 
 export interface VehicleTankState extends TankState {
   vehicleId: string
@@ -40,26 +51,55 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
     orderBy: { capturedAt: 'asc' },
   })
 
-  // The PREVIOUS day's closing level, as one indexed lookup per vehicle rather
-  // than another 24 hours of rows. DISTINCT ON walks the
-  // (vehicle_id, captured_at) index backwards and stops at the first hit.
+  // The PREVIOUS day's closing level — the LAST FEW readings per vehicle, not
+  // one, and not another 24 hours of rows either.
   //
-  // A single reading, not a median like the day's own close: the medianised
-  // value is what this vehicle's own row carried yesterday, and re-deriving it
-  // here from a second window would let today's `initial` disagree with
-  // yesterday's `current`. Reconciling down a week matters more than smoothing
-  // one endpoint twice.
+  // It has to be the last few, because `closingLevel` medianises the final
+  // CLOSE_WINDOW_MINUTES and this value must come out identical to the
+  // `currentMl` that vehicle's own row showed yesterday. Otherwise one day's
+  // Current and the next day's Initial disagree and the column stops
+  // reconciling — which is the whole reason the pair is a day boundary. A
+  // single reading, which is what this did first, cannot match a median.
+  //
+  // `PREV_CLOSE_SAMPLES` is a comfortable over-fetch of the ~30 readings
+  // CLOSE_WINDOW_MINUTES spans at this fleet's ping rate; `closingLevel` then
+  // applies the real time window to whatever it is handed, so over-fetching is
+  // free and under-fetching would silently change the answer.
+  //
+  // LATERAL rather than a 24-hour scan: it walks the (vehicle_id, captured_at)
+  // index backwards per vehicle and stops after LIMIT rows.
   const prevStart = new Date(dayStart.getTime() - 24 * 3_600_000)
-  const prevRows = await prisma.$queryRaw<Array<{ vehicle_id: string; fuel_level_ml: number }>>`
-    SELECT DISTINCT ON (t.vehicle_id) t.vehicle_id, t.fuel_level_ml
-      FROM vehicle_telemetries t
-      JOIN vehicles v ON v.id = t.vehicle_id
-     WHERE v.organisation_id = ${orgId}
-       AND t.captured_at >= ${prevStart}
-       AND t.captured_at <  ${dayStart}
-       AND t.fuel_level_ml IS NOT NULL
-     ORDER BY t.vehicle_id, t.captured_at DESC`
-  const prevClose = new Map(prevRows.map(r => [r.vehicle_id, r.fuel_level_ml]))
+  const prevRows = await prisma.$queryRaw<Array<{
+    vehicle_id: string; captured_at: Date; fuel_level_ml: number
+  }>>`
+    SELECT v.id AS vehicle_id, t.captured_at, t.fuel_level_ml
+      FROM vehicles v
+      CROSS JOIN LATERAL (
+        SELECT tt.captured_at, tt.fuel_level_ml
+          FROM vehicle_telemetries tt
+         WHERE tt.vehicle_id = v.id
+           AND tt.captured_at >= ${prevStart}
+           AND tt.captured_at <  ${dayStart}
+           AND tt.fuel_level_ml IS NOT NULL
+         ORDER BY tt.captured_at DESC
+         LIMIT ${PREV_CLOSE_SAMPLES}
+      ) t
+     WHERE v.organisation_id = ${orgId}`
+
+  const prevByVehicle = new Map<string, LevelReading[]>()
+  for (const r of prevRows) {
+    const s = { capturedAt: r.captured_at, fuelLevelMl: r.fuel_level_ml }
+    const list = prevByVehicle.get(r.vehicle_id)
+    if (list) list.push(s)
+    else prevByVehicle.set(r.vehicle_id, [s])
+  }
+  const prevClose = new Map<string, number>()
+  for (const [id, rows] of prevByVehicle) {
+    // The LATERAL returns them newest-first; closingLevel expects ascending.
+    rows.sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime())
+    const close = closingLevel(rows)
+    if (close != null) prevClose.set(id, close)
+  }
 
   const byVehicle = new Map<string, LevelReading[]>()
   for (const r of dayRows) {
