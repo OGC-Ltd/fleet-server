@@ -99,6 +99,8 @@ export interface RateDerivationOutcome {
   /** Of those, the ones clearing MIN_RUNS — the rates that will actually be used. */
   usable:     number
   stored:     number
+  /** Stored rows deleted for exceeding MAX_PLAUSIBLE_L_PER_HOUR. See below. */
+  pruned:     number
 }
 
 /**
@@ -192,8 +194,28 @@ export async function deriveFuelRates(
     }
   }
 
+  // Delete stored rates the current rules would no longer produce.
+  //
+  // Upserting alone is not enough, and the gap bit on 2026-08-14: when
+  // MAX_PLAUSIBLE_L_PER_HOUR was introduced, the three impossible rates simply
+  // stopped being regenerated — and therefore survived untouched, so
+  // `MUFINDI - DG 12` went on serving 109.89 L/h as its OWN rate. A row that
+  // vanishes from the derivation's output is indistinguishable, to an upsert,
+  // from a machine that was idle all week.
+  //
+  // Idleness is why rows are kept rather than truncated each run, and that is
+  // still right. But no window and no idleness can make an impossible rate
+  // correct, so this one class is pruned explicitly.
+  let pruned = 0
+  if (apply) {
+    const { count } = await prisma.vehicleFuelRate.deleteMany({
+      where: { lPerHour: { gt: MAX_PLAUSIBLE_L_PER_HOUR } },
+    })
+    pruned = count
+  }
+
   const usable = derived.filter(r => r.runs >= MIN_RUNS).length
-  const out: RateDerivationOutcome = { windowDays: days, derived: derived.length, usable, stored }
+  const out: RateDerivationOutcome = { windowDays: days, derived: derived.length, usable, stored, pruned }
   logger.info(out, 'Fuel consumption rates derived')
   return out
 }
