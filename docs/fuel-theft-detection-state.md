@@ -585,22 +585,60 @@ visible in Controltech that is not in our data.
 **"Remove" should mean `isActive = false`, not deletion** — the schema comment
 says exactly that, and trips/alerts/drains and 5.5M telemetry rows FK these.
 
-## B3. The dash still shows none of this, and one label is now wrong
+## B3. ~~The dash shows none of this, and one label is wrong~~ — DONE 2026-08-14
 
-`SensorPanel.jsx` reads `expectedBurnMl` only. `engineSeconds`, `engineBurnMl`,
-`engineRateLPerHour`, `engineRateBasis` and `engineRateSpread` are all served
-and none are drawn.
+The FSL table now reads:
 
-⚠️ **The column the dash labels "Engine burn" is fed by `expectedBurnMl` —
-distance ÷ 2 km/L.** The server now also has a field literally called
-`engineBurnMl` meaning engine-hours × L/h, which is a different quantity.
-Whoever wires this WILL cross them. Settle it first: label them
-**"Expected (km)"** and **"Expected (hrs)"**, or rename the server field.
+**Initial · Current · Mileage (km) · Expected (km) · Engine hrs ·
+Expected (hrs) · Turbulence**
 
-The basis and spread are worth drawing, not just the number — 48 of 133
-vehicles borrow from a group spanning over 4x, and a borrowed rate presented
-identically to a measured one is the same category of lie this module keeps
-finding.
+Each expectation sits beside the measurement that drives it, and both sit
+beside Initial−Current, which is what the tank actually did.
+
+**The label collision is settled by naming both for their driver.** The column
+was called "Engine burn" when it was the only one and it is the DISTANCE
+expectation; the server field `engineBurnMl` means engine-hours × L/h. Anyone
+wiring the two would have crossed them. The server field names are unchanged —
+renaming `expectedBurnMl` would have opened a window where whichever side
+deployed first read a field the other did not serve — so the disambiguation
+lives in the labels, where the operator reads it.
+
+One live row carries the whole argument for the second basis. `MUFINDI - EX 2x`
+on 2026-08-13:
+
+| | |
+| --- | --- |
+| covered | **0.1 km** |
+| engine ran | **1.6 h** |
+| Expected (km) | **0.0 L** |
+| Expected (hrs) | **20.1 L** |
+| Initial − Current | 142 → 119 = **23 L** |
+
+The distance model prices a real shift at nothing. The engine-hours model
+lands within 3 L of what the tank did — and neither was derived from the
+other, so that agreement is evidence rather than construction.
+
+**A borrowed rate is drawn as one.** It renders muted with a leading `≈`, and
+its tooltip names whose median and how many machines — "BORROWED from the
+median of 21 machines of the same type", against "measured on THIS unit over
+9 runs" for its own. Most vehicles borrow; presenting a borrowed figure
+identically to a measured one overstates what is known, which is the failure
+this module keeps finding in itself.
+
+**Engine hrs goes blank, not 0**, when the unit moved without ever reporting
+ignition, with a tooltip saying exactly that.
+
+### The wide-group question, settled
+
+48 of 133 vehicles borrow from a group spanning more than 4x. The options were
+to reject those rates or to mark them, and marking wins: rejecting would strip
+the column from a third of the fleet to avoid a figure that is not wrong so
+much as weakly evidenced. `engineRateSpread` carries the width and the tooltip
+says "treat this as provisional" past 4x.
+
+That is a stopgap and should be read as one. The real fix is behavioural
+grouping (§B2) — the reason so many vehicles borrow is that `vehicle_type` is
+provider metadata, and a group keyed on it is only accidentally coherent.
 
 ## D. Online/offline state classification
 
