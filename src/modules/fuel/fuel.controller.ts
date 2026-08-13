@@ -2,6 +2,7 @@ import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as service from './fuel.service.js'
 import { getFleetTankState } from './fuel-tank-state.service.js'
+import { fleetDayStart } from '../../lib/provider-time.js'
 import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery } from './fuel.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -55,6 +56,28 @@ export const createTheft: RequestHandler = async (req, res, next) => {
  */
 export const listTankState: RequestHandler = async (req, res, next) => {
   try {
-    sendSuccess(res, await getFleetTankState(p(req, 'orgId')))
+    // `?date=YYYY-MM-DD` reads the tank as it stood at the END of that fleet
+    // day, so the FSL table's Initial/Current pair matches the events it is
+    // shown beside. Omitted, or today, means now — a day still in progress has
+    // no end, and pinning it to midnight would freeze the live column.
+    const asOf = asOfFromQuery(req.query['date'])
+    sendSuccess(res, await getFleetTankState(p(req, 'orgId'), asOf))
   } catch (err) { next(err) }
+}
+
+/**
+ * End of the requested fleet day, or now — whichever is earlier.
+ *
+ * Fleet days are Kenyan, not UTC (see lib/provider-time): a 01:00 EAT reading
+ * belongs to that day and not the previous one. An unparseable or future date
+ * falls back to now rather than erroring, because this drives a table and a bad
+ * query string should not blank it.
+ */
+function asOfFromQuery(raw: unknown): Date {
+  const now = new Date()
+  if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return now
+  const dayStart = fleetDayStart(new Date(`${raw}T12:00:00Z`))
+  if (Number.isNaN(dayStart.getTime())) return now
+  const dayEnd = new Date(dayStart.getTime() + 86_400_000)
+  return dayEnd < now ? dayEnd : now
 }
