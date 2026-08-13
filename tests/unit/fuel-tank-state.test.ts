@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   deriveTankState, closingLevel, CLOSE_WINDOW_MINUTES, TURBULENCE_MIN_SAMPLES,
-  MOTION_MIN_KMH, type LevelReading,
+  MOTION_MIN_KMH, TURBULENCE_STOPS, type LevelReading,
 } from '../../src/modules/fuel/fuel-tank-state.js'
 
 const T0 = Date.parse('2026-08-13T04:00:00Z')
@@ -131,6 +131,35 @@ describe('deriveTankState', () => {
     }))
     const out = deriveTankState([...move(20, 0), ...briefPause, ...move(20, 22)], 300_000)
     expect(out.stopsAveraged).toBe(1)
+  })
+
+  it('carries the moving average across midnight', () => {
+    // Most vehicles make 1-2 runs a day, so an eight-run average that restarted
+    // each night spanned one or two runs — a daily figure wearing a moving
+    // average's name. Prior runs come in from previous days' stored values.
+    const move = (n: number, from: number, lo: number, hi: number): LevelReading[] =>
+      Array.from({ length: n }, (_, i) => ({
+        capturedAt: at(from + i), fuelLevelMl: i % 2 ? hi : lo, engineOn: true, speedKmh: 14,
+      }))
+    const today = move(15, 0, 245_000, 255_000)          // one run, swings 10 L
+    const prior = [30_000, 30_000, 30_000]               // three earlier runs at 30 L
+
+    const alone   = deriveTankState(today, 300_000)
+    const carried = deriveTankState(today, 300_000, prior)
+
+    expect(alone.stopsAveraged).toBe(1)
+    expect(alone.turbulenceMl).toBe(10_000)
+    // (30 + 30 + 30 + 10) / 4
+    expect(carried.stopsAveraged).toBe(4)
+    expect(carried.turbulenceMl).toBe(25_000)
+    // The day's own runs are still reported separately, for persisting.
+    expect(carried.runSloshMl).toEqual([10_000])
+  })
+
+  it('never averages more than TURBULENCE_STOPS runs', () => {
+    const prior = Array.from({ length: 40 }, () => 8_000)
+    const out = deriveTankState([], 300_000, prior)
+    expect(out.stopsAveraged).toBe(TURBULENCE_STOPS)
   })
 
   it('ignores GPS jitter below the motion threshold', () => {

@@ -33,6 +33,15 @@ import {
  */
 const PREV_CLOSE_SAMPLES = 600
 
+/**
+ * How far back to gather run slosh so the turbulence average can span days.
+ *
+ * Vehicles average 1.3-2.0 runs a day (measured 2026-08-13), so a fortnight
+ * comfortably contains the TURBULENCE_STOPS most recent runs for all but the
+ * most idle unit — and one that idle has no recent journeys to describe.
+ */
+const TREND_LOOKBACK_DAYS = 14
+
 export interface VehicleTankState extends TankState {
   vehicleId: string
 }
@@ -119,6 +128,23 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
     else byVehicle.set(r.vehicleId, [s])
   }
 
+  // Run slosh from BEFORE this day, so the turbulence average spans midnight
+  // rather than restarting on it. Only the last TURBULENCE_STOPS runs can
+  // matter, and vehicles average 1.3-2.0 runs a day, so a fortnight is a
+  // generous reach — bounded so a long-silent vehicle cannot drag the query.
+  const priorFrom = new Date(dayStart.getTime() - TREND_LOOKBACK_DAYS * 86_400_000)
+  const priorRows = await prisma.fuelDailyTrend.findMany({
+    where:   { day: { gte: priorFrom, lt: dayStart }, vehicle: { organisationId: orgId } },
+    select:  { vehicleId: true, runSloshMl: true },
+    orderBy: { day: 'asc' },
+  })
+  const priorRuns = new Map<string, number[]>()
+  for (const r of priorRows) {
+    const list = priorRuns.get(r.vehicleId)
+    if (list) list.push(...r.runSloshMl)
+    else priorRuns.set(r.vehicleId, [...r.runSloshMl])
+  }
+
   // Every vehicle that reported on EITHER day gets a row. One that reported
   // yesterday and not today still has an opening balance worth showing, and
   // dropping it would make a silent unit vanish from the table rather than
@@ -129,6 +155,6 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
     const readings = byVehicle.get(vehicleId) ?? []
     const prev = prevClose.get(vehicleId) ?? null
     if (readings.length === 0 && prev == null) return { vehicleId, ...UNKNOWN_TANK_STATE }
-    return { vehicleId, ...deriveTankState(readings, prev) }
+    return { vehicleId, ...deriveTankState(readings, prev, priorRuns.get(vehicleId) ?? []) }
   })
 }

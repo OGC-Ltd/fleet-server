@@ -778,9 +778,15 @@ model FuelDailyTrend {
   closingMl     Int?     @map("closing_ml")
   /// opening − closing. Not "burned" on a day carrying a refuel.
   consumedMl    Int?     @map("consumed_ml")
-  /// Moving average of per-RUN slosh while in motion. Slosh, not fuel moved.
-  /// Formula at stopTurbulence in modules/fuel/fuel-tank-state.
+  /// Moving average of per-RUN slosh while in motion, over the last
+  /// TURBULENCE_STOPS runs WHEREVER THEY FELL — the window crosses midnight.
+  /// Slosh, not fuel moved. Formula at stopTurbulence in fuel-tank-state.
   turbulenceMl  Int?     @map("turbulence_ml")
+  /// This day's individual run slosh values, in order, one per run.
+  ///
+  /// Kept because a moving average that spans days needs the runs themselves —
+  /// a day's mean cannot be un-meaned. Most days hold one or two.
+  runSloshMl    Int[]    @map("run_slosh_ml")
   /// STOPS the moving average spans, so a one-run figure is not read as
   /// confidently as an eight-run one. See stopTurbulence for the formula.
   stopsAveraged Int      @default(0) @map("stops_averaged")
