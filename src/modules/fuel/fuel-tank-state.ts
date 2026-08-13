@@ -107,6 +107,24 @@ export const TEMPORARY_STOP_MINUTES = 5
  */
 export const HEAVY_STOP_MINUTES = 60
 
+/**
+ * Kilometres the fleet is expected to cover per litre burned.
+ *
+ * Two, per the operator: *"for every 2KM we expect 1L usage"*.
+ *
+ * A FLEET-WIDE EXPECTATION, and deliberately labelled as one. It cannot be
+ * right for every unit here: `fuel-consumption-rates.md` records that 215 of
+ * 310 probed units are plant or tractors, that KASULU PLANT averages 1.5 km/h
+ * and 7.361 L/km, and that the spread within a single vehicle type reaches
+ * 4.1x. A dozer clearing a face burns fuel while covering almost no ground, so
+ * its expected burn will read near zero against a real consumption.
+ *
+ * That divergence is the useful part rather than a defect: expected burn sits
+ * beside `consumedMl`, which is what the tank actually did, and the gap between
+ * them is the question worth asking. It is not used to judge anything.
+ */
+export const KM_PER_LITRE = 2
+
 export interface LevelReading {
   capturedAt:  Date
   fuelLevelMl: number
@@ -177,12 +195,20 @@ export interface TankState {
   temporaryStops: number
   /** Stops of HEAVY_STOP_MINUTES or more — the machine standing down. */
   heavyStops: number
+  /** Ground covered today, in metres. Null when the unit sent no positions. */
+  distanceM: number | null
+  /**
+   * What the engine is EXPECTED to have burned over that distance, at
+   * `KM_PER_LITRE`. An expectation, not a measurement — compare it against
+   * `consumedMl`, which is what the tank actually did.
+   */
+  expectedBurnMl: number | null
 }
 
 export const UNKNOWN_TANK_STATE: TankState = {
   initialMl: null, currentMl: null, consumedMl: null,
   turbulenceMl: null, stopsAveraged: 0, runSloshMl: [],
-  temporaryStops: 0, heavyStops: 0,
+  temporaryStops: 0, heavyStops: 0, distanceM: null, expectedBurnMl: null,
 }
 
 /**
@@ -220,6 +246,8 @@ export function deriveTankState(
    * a one- or two-run figure on most vehicles, not the eight it claims.
    */
   priorRunSloshMl: readonly number[] = [],
+  /** Ground covered today in metres, summed from the position fixes. */
+  distanceM: number | null = null,
 ): TankState {
   const currentMl = closingLevel(dayReadings)
   const { runSloshMl, temporaryStops, heavyStops } = dayRuns(dayReadings)
@@ -235,6 +263,12 @@ export function deriveTankState(
     runSloshMl,
     temporaryStops,
     heavyStops,
+    distanceM,
+    // Rounded to a whole millilitre; the expectation is a fleet rule of thumb
+    // and false precision on it would invite it to be read as a measurement.
+    expectedBurnMl: distanceM == null
+      ? null
+      : Math.round((distanceM / 1000 / KM_PER_LITRE) * 1000),
   }
 }
 
