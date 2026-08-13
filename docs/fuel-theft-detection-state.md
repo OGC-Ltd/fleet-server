@@ -308,6 +308,55 @@ this one". The API echoes `engineRateLPerHour` and `engineRateBasis`
 3 days is 21 of 27 KASULU PLANT and 48 of 76 SUKARI tractors. `--days` widens
 it deliberately, with someone watching the instance.
 
+### Deployed and verified on live data, 2026-08-14
+
+Migration `20260814020000_fuel_engine_burn` **applied** (2.7 s — nullable
+`ADD COLUMN` is metadata-only, so no rewrite on the 1 GB instance). Rates
+derived and stored on prod: **124 vehicles produced a rate, 77 cleared
+`MIN_RUNS`**, the rest on their org+type median. The derivation ran in ~10 s at
+3 days with `/health` steady at 2.5 ms throughout — so the window is not as
+frightening as §5 of `fuel-consumption-rates.md` implies, though widening it
+still wants someone watching.
+
+KASULU for 2026-08-13, all 133 vehicles carrying a closing level, mileage,
+engine hours and engine burn. The case the basis exists for, in the data:
+
+| vehicle | km | engine h | engine burn | distance would have said |
+| --- | --- | --- | --- | --- |
+| `MUFINDI - EX 30` | 9.7 | 22.3 | **212.1 L** | 4.9 L |
+| `MUFINDI - EX 23` | 7.4 | 21.3 | **220.0 L** | 3.7 L |
+| `MUFINDI - BUS 03` | 561.7 | 17.7 | 84.5 L | 280.9 L |
+
+An excavator working a face for 22 hours covers 9.7 km. The distance model
+prices that shift at under 5 L.
+
+### ⚠️ A dead ignition signal currently reads as "burned nothing"
+
+Found while verifying, NOT yet fixed. **21 of 133 KASULU vehicles reported zero
+engine seconds** for 2026-08-13, and 20 of those still reported distance —
+696 km, 9.6% of the fleet's day. They are not all parked:
+
+- Fleet-wide there are **19,640 readings with `engine_on = false` and
+  `speed_kmh >= 1`** over two days, against 234,121 stationary ones. The fleet
+  does report movement with the ignition flag down.
+- `MUFINDI: EX 07` is one of them, and §5 above already records it reporting
+  `engineOn` on **0 of 11,965 readings**. Its zero is a dead signal, not a
+  quiet day.
+
+So `engineSeconds = 0` conflates *"the machine rested"* with *"we cannot see
+its ignition"*, and `engineBurnMl` then renders **0.0 L** — the exact failure
+mode this module rejects everywhere else, where a rate we do not have gives
+`null` and never a zero. A zero here claims a measurement.
+
+The fix is the same shape as the probe-health sweep: a unit that never reports
+`engineOn` across a window has an ABSENT signal, and absent must give `null`
+burn rather than `0`. It cannot be decided from one day's rows alone — a
+genuinely parked machine looks identical inside the day — so it needs the
+history check, which is why it is written down here rather than guessed at.
+
+Until then, read a 0.0 L engine burn as "unconfirmed", and note it also drags
+any fleet total down by however much those units actually burned.
+
 **None of this judges anything.** No verdict reads a rate or a burn.
 `fuel-consumption-rates.md` §5 lists why they could not carry one yet: three
 days of history, load not modelled, idle not separated from work, and rates
