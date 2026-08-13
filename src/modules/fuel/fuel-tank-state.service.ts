@@ -54,7 +54,7 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
       capturedAt:  { gte: dayStart, lte: asOf },
       fuelLevelMl: { not: null },
     },
-    select:  { vehicleId: true, capturedAt: true, fuelLevelMl: true, engineOn: true },
+    select:  { vehicleId: true, capturedAt: true, fuelLevelMl: true, engineOn: true, speedKmh: true },
     orderBy: { capturedAt: 'asc' },
   })
 
@@ -110,7 +110,10 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
 
   const byVehicle = new Map<string, LevelReading[]>()
   for (const r of dayRows) {
-    const s = { capturedAt: r.capturedAt, fuelLevelMl: r.fuelLevelMl!, engineOn: r.engineOn }
+    const s = {
+      capturedAt: r.capturedAt, fuelLevelMl: r.fuelLevelMl!,
+      engineOn: r.engineOn, speedKmh: r.speedKmh,
+    }
     const list = byVehicle.get(r.vehicleId)
     if (list) list.push(s)
     else byVehicle.set(r.vehicleId, [s])

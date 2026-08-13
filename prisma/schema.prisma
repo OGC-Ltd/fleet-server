@@ -356,6 +356,7 @@ model Vehicle {
   engineHourSessions EngineHourSession[]
   fuelFillings       FuelFilling[]
   fuelThefts         FuelTheft[]
+  fuelDailyTrends    FuelDailyTrend[]
   periodSummaries    VehiclePeriodSummary[]
   serviceRecords     VehicleServiceRecord[]
   garageVisits       VehicleGarageVisit[]
@@ -757,6 +758,41 @@ model VehicleGarageVisit {
 }
 
 /// A single refuelling event.
+/// One vehicle's fuel day, kept so slosh can be TRENDED rather than recomputed.
+///
+/// Asked for by the operator: the fluctuation a moving tank shows is mostly
+/// slosh artefact, and it wants a moving average maintained "not for theft
+/// detection but for trend logging".
+///
+/// NOTHING in modules/fuel/fuel-adjudication reads this table and nothing
+/// should. The drain rules have their own probe instrument, measured while
+/// PARKED (getProbeProfile). A motion-slosh average feeding a theft verdict
+/// would let a machine excuse its own drains by working rough ground.
+model FuelDailyTrend {
+  id            String   @id @default(cuid())
+  vehicleId     String   @map("vehicle_id")
+  /// The FLEET day this describes (Kenyan, not UTC — see lib/provider-time).
+  day           DateTime @db.Date
+  /// Closing level of the previous day; equals that day's closingMl.
+  openingMl     Int?     @map("opening_ml")
+  closingMl     Int?     @map("closing_ml")
+  /// opening − closing. Not "burned" on a day carrying a refuel.
+  consumedMl    Int?     @map("consumed_ml")
+  /// Mean level range per 30-min window while MOVING. Slosh, not fuel moved.
+  turbulenceMl  Int?     @map("turbulence_ml")
+  /// Windows the average spans, so a one-window figure is not read as
+  /// confidently as an eight-window one.
+  motionWindows Int      @default(0) @map("motion_windows")
+  computedAt    DateTime @map("computed_at")
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
+
+  @@unique([vehicleId, day])
+  @@index([vehicleId, day(sort: Desc)])
+  @@index([day])
+  @@map("fuel_daily_trends")
+}
+
 model FuelFilling {
   id                 String   @id @default(cuid())
   vehicleId          String   @map("vehicle_id")
