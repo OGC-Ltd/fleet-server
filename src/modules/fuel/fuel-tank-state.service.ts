@@ -19,12 +19,19 @@ import {
 /**
  * Readings pulled per vehicle to reconstruct the previous day's close.
  *
- * A comfortable over-fetch of the ~30 that CLOSE_WINDOW_MINUTES spans at this
- * fleet's ping rate. `closingLevel` applies the real time window to whatever it
- * is handed, so over-fetching is free and under-fetching would silently change
- * the answer.
+ * MUST exceed the densest CLOSE_WINDOW_MINUTES any vehicle produces, or the
+ * median is taken over a shorter span than `closingLevel` would use on the full
+ * day and the reconciliation silently breaks for exactly the busiest units.
+ *
+ * Measured over two days of live telemetry, readings per 15 minutes:
+ * p50 2, p99 77, **densest 376**. This was 60 first — above p99, and it still
+ * broke two vehicles, which is how the ceiling got measured rather than
+ * guessed. 600 clears the observed maximum with room for a burstier unit.
+ *
+ * Over-fetching is free: `closingLevel` applies the real time window to
+ * whatever it is handed, so extra rows are discarded rather than counted.
  */
-const PREV_CLOSE_SAMPLES = 60
+const PREV_CLOSE_SAMPLES = 600
 
 export interface VehicleTankState extends TankState {
   vehicleId: string
