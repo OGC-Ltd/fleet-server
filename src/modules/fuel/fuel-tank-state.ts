@@ -66,17 +66,36 @@ export const TURBULENCE_STOPS = 8
 export const TURBULENCE_MIN_SAMPLES = 2
 
 /**
- * Continuous engine-off that ends a run.
+ * Continuous engine-off that ends a run. SUSTAINED, not merely spanned.
  *
- * One minute, per the operator: *"A stop could be 1 minute engine off to 60
- * minutes"*, and a run is *"between start and temporary stop or heavy stop
- * whichever comes first"*. So any stop cuts the run — the two kinds differ in
- * what they mean operationally, not in whether they end a journey.
+ * A run is *"between start and temporary stop or heavy stop whichever comes
+ * first"*, so any stop cuts it; the two kinds differ in what they mean
+ * operationally, not in whether they end a journey.
  *
- * This was 15 minutes, which merged a driver's brief halt into the run either
- * side of it and undercounted journeys badly.
+ * ## Why five minutes and not one
+ *
+ * One minute was the operator's first figure and it broke on chattering engine
+ * flags. `MUFINDI: EX 10` on 2026-08-12 reported **266 temporary stops and 212
+ * runs in a single day**: its engine flag changed state **1,445 times** across
+ * 3,957 readings. Those are not journeys, they are a sensor toggling, and they
+ * shredded the day into fragments — its turbulence read 1.1 L where comparable
+ * machines read tens of litres.
+ *
+ * Worth recording what the cause was NOT, because the obvious guard is wrong
+ * here: the flag never contradicted motion. Readings with the engine off and
+ * speed >= 1 km/h numbered **zero**, so "a stop must also be stationary" would
+ * have fixed nothing. The unit genuinely alternates on/off while standing
+ * still.
+ *
+ * Five minutes of CONSECUTIVE engine-off readings is what separates the two. A
+ * unit pinging every few seconds satisfies a one-minute span on a brief
+ * chatter; sustaining five minutes without a single engine-on reading in
+ * between requires the machine to have actually stopped.
+ *
+ * The "consecutive" part is structural, not incidental: any engine-on reading
+ * closes the open stop and resets the span, so a chatter can never accumulate.
  */
-export const TEMPORARY_STOP_MINUTES = 1
+export const TEMPORARY_STOP_MINUTES = 5
 
 /**
  * Engine-off at or beyond which a stop is HEAVY rather than temporary.
@@ -243,8 +262,8 @@ export function movingAverage(runs: readonly number[]): { mean: number | null; s
  *
  * ## The formula, in full
  *
- * A RUN is the motion between two stops. A STOP is `TEMPORARY_STOP_MINUTES` (1)
- * or more of continuous engine-off; one lasting `HEAVY_STOP_MINUTES` (60) or
+ * A RUN is the motion between two stops. A STOP is `TEMPORARY_STOP_MINUTES` (5)
+ * or more of CONSECUTIVE engine-off readings; one lasting `HEAVY_STOP_MINUTES` (60) or
  * more is a HEAVY stop rather than a temporary one, and either ends the run —
  * whichever comes first. Within a run, readings group into 30-minute windows;
  * a window counts only if it holds at least `TURBULENCE_MIN_SAMPLES` (2)

@@ -121,17 +121,31 @@ describe('deriveTankState', () => {
     expect(out.turbulenceMl).toBe(40_000)
   })
 
+  it('does not let a chattering engine flag manufacture stops', () => {
+    // MUFINDI: EX 10 reported 266 temporary stops in one day on a flag that
+    // changed state 1,445 times. A stop needs five minutes of CONSECUTIVE
+    // engine-off: any engine-on reading resets the span, so alternating
+    // on/off — even for an hour — is one run and no stops at all.
+    const chatter: LevelReading[] = Array.from({ length: 60 }, (_, i) => ({
+      capturedAt: at(i), fuelLevelMl: i % 2 ? 260_000 : 240_000,
+      engineOn: i % 2 === 0, speedKmh: 8,
+    }))
+    const out = deriveTankState(chatter, 300_000)
+    expect(out.temporaryStops).toBe(0)
+    expect(out.heavyStops).toBe(0)
+  })
+
   it('cuts a run at ANY stop, temporary or heavy', () => {
-    // A stop is one minute of engine-off. Readings here are 2 minutes apart, so
-    // a single off reading followed by another already exceeds it.
+    // A stop is five minutes of CONSECUTIVE engine-off. Readings here are
+    // 2 minutes apart, so four of them span six minutes and qualify.
     const move = (n: number, from: number): LevelReading[] =>
       Array.from({ length: n }, (_, i) => ({
         capturedAt: at(from + i), fuelLevelMl: i % 2 ? 260_000 : 240_000, engineOn: true, speedKmh: 14,
       }))
-    const pause: LevelReading[] = Array.from({ length: 2 }, (_, i) => ({
+    const pause: LevelReading[] = Array.from({ length: 4 }, (_, i) => ({
       capturedAt: at(20 + i), fuelLevelMl: 250_000, engineOn: false, speedKmh: 0,
     }))
-    const out = deriveTankState([...move(20, 0), ...pause, ...move(20, 22)], 300_000)
+    const out = deriveTankState([...move(20, 0), ...pause, ...move(20, 24)], 300_000)
     expect(out.stopsAveraged).toBe(2)          // two runs, not one
     expect(out.temporaryStops).toBe(1)
     expect(out.heavyStops).toBe(0)
@@ -151,7 +165,7 @@ describe('deriveTankState', () => {
     // Readings are 2 min apart, so an hour of engine-off is 31 of them.
     const heavy = HEAVY_STOP_MINUTES / 2 + 1
     const out = deriveTankState(
-      [...move(10, 0), ...off(3, 10), ...move(10, 13), ...off(heavy, 23), ...move(10, 23 + heavy)],
+      [...move(10, 0), ...off(5, 10), ...move(10, 15), ...off(heavy, 25), ...move(10, 25 + heavy)],
       300_000,
     )
     expect(out.temporaryStops).toBe(1)
