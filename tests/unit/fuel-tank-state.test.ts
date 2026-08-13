@@ -94,7 +94,43 @@ describe('deriveTankState', () => {
     }))
     const out = deriveTankState([...idling, ...moving], 300_000)
     expect(out.turbulenceMl).toBe(20_000)
-    expect(out.motionWindows).toBeGreaterThan(0)
+    expect(out.stopsAveraged).toBeGreaterThan(0)
+  })
+
+  it('averages per RUN, so a long run does not outvote a short one', () => {
+    // The unit of the average is the journey, not the hour. Run A swings 20 L
+    // across four windows; run B swings 60 L across one. Weighted by window
+    // the answer would be 28 L; weighted by RUN it is 40 L, which is what
+    // "computed per every stop" means.
+    const move = (n: number, from: number, lo: number, hi: number): LevelReading[] =>
+      Array.from({ length: n }, (_, i) => ({
+        capturedAt: at(from + i), fuelLevelMl: i % 2 ? hi : lo, engineOn: true, speedKmh: 14,
+      }))
+    const stopped = (n: number, from: number): LevelReading[] =>
+      Array.from({ length: n }, (_, i) => ({
+        capturedAt: at(from + i), fuelLevelMl: 250_000, engineOn: false, speedKmh: 0,
+      }))
+
+    const day = [
+      ...move(60, 0, 240_000, 260_000),      // run A — 2 hours, swings 20 L
+      ...stopped(10, 60),                    // a stop: 20 min of engine-off
+      ...move(15, 70, 220_000, 280_000),     // run B — 30 min, swings 60 L
+    ]
+    const out = deriveTankState(day, 300_000)
+    expect(out.stopsAveraged).toBe(2)
+    expect(out.turbulenceMl).toBe(40_000)
+  })
+
+  it('does not cut a run on a pause shorter than a stop', () => {
+    const move = (n: number, from: number): LevelReading[] =>
+      Array.from({ length: n }, (_, i) => ({
+        capturedAt: at(from + i), fuelLevelMl: i % 2 ? 260_000 : 240_000, engineOn: true, speedKmh: 14,
+      }))
+    const briefPause: LevelReading[] = Array.from({ length: 2 }, (_, i) => ({
+      capturedAt: at(20 + i), fuelLevelMl: 250_000, engineOn: false, speedKmh: 0,
+    }))
+    const out = deriveTankState([...move(20, 0), ...briefPause, ...move(20, 22)], 300_000)
+    expect(out.stopsAveraged).toBe(1)
   })
 
   it('ignores GPS jitter below the motion threshold', () => {

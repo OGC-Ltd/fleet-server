@@ -49,15 +49,25 @@
 export const CLOSE_WINDOW_MINUTES = 15
 
 /**
- * How many recent working windows the turbulence average spans.
+ * How many recent STOPS the turbulence moving average spans.
  *
- * A moving average, so a machine that spent last week on a slope and this week
- * on a yard reads as it is now rather than as it was.
+ * The unit of the average is a stop, not a clock interval: a machine that made
+ * three runs today and eleven yesterday should not have yesterday dominate
+ * simply by being busier. Eight is roughly a working day of runs on this fleet.
  */
-export const TURBULENCE_WINDOWS = 8
+export const TURBULENCE_STOPS = 8
 
-/** Readings a window needs before its swing is worth measuring. */
+/** Readings a 30-minute window needs before its swing is worth measuring. */
 export const TURBULENCE_MIN_SAMPLES = 10
+
+/**
+ * Continuous engine-off that ends a motion segment.
+ *
+ * The same definition of a stop the operator gave for the working/stopped
+ * split: working is engine-on, so stopped is engine-off. Fifteen minutes, so a
+ * machine restarting after a short pause is one run and not three.
+ */
+export const STOP_MINUTES = 15
 
 export interface LevelReading {
   capturedAt:  Date
@@ -109,17 +119,17 @@ export interface TankState {
    */
   turbulenceMl: number | null
   /**
-   * How many moving windows the average spans.
+   * How many STOPS the moving average spans.
    *
-   * Carried so a figure built on one window is not read as confidently as one
+   * Carried so a figure built on one run is not read as confidently as one
    * built on eight — a trend line needs to say how much it is standing on.
    */
-  motionWindows: number
+  stopsAveraged: number
 }
 
 export const UNKNOWN_TANK_STATE: TankState = {
   initialMl: null, currentMl: null, consumedMl: null,
-  turbulenceMl: null, motionWindows: 0,
+  turbulenceMl: null, stopsAveraged: 0,
 }
 
 /**
@@ -153,7 +163,7 @@ export function deriveTankState(
   previousDayCloseMl: number | null,
 ): TankState {
   const currentMl = closingLevel(dayReadings)
-  const { mean, windows } = motionTurbulence(dayReadings)
+  const { mean, stops } = stopTurbulence(dayReadings)
   return {
     initialMl:  previousDayCloseMl,
     currentMl,
@@ -161,32 +171,96 @@ export function deriveTankState(
       ? previousDayCloseMl - currentMl
       : null,
     turbulenceMl:  mean,
-    motionWindows: windows,
+    stopsAveraged: stops,
   }
 }
 
 /**
- * Mean level range per 30-minute window while the unit was MOVING.
+ * Turbulence: the moving average of per-stop slosh.
  *
- * Motion, not engine-on. The fluctuation being measured is slosh — fuel moving
- * about inside the tank — and that is caused by travel over ground, not by the
- * engine turning. A machine idling stationary for an hour produces a flat
- * level; the same machine crossing a rutted haul road produces the swings this
- * average exists to track.
+ * ## The formula
  *
- * Same 30-minute windows as `getProbeProfile`'s parked measure, so the two can
- * be read side by side — but they answer different questions and must not be
- * substituted for one another. Parked swing asks whether the probe can be
- * believed at all and feeds a verdict; this is a trend line and feeds nothing.
+ * A RUN is the motion between two stops. A STOP is `STOP_MINUTES` of
+ * continuous engine-off. Within a run, readings are grouped into 30-minute
+ * windows; a window counts only if it holds at least `TURBULENCE_MIN_SAMPLES`
+ * readings taken at `speedKmh >= MOTION_MIN_KMH`.
  *
- * Null without speed. Turbulence is defined as what happens in motion, and a
- * provider that does not say whether the unit was moving cannot answer it.
+ *   window range      R(w)  = max(level in w) − min(level in w)
+ *
+ *   run turbulence    T(r)  = mean over the qualifying windows w in run r
+ *                             of R(w)
+ *
+ *   moving average    TURB  = mean over the last N runs of T(r),
+ *                             N = TURBULENCE_STOPS
+ *
+ * ## Why per WINDOW inside a run, and not the run's whole range
+ *
+ * A run's outright max−min is contaminated by consumption: a two-hour haul
+ * burns fuel, so its range measures the burn plus the slosh and mostly the
+ * burn. Inside a 30-minute window the burn is small enough to ignore and the
+ * range is dominated by fuel moving about in the tank, which is the quantity
+ * wanted. Averaging the windows then gives that run's typical slosh.
+ *
+ * ## Why per STOP, and not per clock interval
+ *
+ * Asked for directly. It also weights correctly: the average is over RUNS, so a
+ * machine that made three runs today and eleven yesterday does not have
+ * yesterday dominate simply by being busier. Every run counts once, whatever
+ * its length — the unit of the average is the journey, not the hour.
+ *
+ * ## This is a trend line and feeds nothing
+ *
+ * See the note on `TankState.turbulenceMl`. Slosh is not fuel entering or
+ * leaving a tank, and a motion-slosh average must never reach a theft verdict —
+ * the drain rules have their own probe instrument, measured while PARKED.
+ *
+ * Null without speed or engine state: runs cannot be cut without knowing when
+ * the machine stopped, and slosh cannot be measured without knowing it moved.
  */
-function motionTurbulence(
+function stopTurbulence(
   readings: readonly LevelReading[],
-): { mean: number | null; windows: number } {
-  const buckets = new Map<number, number[]>()
+): { mean: number | null; stops: number } {
+  // Cut the day into runs at each stop. A run accumulates every reading until
+  // STOP_MINUTES of continuous engine-off closes it; the off readings
+  // themselves are not part of the run, they are the stop.
+  const runs: LevelReading[][] = []
+  let current: LevelReading[] = []
+  let offSince: Date | null = null
+
   for (const r of readings) {
+    if (r.engineOn === false) {
+      offSince ??= r.capturedAt
+      if (r.capturedAt.getTime() - offSince.getTime() >= STOP_MINUTES * 60_000 && current.length > 0) {
+        runs.push(current)
+        current = []
+      }
+      continue
+    }
+    // Engine on, or unknown: the machine is not stopped, so the run continues.
+    offSince = null
+    current.push(r)
+  }
+  // A day that ends mid-run still contributes it — the machine is out there.
+  if (current.length > 0) runs.push(current)
+
+  const perRun: number[] = []
+  for (const run of runs) {
+    const t = runSlosh(run)
+    if (t != null) perRun.push(t)
+  }
+
+  const recent = perRun.slice(-TURBULENCE_STOPS)
+  if (recent.length === 0) return { mean: null, stops: 0 }
+  return {
+    mean:  Math.round(recent.reduce((a, b) => a + b, 0) / recent.length),
+    stops: recent.length,
+  }
+}
+
+/** T(r): mean of the 30-minute window ranges inside one run, moving only. */
+function runSlosh(run: readonly LevelReading[]): number | null {
+  const buckets = new Map<number, number[]>()
+  for (const r of run) {
     if (r.speedKmh == null || r.speedKmh < MOTION_MIN_KMH) continue
     const key = Math.floor(r.capturedAt.getTime() / (30 * 60_000))
     const b = buckets.get(key)
@@ -194,15 +268,10 @@ function motionTurbulence(
     else buckets.set(key, [r.fuelLevelMl])
   }
 
-  const ranges = [...buckets.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .filter(([, v]) => v.length >= TURBULENCE_MIN_SAMPLES)
-    .map(([, v]) => Math.max(...v) - Math.min(...v))
-    .slice(-TURBULENCE_WINDOWS)
+  const ranges = [...buckets.values()]
+    .filter(v => v.length >= TURBULENCE_MIN_SAMPLES)
+    .map(v => Math.max(...v) - Math.min(...v))
 
-  if (ranges.length === 0) return { mean: null, windows: 0 }
-  return {
-    mean:    Math.round(ranges.reduce((a, b) => a + b, 0) / ranges.length),
-    windows: ranges.length,
-  }
+  if (ranges.length === 0) return null
+  return ranges.reduce((a, b) => a + b, 0) / ranges.length
 }
