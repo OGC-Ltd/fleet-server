@@ -25,10 +25,15 @@ const DAYS = i >= 0 && argv[i + 1] ? Number(argv[i + 1]) : 1
 async function main() {
   console.log(`\n⛽  recording fuel trends for the last ${DAYS} complete fleet day(s)\n`)
 
-  // Yesterday backwards. Today is deliberately excluded: a day still running
-  // has no close, and a half-day turbulence average is not a trend point.
+  // OLDEST first, and that ordering is load-bearing. The turbulence average
+  // spans days by reading previous days' stored run values, so a day computed
+  // before its predecessors would find nothing behind it and report a one-run
+  // average. Walking forwards, each day sees the ones already written.
+  //
+  // Today is deliberately excluded: a day still running has no close, and a
+  // half-day turbulence average is not a trend point.
   const todayStart = fleetDayStart(new Date())
-  for (let d = 1; d <= DAYS; d++) {
+  for (let d = DAYS; d >= 1; d--) {
     const inDay = new Date(todayStart.getTime() - (d - 1) * 86_400_000 - 1)
     for (const out of await recordFuelTrends(inDay)) {
       console.log(`  ${out.day}  ${String(out.written).padStart(4)} rows written · ${out.withTurbulence} with a turbulence figure`)
