@@ -12,7 +12,8 @@
 import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import {
-  closingLevel, deriveTankState, MAX_ENGINE_GAP_SECONDS, UNKNOWN_TANK_STATE,
+  closingLevel, deriveTankState, resolveEngineSeconds,
+  MAX_ENGINE_GAP_SECONDS, MOTION_MIN_KMH, UNKNOWN_TANK_STATE,
   type LevelReading, type TankState,
 } from './fuel-tank-state.js'
 import { getOrgFuelRates } from './fuel-rate.service.js'
@@ -186,9 +187,10 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
   // without a position is still running its engine.
   const dayRowsSql = await prisma.$queryRaw<Array<{
     vehicle_id: string; metres: number | null; seconds: number | null
+    on_pings: number | null; moving_pings: number | null
   }>>`
     WITH base AS (
-      SELECT t.vehicle_id, t.captured_at, t.lat, t.lng, t.engine_on
+      SELECT t.vehicle_id, t.captured_at, t.lat, t.lng, t.engine_on, t.speed_kmh
         FROM vehicle_telemetries t
         JOIN vehicles v ON v.id = t.vehicle_id
        WHERE v.organisation_id = ${orgId}
@@ -225,16 +227,35 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
                       THEN least(secs, ${MAX_ENGINE_GAP_SECONDS}) ELSE 0 END) AS seconds
         FROM gap
        GROUP BY vehicle_id
+    ), sig AS (
+      -- Is the ignition flag corroborated by motion? Speed does not come from
+      -- the ignition wire, so a unit that moved while never reporting
+      -- engine-on has a dead flag rather than a quiet day. 27 units on this
+      -- fleet send 500+ pings and never once report it. See
+      -- resolveEngineSeconds for what is done with these two counts.
+      SELECT vehicle_id,
+             count(*) FILTER (WHERE engine_on)::int AS on_pings,
+             count(*) FILTER (WHERE speed_kmh >= ${MOTION_MIN_KMH})::int AS moving_pings
+        FROM base
+       GROUP BY vehicle_id
     )
-    SELECT COALESCE(d.vehicle_id, e.vehicle_id) AS vehicle_id, d.metres, e.seconds
+    SELECT COALESCE(d.vehicle_id, e.vehicle_id) AS vehicle_id,
+           d.metres, e.seconds, s.on_pings, s.moving_pings
       FROM dist d
-      FULL OUTER JOIN eng e ON e.vehicle_id = d.vehicle_id`
+      FULL OUTER JOIN eng e ON e.vehicle_id = d.vehicle_id
+      LEFT JOIN sig s ON s.vehicle_id = COALESCE(d.vehicle_id, e.vehicle_id)`
 
   const distance = new Map<string, number>()
-  const engineSeconds = new Map<string, number>()
+  const engineSeconds = new Map<string, number | null>()
   for (const r of dayRowsSql) {
-    if (r.metres  != null) distance.set(r.vehicle_id, Math.round(Number(r.metres)))
-    if (r.seconds != null) engineSeconds.set(r.vehicle_id, Math.round(Number(r.seconds)))
+    if (r.metres != null) distance.set(r.vehicle_id, Math.round(Number(r.metres)))
+    if (r.seconds != null) {
+      // Null, not zero, when the day's motion contradicts a silent ignition
+      // flag — otherwise a dead wire renders as "burned nothing".
+      engineSeconds.set(r.vehicle_id, resolveEngineSeconds(
+        Math.round(Number(r.seconds)), Number(r.on_pings ?? 0), Number(r.moving_pings ?? 0),
+      ))
+    }
   }
 
   // Consumption rates, resolved per vehicle with an org+type fallback. Read

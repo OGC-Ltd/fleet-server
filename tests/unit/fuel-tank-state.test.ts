@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   deriveTankState, closingLevel, CLOSE_WINDOW_MINUTES, TURBULENCE_MIN_SAMPLES,
-  MOTION_MIN_KMH, TURBULENCE_STOPS, HEAVY_STOP_MINUTES, type LevelReading,
+  MOTION_MIN_KMH, TURBULENCE_STOPS, HEAVY_STOP_MINUTES, resolveEngineSeconds,
+  type LevelReading,
 } from '../../src/modules/fuel/fuel-tank-state.js'
 import type { ResolvedRate } from '../../src/modules/fuel/fuel-rate.js'
 
@@ -271,7 +272,7 @@ describe('mileage and expected burn', () => {
 })
 
 describe('engine hours and engine burn', () => {
-  const rate = (lPerHour: number): ResolvedRate => ({ lPerHour, basis: 'vehicle', runs: 5 })
+  const rate = (lPerHour: number): ResolvedRate => ({ lPerHour, basis: 'vehicle', runs: 5, spread: null })
 
   it('burns the measured rate over the hours the engine ran', () => {
     // Two hours at 11.28 L/h — KASULU PLANT's measured aggregate.
@@ -316,6 +317,44 @@ describe('engine hours and engine burn', () => {
 
   it('says nothing about burn when the engine time is unknown', () => {
     const out = deriveTankState([], 300_000, { engineSeconds: null, rate: rate(9) })
+    expect(out.engineSeconds).toBeNull()
+    expect(out.engineBurnMl).toBeNull()
+  })
+})
+
+describe('resolveEngineSeconds — a dead ignition wire is not a quiet day', () => {
+  it('voids the measurement when motion contradicts a silent flag', () => {
+    // MUFINDI - EX 06 sent 15,357 pings over a week without one engine-on
+    // reading. It did not rest for a week. Speed is the independent witness —
+    // it does not come from the ignition wire — so a unit that moved while
+    // never reporting engine-on has a dead flag, and its engine time is
+    // UNKNOWN rather than zero.
+    expect(resolveEngineSeconds(0, 0, 480)).toBeNull()
+  })
+
+  it('keeps a real zero for a machine that genuinely stood still', () => {
+    // The reason this is not simply "null whenever the total is zero": a parked
+    // machine burned nothing, and 0 is a measurement worth showing.
+    expect(resolveEngineSeconds(0, 0, 0)).toBe(0)
+  })
+
+  it('leaves a working ignition flag alone', () => {
+    expect(resolveEngineSeconds(7_200, 900, 400)).toBe(7_200)
+    // Reported engine-on at some point, so the flag works; a later zero-motion
+    // stretch is just the machine idling.
+    expect(resolveEngineSeconds(3_600, 12, 0)).toBe(3_600)
+  })
+
+  it('stays null when there was nothing to measure', () => {
+    expect(resolveEngineSeconds(null, 0, 0)).toBeNull()
+  })
+
+  it('carries the void through to the burn', () => {
+    // The whole point: engineBurnMl must not render 0.0 L for a dead wire.
+    const seconds = resolveEngineSeconds(0, 0, 500)
+    const out = deriveTankState([], 300_000, {
+      engineSeconds: seconds, rate: { lPerHour: 11.28, basis: 'vehicle', runs: 5, spread: null },
+    })
     expect(out.engineSeconds).toBeNull()
     expect(out.engineBurnMl).toBeNull()
   })
