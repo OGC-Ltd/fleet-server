@@ -267,6 +267,16 @@ export interface TankState {
    * provisional rather than presenting every borrowed rate identically.
    */
   engineRateSpread: number | null
+  /**
+   * What the rate stands on: the vehicle's own qualifying RUNS on a `vehicle`
+   * basis, or the number of MACHINES the median spans on a `type` one.
+   *
+   * Two different units behind one field, which is unusual enough to justify:
+   * `engineRateBasis` says which, and the pair is only ever read together —
+   * "measured on this unit over 9 runs" or "median of 21 machines". Splitting
+   * them would give every row a column that is null by construction.
+   */
+  engineRateRuns: number | null
 }
 
 export const UNKNOWN_TANK_STATE: TankState = {
@@ -275,6 +285,7 @@ export const UNKNOWN_TANK_STATE: TankState = {
   temporaryStops: 0, heavyStops: 0, distanceM: null, expectedBurnMl: null,
   engineSeconds: null, engineBurnMl: null,
   engineRateLPerHour: null, engineRateBasis: null, engineRateSpread: null,
+  engineRateRuns: null,
 }
 
 /**
@@ -399,6 +410,7 @@ export function deriveTankState(
     engineRateLPerHour: rate?.lPerHour ?? null,
     engineRateBasis:    rate?.basis    ?? null,
     engineRateSpread:   rate?.spread   ?? null,
+    engineRateRuns:     rate?.runs     ?? null,
   }
 }
 
