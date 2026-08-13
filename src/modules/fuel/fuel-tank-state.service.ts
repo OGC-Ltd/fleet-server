@@ -12,9 +12,10 @@
 import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import {
-  closingLevel, deriveTankState, UNKNOWN_TANK_STATE,
+  closingLevel, deriveTankState, MAX_ENGINE_GAP_SECONDS, UNKNOWN_TANK_STATE,
   type LevelReading, type TankState,
 } from './fuel-tank-state.js'
+import { getOrgFuelRates } from './fuel-rate.service.js'
 
 /**
  * Readings pulled per vehicle to reconstruct the previous day's close.
@@ -155,30 +156,50 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
     else priorRuns.set(r.vehicleId, [...r.runSloshMl])
   }
 
-  // Ground covered today, summed from the position fixes.
+  // Ground covered today, and time the engine spent running — the two
+  // measurements the day's fuel expectations are built on.
   //
-  // There is no odometer on vehicle_telemetries — Wialon's counter reaches the
-  // snapshot but is not persisted per ping — so distance is the sum of
-  // great-circle hops between consecutive fixes. Computed in SQL rather than in
-  // JS because it needs EVERY fix, including the ones with no fuel reading that
-  // the day query above filters out; pulling those into memory as well would
-  // roughly double the payload for one number.
+  // ONE pass over the day's telemetry for both. They need the same rows: every
+  // fix, including the ones with no fuel reading that the day query above
+  // filters out. Pulling those into memory would roughly double the payload for
+  // two numbers, and running two queries would scan the same partition twice.
   //
-  // Haversine written out rather than PostGIS: ST_DistanceSphere would do, but
-  // this needs no extension to be present and the arithmetic is not the hard
-  // part. Hops longer than MAX_HOP_KM are dropped — at a 30-second ping that is
-  // over 600 km/h, so it is a GPS jump rather than travel, and one such fix
-  // would otherwise add hundreds of kilometres to a vehicle's day.
-  const distRows = await prisma.$queryRaw<Array<{ vehicle_id: string; metres: number }>>`
-    WITH p AS (
-      SELECT t.vehicle_id, t.lat, t.lng,
-             lag(t.lat) OVER (PARTITION BY t.vehicle_id ORDER BY t.captured_at) AS plat,
-             lag(t.lng) OVER (PARTITION BY t.vehicle_id ORDER BY t.captured_at) AS plng
+  // Distance: there is no odometer on vehicle_telemetries — Wialon's counter
+  // reaches the snapshot but is not persisted per ping — so it is the sum of
+  // great-circle hops between consecutive fixes. Haversine written out rather
+  // than PostGIS: ST_DistanceSphere would do, but this needs no extension to be
+  // present and the arithmetic is not the hard part. Hops longer than
+  // MAX_HOP_KM are dropped — at a 30-second ping that is over 600 km/h, so it
+  // is a GPS jump rather than travel, and one such fix would otherwise add
+  // hundreds of kilometres to a vehicle's day.
+  //
+  // Engine seconds: the gap between consecutive fixes, charged to the EARLIER
+  // fix's engine state and capped at MAX_ENGINE_GAP_SECONDS. The day's first
+  // fix per vehicle has no predecessor, so `prev_on` and `secs` are both NULL
+  // there and the CASE contributes nothing — a day opens from its first ping,
+  // not from midnight, which is the only honest reading when the hours before
+  // it are simply unobserved.
+  //
+  // The two are computed over DIFFERENT row sets on purpose: the hop chain
+  // takes only position-bearing fixes, so a fix with no lat/lng breaks no hop,
+  // while engine time takes every fix, because a unit reporting ignition
+  // without a position is still running its engine.
+  const dayRowsSql = await prisma.$queryRaw<Array<{
+    vehicle_id: string; metres: number | null; seconds: number | null
+  }>>`
+    WITH base AS (
+      SELECT t.vehicle_id, t.captured_at, t.lat, t.lng, t.engine_on
         FROM vehicle_telemetries t
         JOIN vehicles v ON v.id = t.vehicle_id
        WHERE v.organisation_id = ${orgId}
          AND t.captured_at >= ${dayStart} AND t.captured_at <= ${asOf}
-         AND t.lat IS NOT NULL AND t.lng IS NOT NULL
+    ), pos AS (
+      SELECT vehicle_id, lat, lng,
+             lag(lat) OVER w AS plat,
+             lag(lng) OVER w AS plng
+        FROM base
+       WHERE lat IS NOT NULL AND lng IS NOT NULL
+      WINDOW w AS (PARTITION BY vehicle_id ORDER BY captured_at)
     ), hop AS (
       SELECT vehicle_id,
              6371000 * 2 * asin(sqrt(
@@ -186,13 +207,41 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
                + cos(radians(plat)) * cos(radians(lat))
                  * power(sin(radians(lng - plng) / 2), 2)
              )) AS metres
-        FROM p WHERE plat IS NOT NULL
+        FROM pos WHERE plat IS NOT NULL
+    ), dist AS (
+      SELECT vehicle_id, sum(metres) AS metres
+        FROM hop
+       WHERE metres < ${MAX_HOP_KM * 1000}
+       GROUP BY vehicle_id
+    ), gap AS (
+      SELECT vehicle_id,
+             lag(engine_on) OVER w AS prev_on,
+             extract(epoch FROM (captured_at - lag(captured_at) OVER w)) AS secs
+        FROM base
+      WINDOW w AS (PARTITION BY vehicle_id ORDER BY captured_at)
+    ), eng AS (
+      SELECT vehicle_id,
+             sum(CASE WHEN prev_on AND secs > 0
+                      THEN least(secs, ${MAX_ENGINE_GAP_SECONDS}) ELSE 0 END) AS seconds
+        FROM gap
+       GROUP BY vehicle_id
     )
-    SELECT vehicle_id, sum(metres) AS metres
-      FROM hop
-     WHERE metres < ${MAX_HOP_KM * 1000}
-     GROUP BY vehicle_id`
-  const distance = new Map(distRows.map(r => [r.vehicle_id, Math.round(Number(r.metres))]))
+    SELECT COALESCE(d.vehicle_id, e.vehicle_id) AS vehicle_id, d.metres, e.seconds
+      FROM dist d
+      FULL OUTER JOIN eng e ON e.vehicle_id = d.vehicle_id`
+
+  const distance = new Map<string, number>()
+  const engineSeconds = new Map<string, number>()
+  for (const r of dayRowsSql) {
+    if (r.metres  != null) distance.set(r.vehicle_id, Math.round(Number(r.metres)))
+    if (r.seconds != null) engineSeconds.set(r.vehicle_id, Math.round(Number(r.seconds)))
+  }
+
+  // Consumption rates, resolved per vehicle with an org+type fallback. Read
+  // from the table the weekly derivation writes — never computed here, which is
+  // the point of §7.1 of docs/fuel-consumption-rates.md: this runs whenever an
+  // operator opens a tab.
+  const rates = await getOrgFuelRates(orgId)
 
   // Every vehicle that reported on EITHER day gets a row. One that reported
   // yesterday and not today still has an opening balance worth showing, and
@@ -206,9 +255,12 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
     if (readings.length === 0 && prev == null) return { vehicleId, ...UNKNOWN_TANK_STATE }
     return {
       vehicleId,
-      ...deriveTankState(
-        readings, prev, priorRuns.get(vehicleId) ?? [], distance.get(vehicleId) ?? null,
-      ),
+      ...deriveTankState(readings, prev, {
+        priorRunSloshMl: priorRuns.get(vehicleId) ?? [],
+        distanceM:       distance.get(vehicleId) ?? null,
+        engineSeconds:   engineSeconds.get(vehicleId) ?? null,
+        rate:            rates.get(vehicleId) ?? null,
+      }),
     }
   })
 }

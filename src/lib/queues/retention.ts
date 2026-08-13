@@ -42,6 +42,7 @@ import { trimCachedNotifications } from '../notifications/notification-cache.js'
 import { sweepProbeHealth } from '../../modules/fuel/fuel-probe-health.service.js'
 import { adjudicateFillings } from '../../modules/fuel/fuel-filling-adjudication.service.js'
 import { recordFuelTrends } from '../../modules/fuel/fuel-trend.service.js'
+import { deriveFuelRates } from '../../modules/fuel/fuel-rate.service.js'
 
 export const RETENTION_QUEUE = 'maintenance'
 const PRUNE_JOB = 'notifications:prune'
@@ -77,6 +78,16 @@ const FILLING_JOB = 'fuel:adjudicate-fillings'
  * closing level taken before the day ends is not a close.
  */
 const TREND_JOB = 'fuel:daily-trend'
+/**
+ * Per-vehicle litres-per-engine-hour, re-derived from the last few days.
+ *
+ * WEEKLY, alone among these — the others are daily. Two reasons, and both are
+ * about the box rather than the fuel: the derivation sorts the full
+ * fuel-carrying telemetry window per vehicle against a 1 GB RDS, and a
+ * consumption rate does not move between Tuesday and Wednesday. The daily trend
+ * rows read whatever this last wrote.
+ */
+const RATE_JOB = 'fuel:consumption-rates'
 
 /**
  * Rows deleted per statement. Deliberately small: this runs against the same
@@ -225,7 +236,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   // previous one firing forever alongside the new one.
   for (const r of await queue.getRepeatableJobs()) {
     if (r.name === PRUNE_JOB || r.name === PROBE_JOB || r.name === FILLING_JOB
-     || r.name === TREND_JOB) {
+     || r.name === TREND_JOB || r.name === RATE_JOB) {
       await queue.removeRepeatableByKey(r.key)
     }
   }
@@ -273,9 +284,22 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
+  await queue.add(RATE_JOB, {}, {
+    // 02:40 UTC on SUNDAY. Weekly because a consumption rate moves over weeks,
+    // and clear of every daily job above — this one sorts the whole
+    // fuel-carrying telemetry window against a 1 GB RDS, so it must not land
+    // beside the prune holding batched connections to the same pooler.
+    repeat:            { pattern: '40 2 * * 0' },
+    removeOnComplete:  { count: 10 },
+    removeOnFail:      { count: 10 },
+    attempts:          3,
+    backoff:           { type: 'exponential', delay: 60_000 },
+  })
+
   worker = new Worker(RETENTION_QUEUE, async (job: Job) => {
     // Records the day that just ended, not the one starting.
     if (job.name === TREND_JOB) return recordFuelTrends(new Date(Date.now() - 30 * 60_000))
+    if (job.name === RATE_JOB) return deriveFuelRates({ apply: true })
     if (job.name === FILLING_JOB) return adjudicateFillings({ apply: true })
     if (job.name === PROBE_JOB) return sweepProbeHealth({ notify: true })
     if (job.name !== PRUNE_JOB) return
@@ -293,6 +317,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   logger.info({
     queue: RETENTION_QUEUE, cron: '17 3 * * *',
     fillingCron: '5 4 * * *', probeCron: '23 4 * * *', trendCron: '20 21 * * *',
+    rateCron: '40 2 * * 0',
     retentionDays: env.NOTIFICATION_RETENTION_DAYS,
   }, 'Maintenance jobs scheduled')
 
