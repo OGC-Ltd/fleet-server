@@ -40,6 +40,7 @@ async function main() {
   console.log(`  ${out.derived} vehicles produced a rate`)
   console.log(`  ${out.usable} of them cleared ${MIN_RUNS} runs — the rest fall back to their org+type median`)
   console.log(`  ${out.stored} rows stored`)
+  if (out.pruned > 0) console.log(`  ${out.pruned} stale rows pruned as implausible`)
   if (!APPLY) console.log('\n  Dry run — nothing stored. Re-run with --apply\n')
   else console.log()
 }
