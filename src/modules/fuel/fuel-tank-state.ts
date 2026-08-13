@@ -57,17 +57,36 @@ export const CLOSE_WINDOW_MINUTES = 15
  */
 export const TURBULENCE_STOPS = 8
 
-/** Readings a 30-minute window needs before its swing is worth measuring. */
-export const TURBULENCE_MIN_SAMPLES = 10
+/**
+ * Moving readings a 30-minute window needs before its swing counts.
+ *
+ * "More than 1", per the operator — so two. A single reading has no range at
+ * all, and two is the least that can describe one.
+ */
+export const TURBULENCE_MIN_SAMPLES = 2
 
 /**
- * Continuous engine-off that ends a motion segment.
+ * Continuous engine-off that ends a run.
  *
- * The same definition of a stop the operator gave for the working/stopped
- * split: working is engine-on, so stopped is engine-off. Fifteen minutes, so a
- * machine restarting after a short pause is one run and not three.
+ * One minute, per the operator: *"A stop could be 1 minute engine off to 60
+ * minutes"*, and a run is *"between start and temporary stop or heavy stop
+ * whichever comes first"*. So any stop cuts the run — the two kinds differ in
+ * what they mean operationally, not in whether they end a journey.
+ *
+ * This was 15 minutes, which merged a driver's brief halt into the run either
+ * side of it and undercounted journeys badly.
  */
-export const STOP_MINUTES = 15
+export const TEMPORARY_STOP_MINUTES = 1
+
+/**
+ * Engine-off at or beyond which a stop is HEAVY rather than temporary.
+ *
+ * The operator's split: under an hour is a pause in the work — a gate, a
+ * weighbridge, a driver's break; an hour or more is the machine standing down.
+ * Both end a run; the distinction is recorded because it describes the day
+ * differently, and a day of six temporary stops is not a day of six heavy ones.
+ */
+export const HEAVY_STOP_MINUTES = 60
 
 export interface LevelReading {
   capturedAt:  Date
@@ -80,10 +99,10 @@ export interface LevelReading {
 /**
  * Speed at or above which the unit counts as moving.
  *
- * 0.1 km/h, matching the operator's own motion threshold. Anything lower is GPS
- * jitter on a stationary machine, not travel.
+ * 1 km/h, per the operator. This was 0.1, which admitted a stationary machine's
+ * fix wandering as travel — at 1 km/h a reading is unambiguously movement.
  */
-export const MOTION_MIN_KMH = 0.1
+export const MOTION_MIN_KMH = 1
 
 export interface TankState {
   /** Closing level of the PREVIOUS fleet day. */
@@ -135,11 +154,16 @@ export interface TankState {
    * cannot be un-meaned back into its runs.
    */
   runSloshMl: number[]
+  /** Stops under HEAVY_STOP_MINUTES — a pause in the work. */
+  temporaryStops: number
+  /** Stops of HEAVY_STOP_MINUTES or more — the machine standing down. */
+  heavyStops: number
 }
 
 export const UNKNOWN_TANK_STATE: TankState = {
   initialMl: null, currentMl: null, consumedMl: null,
   turbulenceMl: null, stopsAveraged: 0, runSloshMl: [],
+  temporaryStops: 0, heavyStops: 0,
 }
 
 /**
@@ -178,8 +202,8 @@ export function deriveTankState(
    */
   priorRunSloshMl: readonly number[] = [],
 ): TankState {
-  const currentMl  = closingLevel(dayReadings)
-  const runSloshMl = dayRunSlosh(dayReadings)
+  const currentMl = closingLevel(dayReadings)
+  const { runSloshMl, temporaryStops, heavyStops } = dayRuns(dayReadings)
   const { mean, stops } = movingAverage([...priorRunSloshMl, ...runSloshMl])
   return {
     initialMl:  previousDayCloseMl,
@@ -190,6 +214,8 @@ export function deriveTankState(
     turbulenceMl:  mean,
     stopsAveraged: stops,
     runSloshMl,
+    temporaryStops,
+    heavyStops,
   }
 }
 
@@ -217,10 +243,12 @@ export function movingAverage(runs: readonly number[]): { mean: number | null; s
  *
  * ## The formula, in full
  *
- * A RUN is the motion between two stops. A STOP is `STOP_MINUTES` of
- * continuous engine-off. Within a run, readings are grouped into 30-minute
- * windows; a window counts only if it holds at least `TURBULENCE_MIN_SAMPLES`
- * readings taken at `speedKmh >= MOTION_MIN_KMH`.
+ * A RUN is the motion between two stops. A STOP is `TEMPORARY_STOP_MINUTES` (1)
+ * or more of continuous engine-off; one lasting `HEAVY_STOP_MINUTES` (60) or
+ * more is a HEAVY stop rather than a temporary one, and either ends the run —
+ * whichever comes first. Within a run, readings group into 30-minute windows;
+ * a window counts only if it holds at least `TURBULENCE_MIN_SAMPLES` (2)
+ * readings taken at `speedKmh >= MOTION_MIN_KMH` (1 km/h).
  *
  *   window range      R(w)  = max(level in w) − min(level in w)
  *
@@ -263,39 +291,62 @@ export function movingAverage(runs: readonly number[]): { mean: number | null; s
  * Null without speed or engine state: runs cannot be cut without knowing when
  * the machine stopped, and slosh cannot be measured without knowing it moved.
  */
-function dayRunSlosh(readings: readonly LevelReading[]): number[] {
-  // Cut the day into runs at each stop. A run accumulates every reading until
-  // STOP_MINUTES of continuous engine-off closes it; the off readings
-  // themselves are not part of the run, they are the stop.
+function dayRuns(readings: readonly LevelReading[]): {
+  runSloshMl: number[]; temporaryStops: number; heavyStops: number
+} {
   const runs: LevelReading[][] = []
   let current: LevelReading[] = []
-  let offSince: Date | null = null
+  // The span of the engine-off stretch currently open, if any. Measured
+  // between the first and last OFF READING, so a sparse-reporting unit's stop
+  // reads slightly short — the alternative, counting the gap to the next
+  // engine-on ping, reads long on exactly the same units. Short is the safer
+  // error: it merges a marginal stop into the run rather than inventing one.
+  let offFrom: Date | null = null
+  let offTo:   Date | null = null
+  let temporaryStops = 0, heavyStops = 0
+
+  const closeStop = () => {
+    if (offFrom == null || offTo == null) return
+    const minutes = (offTo.getTime() - offFrom.getTime()) / 60_000
+    if (minutes >= HEAVY_STOP_MINUTES) heavyStops++
+    else if (minutes >= TEMPORARY_STOP_MINUTES) temporaryStops++
+    offFrom = null
+    offTo   = null
+  }
 
   for (const r of readings) {
     if (r.engineOn === false) {
-      offSince ??= r.capturedAt
-      if (r.capturedAt.getTime() - offSince.getTime() >= STOP_MINUTES * 60_000 && current.length > 0) {
+      offFrom ??= r.capturedAt
+      offTo = r.capturedAt
+      // A stop of any kind ends the run — temporary or heavy, whichever comes
+      // first. The classification happens when the engine returns and the
+      // stop's full length is known.
+      if (offTo.getTime() - offFrom.getTime() >= TEMPORARY_STOP_MINUTES * 60_000
+          && current.length > 0) {
         runs.push(current)
         current = []
       }
       continue
     }
     // Engine on, or unknown: the machine is not stopped, so the run continues.
-    offSince = null
+    closeStop()
     current.push(r)
   }
+  // A stop still open when the day ends is still a stop that happened.
+  closeStop()
   // A day that ends mid-run still contributes it — the machine is out there.
   if (current.length > 0) runs.push(current)
 
-  const perRun: number[] = []
+  const runSloshMl: number[] = []
   for (const run of runs) {
     const t = runSlosh(run)
     // Rounded here, because these are persisted and re-averaged later: keeping
     // full precision in the array and rounding only at the end would make a
     // stored row disagree with the same day recomputed.
-    if (t != null) perRun.push(Math.round(t))
+    if (t != null) runSloshMl.push(Math.round(t))
   }
-  return perRun
+
+  return { runSloshMl, temporaryStops, heavyStops }
 }
 
 /** T(r): mean of the 30-minute window ranges inside one run, moving only. */

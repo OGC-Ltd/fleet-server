@@ -74,12 +74,14 @@ export async function recordFuelTrends(asOf = new Date()): Promise<TrendOutcome[
           openingMl: r.initialMl, closingMl: r.currentMl, consumedMl: r.consumedMl,
           turbulenceMl: r.turbulenceMl, stopsAveraged: r.stopsAveraged,
           runSloshMl: r.runSloshMl,
+          temporaryStops: r.temporaryStops, heavyStops: r.heavyStops,
           computedAt: new Date(),
         },
         update: {
           openingMl: r.initialMl, closingMl: r.currentMl, consumedMl: r.consumedMl,
           turbulenceMl: r.turbulenceMl, stopsAveraged: r.stopsAveraged,
           runSloshMl: r.runSloshMl,
+          temporaryStops: r.temporaryStops, heavyStops: r.heavyStops,
           computedAt: new Date(),
         },
       })

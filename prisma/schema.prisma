@@ -782,6 +782,10 @@ model FuelDailyTrend {
   /// TURBULENCE_STOPS runs WHEREVER THEY FELL — the window crosses midnight.
   /// Slosh, not fuel moved. Formula at stopTurbulence in fuel-tank-state.
   turbulenceMl  Int?     @map("turbulence_ml")
+  /// Stops under HEAVY_STOP_MINUTES — a pause in the work.
+  temporaryStops Int     @default(0) @map("temporary_stops")
+  /// Stops of HEAVY_STOP_MINUTES or more — the machine standing down.
+  heavyStops     Int     @default(0) @map("heavy_stops")
   /// This day's individual run slosh values, in order, one per run.
   ///
   /// Kept because a moving average that spans days needs the runs themselves —
