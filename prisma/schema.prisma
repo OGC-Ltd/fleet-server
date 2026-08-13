@@ -782,6 +782,14 @@ model FuelDailyTrend {
   /// TURBULENCE_STOPS runs WHEREVER THEY FELL — the window crosses midnight.
   /// Slosh, not fuel moved. Formula at stopTurbulence in fuel-tank-state.
   turbulenceMl  Int?     @map("turbulence_ml")
+  /// Ground covered that day, in metres — summed from the position fixes,
+  /// since vehicle_telemetries carries no odometer. Metres because an integer
+  /// of them is exact where a float of kilometres accumulates error.
+  distanceM      Int?    @map("distance_m")
+  /// Fuel the engine is EXPECTED to have burned over that distance, at
+  /// KM_PER_LITRE. An expectation, not a measurement — compare against
+  /// consumedMl, which is what the tank actually did.
+  expectedBurnMl Int?    @map("expected_burn_ml")
   /// Stops under HEAVY_STOP_MINUTES — a pause in the work.
   temporaryStops Int     @default(0) @map("temporary_stops")
   /// Stops of HEAVY_STOP_MINUTES or more — the machine standing down.

@@ -238,3 +238,33 @@ describe('deriveTankState', () => {
     expect(out.consumedMl).toBe(60_000)
   })
 })
+
+describe('mileage and expected burn', () => {
+  it('converts distance to an expected burn at KM_PER_LITRE', () => {
+    // "For every 2 km we expect 1 L." 40 km -> 20 L.
+    const out = deriveTankState([], 300_000, [], 40_000)
+    expect(out.distanceM).toBe(40_000)
+    expect(out.expectedBurnMl).toBe(20_000)
+  })
+
+  it('says nothing when the unit sent no positions', () => {
+    // A zero would read as "went nowhere", which is a different claim from
+    // "we do not know where it went".
+    const out = deriveTankState([], 300_000)
+    expect(out.distanceM).toBeNull()
+    expect(out.expectedBurnMl).toBeNull()
+  })
+
+  it('leaves the expectation and the measurement side by side', () => {
+    // Expected burn is a fleet rule of thumb; consumed is what the tank did.
+    // The gap between them is the point, so neither is derived from the other.
+    const day = [
+      ...Array.from({ length: 20 }, (_, i) => ({
+        capturedAt: at(i), fuelLevelMl: 250_000, engineOn: true, speedKmh: 20,
+      })),
+    ]
+    const out = deriveTankState(day, 300_000, [], 10_000)
+    expect(out.expectedBurnMl).toBe(5_000)     // 10 km at 2 km/L
+    expect(out.consumedMl).toBe(50_000)        // what the tank actually lost
+  })
+})

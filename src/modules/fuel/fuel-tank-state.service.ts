@@ -42,6 +42,16 @@ const PREV_CLOSE_SAMPLES = 600
  */
 const TREND_LOOKBACK_DAYS = 14
 
+/**
+ * Longest single hop counted as travel.
+ *
+ * At a 30-second ping, 10 km between consecutive fixes is over 600 km/h — a GPS
+ * jump, not a journey. One such fix left in would add hundreds of kilometres to
+ * a vehicle's day, and the dropped hop costs at most the real distance the unit
+ * covered while its fix was wrong.
+ */
+const MAX_HOP_KM = 10
+
 export interface VehicleTankState extends TankState {
   vehicleId: string
 }
@@ -145,6 +155,45 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
     else priorRuns.set(r.vehicleId, [...r.runSloshMl])
   }
 
+  // Ground covered today, summed from the position fixes.
+  //
+  // There is no odometer on vehicle_telemetries — Wialon's counter reaches the
+  // snapshot but is not persisted per ping — so distance is the sum of
+  // great-circle hops between consecutive fixes. Computed in SQL rather than in
+  // JS because it needs EVERY fix, including the ones with no fuel reading that
+  // the day query above filters out; pulling those into memory as well would
+  // roughly double the payload for one number.
+  //
+  // Haversine written out rather than PostGIS: ST_DistanceSphere would do, but
+  // this needs no extension to be present and the arithmetic is not the hard
+  // part. Hops longer than MAX_HOP_KM are dropped — at a 30-second ping that is
+  // over 600 km/h, so it is a GPS jump rather than travel, and one such fix
+  // would otherwise add hundreds of kilometres to a vehicle's day.
+  const distRows = await prisma.$queryRaw<Array<{ vehicle_id: string; metres: number }>>`
+    WITH p AS (
+      SELECT t.vehicle_id, t.lat, t.lng,
+             lag(t.lat) OVER (PARTITION BY t.vehicle_id ORDER BY t.captured_at) AS plat,
+             lag(t.lng) OVER (PARTITION BY t.vehicle_id ORDER BY t.captured_at) AS plng
+        FROM vehicle_telemetries t
+        JOIN vehicles v ON v.id = t.vehicle_id
+       WHERE v.organisation_id = ${orgId}
+         AND t.captured_at >= ${dayStart} AND t.captured_at <= ${asOf}
+         AND t.lat IS NOT NULL AND t.lng IS NOT NULL
+    ), hop AS (
+      SELECT vehicle_id,
+             6371000 * 2 * asin(sqrt(
+               power(sin(radians(lat - plat) / 2), 2)
+               + cos(radians(plat)) * cos(radians(lat))
+                 * power(sin(radians(lng - plng) / 2), 2)
+             )) AS metres
+        FROM p WHERE plat IS NOT NULL
+    )
+    SELECT vehicle_id, sum(metres) AS metres
+      FROM hop
+     WHERE metres < ${MAX_HOP_KM * 1000}
+     GROUP BY vehicle_id`
+  const distance = new Map(distRows.map(r => [r.vehicle_id, Math.round(Number(r.metres))]))
+
   // Every vehicle that reported on EITHER day gets a row. One that reported
   // yesterday and not today still has an opening balance worth showing, and
   // dropping it would make a silent unit vanish from the table rather than
@@ -155,6 +204,11 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
     const readings = byVehicle.get(vehicleId) ?? []
     const prev = prevClose.get(vehicleId) ?? null
     if (readings.length === 0 && prev == null) return { vehicleId, ...UNKNOWN_TANK_STATE }
-    return { vehicleId, ...deriveTankState(readings, prev, priorRuns.get(vehicleId) ?? []) }
+    return {
+      vehicleId,
+      ...deriveTankState(
+        readings, prev, priorRuns.get(vehicleId) ?? [], distance.get(vehicleId) ?? null,
+      ),
+    }
   })
 }
