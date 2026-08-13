@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   deriveTankState, closingLevel, CLOSE_WINDOW_MINUTES, TURBULENCE_MIN_SAMPLES,
-  MOTION_MIN_KMH, TURBULENCE_STOPS, type LevelReading,
+  MOTION_MIN_KMH, TURBULENCE_STOPS, HEAVY_STOP_MINUTES, type LevelReading,
 } from '../../src/modules/fuel/fuel-tank-state.js'
 
 const T0 = Date.parse('2026-08-13T04:00:00Z')
@@ -121,16 +121,41 @@ describe('deriveTankState', () => {
     expect(out.turbulenceMl).toBe(40_000)
   })
 
-  it('does not cut a run on a pause shorter than a stop', () => {
+  it('cuts a run at ANY stop, temporary or heavy', () => {
+    // A stop is one minute of engine-off. Readings here are 2 minutes apart, so
+    // a single off reading followed by another already exceeds it.
     const move = (n: number, from: number): LevelReading[] =>
       Array.from({ length: n }, (_, i) => ({
         capturedAt: at(from + i), fuelLevelMl: i % 2 ? 260_000 : 240_000, engineOn: true, speedKmh: 14,
       }))
-    const briefPause: LevelReading[] = Array.from({ length: 2 }, (_, i) => ({
+    const pause: LevelReading[] = Array.from({ length: 2 }, (_, i) => ({
       capturedAt: at(20 + i), fuelLevelMl: 250_000, engineOn: false, speedKmh: 0,
     }))
-    const out = deriveTankState([...move(20, 0), ...briefPause, ...move(20, 22)], 300_000)
-    expect(out.stopsAveraged).toBe(1)
+    const out = deriveTankState([...move(20, 0), ...pause, ...move(20, 22)], 300_000)
+    expect(out.stopsAveraged).toBe(2)          // two runs, not one
+    expect(out.temporaryStops).toBe(1)
+    expect(out.heavyStops).toBe(0)
+  })
+
+  it('tells a heavy stop from a temporary one', () => {
+    // Under an hour is a pause in the work; an hour or more is the machine
+    // standing down. Both end a run — only the classification differs.
+    const move = (n: number, from: number): LevelReading[] =>
+      Array.from({ length: n }, (_, i) => ({
+        capturedAt: at(from + i), fuelLevelMl: i % 2 ? 260_000 : 240_000, engineOn: true, speedKmh: 14,
+      }))
+    const off = (n: number, from: number): LevelReading[] =>
+      Array.from({ length: n }, (_, i) => ({
+        capturedAt: at(from + i), fuelLevelMl: 250_000, engineOn: false, speedKmh: 0,
+      }))
+    // Readings are 2 min apart, so an hour of engine-off is 31 of them.
+    const heavy = HEAVY_STOP_MINUTES / 2 + 1
+    const out = deriveTankState(
+      [...move(10, 0), ...off(3, 10), ...move(10, 13), ...off(heavy, 23), ...move(10, 23 + heavy)],
+      300_000,
+    )
+    expect(out.temporaryStops).toBe(1)
+    expect(out.heavyStops).toBe(1)
   })
 
   it('carries the moving average across midnight', () => {
@@ -163,8 +188,8 @@ describe('deriveTankState', () => {
   })
 
   it('ignores GPS jitter below the motion threshold', () => {
-    // MOTION_MIN_KMH is 0.1: anything under it is a stationary machine's fix
-    // wandering, not travel.
+    // MOTION_MIN_KMH is 1 km/h: below that a reading is a stationary machine's
+    // fix wandering rather than travel.
     const jitter: LevelReading[] = Array.from({ length: 40 }, (_, i) => ({
       capturedAt: at(i), fuelLevelMl: i % 2 ? 250_000 : 230_000, engineOn: true,
       speedKmh: MOTION_MIN_KMH / 2,
@@ -172,7 +197,8 @@ describe('deriveTankState', () => {
     expect(deriveTankState(jitter, 300_000).turbulenceMl).toBeNull()
   })
 
-  it('will not compute turbulence from a handful of readings', () => {
+  it('needs more than one moving reading in a window', () => {
+    // A single reading has no range at all, so one is never enough.
     const thin: LevelReading[] = Array.from({ length: TURBULENCE_MIN_SAMPLES - 1 }, (_, i) => ({
       capturedAt: at(i), fuelLevelMl: i % 2 ? 250_000 : 230_000, engineOn: true, speedKmh: 12,
     }))
