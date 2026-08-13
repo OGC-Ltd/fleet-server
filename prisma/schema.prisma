@@ -778,11 +778,12 @@ model FuelDailyTrend {
   closingMl     Int?     @map("closing_ml")
   /// opening − closing. Not "burned" on a day carrying a refuel.
   consumedMl    Int?     @map("consumed_ml")
-  /// Mean level range per 30-min window while MOVING. Slosh, not fuel moved.
+  /// Moving average of per-RUN slosh while in motion. Slosh, not fuel moved.
+  /// Formula at stopTurbulence in modules/fuel/fuel-tank-state.
   turbulenceMl  Int?     @map("turbulence_ml")
-  /// Windows the average spans, so a one-window figure is not read as
-  /// confidently as an eight-window one.
-  motionWindows Int      @default(0) @map("motion_windows")
+  /// STOPS the moving average spans, so a one-run figure is not read as
+  /// confidently as an eight-run one. See stopTurbulence for the formula.
+  stopsAveraged Int      @default(0) @map("stops_averaged")
   computedAt    DateTime @map("computed_at")
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id])
