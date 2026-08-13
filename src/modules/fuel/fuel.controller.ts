@@ -72,12 +72,35 @@ export const listTankState: RequestHandler = async (req, res, next) => {
  * belongs to that day and not the previous one. An unparseable or future date
  * falls back to now rather than erroring, because this drives a table and a bad
  * query string should not blank it.
+ *
+ * ## The last instant of the day, NOT the first of the next
+ *
+ * This is a one-millisecond distinction that silently emptied every past day,
+ * and it is worth stating why rather than leaving the `- 1` looking like a
+ * rounding nicety.
+ *
+ * `getFleetTankState` derives its own day from the `asOf` it is handed —
+ * `fleetDayStart(asOf)` — so `asOf` must land INSIDE the day being asked for.
+ * Midnight-at-the-end belongs to the following day: `fleetDayStart` of it
+ * returns that same instant, the service's window becomes
+ * `[asOf, asOf]`, and every figure derived from the day's readings — closing
+ * level, mileage, engine hours, both expected burns, turbulence, stops — comes
+ * back null for want of any rows in a zero-width window.
+ *
+ * It fails in a way designed to be missed: the previous-day lookup, which
+ * reaches back 24 hours from that same boundary, then spans exactly the day
+ * that was requested, so the table renders the requested day's real closing
+ * level in the INITIAL column while Current sits blank. It reads as a data gap
+ * rather than an off-by-one.
+ *
+ * `recordFuelTrends` has always bounded its own day this way, which is why the
+ * persisted `fuel_daily_trends` rows are right where the live table was wrong.
  */
-function asOfFromQuery(raw: unknown): Date {
+export function asOfFromQuery(raw: unknown): Date {
   const now = new Date()
   if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return now
   const dayStart = fleetDayStart(new Date(`${raw}T12:00:00Z`))
   if (Number.isNaN(dayStart.getTime())) return now
-  const dayEnd = new Date(dayStart.getTime() + 86_400_000)
+  const dayEnd = new Date(dayStart.getTime() + 86_400_000 - 1)
   return dayEnd < now ? dayEnd : now
 }
