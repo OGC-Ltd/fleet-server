@@ -25,7 +25,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
-import { getFleetTankState } from './fuel-tank-state.service.js'
+import { computeFleetTankState } from './fuel-tank-state.service.js'
 
 export interface TrendOutcome {
   day:      string
@@ -60,7 +60,10 @@ export async function recordFuelTrends(asOf = new Date()): Promise<TrendOutcome[
   const out: TrendOutcome[] = []
 
   for (const org of orgs) {
-    const rows = await getFleetTankState(org.id, asOfBounded)
+    // computeFleetTankState, NOT getFleetTankState: this job WRITES the rows
+    // that the cached path reads, so going through the cache would make it read
+    // its own previous output and write it back unchanged.
+    const rows = await computeFleetTankState(org.id, asOfBounded)
     let written = 0, withTurbulence = 0
 
     for (const r of rows) {

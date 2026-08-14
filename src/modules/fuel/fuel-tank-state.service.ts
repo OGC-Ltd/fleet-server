@@ -10,13 +10,14 @@
  */
 
 import { prisma } from '../../lib/prisma.js'
-import { fleetDayStart } from '../../lib/provider-time.js'
+import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import {
   closingLevel, deriveTankState, resolveEngineSeconds,
   MAX_ENGINE_GAP_SECONDS, MOTION_MIN_KMH, UNKNOWN_TANK_STATE,
   type LevelReading, type TankState,
 } from './fuel-tank-state.js'
 import { getOrgFuelRates } from './fuel-rate.service.js'
+import { engineBurnMl } from './fuel-rate.js'
 
 /**
  * Readings pulled per vehicle to reconstruct the previous day's close.
@@ -66,6 +67,106 @@ export interface VehicleTankState extends TankState {
  * that day's closing level.
  */
 export async function getFleetTankState(orgId: string, asOf = new Date()): Promise<VehicleTankState[]> {
+  // A finished day has already been measured — read it rather than measure it
+  // again. Null when the day is today, or when nothing usable is stored.
+  const stored = await readStoredTankState(orgId, asOf)
+  if (stored) return stored
+  return computeFleetTankState(orgId, asOf)
+}
+
+/**
+ * A past fleet day, served from `fuel_daily_trends`.
+ *
+ * ## Why this exists
+ *
+ * `computeFleetTankState` rebuilds a whole fleet day from raw telemetry on
+ * every request — **241,281 rows for one KASULU day** — against an instance
+ * whose `work_mem` is 4 MB, so its window functions spill to disk. Measured
+ * 2026-08-14: 5.6 s for today, **13.4 s for a past day**, and the FSL table
+ * redraws whenever an operator opens a tab or moves the date picker.
+ *
+ * The nightly trend job has already computed exactly these figures for every
+ * finished day. Recomputing them is work done twice, and the second time is on
+ * a person waiting.
+ *
+ * ## Only for a day that is OVER
+ *
+ * Today has no stored row yet and would be wrong if it had one: the day is
+ * still accumulating, and `currentMl` for today means "the latest reading",
+ * which changes every few seconds. Today always recomputes.
+ *
+ * ## Only for a day the CURRENT code computed
+ *
+ * Rows written before `engineHoursMeter` existed carry nulls for it and for
+ * `engineSeconds`, and serving those would blank columns that the recompute
+ * path fills — a regression dressed as a speed-up. A day qualifies only if at
+ * least one of its rows carries a meter reading, which no pre-2026-08-14 row
+ * does. Older days keep recomputing, correctly and slowly, and convert to the
+ * fast path as `prisma/fuel-trends.ts` backfills them.
+ *
+ * ## Rates are resolved live, not read from the row
+ *
+ * `engineBurnMl` is stored, but it is a rate multiplied by a duration and the
+ * RATE moves — weekly, and whenever a bad one is pruned. Only the DURATION is a
+ * fact about that day. So the duration comes from the row and the rate from the
+ * current table, which means a corrected rate reaches history without a
+ * backfill, and a stored burn can never disagree with the rate shown beside it.
+ */
+async function readStoredTankState(orgId: string, asOf: Date): Promise<VehicleTankState[] | null> {
+  const day = fleetDayKey(asOf)
+  if (day.getTime() >= fleetDayKey(new Date()).getTime()) return null
+
+  const rows = await prisma.fuelDailyTrend.findMany({
+    where:  { day, vehicle: { organisationId: orgId } },
+    select: {
+      vehicleId: true, openingMl: true, closingMl: true, consumedMl: true,
+      turbulenceMl: true, stopsAveraged: true, runSloshMl: true,
+      temporaryStops: true, heavyStops: true, distanceM: true,
+      expectedBurnMl: true, engineSeconds: true, engineHoursMeter: true,
+    },
+  })
+  if (rows.length === 0) return null
+  // Written before the engine fields existed — recompute instead of serving
+  // blanks. See the note above.
+  if (!rows.some(r => r.engineHoursMeter != null)) return null
+
+  const rates = await getOrgFuelRates(orgId)
+
+  return rows.map(r => {
+    const rate = rates.get(r.vehicleId) ?? null
+    return {
+      vehicleId:      r.vehicleId,
+      initialMl:      r.openingMl,
+      currentMl:      r.closingMl,
+      consumedMl:     r.consumedMl,
+      turbulenceMl:   r.turbulenceMl,
+      stopsAveraged:  r.stopsAveraged,
+      runSloshMl:     r.runSloshMl,
+      temporaryStops: r.temporaryStops,
+      heavyStops:     r.heavyStops,
+      distanceM:      r.distanceM,
+      expectedBurnMl: r.expectedBurnMl,
+      engineHoursMeter: r.engineHoursMeter,
+      engineSeconds:  r.engineSeconds,
+      engineBurnMl:   engineBurnMl(r.engineSeconds, rate),
+      engineRateLPerHour: rate?.lPerHour ?? null,
+      engineRateBasis:    rate?.basis    ?? null,
+      engineRateSpread:   rate?.spread   ?? null,
+      engineRateRuns:     rate?.runs     ?? null,
+    }
+  })
+}
+
+/**
+ * Measure the day from raw telemetry. The expensive path.
+ *
+ * Exported because `recordFuelTrends` MUST call it directly and never
+ * `getFleetTankState`. The job writes the very rows the cached path reads, so
+ * going through the cache would have it read its own previous output and write
+ * it straight back — the trend table would freeze at whatever it last held and
+ * a backfill would be a no-op that reported success.
+ */
+export async function computeFleetTankState(orgId: string, asOf: Date): Promise<VehicleTankState[]> {
   const dayStart = fleetDayStart(asOf)
 
   // The day's readings, for the closing level and the working turbulence.
