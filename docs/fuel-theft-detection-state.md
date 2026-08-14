@@ -246,6 +246,7 @@ between them is the whole point:
 | field | kind | how |
 | --- | --- | --- |
 | `distanceM` | measurement | great-circle hops between fixes, dropping any over `MAX_HOP_KM` |
+| `engineHoursMeter` | measurement | the unit's own cumulative hour counter at the day's close |
 | `engineSeconds` | measurement | gap between fixes charged to the earlier fix's engine state, capped at `MAX_ENGINE_GAP_SECONDS` |
 | `expectedBurnMl` | expectation | distance ÷ `KM_PER_LITRE` (2) |
 | `engineBurnMl` | expectation | engine hours × the vehicle's measured L/h |
@@ -269,6 +270,39 @@ secondary check on road vehicles, where the two agree.
 
 Both expectations sit beside `consumedMl` and neither is derived from the
 other. The gap between them is the question worth asking.
+
+### Engine hours: the METER, and the duration, are different things
+
+Added 2026-08-14 at the operator's instruction — *"engine hour should be the
+final engine hours for that day on a unit"*. The column was showing a
+DURATION; what was wanted is the machine's own cumulative counter at the day's
+close, the way `Current` is the day's final fuel level.
+
+Both are now carried, because both are needed and **only one of them can be
+multiplied by a rate**:
+
+- `engineHoursMeter` — the reading. What the FSL table shows.
+- `engineSeconds` — the duration. What prices `engineBurnMl`, surfaced in that
+  column's tooltip so the arithmetic stays auditable.
+
+Source is Wialon's `cneh`, arriving in `vehicle_telemetry_raws.payload` rather
+than as a column, exactly like the odometer. Coverage: **159 of 214 active
+KASULU units, 270 of 284 SUKARI**.
+
+**Stored as the reading, NOT the day-over-day delta** — and the delta is the
+tempting figure, because it would be the hours actually run and it corroborates
+the integration nicely (`EX 30`: 22.17 h by meter against 22.3 h integrated,
+two independent methods agreeing, which is the best evidence either is right).
+It is not used because the adapter carries the last known meter value FORWARD
+into every frame, so a boundary read can be one taken hours earlier and a delta
+between two of them misattributes hours across days. **3 of 158 KASULU units
+showed more than 24 hours in a single day**, which no engine does. The reading
+carries no such risk: it is whatever the counter last said.
+
+⚠️ **The meter lookup must stay a per-vehicle indexed LATERAL taking ONE row,
+scoped to active vehicles.** `vehicle_telemetry_raws` is ~156 MB and joining it
+across a whole org-day **timed out at 60 s** while this was being measured.
+Dropping the `is_active` filter alone took it from **12 ms to 10.2 s**.
 
 ⚠️ **`MAX_ENGINE_GAP_SECONDS` (900) must stay equal to the 900 s that cuts a run
 in the rate derivation.** `engineBurnMl` is a rate calibrated under one
