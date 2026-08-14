@@ -216,7 +216,12 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
        WHERE metres < ${MAX_HOP_KM * 1000}
        GROUP BY vehicle_id
     ), gap AS (
-      SELECT vehicle_id,
+      -- engine_on and speed_kmh are carried through so the aggregate below can
+      -- compute the ignition-signal counts in the SAME pass. They were a
+      -- separate CTE over the base rows and that pass cost 2.1 s of a 4.5 s
+      -- query — a full extra scan and GROUP BY to produce two counters that
+      -- the existing GROUP BY was already positioned to produce.
+      SELECT vehicle_id, engine_on, speed_kmh,
              lag(engine_on) OVER w AS prev_on,
              extract(epoch FROM (captured_at - lag(captured_at) OVER w)) AS secs
         FROM base
@@ -224,26 +229,21 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
     ), eng AS (
       SELECT vehicle_id,
              sum(CASE WHEN prev_on AND secs > 0
-                      THEN least(secs, ${MAX_ENGINE_GAP_SECONDS}) ELSE 0 END) AS seconds
-        FROM gap
-       GROUP BY vehicle_id
-    ), sig AS (
-      -- Is the ignition flag corroborated by motion? Speed does not come from
-      -- the ignition wire, so a unit that moved while never reporting
-      -- engine-on has a dead flag rather than a quiet day. 27 units on this
-      -- fleet send 500+ pings and never once report it. See
-      -- resolveEngineSeconds for what is done with these two counts.
-      SELECT vehicle_id,
+                      THEN least(secs, ${MAX_ENGINE_GAP_SECONDS}) ELSE 0 END) AS seconds,
+             -- Is the ignition flag corroborated by motion? Speed does not come
+             -- from the ignition wire, so a unit that moved while never
+             -- reporting engine-on has a dead flag rather than a quiet day. 27
+             -- units on this fleet send 500+ pings and never once report it.
+             -- See resolveEngineSeconds for what is done with these counts.
              count(*) FILTER (WHERE engine_on)::int AS on_pings,
              count(*) FILTER (WHERE speed_kmh >= ${MOTION_MIN_KMH})::int AS moving_pings
-        FROM base
+        FROM gap
        GROUP BY vehicle_id
     )
     SELECT COALESCE(d.vehicle_id, e.vehicle_id) AS vehicle_id,
-           d.metres, e.seconds, s.on_pings, s.moving_pings
+           d.metres, e.seconds, e.on_pings, e.moving_pings
       FROM dist d
-      FULL OUTER JOIN eng e ON e.vehicle_id = d.vehicle_id
-      LEFT JOIN sig s ON s.vehicle_id = COALESCE(d.vehicle_id, e.vehicle_id)`
+      FULL OUTER JOIN eng e ON e.vehicle_id = d.vehicle_id`
 
   const distance = new Map<string, number>()
   const engineSeconds = new Map<string, number | null>()
