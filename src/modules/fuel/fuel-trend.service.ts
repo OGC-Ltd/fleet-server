@@ -24,7 +24,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
-import { fleetDayStart } from '../../lib/provider-time.js'
+import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import { getFleetTankState } from './fuel-tank-state.service.js'
 
 export interface TrendOutcome {
@@ -46,9 +46,12 @@ export interface TrendOutcome {
 export async function recordFuelTrends(asOf = new Date()): Promise<TrendOutcome[]> {
   const dayStart = fleetDayStart(asOf)
   // DATE column: the fleet day's own calendar date, not a UTC instant.
-  const day = new Date(Date.UTC(
-    dayStart.getUTCFullYear(), dayStart.getUTCMonth(), dayStart.getUTCDate(),
-  ))
+  //
+  // This took the UTC components of `dayStart` until 2026-08-14, and `dayStart`
+  // is 21:00 the PREVIOUS evening in UTC — so every row was filed under the day
+  // before the one it describes. See fleetDayKey, which is now the only place
+  // this conversion happens.
+  const day = fleetDayKey(asOf)
   // A day is only worth recording once it is over — mid-day figures would be
   // overwritten anyway, and a half-day turbulence average is not a trend point.
   const asOfBounded = new Date(Math.min(asOf.getTime(), dayStart.getTime() + 86_400_000 - 1))
