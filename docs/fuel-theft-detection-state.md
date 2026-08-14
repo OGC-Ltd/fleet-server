@@ -246,8 +246,8 @@ between them is the whole point:
 | field | kind | how |
 | --- | --- | --- |
 | `distanceM` | measurement | great-circle hops between fixes, dropping any over `MAX_HOP_KM` |
-| `engineHoursMeter` | measurement | the unit's own cumulative hour counter at the day's close |
-| `engineSeconds` | measurement | gap between fixes charged to the earlier fix's engine state, capped at `MAX_ENGINE_GAP_SECONDS` |
+| `engineSeconds` | measurement | the day's RUNNING TIME, from the machine's own engine-hour counter |
+| `engineHoursMeter` | measurement | that counter's cumulative reading at the day's close |
 | `expectedBurnMl` | expectation | distance ÷ `KM_PER_LITRE` (2) |
 | `engineBurnMl` | expectation | engine hours × the vehicle's measured L/h |
 
@@ -271,33 +271,51 @@ secondary check on road vehicles, where the two agree.
 Both expectations sit beside `consumedMl` and neither is derived from the
 other. The gap between them is the question worth asking.
 
-### Engine hours: the METER, and the duration, are different things
+### Engine hours come from the machine's own COUNTER, not from integrating pings
 
-Added 2026-08-14 at the operator's instruction — *"engine hour should be the
-final engine hours for that day on a unit"*. The column was showing a
-DURATION; what was wanted is the machine's own cumulative counter at the day's
-close, the way `Current` is the day's final fuel level.
+The operator checked `KTCC 959G` for 2026-08-13 against the provider's report
+and read **2:16:16**. We were reporting 2:27:20 — eleven minutes over.
 
-Both are now carried, because both are needed and **only one of them can be
-multiplied by a rate**:
+| source | result | error |
+| --- | --- | --- |
+| **counter delta, first to last reading of the day** | **2:16:16** | **0 s** |
+| integrating engine-on gaps, capped at 900 s | 2:27:20 | +664 s |
+| integrating engine-on gaps, uncapped | 2:45:37 | +1761 s |
 
-- `engineHoursMeter` — the reading. What the FSL table shows.
-- `engineSeconds` — the duration. What prices `engineBurnMl`, surfaced in that
-  column's tooltip so the arithmetic stays auditable.
+**Integration over-counts structurally, not occasionally.** It charges the WHOLE
+interval between two pings to the earlier ping's engine state, so every shutdown
+keeps counting until the next ping lands. Capping the gap bounds that error
+without removing it. The counter has no such problem — it is the engine's own
+reckoning, and it is the number the operator is reading.
 
-Source is Wialon's `cneh`, arriving in `vehicle_telemetry_raws.payload` rather
-than as a column, exactly like the odometer. Coverage: **159 of 214 active
-KASULU units, 270 of 284 SUKARI**.
+So `engineSeconds` is the counter delta, and integration survives only as the
+fallback for units whose tracker has no counter. Source is Wialon's `cneh`, in
+`vehicle_telemetry_raws.payload` rather than as a column, like the odometer.
+Coverage: **167 of 177** vehicles on the day above.
 
-**Stored as the reading, NOT the day-over-day delta** — and the delta is the
-tempting figure, because it would be the hours actually run and it corroborates
-the integration nicely (`EX 30`: 22.17 h by meter against 22.3 h integrated,
-two independent methods agreeing, which is the best evidence either is right).
-It is not used because the adapter carries the last known meter value FORWARD
-into every frame, so a boundary read can be one taken hours earlier and a delta
-between two of them misattributes hours across days. **3 of 158 KASULU units
-showed more than 24 hours in a single day**, which no engine does. The reading
-carries no such risk: it is whatever the counter last said.
+⚠️ **Both boundary readings must be taken INSIDE the day.** The adapter repeats
+the last known value into every frame, so a closing read alone can belong to an
+earlier day, and a delta against it attributes another day's hours to this one.
+
+A delta that goes backwards (counter reset or replaced) or exceeds 24 hours (a
+unit returning from days of silence, its carried-forward value jumping at once)
+falls back to integration — wrong by minutes rather than by days.
+
+**Displayed h:mm:ss, not decimal hours.** That is how it is read off the
+report, and decimals hid this very error: 2:16:16 and 2:27:20 both round to
+"2.3 h".
+
+`engineHoursMeter` — the cumulative reading at the day's close — is still
+carried, since it is real and costs nothing extra, but it is not the column.
+
+#### What this corrected
+
+The first reading of *"engine hour should be the final engine hours for that
+day on a unit"* was the lifetime counter reading, the way `Current` is the
+day's final fuel level. It is not: **2:16:16 is plainly a duration**. The
+requirement meant the day's finalised RUNNING TIME. Worth recording because the
+wrong reading was internally consistent and survived a full build and deploy —
+only ground truth from the operator caught it.
 
 ⚠️ **The meter lookup must stay a per-vehicle indexed LATERAL taking ONE row,
 scoped to active vehicles.** `vehicle_telemetry_raws` is ~156 MB and joining it
@@ -554,6 +572,37 @@ third-largest category at 438 rows. Mirror `judgeDrain`: a real filling shows a
 sustained RISE, noise shows a spike that falls back. There is a spawned task
 carrying the full brief.
 
+## B4. ~~A finished day was recomputed on every request~~ — DONE 2026-08-14
+
+`getFleetTankState` rebuilt a whole fleet day from raw telemetry every time the
+table drew — **241,281 rows for one KASULU day** — against an instance whose
+`work_mem` is **4 MB**, so its window functions spill to disk. 5.6 s for today,
+**13.4 s for a past day**, on a table that redraws whenever an operator opens a
+tab or moves the date picker.
+
+The nightly job had already computed exactly those figures. A past day now
+reads `fuel_daily_trends`: **13.4 s → 111 ms**.
+
+Three conditions keep it honest:
+
+- **Today always recomputes.** It has no stored row and would be wrong if it
+  had one — `currentMl` for today means "the latest reading" and moves
+  constantly.
+- **A day is served from storage only if one of its rows carries an
+  engine-hour meter**, which no row written before 2026-08-14 does. Serving the
+  older ones would blank columns the recompute path fills — a regression
+  dressed as a speed-up. Those days recompute until the backfill reaches them.
+- **Rates are resolved live, not read from the row.** `engineBurnMl` is a rate
+  times a duration and only the DURATION is a fact about that day; the rate
+  moves weekly and whenever a bad one is pruned. So a corrected rate reaches
+  history with no backfill and can never disagree with the rate beside it.
+
+⚠️ **`recordFuelTrends` calls `computeFleetTankState` directly and must keep
+doing so.** It WRITES the rows the cached path reads, so going through
+`getFleetTankState` would have it read its own previous output and write it
+back unchanged — the table would freeze at whatever it last held and a backfill
+would be a no-op reporting success.
+
 ## B2. Behavioural grouping, and the correlation study behind it — NOT STARTED
 
 The fallback guards above stop the worst failures; they do not fix the cause.
@@ -624,7 +673,11 @@ says exactly that, and trips/alerts/drains and 5.5M telemetry rows FK these.
 The FSL table now reads:
 
 **Initial · Current · Mileage (km) · Expected (km) · Engine hrs ·
-Expected (hrs) · Turbulence**
+Turbulence**
+
+*(Expected (hrs) was removed 2026-08-14 at the operator's instruction. The
+server still derives the rates behind it and they remain documented above;
+nothing is drawn from them.)*
 
 Each expectation sits beside the measurement that drives it, and both sit
 beside Initial−Current, which is what the tank actually did.
