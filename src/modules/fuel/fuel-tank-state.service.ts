@@ -12,7 +12,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import {
-  closingLevel, deriveTankState, resolveEngineSeconds,
+  closingLevel, deriveTankState, resolveEngineSeconds, dayEngineSeconds,
   MAX_ENGINE_GAP_SECONDS, MOTION_MIN_KMH, UNKNOWN_TANK_STATE,
   type LevelReading, type TankState,
 } from './fuel-tank-state.js'
@@ -347,13 +347,17 @@ export async function computeFleetTankState(orgId: string, asOf: Date): Promise<
       FULL OUTER JOIN eng e ON e.vehicle_id = d.vehicle_id`
 
   const distance = new Map<string, number>()
-  const engineSeconds = new Map<string, number | null>()
+  // The gap-integrated engine time. Only a FALLBACK now — it is structurally
+  // over-counted, by 664 s against the operator's figure for KTCC 959G — and is
+  // used where a unit's tracker reports no counter. Combined with the counter
+  // below, once that query has run.
+  const integratedSeconds = new Map<string, number | null>()
   for (const r of dayRowsSql) {
     if (r.metres != null) distance.set(r.vehicle_id, Math.round(Number(r.metres)))
     if (r.seconds != null) {
       // Null, not zero, when the day's motion contradicts a silent ignition
       // flag — otherwise a dead wire renders as "burned nothing".
-      engineSeconds.set(r.vehicle_id, resolveEngineSeconds(
+      integratedSeconds.set(r.vehicle_id, resolveEngineSeconds(
         Math.round(Number(r.seconds)), Number(r.on_pings ?? 0), Number(r.moving_pings ?? 0),
       ))
     }
@@ -378,28 +382,57 @@ export async function computeFleetTankState(orgId: string, asOf: Date): Promise<
   // rather than "the newest non-null" for exactly that reason: a NOT NULL
   // predicate on a JSON field cannot use an index, so on a unit that never
   // reports `cneh` it would walk the entire day before giving up.
+  // BOTH boundary readings of the counter, so the day's engine hours can be its
+  // DELTA — see dayEngineSeconds, which is exact against the operator's own
+  // figure where integrating pings is out by minutes.
+  //
+  // Both readings are bounded INSIDE the day. The closing one alone could be
+  // carried forward from an earlier day (the adapter repeats the last known
+  // value), and a delta taken against that would attribute another day's hours
+  // to this one.
   const meterRows = await prisma.$queryRaw<Array<{
-    vehicle_id: string; engine_hours: number | null
+    vehicle_id: string; first_eh: number | null; last_eh: number | null
   }>>`
-    SELECT v.id AS vehicle_id, p.engine_hours
+    SELECT v.id AS vehicle_id, f.eh AS first_eh, l.eh AS last_eh
       FROM vehicles v
-      CROSS JOIN LATERAL (
-        SELECT (r.payload->>'engine_hours')::float AS engine_hours
+      LEFT JOIN LATERAL (
+        SELECT (r.payload->>'engine_hours')::float AS eh
           FROM vehicle_telemetries t
           JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
-         WHERE t.vehicle_id = v.id AND t.captured_at <= ${asOf}
+         WHERE t.vehicle_id = v.id
+           AND t.captured_at >= ${dayStart} AND t.captured_at <= ${asOf}
+         ORDER BY t.captured_at ASC
+         LIMIT 1
+      ) f ON true
+      LEFT JOIN LATERAL (
+        SELECT (r.payload->>'engine_hours')::float AS eh
+          FROM vehicle_telemetries t
+          JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
+         WHERE t.vehicle_id = v.id
+           AND t.captured_at >= ${dayStart} AND t.captured_at <= ${asOf}
          ORDER BY t.captured_at DESC
          LIMIT 1
-      ) p
+      ) l ON true
      WHERE v.organisation_id = ${orgId} AND v.is_active`
+
   const engineHoursMeter = new Map<string, number>()
+  const meterFirst = new Map<string, number>()
   for (const r of meterRows) {
-    // A zero counter is a tracker that has one and has never run, which is not
-    // the same as a reading — and in practice marks a unit whose cneh is
-    // absent rather than genuinely zero.
-    if (r.engine_hours != null && r.engine_hours > 0) {
-      engineHoursMeter.set(r.vehicle_id, Number(r.engine_hours))
-    }
+    // A zero counter is a tracker that reports the field without a real value,
+    // not a machine that has never run.
+    if (r.last_eh  != null && r.last_eh  > 0) engineHoursMeter.set(r.vehicle_id, Number(r.last_eh))
+    if (r.first_eh != null && r.first_eh > 0) meterFirst.set(r.vehicle_id, Number(r.first_eh))
+  }
+
+  // The day's engine hours: the machine's own counter where it has one, the
+  // integrated figure only where it does not. See dayEngineSeconds.
+  const engineSeconds = new Map<string, number | null>()
+  for (const id of new Set([...integratedSeconds.keys(), ...meterFirst.keys()])) {
+    engineSeconds.set(id, dayEngineSeconds(
+      meterFirst.get(id) ?? null,
+      engineHoursMeter.get(id) ?? null,
+      integratedSeconds.get(id) ?? null,
+    ))
   }
 
   // Consumption rates, resolved per vehicle with an org+type fallback. Read
