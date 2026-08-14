@@ -372,6 +372,50 @@ export function closingLevel(readings: readonly LevelReading[]): number | null {
  * `MOTION_MIN_KMH` is the same 1 km/h the turbulence rule uses, so a stationary
  * machine's fix wandering cannot masquerade as movement and void a real zero.
  */
+/**
+ * The day's engine hours, from the machine's OWN counter where it has one.
+ *
+ * ## The counter is the answer; integrating pings is not
+ *
+ * Checked against the operator's figure for `KTCC 959G` on 2026-08-13, which
+ * they read as **2:16:16**:
+ *
+ * | source | result | error |
+ * | --- | --- | --- |
+ * | counter delta, first to last reading of the day | **2:16:16** | **0 s** |
+ * | integrating engine-on gaps, capped at 900 s | 2:27:20 | +664 s |
+ * | integrating engine-on gaps, uncapped | 2:45:37 | +1761 s |
+ *
+ * Integration over-counts structurally: it charges the WHOLE interval between
+ * two pings to the earlier ping's engine state, so every shutdown is counted as
+ * running until the next ping arrives. Capping the gap bounds the error without
+ * removing it. The counter has no such problem — it is the engine's own
+ * reckoning, and it is what the operator sees in the provider's report.
+ *
+ * ## Bounds, and what happens outside them
+ *
+ * A delta must be within a day and not negative. A counter that goes backwards
+ * has been reset or replaced; one that gains more than 24 hours in a day is
+ * reading across a gap in reporting — the adapter carries the last known value
+ * forward, so a unit silent for days can show its return as one enormous jump.
+ * Both fall back to the integrated figure, which is wrong by minutes rather
+ * than by days.
+ */
+export function dayEngineSeconds(
+  /** Counter reading at the day's FIRST report, in hours. */
+  firstMeterHours: number | null,
+  /** Counter reading at the day's LAST report, in hours. */
+  lastMeterHours: number | null,
+  /** The gap-integrated figure, used only where there is no usable counter. */
+  integratedSeconds: number | null,
+): number | null {
+  if (firstMeterHours != null && lastMeterHours != null) {
+    const seconds = (lastMeterHours - firstMeterHours) * 3600
+    if (seconds >= 0 && seconds <= 24 * 3600) return Math.round(seconds)
+  }
+  return integratedSeconds
+}
+
 export function resolveEngineSeconds(
   measuredSeconds: number | null,
   /** Readings in the day that reported the engine ON. */

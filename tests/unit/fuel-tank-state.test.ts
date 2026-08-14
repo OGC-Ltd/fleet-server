@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   deriveTankState, closingLevel, CLOSE_WINDOW_MINUTES, TURBULENCE_MIN_SAMPLES,
   MOTION_MIN_KMH, TURBULENCE_STOPS, HEAVY_STOP_MINUTES, resolveEngineSeconds,
+  dayEngineSeconds,
   type LevelReading,
 } from '../../src/modules/fuel/fuel-tank-state.js'
 import type { ResolvedRate } from '../../src/modules/fuel/fuel-rate.js'
@@ -319,6 +320,52 @@ describe('engine hours and engine burn', () => {
     const out = deriveTankState([], 300_000, { engineSeconds: null, rate: rate(9) })
     expect(out.engineSeconds).toBeNull()
     expect(out.engineBurnMl).toBeNull()
+  })
+})
+
+describe("the day's engine hours come from the machine's own counter", () => {
+  it("matches the operator's figure exactly", () => {
+    // KTCC 959G, 2026-08-13. The operator reads 2:16:16 in the provider's
+    // report. The counter ran 861.629166667 -> 863.900277778 h that day.
+    const seconds = dayEngineSeconds(861.629166667, 863.900277778, 8840)
+    expect(seconds).toBe(2 * 3600 + 16 * 60 + 16)   // 8176 s, to the second
+    // ...and the gap-integrated figure it replaces was 664 s over.
+    expect(8840 - seconds!).toBe(664)
+  })
+
+  it('prefers the counter even when integration disagrees', () => {
+    // Integration over-counts structurally: it charges the whole interval
+    // between two pings to the earlier ping's engine state, so a shutdown runs
+    // on until the next ping. The counter is the engine's own reckoning.
+    expect(dayEngineSeconds(100, 101, 9_999)).toBe(3_600)
+  })
+
+  it('falls back to integration where the tracker has no counter', () => {
+    expect(dayEngineSeconds(null, null, 8_840)).toBe(8_840)
+    expect(dayEngineSeconds(100, null, 8_840)).toBe(8_840)
+    expect(dayEngineSeconds(null, 101, 8_840)).toBe(8_840)
+  })
+
+  it('rejects a counter that went backwards', () => {
+    // Reset or replaced. Minutes of error beats days of it.
+    expect(dayEngineSeconds(900, 100, 8_840)).toBe(8_840)
+  })
+
+  it('rejects a jump longer than the day it is measuring', () => {
+    // The adapter carries the last known value forward, so a unit silent for a
+    // week shows its return as one enormous gain. No engine runs 30 h in a day.
+    expect(dayEngineSeconds(100, 130, 8_840)).toBe(8_840)
+    // Exactly 24 h is the boundary and is allowed — a machine can run all day.
+    expect(dayEngineSeconds(100, 124, 8_840)).toBe(24 * 3600)
+  })
+
+  it('reports a real zero for a machine that never started', () => {
+    // The counter did not move. That is a measurement, not a gap.
+    expect(dayEngineSeconds(500, 500, 9_999)).toBe(0)
+  })
+
+  it('has nothing to say when neither source does', () => {
+    expect(dayEngineSeconds(null, null, null)).toBeNull()
   })
 })
 
