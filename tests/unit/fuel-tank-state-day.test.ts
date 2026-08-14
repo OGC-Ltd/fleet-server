@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { asOfFromQuery } from '../../src/modules/fuel/fuel.controller.js'
-import { fleetDayStart } from '../../src/lib/provider-time.js'
+import { fleetDayStart, fleetDayKey } from '../../src/lib/provider-time.js'
 
 /** A day long past, so `asOf` is never clamped to `now`. */
 const DAY = '2026-08-13'
@@ -61,6 +61,48 @@ describe('asOfFromQuery', () => {
     // Pinning today to its midnight would freeze the live column.
     expect(asOf.getTime()).toBeGreaterThanOrEqual(before)
     expect(asOf.getTime()).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('files a fleet day under the date a person would write on the sheet', () => {
+    // The off-by-one that mislabelled all 4,650 stored trend rows. fleetDayStart
+    // returns the INSTANT EAT-midnight falls on, which in UTC is 21:00 the
+    // previous evening — so its UTC calendar components are the day BEFORE the
+    // one it opens. The whole fleet day below is EAT the 13th.
+    const start = fleetDayStart(new Date('2026-08-13T20:50:00Z'))
+    expect(start.toISOString()).toBe('2026-08-12T21:00:00.000Z')
+    expect(start.getUTCDate()).toBe(12)                          // the trap
+    expect(fleetDayKey(new Date('2026-08-13T20:50:00Z')).toISOString())
+      .toBe('2026-08-13T00:00:00.000Z')                          // the answer
+  })
+
+  it('gives every instant inside one fleet day the same key', () => {
+    // Including the three hours after UTC midnight, which is where EAT and UTC
+    // dates disagree and where a naive conversion flips to the wrong day.
+    const key = '2026-08-13T00:00:00.000Z'
+    for (const t of [
+      '2026-08-12T21:00:00.000Z',   // EAT midnight, the day's first instant
+      '2026-08-12T23:30:00.000Z',   // before UTC midnight, still EAT the 13th
+      '2026-08-13T00:30:00.000Z',   // after UTC midnight, still EAT the 13th
+      '2026-08-13T20:59:59.999Z',   // the day's last instant
+    ]) {
+      expect(fleetDayKey(new Date(t)).toISOString()).toBe(key)
+    }
+    // ...and the next instant belongs to the next day, not this one.
+    expect(fleetDayKey(new Date('2026-08-13T21:00:00.000Z')).toISOString())
+      .toBe('2026-08-14T00:00:00.000Z')
+  })
+
+  it('keeps the prior-slosh window clear of the day it is computing', () => {
+    // Second-order effect of the same bug: getFleetTankState gathers prior run
+    // slosh with `day < dayStart`. Under the old labels the current day's own
+    // row compared as 00:00Z against a 21:00Z bound and was pulled into its own
+    // "prior" window. Correct labels sort it after the bound.
+    const asOf     = asOfFromQuery(DAY)
+    const dayStart = fleetDayStart(asOf)
+    expect(fleetDayKey(asOf).getTime()).toBeGreaterThan(dayStart.getTime())
+    // The PREVIOUS fleet day still falls inside the window.
+    const prev = fleetDayKey(new Date(dayStart.getTime() - 1))
+    expect(prev.getTime()).toBeLessThan(dayStart.getTime())
   })
 
   it('falls back to now on a missing or malformed date', () => {
