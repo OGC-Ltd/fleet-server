@@ -290,7 +290,7 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
          ORDER BY t.captured_at DESC
          LIMIT 1
       ) p
-     WHERE v.organisation_id = ${orgId}`
+     WHERE v.organisation_id = ${orgId} AND v.is_active`
   const engineHoursMeter = new Map<string, number>()
   for (const r of meterRows) {
     // A zero counter is a tracker that has one and has never run, which is not
