@@ -794,6 +794,15 @@ model FuelDailyTrend {
   /// The DISTANCE half of the pair. engineBurnMl is the other, and is the
   /// better basis for the 215 of 310 probed units that are plant or tractors.
   expectedBurnMl Int?    @map("expected_burn_ml")
+  /// The unit's cumulative ENGINE-HOUR METER at the end of that day — the
+  /// machine's own counter, the way an odometer reads, NOT hours run that day.
+  /// From Wialon's cneh, which arrives in the raw payload rather than as a
+  /// column. Null for the ~26% of units whose tracker never reports it.
+  ///
+  /// The READING, not the day-over-day delta: the adapter carries the last
+  /// known value forward, so a delta between two boundary reads can
+  /// misattribute hours across days.
+  engineHoursMeter Float? @map("engine_hours_meter")
   /// Seconds the engine ran that day, integrated from every fix and capped at
   /// MAX_ENGINE_GAP_SECONDS per gap. A measurement, not an estimate.
   engineSeconds  Int?    @map("engine_seconds")
