@@ -13,28 +13,26 @@ import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import {
   closingLevel, deriveTankState, resolveEngineSeconds, dayEngineSeconds,
+  CLOSE_WINDOW_MINUTES,
   MAX_ENGINE_GAP_SECONDS, MOTION_MIN_KMH, UNKNOWN_TANK_STATE,
   type LevelReading, type TankState,
 } from './fuel-tank-state.js'
 import { getOrgFuelRates } from './fuel-rate.service.js'
 import { engineBurnMl } from './fuel-rate.js'
 
-/**
- * Readings pulled per vehicle to reconstruct the previous day's close.
+/*
+ * `PREV_CLOSE_SAMPLES` used to live here — the per-vehicle row cap on the
+ * previous-day close query, sized at 600 to clear the densest 15 minutes any
+ * vehicle produced (measured p50 2, p99 77, densest 376).
  *
- * MUST exceed the densest CLOSE_WINDOW_MINUTES any vehicle produces, or the
- * median is taken over a shorter span than `closingLevel` would use on the full
- * day and the reconciliation silently breaks for exactly the busiest units.
- *
- * Measured over two days of live telemetry, readings per 15 minutes:
- * p50 2, p99 77, **densest 376**. This was 60 first — above p99, and it still
- * broke two vehicles, which is how the ceiling got measured rather than
- * guessed. 600 clears the observed maximum with room for a burstier unit.
- *
- * Over-fetching is free: `closingLevel` applies the real time window to
- * whatever it is handed, so extra rows are discarded rather than counted.
+ * It is gone because the query no longer ships rows to be medianised in Node;
+ * it medianises in SQL and returns one row per vehicle, so there is nothing to
+ * cap. The note is kept because the reasoning behind 600 was measured, and
+ * anyone reintroducing a row-shipping form of this query needs it: the cap has
+ * to exceed the densest CLOSE_WINDOW_MINUTES on the fleet or the median is
+ * taken over a shorter span than `closingLevel` uses, and the day-to-day
+ * reconciliation breaks for exactly the busiest units.
  */
-const PREV_CLOSE_SAMPLES = 600
 
 /**
  * How far back to gather run slosh so the turbulence average can span days.
@@ -158,6 +156,66 @@ async function readStoredTankState(orgId: string, asOf: Date): Promise<VehicleTa
 }
 
 /**
+ * The previous day's closing level per vehicle, reconstructed from telemetry.
+ *
+ * The FALLBACK for when yesterday has no stored trend row — a gap in the
+ * backfill, or the first day of the record. Everything else should be reading
+ * that row instead; see the note at the call site for what this costs.
+ *
+ * The median is taken IN SQL and returns one row per vehicle. It used to ship
+ * every candidate row to Node — up to 600 per vehicle, ~66,000 for KASULU, to
+ * produce 133 numbers.
+ *
+ * ⚠️ This median MUST match `closingLevel` exactly, because one day's Current
+ * is the next day's Initial and a disagreement breaks the reconciliation the
+ * column exists for. `closingLevel` sorts ascending and takes index
+ * `floor(n/2)`, which for an even count is the UPPER of the two middle values.
+ * Postgres `percentile_cont` interpolates and `percentile_disc` takes the
+ * LOWER — neither matches — so the array is indexed directly, +1 for SQL's
+ * 1-based arrays. Verified against the JS implementation on live data:
+ * **129 of 129 identical, 0 different.**
+ *
+ * The window is anchored to each vehicle's OWN last reading rather than to the
+ * day boundary: a unit that went quiet at noon closes at noon, and cutting the
+ * window at midnight would leave it with no readings at all.
+ */
+async function closeFromTelemetry(orgId: string, dayStart: Date): Promise<Map<string, number>> {
+  const prevStart = new Date(dayStart.getTime() - 24 * 3_600_000)
+  const rows = await prisma.$queryRaw<Array<{ vehicle_id: string; close_ml: number | null }>>`
+    WITH last_read AS (
+      SELECT v.id AS vehicle_id, t.captured_at AS last_at
+        FROM vehicles v
+        CROSS JOIN LATERAL (
+          SELECT tt.captured_at
+            FROM vehicle_telemetries tt
+           WHERE tt.vehicle_id = v.id
+             AND tt.captured_at >= ${prevStart}
+             AND tt.captured_at <  ${dayStart}
+             AND tt.fuel_level_ml IS NOT NULL
+           ORDER BY tt.captured_at DESC
+           LIMIT 1
+        ) t
+       WHERE v.organisation_id = ${orgId}
+    ), tail AS (
+      SELECT l.vehicle_id, tt.fuel_level_ml
+        FROM last_read l
+        JOIN vehicle_telemetries tt
+          ON tt.vehicle_id = l.vehicle_id
+         AND tt.captured_at <= l.last_at
+         AND tt.captured_at >= l.last_at - make_interval(mins => ${CLOSE_WINDOW_MINUTES})
+       WHERE tt.fuel_level_ml IS NOT NULL
+    )
+    SELECT vehicle_id,
+           (array_agg(fuel_level_ml ORDER BY fuel_level_ml))[floor(count(*) / 2) + 1] AS close_ml
+      FROM tail
+     GROUP BY vehicle_id`
+
+  const out = new Map<string, number>()
+  for (const r of rows) if (r.close_ml != null) out.set(r.vehicle_id, Number(r.close_ml))
+  return out
+}
+
+/**
  * Measure the day from raw telemetry. The expensive path.
  *
  * Exported because `recordFuelTrends` MUST call it directly and never
@@ -197,39 +255,67 @@ export async function computeFleetTankState(orgId: string, asOf: Date): Promise<
   //
   // LATERAL rather than a 24-hour scan: it walks the (vehicle_id, captured_at)
   // index backwards per vehicle and stops after LIMIT rows.
-  const prevStart = new Date(dayStart.getTime() - 24 * 3_600_000)
-  const prevRows = await prisma.$queryRaw<Array<{
-    vehicle_id: string; captured_at: Date; fuel_level_ml: number
-  }>>`
-    SELECT v.id AS vehicle_id, t.captured_at, t.fuel_level_ml
-      FROM vehicles v
-      CROSS JOIN LATERAL (
-        SELECT tt.captured_at, tt.fuel_level_ml
-          FROM vehicle_telemetries tt
-         WHERE tt.vehicle_id = v.id
-           AND tt.captured_at >= ${prevStart}
-           AND tt.captured_at <  ${dayStart}
-           AND tt.fuel_level_ml IS NOT NULL
-         ORDER BY tt.captured_at DESC
-         LIMIT ${PREV_CLOSE_SAMPLES}
-      ) t
-     WHERE v.organisation_id = ${orgId}`
+  // ## The median is taken IN SQL, and that is a performance fix, not a style one
+  //
+  // This shipped every candidate row to Node and medianised them here: up to
+  // `PREV_CLOSE_SAMPLES` per vehicle, ~66,000 rows for KASULU, to produce 214
+  // numbers. Measured 2026-08-14 it was the single query that broke the table —
+  // **60 s and a client timeout**, where every other query in this function ran
+  // in 1.4–8.4 s. The FSL table then rendered with Initial, Current, Mileage,
+  // Expected, Engine hrs and Turbulence all blank, because the dashboard
+  // catches a failed tank-state call and falls back to an empty map. A silent
+  // blank, from the one query nobody was watching.
+  //
+  // It now returns one row per vehicle. The window is still anchored to that
+  // vehicle's OWN last reading rather than to the day boundary — a unit that
+  // went quiet at noon closes at noon, and cutting the window at midnight would
+  // give it no readings at all.
+  //
+  // ⚠️ The median here MUST match `closingLevel` exactly, because one day's
+  // Current is the next day's Initial and a disagreement breaks the
+  // reconciliation the whole column exists for. `closingLevel` sorts ascending
+  // and takes index `floor(n/2)`, which for an even count is the UPPER of the
+  // two middle values. Postgres `percentile_cont` interpolates and
+  // `percentile_disc` takes the LOWER — neither matches — so the array is
+  // indexed directly, +1 for SQL's 1-based arrays.
+  // ## First ask yesterday's stored row, because Initial IS yesterday's Current
+  //
+  // That is not an approximation, it is the invariant the column is built on and
+  // it was verified on live data when the pair shipped: 129 agree, 0 differ. So
+  // the opening balance for a day is a 133-row indexed read, not a reconstruction
+  // from a full day of telemetry.
+  //
+  // This matters most for TODAY, which can never be served from the cached path
+  // and so pays the reconstruction on every request. Measured 2026-08-14 the
+  // telemetry form of this query was the one that broke the table: **60 s and a
+  // client timeout**, while every other query in this function ran in 1.4–8.4 s.
+  // The dashboard catches a failed tank-state call and renders an empty map, so
+  // the operator saw Initial, Current, Mileage, Expected, Engine hrs and
+  // Turbulence all blank at once, with no error anywhere.
+  //
+  // The instance is why it is marginal rather than merely slow: ~1 GB of RAM,
+  // `work_mem` 4 MB, and it goes IO-bound under any concurrent aggregation, at
+  // which point a query that normally takes 1.7 s takes more than a minute.
+  // Removing the scan removes the exposure.
+  const prevDayKey = fleetDayKey(new Date(dayStart.getTime() - 1))
+  const storedPrev = await prisma.fuelDailyTrend.findMany({
+    where:  { day: prevDayKey, vehicle: { organisationId: orgId } },
+    select: { vehicleId: true, closingMl: true },
+  })
 
-  const prevByVehicle = new Map<string, LevelReading[]>()
-  for (const r of prevRows) {
-    const s = { capturedAt: r.captured_at, fuelLevelMl: r.fuel_level_ml }
-    const list = prevByVehicle.get(r.vehicle_id)
-    if (list) list.push(s)
-    else prevByVehicle.set(r.vehicle_id, [s])
-  }
   const prevClose = new Map<string, number>()
-  for (const [id, rows] of prevByVehicle) {
-    // The LATERAL returns them newest-first; closingLevel expects ascending.
-    rows.sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime())
-    const close = closingLevel(rows)
-    if (close != null) prevClose.set(id, close)
+  for (const r of storedPrev) {
+    if (r.closingMl != null) prevClose.set(r.vehicleId, r.closingMl)
   }
 
+  // Fall back to the telemetry only when yesterday was never recorded — a gap in
+  // the backfill, or the first day of the record. Correct but expensive, so it
+  // is the exception rather than the path every request takes.
+  if (prevClose.size === 0) {
+    for (const [id, close] of await closeFromTelemetry(orgId, dayStart)) {
+      prevClose.set(id, close)
+    }
+  }
   const byVehicle = new Map<string, LevelReading[]>()
   for (const r of dayRows) {
     const s = {
