@@ -258,6 +258,49 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
     }
   }
 
+  // The unit's cumulative ENGINE-HOUR METER as it stood at the day's end.
+  //
+  // Wialon's `cneh` reaches us in the RAW payload, not as a column on
+  // vehicle_telemetries — the same way the odometer does. Coverage measured
+  // 2026-08-14: 159 of 214 active KASULU units and 270 of 284 SUKARI ones.
+  //
+  // ## This must stay a per-vehicle LATERAL, never a scan
+  //
+  // `vehicle_telemetry_raws` is ~156 MB. Joining it across a whole org-day
+  // TIMED OUT at 60 s against this instance while measuring — that attempt is
+  // why this is written as an indexed backward walk taking ONE row per
+  // vehicle. In that form the whole org costs about 250 ms, because it rides
+  // the (vehicle_id, captured_at) index and stops at the first row.
+  //
+  // The value is carried forward by the adapter into every frame, so the
+  // newest row almost always has it and the walk stops immediately. LIMIT 1
+  // rather than "the newest non-null" for exactly that reason: a NOT NULL
+  // predicate on a JSON field cannot use an index, so on a unit that never
+  // reports `cneh` it would walk the entire day before giving up.
+  const meterRows = await prisma.$queryRaw<Array<{
+    vehicle_id: string; engine_hours: number | null
+  }>>`
+    SELECT v.id AS vehicle_id, p.engine_hours
+      FROM vehicles v
+      CROSS JOIN LATERAL (
+        SELECT (r.payload->>'engine_hours')::float AS engine_hours
+          FROM vehicle_telemetries t
+          JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
+         WHERE t.vehicle_id = v.id AND t.captured_at <= ${asOf}
+         ORDER BY t.captured_at DESC
+         LIMIT 1
+      ) p
+     WHERE v.organisation_id = ${orgId}`
+  const engineHoursMeter = new Map<string, number>()
+  for (const r of meterRows) {
+    // A zero counter is a tracker that has one and has never run, which is not
+    // the same as a reading — and in practice marks a unit whose cneh is
+    // absent rather than genuinely zero.
+    if (r.engine_hours != null && r.engine_hours > 0) {
+      engineHoursMeter.set(r.vehicle_id, Number(r.engine_hours))
+    }
+  }
+
   // Consumption rates, resolved per vehicle with an org+type fallback. Read
   // from the table the weekly derivation writes — never computed here, which is
   // the point of §7.1 of docs/fuel-consumption-rates.md: this runs whenever an
@@ -281,6 +324,7 @@ export async function getFleetTankState(orgId: string, asOf = new Date()): Promi
         distanceM:       distance.get(vehicleId) ?? null,
         engineSeconds:   engineSeconds.get(vehicleId) ?? null,
         rate:            rates.get(vehicleId) ?? null,
+        engineHoursMeter: engineHoursMeter.get(vehicleId) ?? null,
       }),
     }
   })

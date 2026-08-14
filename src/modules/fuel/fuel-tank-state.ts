@@ -238,6 +238,31 @@ export interface TankState {
    * reports ≈0 km against a real shift's burn. Engine hours are what it has to
    * show for the day.
    */
+  /**
+   * The unit's cumulative ENGINE-HOUR METER as it stood at the end of the day —
+   * the machine's own counter, the way an odometer reads, NOT the hours it ran
+   * that day.
+   *
+   * This is what the operator means by "engine hours for that day": the final
+   * reading, matching how `currentMl` is the day's final level. It comes from
+   * Wialon's `cneh`, reaching us in the raw payload rather than as a column.
+   *
+   * ## Why the READING and not the day-over-day delta
+   *
+   * The delta is the tempting figure — it would be the hours actually run, and
+   * measured 2026-08-14 it agrees closely with `engineSeconds` (`EX 30`: 22.17 h
+   * by meter against 22.3 h integrated, two independent methods corroborating).
+   *
+   * But the adapter carries the last known meter value FORWARD into every
+   * frame, so a boundary reading can be one taken hours or days earlier, and a
+   * delta built from two of them misattributes hours across days. Three of 158
+   * KASULU units showed more than 24 hours in a single day, which no engine
+   * does. The reading itself carries no such risk: it is whatever the counter
+   * last said, and that is a fact about the machine.
+   *
+   * Null for the ~26% of units whose tracker never reports `cneh`.
+   */
+  engineHoursMeter: number | null
   engineSeconds: number | null
   /**
    * What the engine is expected to have burned over those hours, at the
@@ -283,7 +308,7 @@ export const UNKNOWN_TANK_STATE: TankState = {
   initialMl: null, currentMl: null, consumedMl: null,
   turbulenceMl: null, stopsAveraged: 0, runSloshMl: [],
   temporaryStops: 0, heavyStops: 0, distanceM: null, expectedBurnMl: null,
-  engineSeconds: null, engineBurnMl: null,
+  engineHoursMeter: null, engineSeconds: null, engineBurnMl: null,
   engineRateLPerHour: null, engineRateBasis: null, engineRateSpread: null,
   engineRateRuns: null,
 }
@@ -376,6 +401,11 @@ export interface TankStateInputs {
   engineSeconds?: number | null
   /** This vehicle's resolved consumption rate, or null if it has none. */
   rate?: ResolvedRate | null
+  /**
+   * Closing reading of the unit's cumulative engine-hour meter. A fact about
+   * the machine, not a duration — see TankState.engineHoursMeter.
+   */
+  engineHoursMeter?: number | null
 }
 
 export function deriveTankState(
@@ -383,6 +413,7 @@ export function deriveTankState(
   previousDayCloseMl: number | null,
   {
     priorRunSloshMl = [], distanceM = null, engineSeconds = null, rate = null,
+    engineHoursMeter = null,
   }: TankStateInputs = {},
 ): TankState {
   const currentMl = closingLevel(dayReadings)
@@ -405,6 +436,7 @@ export function deriveTankState(
     expectedBurnMl: distanceM == null
       ? null
       : Math.round((distanceM / 1000 / KM_PER_LITRE) * 1000),
+    engineHoursMeter,
     engineSeconds,
     engineBurnMl:       engineBurnMl(engineSeconds, rate),
     engineRateLPerHour: rate?.lPerHour ?? null,

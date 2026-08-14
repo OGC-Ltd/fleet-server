@@ -322,6 +322,39 @@ describe('engine hours and engine burn', () => {
   })
 })
 
+describe('the engine-hour meter is a reading, not a duration', () => {
+  it("reports the machine's own counter at the close of the day", () => {
+    // What the operator asked for: the FINAL engine hours for that day, the way
+    // Current is the day's final fuel level. 692.4 h is what the counter says,
+    // not what the machine ran today.
+    const out = deriveTankState([], 300_000, { engineHoursMeter: 692.4 })
+    expect(out.engineHoursMeter).toBe(692.4)
+  })
+
+  it('is independent of the duration that prices the burn', () => {
+    // Two different quantities carried side by side: the meter is a fact about
+    // the machine, engineSeconds is how long it ran today, and only the second
+    // can be multiplied by a rate.
+    const out = deriveTankState([], 300_000, {
+      engineHoursMeter: 4607.3,
+      engineSeconds: 3_600,
+      rate: { lPerHour: 11.28, basis: 'vehicle', runs: 5, spread: null },
+    })
+    expect(out.engineHoursMeter).toBe(4607.3)
+    expect(out.engineSeconds).toBe(3_600)
+    // Priced off the DURATION — the meter's 4607 h must never reach this.
+    expect(out.engineBurnMl).toBe(11_280)
+  })
+
+  it('is null for a tracker that never reports one', () => {
+    // About a quarter of units. Blank, not zero — a zero would read as a
+    // brand-new machine.
+    const out = deriveTankState([], 300_000, { engineSeconds: 7_200 })
+    expect(out.engineHoursMeter).toBeNull()
+    expect(out.engineSeconds).toBe(7_200)
+  })
+})
+
 describe('resolveEngineSeconds — a dead ignition wire is not a quiet day', () => {
   it('voids the measurement when motion contradicts a silent flag', () => {
     // MUFINDI - EX 06 sent 15,357 pings over a week without one engine-on
