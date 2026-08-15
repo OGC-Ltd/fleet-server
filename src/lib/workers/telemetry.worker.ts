@@ -11,7 +11,7 @@ import { logger }                from '../logger.js'
 import { emitDashboardPosition } from '../sse.js'
 import { deriveFeedEvents } from '../feed-events.js'
 import { trackZonePresence, assignedZoneStatus } from '../zone-presence.js'
-import { trackYardDeparture } from '../yard-departure.js'
+import { trackYardDeparture, trackYardArrival } from '../yard-departure.js'
 import { connectionStatus } from '../connection-state.js'
 import { noteMovement, movementState } from '../movement-state.js'
 import type { MovementState } from '../movement-state.js'
@@ -178,7 +178,16 @@ export function startTelemetryWorker(): () => void {
       void trackYardDeparture({
         orgId, vehicleId, plate, driverName,
         lat: payload.lat, lng: payload.lng, capturedAt: payload.capturedAt,
-      }).catch(err => logger.warn({ err, vehicleId }, 'Yard departure tracking failed'))
+      })
+        // Awaited in sequence, not fired alongside: both share the per-vehicle
+        // state map in that module and the departure pass is what SEEDS it, so
+        // racing them would let an arrival read a half-built entry on the very
+        // first frame after a restart.
+        .then(() => trackYardArrival({
+          orgId, vehicleId, plate, driverName,
+          lat: payload.lat, lng: payload.lng, capturedAt: payload.capturedAt,
+        }))
+        .catch(err => logger.warn({ err, vehicleId }, 'Yard gate tracking failed'))
 
       // Human live-feed items (dispatch / arrival / offload / alerts) derived
       // from phase transitions between consecutive frames — see feed-events.

@@ -73,7 +73,7 @@ Start-Process ssh -WindowStyle Hidden -ArgumentList `
   '-i', 'C:\Users\supervisor\Documents\keys\logistics.pem', '-N', `
   '-L', '15432:fleet-store.c8ty8uocsdjp.us-east-1.rds.amazonaws.com:5432', `
   '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes', `
-  'ubuntu@ec2-32-198-44-105.compute-1.amazonaws.com'
+  'ubuntu@ec2-18-232-178-169.compute-1.amazonaws.com'
 ```
 
 To stop a background tunnel: `Get-Process ssh | Stop-Process`
@@ -95,7 +95,7 @@ Background (`-f` forks after auth):
 ssh -i ~/keys/logistics.pem -f -N \
   -L 15432:fleet-store.c8ty8uocsdjp.us-east-1.rds.amazonaws.com:5432 \
   -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes \
-  ubuntu@ec2-32-198-44-105.compute-1.amazonaws.com
+  ubuntu@ec2-18-232-178-169.compute-1.amazonaws.com
 ```
 
 To stop a background tunnel: `pkill -f "ssh.*15432"`

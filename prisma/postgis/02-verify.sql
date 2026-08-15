@@ -1,4 +1,4 @@
--- ---------------------------------------------------------------------------
+q-- ---------------------------------------------------------------------------
 -- Read-only. Proves the PostGIS setup is actually correct, and that the
 -- telemetry index is actually used. Safe to run any time, as `fleet_app`.
 --
