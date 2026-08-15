@@ -7,7 +7,7 @@ vi.mock('../../src/lib/notifications/notification.store.js', () => ({
 
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { publishNotification } from '../../src/lib/notifications/notification.store.js'
-import { trackYardDeparture, invalidateYardCache, resetYardPresence } from '../../src/lib/yard-departure.js'
+import { trackYardDeparture, trackYardArrival, invalidateYardCache, resetYardPresence } from '../../src/lib/yard-departure.js'
 import { resetFixPlausibility } from '../../src/lib/fix-plausibility.js'
 
 // SUKARI's real geometry: the hub sits 17 m from the gate, which is exactly why
@@ -178,5 +178,97 @@ describe('trackYardDeparture', () => {
     await trackYardDeparture(input(AT_GATE))
     await trackYardDeparture(input(CLEAR))
     expect(published()[0]![0]['text']).toBe('KTCC 870B · AUGUSTINE OWINO NYAMWOK cleared the gate to OPAPO.')
+  })
+})
+
+/**
+ * Arrivals. The mirror of the departure band — away, then back inside the gate
+ * radius — and the half the provider cannot cover on its own.
+ *
+ * Both trackers run on the same frame from telemetry.worker, departure first,
+ * because that pass is what seeds the shared per-vehicle state. The tests call
+ * them in that order for the same reason.
+ */
+const frame = async (pos: { lat: number; lng: number }) => {
+  const p = input(pos)
+  await trackYardDeparture(p)
+  await trackYardArrival(p)
+}
+
+describe('trackYardArrival', () => {
+  it('says nothing on the first frame, even sitting at the gate', async () => {
+    // A restart must not narrate an arrival for every unit already parked up.
+    await frame(AT_GATE)
+    expect(publishNotification).not.toHaveBeenCalled()
+  })
+
+  it('publishes when a unit that was away comes back inside the gate radius', async () => {
+    await frame(FAR)        // seed: out on the road
+    await frame(AT_GATE)    // home
+
+    const arrivals = published().filter(c => c[0]!['alertType'] === 'MOVEMENT_ENTRY')
+    expect(arrivals).toHaveLength(1)
+    const item = arrivals[0]![0]
+    expect(item['source']).toBe('telemetry')
+    expect(item['severity']).toBe('success')
+    expect(item['text']).toContain('arrived at the gate')
+    expect(item['text']).toContain('from kwoyo u k')
+  })
+
+  it('does not narrate a unit that never left', async () => {
+    // Parked at the barrier all shift: it crosses no threshold, so there is
+    // nothing to report. This is the case the hysteresis band exists for.
+    await frame(AT_GATE)
+    await frame(AT_GATE)
+    await frame(AT_GATE)
+    expect(published().filter(c => c[0]!['alertType'] === 'MOVEMENT_ENTRY')).toHaveLength(0)
+  })
+
+  it('does not re-arm inside the hysteresis band', async () => {
+    // Nosing out to 80 m and back is GPS jitter plus a barrier queue, not a
+    // round trip. Re-arming on it would narrate a convoy of arrivals.
+    await frame(AT_GATE)
+    await frame(IN_BAND)
+    await frame(AT_GATE)
+    expect(published().filter(c => c[0]!['alertType'] === 'MOVEMENT_ENTRY')).toHaveLength(0)
+  })
+
+  it('arms again after a genuine departure, so a second trip is reported', async () => {
+    await frame(FAR)
+    await frame(AT_GATE)     // arrival 1
+    await frame(FAR)         // out again, past the band
+    await frame(AT_GATE)     // arrival 2
+
+    expect(published().filter(c => c[0]!['alertType'] === 'MOVEMENT_ENTRY')).toHaveLength(2)
+  })
+
+  it('narrates a unit with no dispatch at all', async () => {
+    // KTCC 505D's case: bound to a Wialon device, reporting, and unknown to
+    // FactorySuite — zero dispatch rows. Requiring a dispatch here would
+    // exclude precisely the units this exists to cover.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.dispatch.findFirst as any).mockResolvedValue(null)
+
+    await frame(FAR)
+    await frame(AT_GATE)
+
+    const arrivals = published().filter(c => c[0]!['alertType'] === 'MOVEMENT_ENTRY')
+    expect(arrivals).toHaveLength(1)
+    expect(arrivals[0]![0]['text']).toBe(
+      'KTCC 870B · AUGUSTINE OWINO NYAMWOK arrived at the gate.',
+    )
+  })
+
+  it('stays silent for an org with no gate recorded', async () => {
+    // Kasulu today. There is deliberately no hub fallback: "came within 800 m
+    // of the yard" is not an arrival, it is the coarse rule the gate replaced.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue(org({ gateLat: null, gateLng: null }))
+    invalidateYardCache()
+
+    await frame(FAR)
+    await frame(AT_GATE)
+
+    expect(published().filter(c => c[0]!['alertType'] === 'MOVEMENT_ENTRY')).toHaveLength(0)
   })
 })

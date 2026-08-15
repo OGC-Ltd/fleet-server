@@ -213,6 +213,19 @@ export async function handleDispatch(
 const DISPATCH_ECHO_MS = 60_000
 
 /**
+ * How far apart a measured gate arrival and the provider's RETURN may be and
+ * still be the same homecoming.
+ *
+ * Wider than DISPATCH_ECHO_MS because these two are NOT the same clock the way
+ * a dispatch and its EXIT are. That pair is emitted inside one transaction, 9 ms
+ * apart. This pair is a barrier crossing and a weighbridge entry — genuinely
+ * different moments, separated by however long the unit takes to queue and
+ * weigh in. Ten minutes covers that without reaching so far that two separate
+ * visits in one shift could be collapsed into one.
+ */
+const ARRIVAL_ECHO_MS = 10 * 60_000
+
+/**
  * Narrate a gate crossing. No coordinates are involved.
  *
  * An EXIT that echoes its own dispatch is dropped — not because the departure
@@ -225,8 +238,21 @@ const DISPATCH_ECHO_MS = 60_000
  * An EXIT with no dispatch behind it still narrates: then it is the only
  * record of that crossing, and dropping it would lose the departure entirely.
  *
- * RETURN is left alone: nothing else observes a vehicle coming home, the
- * provider records it at the weighbridge, and it is not duplicated by anything.
+ * RETURN used to be left alone, on the grounds that nothing else observed a
+ * vehicle coming home. Since 2026-08-10 something does: lib/yard-departure's
+ * `trackYardArrival` measures the crossing off the vehicle's own fixes, so for
+ * a tracked unit the same arrival can now reach the feed twice.
+ *
+ * Where both exist the MEASURED one wins and the RETURN is suppressed, because
+ * they are not equally good: the provider stamps its RETURN at the weighbridge,
+ * which is where the paperwork happens rather than where the barrier is, while
+ * the telemetry line carries the time the unit was actually at the gate.
+ *
+ * The suppression is conditional on our line having genuinely been published —
+ * it looks for the notification, not for a tracker. So a unit whose tracker was
+ * dark, or one FactorySuite knows and Wialon does not, still gets its RETURN
+ * narrated. Nothing is lost by adding the measured source; it only displaces
+ * the provider's line where it actually has something better to say.
  */
 export async function handleMovement(m: MovementEvent): Promise<boolean> {
   const organisationId = await resolveOrgId(m.factoryCode)
@@ -250,6 +276,32 @@ export async function handleMovement(m: MovementEvent): Promise<boolean> {
       logger.debug(
         { plate: m.vehicleNumberPlate, dispatch: echoed.id },
         'Movement EXIT echoes its dispatch — not narrated; the sign-out line already says it left',
+      )
+      return true
+    }
+  } else {
+    // RETURN: stand down if we already measured this arrival at the gate.
+    //
+    // Matched on the notification we published, not on whether the vehicle has
+    // a tracker — a dark tracker publishes nothing, finds nothing here, and the
+    // provider's line goes out as it always did.
+    const measured = await prisma.notification.findFirst({
+      where: {
+        organisationId: organisationId,
+        plate:          m.vehicleNumberPlate,
+        alertType:      'MOVEMENT_ENTRY',
+        source:         'telemetry',
+        occurredAt: {
+          gte: new Date(when.getTime() - ARRIVAL_ECHO_MS),
+          lte: new Date(when.getTime() + ARRIVAL_ECHO_MS),
+        },
+      },
+      select: { feedId: true },
+    })
+    if (measured) {
+      logger.debug(
+        { plate: m.vehicleNumberPlate, measured: measured.feedId },
+        'Movement RETURN superseded by the measured gate arrival — not narrated',
       )
       return true
     }

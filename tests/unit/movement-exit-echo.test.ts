@@ -76,15 +76,51 @@ describe('MOVEMENT_EXIT that echoes its dispatch', () => {
     )
   })
 
-  it('never suppresses a RETURN', async () => {
-    // Nothing else observes a vehicle coming home — the provider records it at
-    // the weighbridge and no telemetry rule replaces it.
+  it('narrates a RETURN when nothing measured the arrival', async () => {
+    // This used to read "never suppresses a RETURN", and until 2026-08-10 that
+    // was true — nothing else observed a vehicle coming home. lib/yard-departure
+    // now does, so the claim is narrower: with no measured arrival on record the
+    // provider's line is still the only account of the homecoming and must go out.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.notification.findFirst as any).mockResolvedValue(null)
+
     await handleMovement(movement({ direction: 'RETURN' }))
 
     expect(narrated()).toHaveLength(1)
     expect(narrated()[0]![1]['text']).toBe('KTCC 870B · AUGUSTINE OWINO NYAMWOK returned to the yard.')
     // The dispatch lookup is for exits only; a return must not pay for it.
     expect(prismaMock.dispatch.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('suppresses a RETURN that a measured gate arrival already reported', async () => {
+    // Both sources saw the same homecoming. The measured one carries the time
+    // the unit was at the barrier; the provider's is stamped at the weighbridge.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.notification.findFirst as any).mockResolvedValue({ feedId: 'ya-veh_1-1' })
+
+    const ok = await handleMovement(movement({ direction: 'RETURN' }))
+
+    expect(ok).toBe(true)                     // handled, deliberately silent
+    expect(eventBus.publish).not.toHaveBeenCalled()
+  })
+
+  it('matches the measured arrival on plate, org and a bounded window', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.notification.findFirst as any).mockResolvedValue(null)
+
+    await handleMovement(movement({ direction: 'RETURN' }))
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const where = (prismaMock.notification.findFirst as any).mock.calls[0][0].where
+    expect(where.plate).toBe('KTCC 870B')
+    expect(where.alertType).toBe('MOVEMENT_ENTRY')
+    expect(where.source).toBe('telemetry')
+    expect(where.organisationId).toBe('org_1')
+    // Bounded both ways: an unbounded lookup would let this morning's arrival
+    // silence this evening's return.
+    const span = where.occurredAt.lte.getTime() - where.occurredAt.gte.getTime()
+    expect(span).toBeGreaterThan(0)
+    expect(span).toBeLessThanOrEqual(30 * 60_000)
   })
 
   it('checks the dispatch window against the plate, not the whole fleet', async () => {

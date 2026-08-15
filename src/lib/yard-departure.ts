@@ -79,6 +79,12 @@ interface VehicleState {
   sawGate: boolean
   /** Dispatch already announced, so a later frame cannot restate it. */
   announcedFor: string | null
+  /**
+   * Seen OUTSIDE the gate's hysteresis band since the last arrival announced.
+   * The mirror of `sawGate`: it is what arms an arrival, so a unit that never
+   * left cannot be narrated as coming back.
+   */
+  sawAway: boolean
 }
 
 const state = new Map<string, VehicleState>()
@@ -138,6 +144,12 @@ export async function trackYardDeparture(p: YardDepartureInput): Promise<void> {
     state.set(p.vehicleId, {
       beyondHub,
       sawGate: geo.gate ? haversineM(geo.gate, here) <= geo.gate.radiusM : false,
+      // Seeded the same way and for the same reason: a unit first sighted out
+      // on the road is already away, so its next approach is a real arrival —
+      // but a restart must not narrate one for a unit sitting in the yard.
+      sawAway: geo.gate
+        ? haversineM(geo.gate, here) > geo.gate.radiusM + DEPARTURE_BUFFER_M
+        : false,
       announcedFor: null,
     })
     return
@@ -172,6 +184,116 @@ export async function trackYardDeparture(p: YardDepartureInput): Promise<void> {
   if (wasBeyondHub === false && beyondHub) {
     await announce(p, st, geo.gate ? 'bounded' : 'yard')
   }
+}
+
+/**
+ * Publish an arrival the first time a vehicle that had been away is seen back
+ * inside the gate radius. Safe to call on every frame.
+ *
+ * ## Why this exists at all, given the provider already sends RETURN
+ *
+ * Because RETURN only covers units RaiFactorySuite knows about. Verified
+ * 2026-08-10: KTCC 505D is bound to `wialon:29697275`, was reporting minutes
+ * before this was written, and has ZERO dispatch rows — FactorySuite has never
+ * heard of it, so no provider event will ever narrate its crossings. It is not
+ * alone: only 284 of Sukari's 597 active vehicles carry a Wialon device at all,
+ * and the two registries do not agree about which units exist.
+ *
+ * So the two sources cover different halves of the yard, and neither is
+ * complete. This one is the measured half.
+ *
+ * ## The rule is the departure rule, mirrored
+ *
+ * Departure: inside the gate radius, then beyond radius + buffer.
+ * Arrival:   beyond radius + buffer, then inside the gate radius.
+ *
+ * Same band, same reason — a truck idling at the barrier or jittering on GPS
+ * noise crosses one threshold repeatedly, and the hysteresis is what stops that
+ * becoming a convoy of feed lines. Direction comes from the ORDER those two
+ * thresholds are crossed, not from the heading field: heading is noisy at the
+ * low speeds a vehicle actually approaches a barrier at, and is absent
+ * entirely on some frames.
+ *
+ * ## No dispatch required
+ *
+ * Unlike a departure, which is "just traffic" without a dispatch behind it, an
+ * arrival at the gate is self-evidently an arrival — and requiring a dispatch
+ * would silently exclude exactly the units this exists to cover. When there IS
+ * an open dispatch the wording says where it came back from; nothing writes
+ * `actualReturnAt`, because the dispatch lifecycle belongs to the provider.
+ */
+export async function trackYardArrival(p: YardDepartureInput): Promise<void> {
+  const { lat, lng } = p
+  if (lat == null || lng == null || !Number.isFinite(lat) || !Number.isFinite(lng)) return
+
+  const atMs = new Date(p.capturedAt).getTime()
+  if (!Number.isFinite(atMs)) return
+  if (!isPlausibleFix({ vehicleId: p.vehicleId, lat, lng, atMs })) return
+
+  const geo = await getGeo(p.orgId)
+  // Arrivals are gate-only. There is no hub fallback on purpose: the hub radius
+  // is 800 m, and "came within 800 m of the yard" is not an arrival — it is the
+  // coarse rule this module was written to replace, and it would fire on every
+  // unit that merely drove past. An org with no gate recorded gets nothing here
+  // rather than something misleading. Kasulu is in exactly that position today.
+  if (!geo.gate) return
+
+  const st = state.get(p.vehicleId)
+  // Seeding is trackYardDeparture's job — both run on the same frame from
+  // telemetry.worker, and it is called first. If it declined this fix (an
+  // implausible position, say) there is no state and nothing to compare against.
+  if (!st) return
+
+  const fromGate = haversineM(geo.gate, { lat, lng })
+
+  if (fromGate > geo.gate.radiusM + DEPARTURE_BUFFER_M) {
+    st.sawAway = true
+    return
+  }
+  if (fromGate <= geo.gate.radiusM && st.sawAway) {
+    await announceArrival(p)
+    st.sawAway = false
+  }
+}
+
+async function announceArrival(p: YardDepartureInput): Promise<void> {
+  const at   = new Date(p.capturedAt)
+  const who  = p.driverName ? ` · ${p.driverName}` : ''
+
+  // Only worth a lookup on the transition itself, same as the departure path.
+  const dispatch = await prisma.dispatch.findFirst({
+    where:   { vehicleId: p.vehicleId, actualReturnAt: null },
+    orderBy: { dispatchedAt: 'desc' },
+    select:  { id: true, destination: true, dispatchedAt: true },
+  })
+  const from = dispatch?.destination ? ` from ${dispatch.destination}` : ''
+  const awayMs = dispatch ? at.getTime() - dispatch.dispatchedAt.getTime() : 0
+  const away = awayMs >= 60_000
+    ? ` — out ${awayMs >= 3_600_000
+        ? `${(awayMs / 3_600_000).toFixed(1)} h`
+        : `${Math.round(awayMs / 60_000)} min`}`
+    : ''
+
+  await publishNotification({
+    orgId: p.orgId,
+    // Keyed on the CROSSING, not on a dispatch: a unit with no dispatch has no
+    // other stable key, and a unit with one can legitimately arrive twice
+    // against the same dispatch if the provider never closed it. The
+    // hysteresis band above is what prevents a duplicate for one crossing.
+    id:        `ya-${p.vehicleId}-${at.getTime()}`,
+    source:    'telemetry',
+    alertType: 'MOVEMENT_ENTRY',
+    severity:  'success',
+    text:      `${p.plate}${who} arrived at the gate${from}${away}.`,
+    at,
+    plate:     p.plate,
+    vehicleId: p.vehicleId,
+  })
+
+  logger.debug(
+    { plate: p.plate, dispatch: dispatch?.id ?? null, awayMs },
+    'Gate arrival published',
+  )
 }
 
 /**
