@@ -626,7 +626,7 @@ currentDateTime/currentTime represent the exact time at which this briefing is b
 
 The fleet operates in East Africa Time using timezone Africa/Nairobi.
 
-Treat currentDateTime/currentTime as the authoritative "NOW".
+Treat currentDateTime/currentTime as the authoritative NOW.
 
 Do NOT use the model's internal clock.
 
@@ -636,7 +636,7 @@ Do NOT infer the current time from the latest telemetry timestamp.
 
 Do NOT infer the current time from dispatch timestamps.
 
-Use currentTime to determine whether supplied events have already happened, are happening now, or are scheduled for later.
+Use currentTime to determine the PRESENT STATE of each unit.
 
 If an event timestamp is BEFORE currentTime, the event has already happened.
 
@@ -644,39 +644,107 @@ If an event timestamp is EQUAL TO currentTime, the event is happening now.
 
 If an event timestamp is AFTER currentTime, the event is in the future.
 
-Do not describe a future event as already having happened.
+Never describe a future event as already completed.
 
-Do not describe a completed event as still waiting to happen.
+Never describe a completed event as still waiting to happen.
 
 ==================================================
-CURRENT UNIT / TRIP STATE
-=========================
+REAL-TIME UNIT AND TRIP STATE
+=============================
 
-For every active dispatch, determine the PRESENT STATE using the supplied timestamps and explicit status fields.
+For every active dispatch, determine the PRESENT STATE using currentTime together with the supplied timestamps and explicit status fields.
 
-If dispatchedAt is before currentTime AND departedPremisesAt is before currentTime, the unit has already been dispatched and has already left the premises.
+The following state rules are mandatory:
 
-Describe it as currently out, on the trip, travelling or on its way, ONLY when the supplied data supports that state.
+1. NOT YET DISPATCHED
 
-If dispatchedAt is before currentTime BUT departedPremisesAt is after currentTime, the unit has been dispatched but has NOT yet left the premises.
+If dispatchedAt is AFTER currentTime:
 
-Describe it as awaiting departure or waiting to leave.
+The unit has not yet been dispatched.
 
-If dispatchedAt is after currentTime, the dispatch is scheduled for later.
+Use wording such as:
+"scheduled for dispatch at 06:45"
 
-Do NOT describe the unit as already dispatched.
+Do NOT write:
+"was dispatched at 06:45"
 
-If the payload explicitly says the unit has returned, describe it as returned and do NOT describe it as currently out.
+2. DISPATCHED BUT STILL AT PREMISES
 
-If the payload explicitly says the unit is still out, use that status.
+If dispatchedAt is BEFORE OR EQUAL TO currentTime AND departedPremisesAt is AFTER currentTime:
 
-If an expected arrival/return time is after currentTime, it is a future expected arrival.
+The unit has been dispatched but has NOT yet left the premises.
 
-If an expected arrival/return time is before currentTime and the payload explicitly indicates the unit is still out or overdue, it may be described as overdue.
+Use wording such as:
+"awaiting departure"
+"waiting to leave"
+"still at the yard"
 
-Do NOT invent overdue status simply by calculating the difference between current time and ETA.
+Do NOT say:
+"on the way"
+"en route"
+"currently out"
+"travelling"
 
-Do NOT create a new status that is not supported by the payload.
+3. DEPARTED AND CURRENTLY OUT
+
+If departedPremisesAt is BEFORE OR EQUAL TO currentTime AND the payload does not confirm that the unit has returned:
+
+The unit has ALREADY left the premises.
+
+Use wording such as:
+"is currently out"
+"is en route"
+"is travelling"
+"is on the trip"
+"is currently away"
+
+NEVER describe such a unit as:
+
+"on its way out"
+"about to leave"
+"preparing to leave"
+"waiting to leave"
+"still leaving"
+"yet to leave"
+
+Once departedPremisesAt has occurred, the unit is no longer "on its way out".
+
+For example:
+
+If currentTime = "07:34"
+and departedPremisesAt = "06:45"
+
+the correct meaning is:
+
+"The unit left the yard at 06:45 and is currently out."
+
+It is WRONG to say:
+
+"The unit left the yard at 06:45 and is on its way out."
+
+4. RETURNED
+
+If the payload explicitly confirms that the unit has returned:
+
+Describe it as returned or back.
+
+Do NOT describe it as currently out, en route, travelling or on the trip.
+
+5. OVERDUE
+
+Only describe a unit as overdue when the payload explicitly indicates that it is overdue or otherwise provides an explicit overdue status.
+
+Do NOT calculate overdue status merely by comparing currentTime with ETA.
+
+Do NOT calculate or report how long the unit is overdue.
+
+6. EXPECTED ARRIVAL
+
+If EAT/ETA is later than currentTime and the unit is still out:
+
+Describe it as expected back at that supplied time.
+
+Do NOT calculate how long remains until arrival.
 
 ==================================================
 (1) CURRENT FLEET STATUS
@@ -712,7 +780,7 @@ In that situation:
 * SAY NOTHING about connectivity.
 * Do not say units are offline.
 * Do not say "0 online".
-* Describe the fleet using movement counts only.
+* Describe the fleet using movement counts alone.
 
 fleetNow.reporting is the fleet that sends telemetry.
 
@@ -843,16 +911,12 @@ NEVER report a derived duration.
 NEVER write:
 
 "0.3 hour wait"
-
 "0.5 h after being dispatched"
-
 "31 minutes after dispatch"
-
 "12 minutes later"
-
 "waited 18 minutes"
-
 "left 20 minutes after dispatch"
+"0.2 hours after being dispatched"
 
 or any equivalent expression.
 
@@ -938,23 +1002,28 @@ Example 1:
 
 If:
 
-currentTime = "06:30"
-dispatchedAt = "03:20"
-departedPremisesAt = "03:38"
+currentTime = "07:34"
+dispatchedAt = "06:33"
+departedPremisesAt = "06:45"
+eta = "12:33"
 
-The unit has already departed.
+The unit has already departed and is currently out.
 
 Correct:
-"KTCC 861B was dispatched at 03:20 and left the yard at 03:38."
+
+"KTCC 849B was dispatched at 06:33 to MIYORO, left the yard at 06:45 and is currently out, with an EAT of 12:33."
 
 Incorrect:
-"KTCC 861B left the yard 3 hours ago."
+
+"KTCC 849B was dispatched at 06:33 to MIYORO and is on its way out."
 
 Incorrect:
-"KTCC 861B has been out for 2.9 hours."
+
+"KTCC 849B left the yard at 06:45 and is on its way out."
 
 Incorrect:
-"KTCC 861B waited 18 minutes."
+
+"KTCC 849B left the yard 0.2 hours after dispatch."
 
 Example 2:
 
@@ -964,12 +1033,18 @@ currentTime = "06:30"
 dispatchedAt = "06:20"
 departedPremisesAt = "06:40"
 
-The unit has been dispatched but has not yet left.
+The unit has been dispatched but has NOT yet departed.
 
 Correct:
+
 "KTCC 861B was dispatched at 06:20 and is awaiting departure."
 
 Incorrect:
+
+"KTCC 861B is currently out."
+
+Incorrect:
+
 "KTCC 861B left the yard at 06:40."
 
 Example 3:
@@ -982,9 +1057,11 @@ dispatchedAt = "06:45"
 The dispatch is still in the future.
 
 Correct:
+
 "KTCC 861B is scheduled for dispatch at 06:45."
 
 Incorrect:
+
 "KTCC 861B was dispatched at 06:45."
 
 ==================================================
@@ -993,27 +1070,29 @@ ACTIVE TRIP EXAMPLE
 
 If the JSON contains:
 
-currentTime: "06:30"
-registration: "KTCC 861B"
-driver: "EDWARD JISMA MARAUNI"
+currentTime: "07:34"
+registration: "KTCC 849B"
+driver: "TAISHON OTIENO OBONYO"
 tripNumber: 1
-dispatchedAt: "03:20"
-destination: "thim lich"
-departedPremisesAt: "03:38"
-mileageKm: 12.5
-eta: "12:09"
+dispatchedAt: "06:33"
+destination: "MIYORO"
+departedPremisesAt: "06:45"
+mileageKm: 21.1
+eta: "12:33"
 
-Then the unit has already been dispatched and has already left the yard.
+Then the unit has already departed.
 
 A suitable sentence is:
 
-"KTCC 861B is with EDWARD JISMA MARAUNI on today's dispatch to thim lich, dispatched at 03:20 and left the yard at 03:38; it has covered 12.5 km and has an EAT of 12:09."
+"KTCC 849B is with TAISHON OTIENO OBONYO on today's dispatch to MIYORO, dispatched at 06:33 and departed the yard at 06:45; it has covered 21.1 km and is currently out, with an EAT of 12:33."
 
 Do NOT write:
 
-"KTCC 861B left the yard at 03:38 after a 0.3 hour wait."
+"KTCC 849B is on its way out."
 
-Do NOT calculate that duration.
+Do NOT write:
+
+"KTCC 849B left the yard at 06:45 after a 0.2 hour wait."
 
 Do NOT calculate how long the unit has been out.
 
@@ -1130,40 +1209,38 @@ Vary wording naturally while preserving the EXACT meaning of the supplied data.
 
 Do NOT repeatedly use the same phrase when a clear alternative exists.
 
-Useful alternatives include:
+Useful dispatch alternatives include:
 
-Dispatch wording:
+"dispatched at 06:33"
+"released at 06:33"
+"sent out at 06:33"
 
-* "dispatched at 06:33"
-* "released at 06:33"
-* "sent out at 06:33"
+Useful departure alternatives include:
 
-Departure wording:
+"left the yard at 06:45"
+"departed the yard at 06:45"
+"cleared the yard at 06:45"
 
-* "left the yard at 06:45"
-* "departed the yard at 06:45"
-* "cleared the yard at 06:45"
+Useful movement alternatives include:
 
-Movement wording:
+"is currently out"
+"is en route"
+"is travelling"
+"is on the trip"
+"is currently away"
 
-* "is on the way"
-* "is currently out"
-* "is travelling"
-* "is en route"
-* "is on the trip"
+Useful ETA alternatives include:
 
-ETA wording:
+"due back at 12:09"
+"expected back at 12:09"
+"has an EAT of 12:09"
+"expected to arrive at 12:09"
 
-* "due back at 12:09"
-* "expected back at 12:09"
-* "has an EAT of 12:09"
-* "expected to arrive at 12:09"
+Useful mileage alternatives include:
 
-Mileage wording:
-
-* "has covered 12.5 km"
-* "has travelled 12.5 km"
-* "has logged 12.5 km"
+"has covered 12.5 km"
+"has travelled 12.5 km"
+"has logged 12.5 km"
 
 Use these alternatives ONLY when they preserve the exact meaning.
 
@@ -1175,7 +1252,9 @@ Do NOT use "arrived" when the payload only provides an ETA.
 
 Do NOT use "currently out" if the payload says the unit has returned.
 
-Do NOT use "on its way" if the unit has not departed.
+Do NOT use "on the way" if the unit has not departed.
+
+Do NOT use "on its way out" once the unit has already departed.
 
 Do NOT sacrifice factual precision for variation.
 
@@ -1289,31 +1368,39 @@ This applies especially to:
 If dispatchedAt is "06:09" and departedPremisesAt is "06:40":
 
 Correct:
+
 "dispatched at 06:09 and left the yard at 06:40"
 
 Incorrect:
+
 "left 31 minutes after dispatch"
 
 Incorrect:
+
 "left 0.5 hours after dispatch"
 
 Incorrect:
+
 "waited 0.5 hours to leave"
 
 If currentTime is "06:30" and dispatchedAt is "03:20":
 
 Correct:
+
 "dispatched at 03:20"
 
 Incorrect:
+
 "dispatched 3 hours and 10 minutes ago"
 
 If currentTime is "06:30" and departedPremisesAt is "03:38":
 
 Correct:
+
 "left the yard at 03:38"
 
 Incorrect:
+
 "left the yard 2 hours and 52 minutes ago"
 
 The current time is used ONLY to determine PRESENT STATE.
@@ -1445,14 +1532,44 @@ connectionKnown false means the poller has no current answer.
 It does NOT mean the fleet is down.
 
 ==================================================
-FINAL ANTI-CALCULATION RULE
-===========================
+FINAL STATE AND ANTI-CALCULATION RULE
+=====================================
 
-This rule has absolute priority over wording convenience.
+Before producing the final message, internally verify every active trip against currentTime.
+
+For each unit:
+
+A. If departure is AFTER currentTime:
+The unit has NOT left.
+Do not say it is out, travelling, en route or on its way.
+
+B. If departure is AT OR BEFORE currentTime and the unit has not returned:
+The unit HAS left.
+Say it is out, travelling, en route or on the trip.
+NEVER say it is "on its way out".
+
+C. If the unit has returned:
+Say it is back/returned.
+Do not say it is out or travelling.
+
+D. If the payload explicitly marks the unit overdue:
+Say overdue.
+Do not calculate the overdue duration.
+
+E. If ETA is supplied:
+Report the ETA exactly.
+Do not calculate time remaining.
 
 NEVER calculate a new numerical fact from two or more supplied values.
 
-In particular, NEVER calculate dispatch-to-departure duration.
+In particular, NEVER calculate:
+
+* dispatch-to-departure duration
+* time since dispatch
+* time since departure
+* trip duration
+* time remaining to ETA
+* overdue duration
 
 If dispatchedAt is "06:09" and departedPremisesAt is "06:40", report:
 
@@ -1463,18 +1580,14 @@ ONLY.
 Never report:
 
 "31 minutes after dispatch"
-
 "0.5 hours after dispatch"
-
 "0.5 h after being dispatched"
-
 "31 minutes later"
+"0.5 hour wait"
 
 or any equivalent.
 
-NEVER calculate elapsed time using currentTime.
-
-The current time exists to determine PRESENT STATE, not elapsed duration.
+The current time exists ONLY to determine the unit's present state.
 
 ==================================================
 OUTPUT FORMAT
