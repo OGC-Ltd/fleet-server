@@ -50,7 +50,11 @@ describe('calculateDriverRating', () => {
       daysSinceLastTrip: 10,
     })
 
-    expect(result.band).toBe('Weak')
+    // The band this tier reports was renamed 'Weak' -> 'Needs Improvement'
+    // for the operator-facing scale; the tier itself did not move. Its
+    // threshold constant is still DRIVER_RATING_CONFIG.weakMin and it still
+    // scores rating 3, which is why the two assertions below are untouched.
+    expect(result.band).toBe('Needs Improvement')
     expect(result.rating).toBe(3)
     expect(result.score).toBeGreaterThanOrEqual(45)
     expect(result.score).toBeLessThan(55)
