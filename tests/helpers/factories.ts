@@ -84,6 +84,9 @@ export function makeVehicle(overrides: Partial<Vehicle> = {}): Vehicle {
     isActive: true,
     fuelEfficiencyKmpl: null,
     tankCapacityLitres: null,
+    // Unknown by default, which is the state of almost the whole fleet — the
+    // column exists to be filled in by hand as models are supplied.
+    model: null,
     createdAt: now(),
     updatedAt: now(),
     ...overrides,
@@ -152,6 +155,7 @@ export function makeFilling(overrides: Partial<FuelFilling> = {}): FuelFilling {
     verdict: 'PENDING',
     verdictAt: null,
     verdictReason: null,
+    verdictConfidence: null,
     observedRiseMl: null,
     ...overrides,
   }
@@ -177,6 +181,12 @@ export function makeTheft(overrides: Partial<FuelTheft> = {}): FuelTheft {
     verdictAt: null,
     recoveredMl: null,
     verdictReason: null,
+    verdictConfidence: null,
+    // Unclassified by default: a cause is only assigned once the verdict has
+    // settled as DRAIN — see modules/fuel/fuel-theft-classifier.
+    drainCause: null,
+    causeConfidence: null,
+    causeReason: null,
     ...overrides,
   }
 }

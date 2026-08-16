@@ -24,9 +24,12 @@ import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { publishNotificationDurable } from '../../lib/notifications/notification.store.js'
 import {
-  adjudicateDrain, applyProbeTrustGate, SETTLE_MINUTES, SWING_ML,
+  adjudicateDrain, applyProbeTrustGate, smoothLevels, SETTLE_MINUTES, SWING_ML,
   type Adjudication, type DrainClaim, type LevelSample, type ProbeProfile, type Verdict,
 } from './fuel-adjudication.js'
+import { measureFall, type FallSample } from './fuel-drop-shape.js'
+import { classifyDrain, resolveBand, type CauseJudgement } from './fuel-theft-classifier.js'
+import { resolveRates, type ResolvedRate } from './fuel-rate.js'
 
 /**
  * How far before the drain to read levels. Needs to comfortably precede the
@@ -73,11 +76,17 @@ export interface AdjudicateOutcome {
   published:      number
   /** Millilitres reclassified as never having left the tank. */
   recoveredMl:    number
+  /**
+   * Causes assigned this cycle, by name. Reported so a SHADOW run — causes
+   * written, notifications unchanged — is visible in the ordinary cycle log
+   * rather than needing a query against the ledger.
+   */
+  causes:         Record<string, number>
 }
 
 const EMPTY: AdjudicateOutcome = {
   examined: 0, drain: 0, drainConfirmed: 0, refill: 0, redistribution: 0,
-  sensorFault: 0, stillPending: 0, published: 0, recoveredMl: 0,
+  sensorFault: 0, stillPending: 0, published: 0, recoveredMl: 0, causes: {},
 }
 
 /** litres, without the false precision of "40.0" for a whole number. */
@@ -169,19 +178,38 @@ export async function getProbeProfile(vehicleId: string, now: Date): Promise<Pro
 export async function judgeDrain(
   drain: DrainClaim & { vehicleId: string },
   now: Date,
-): Promise<Adjudication> {
+): Promise<Adjudication & { cause: CauseJudgement | null }> {
   const from = new Date(drain.beganAt.getTime() - LOOKBEHIND_MS)
   const to   = new Date(drain.detectedAt.getTime() + LOOKAHEAD_MS)
 
   const [rows, filling] = await Promise.all([
-    prisma.vehicleTelemetry.findMany({
-      where:   { vehicleId: drain.vehicleId, capturedAt: { gte: from, lte: to }, fuelLevelMl: { not: null } },
-      // engineOn is what separates a dead probe from a tank drained empty —
-      // an engine cannot run on an empty tank. Without it the dropout rule
-      // stays silent and the ordinary recovery test decides.
-      select:  { capturedAt: true, fuelLevelMl: true, engineOn: true },
-      orderBy: { capturedAt: 'asc' },
-    }),
+    // Raw SQL rather than `findMany` because of `ignition_known`, which lives
+    // in the raw payload and is the only way to tell a MEASURED engine state
+    // from the adapter's fallback.
+    //
+    // `vehicle_telemetries.engine_on` is NOT NULL with a default of false and
+    // is filled as `ignition ?? (speed > 0)`, so on a unit that reports no
+    // ignition it silently becomes "was the vehicle moving". The cause
+    // classifier's parked branch cannot be built on that — "engine off and
+    // stationary" would be true of every parked machine by construction.
+    //
+    // Both readings are carried, and they feed DIFFERENT consumers on purpose:
+    // `adjudicateDrain` keeps the raw column it has always had, so its
+    // dead-probe rules behave exactly as before, and only the classifier sees
+    // the stricter ignition-aware version. Narrowing what adjudication sees
+    // would change verdicts, which this step must not do.
+    prisma.$queryRaw<Array<{
+      captured_at: Date; fuel_level_ml: number; engine_on: boolean
+      speed_kmh: number | null; ignition_known: boolean | null
+    }>>`
+      SELECT t.captured_at, t.fuel_level_ml, t.engine_on, t.speed_kmh,
+             (r.payload->>'ignition_known')::boolean AS ignition_known
+        FROM vehicle_telemetries t
+        JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
+       WHERE t.vehicle_id = ${drain.vehicleId}
+         AND t.captured_at >= ${from} AND t.captured_at <= ${to}
+         AND t.fuel_level_ml IS NOT NULL
+       ORDER BY t.captured_at ASC`,
     prisma.fuelFilling.findFirst({
       where:   {
         vehicleId: drain.vehicleId,
@@ -207,16 +235,97 @@ export async function judgeDrain(
     }),
   ])
   const samples: LevelSample[] = rows.map(r => ({
-    capturedAt: r.capturedAt, fuelLevelMl: r.fuelLevelMl!, engineOn: r.engineOn,
+    capturedAt: r.captured_at, fuelLevelMl: r.fuel_level_ml, engineOn: r.engine_on,
   }))
 
   const verdict = adjudicateDrain(drain, samples, filling?.filledAt ?? null, now)
 
-  // The trust gate, asked LAST and only of the rows it can act on. It costs a
-  // second query, and the great majority never need it: on the ledger as it
-  // stands 417 of 2,571 are a CONFIRMED drain.
-  if (verdict.verdict !== 'DRAIN' || !verdict.confirmed) return verdict
-  return applyProbeTrustGate(verdict, await getProbeProfile(drain.vehicleId, now))
+  // ── the cause ────────────────────────────────────────────────────────────
+  //
+  // Only a DRAIN has a cause to determine. A REDISTRIBUTION means the fuel came
+  // back and a SENSOR_FAULT means the probe lied, so neither poses the question
+  // "where did it go" that this answers.
+  if (verdict.verdict !== 'DRAIN') return { ...verdict, cause: null }
+
+  // The trust gate, asked only of the rows it can act on. It costs a second
+  // query, and the great majority never need it: on the ledger as it stands 417
+  // of 2,571 are a CONFIRMED drain.
+  const gated = verdict.confirmed
+    ? applyProbeTrustGate(verdict, await getProbeProfile(drain.vehicleId, now))
+    : verdict
+
+  // The classifier gets the STRICTER engine reading — see the query note.
+  const fallSamples: FallSample[] = rows.map(r => ({
+    capturedAt:  r.captured_at,
+    fuelLevelMl: r.fuel_level_ml,
+    engineOn:    r.ignition_known === true ? r.engine_on : undefined,
+    speedKmh:    r.speed_kmh,
+  }))
+  const measured = measureFall(fallSamples, drain, smoothLevels)
+  if (measured == null) {
+    // No measurable fall in our own series. The verdict stands — the provider
+    // saw something we could not — but there is nothing to attribute it to.
+    return { ...gated, cause: { cause: 'INDETERMINATE', reason: 'no-measurable-fall', confidence: 0.5, impliedLph: null } }
+  }
+
+  const { orgCode, plate, rate } = await getBandInputs(drain.vehicleId, now)
+  const band    = resolveBand(orgCode, plate, rate)
+  const profile = await getProbeProfile(drain.vehicleId, now)
+  return { ...gated, cause: classifyDrain(measured.evidence, band, profile) }
+}
+
+/**
+ * What `resolveBand` needs about a vehicle: which org and machine it is, and
+ * what it has been measured to burn.
+ *
+ * Fetched HERE rather than passed in by the caller, for the reason the module
+ * docstring already gives about the evidence query: `judgeDrain` has two
+ * callers — the live sweep and `prisma/readjudicate-fuel.ts` — and anything one
+ * of them assembles for itself is something the two can come to disagree about.
+ * A backfill that resolved a different band than the live pass would produce
+ * causes that could never be reproduced.
+ *
+ * The resolved rates are a FLEET-WIDE computation (a type median needs every
+ * vehicle's rate), so they are built once and cached rather than per drain.
+ */
+const BAND_TTL_MS = 6 * 60 * 60_000
+let bandCache: { at: number; byVehicle: Map<string, { orgCode: string; plate: string; rate: ResolvedRate | null }> } | null = null
+
+/** Test seam — the cache is module-global and would leak between cases. */
+export function __resetBandCache(): void {
+  bandCache = null
+}
+
+async function getBandInputs(
+  vehicleId: string,
+  now: Date,
+): Promise<{ orgCode: string; plate: string; rate: ResolvedRate | null }> {
+  if (bandCache == null || now.getTime() - bandCache.at >= BAND_TTL_MS) {
+    const [vehicles, rates] = await Promise.all([
+      prisma.vehicle.findMany({
+        select: {
+          id: true, registrationPlate: true, vehicleType: true, organisationId: true,
+          organisation: { select: { code: true } },
+        },
+      }),
+      prisma.vehicleFuelRate.findMany({ select: { vehicleId: true, lPerHour: true, lPerKm: true, runs: true } }),
+    ])
+    // The SAME resolution the trend rows and the measurement harness use —
+    // per-vehicle where earned, type median otherwise.
+    const resolved = resolveRates(
+      rates.map(r => ({ vehicleId: r.vehicleId, lPerHour: r.lPerHour, lPerKm: r.lPerKm, runs: r.runs })),
+      vehicles.map(v => ({ vehicleId: v.id, organisationId: v.organisationId, vehicleType: v.vehicleType })),
+    )
+    bandCache = {
+      at: now.getTime(),
+      byVehicle: new Map(vehicles.map(v => [v.id, {
+        orgCode: v.organisation?.code ?? '',
+        plate:   v.registrationPlate,
+        rate:    resolved.get(v.id) ?? null,
+      }])),
+    }
+  }
+  return bandCache.byVehicle.get(vehicleId) ?? { orgCode: '', plate: '', rate: null }
 }
 
 export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<AdjudicateOutcome> {
@@ -237,9 +346,9 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     orderBy: { detectedAt: 'asc' },
     take: opts.limit ?? 500,
   })
-  if (pending.length === 0) return { ...EMPTY }
+  if (pending.length === 0) return { ...EMPTY, causes: {} }
 
-  const out: AdjudicateOutcome = { ...EMPTY }
+  const out: AdjudicateOutcome = { ...EMPTY, causes: {} }
 
   for (const t of pending) {
     out.examined++
@@ -251,6 +360,7 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
 
     if (verdict.verdict === 'PENDING') { out.stillPending++; continue }
     tally(out, verdict)
+    if (verdict.cause) out.causes[verdict.cause.cause] = (out.causes[verdict.cause.cause] ?? 0) + 1
     if (verdict.verdict === 'REDISTRIBUTION') out.recoveredMl += t.stolenMl
 
     if (!opts.apply) continue
@@ -263,6 +373,15 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
         recoveredMl:       verdict.recoveredMl,
         verdictReason:     verdict.reason,
         verdictConfidence: verdict.confidence,
+        // Written but NOT yet acted on. The notification gate below is
+        // deliberately unchanged in this step: causes accumulate on the ledger
+        // for a day so the thresholds can be checked against what the live
+        // pass actually decides, before any of them start suppressing an
+        // alert. Flipping the gate is a one-line change once that is done —
+        // see docs/fuel-theft-discrimination-plan.md step 6.
+        drainCause:        verdict.cause?.cause      ?? null,
+        causeConfidence:   verdict.cause?.confidence ?? null,
+        causeReason:       verdict.cause?.reason     ?? null,
       },
     })
 

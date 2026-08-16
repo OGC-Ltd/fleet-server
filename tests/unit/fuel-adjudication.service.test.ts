@@ -9,7 +9,7 @@ vi.mock('../../src/lib/notifications/notification.store.js', () => ({
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { publishNotificationDurable } from '../../src/lib/notifications/notification.store.js'
 import {
-  adjudicatePendingDrains, __resetProbeProfileCache,
+  adjudicatePendingDrains, __resetProbeProfileCache, __resetBandCache,
 } from '../../src/modules/fuel/fuel-adjudication.service.js'
 
 const BEGAN    = new Date('2026-08-04T13:00:00Z')
@@ -22,11 +22,24 @@ const DRAIN = {
   vehicle: { organisationId: 'org_1', registrationPlate: 'CTR 03' },
 }
 
-/** Readings at one-minute steps from 12:55, spanning the whole event. */
+/**
+ * Readings at one-minute steps from 12:55, spanning the whole event.
+ *
+ * Shaped as the RAW SQL rows the service now reads, not as Prisma models: the
+ * evidence query joins `vehicle_telemetry_raws` for `ignition_known`, which is
+ * the only way to tell a measured engine state from the adapter's
+ * `ignition ?? (speed > 0)` fallback. `ignition_known` is false here, so these
+ * fixtures assert the ordinary case of a unit that reports no ignition — the
+ * majority of the fleet, and the case where the cause classifier must NOT
+ * conclude the engine was off.
+ */
 const levels = (mls: number[]) =>
   mls.map((fuelLevelMl, i) => ({
-    capturedAt: new Date(Date.parse('2026-08-04T12:55:00Z') + i * 60_000),
-    fuelLevelMl,
+    captured_at:    new Date(Date.parse('2026-08-04T12:55:00Z') + i * 60_000),
+    fuel_level_ml:  fuelLevelMl,
+    engine_on:      false,
+    speed_kmh:      0,
+    ignition_known: false,
   }))
 
 const STEADY = [200_000, 200_000, 200_000, 200_000, 200_000, 200_000]
@@ -35,22 +48,50 @@ const DRAINING = [180_000, 170_000, 160_000, 160_000, 160_000]
 const published = () =>
   (publishNotificationDurable as unknown as { mock: { calls: [Record<string, unknown>][] } }).mock.calls
 
-const setLevels = (mls: number[]) =>
+/**
+ * `$queryRaw` now serves TWO different queries — the level series and the
+ * probe's parked-swing profile — so the mock dispatches on the SQL rather than
+ * returning one shape for both. Routing on the table name is enough to tell
+ * them apart and does not couple the test to the rest of the statement.
+ */
+let telemetryRows: ReturnType<typeof levels> = []
+let profileRow = { parked: BigInt(200), swinging: BigInt(0) }
+let profileCalls = 0
+
+const installQueryRaw = () =>
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (prismaMock.vehicleTelemetry.findMany as any).mockResolvedValue(levels(mls))
+  (prismaMock.$queryRaw as any).mockImplementation((strings: unknown) => {
+    const sql = Array.isArray(strings) ? strings.join(' ') : String(strings)
+    if (sql.includes('vehicle_telemetry_raws')) return Promise.resolve(telemetryRows)
+    profileCalls++
+    return Promise.resolve([profileRow])
+  })
+
+const setLevels = (mls: number[]) => { telemetryRows = levels(mls) }
 
 /**
  * The vehicle's parked-swing profile, which the trust gate reads for any drain
- * that reaches LOSS. Steady by default — the gate is meant to be silent on the
- * 97 of 139 machines that never swing.
+ * that reaches a confirmed DRAIN. Steady by default — the gate is meant to be
+ * silent on the 97 of 139 machines that never swing.
  */
-const setProbeProfile = (parked: number, swinging: number) =>
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (prismaMock.$queryRaw as any).mockResolvedValue([{ parked: BigInt(parked), swinging: BigInt(swinging) }])
+const setProbeProfile = (parked: number, swinging: number) => {
+  profileRow = { parked: BigInt(parked), swinging: BigInt(swinging) }
+}
 
 beforeEach(() => {
   vi.mocked(publishNotificationDurable).mockClear()
   __resetProbeProfileCache()   // module-global, keyed by vehicle — would leak between cases
+  __resetBandCache()           // ...and so would the fleet-wide band lookup
+  profileCalls = 0
+  installQueryRaw()
+  // The cause classifier resolves an expected burn band per vehicle. Empty
+  // here: these cases are about VERDICTS, and a drain with no band simply
+  // reaches INDETERMINATE, which is the state the shadow run writes for most
+  // of the live ledger anyway.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(prismaMock.vehicle.findMany as any).mockResolvedValue([])
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(prismaMock.vehicleFuelRate.findMany as any).mockResolvedValue([])
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([DRAIN])
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -197,7 +238,10 @@ describe('adjudicatePendingDrains', () => {
     const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
 
     expect(out.redistribution).toBe(1)
-    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    // The level series IS fetched for every drain; what must not happen is the
+    // second, separate profile query — counted rather than inferred from
+    // `$queryRaw` being untouched, since both now go through it.
+    expect(profileCalls).toBe(0)
   })
 
   it('writes nothing on a dry run', async () => {
