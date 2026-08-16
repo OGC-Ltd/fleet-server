@@ -881,13 +881,21 @@ model FuelFilling {
   /// Our verdict on the provider's claim that this was a refuelling — see
   /// FuelEventVerdict and modules/fuel/fuel-filling-adjudication. Rows stay on
   /// the ledger whatever the verdict, so the rule can always be audited back.
-  verdict        FuelEventVerdict @default(PENDING)
-  verdictAt      DateTime?        @map("verdict_at")
-  verdictReason  String?          @map("verdict_reason")
+  verdict           FuelEventVerdict @default(PENDING)
+  verdictAt         DateTime?        @map("verdict_at")
+  verdictReason     String?          @map("verdict_reason")
   /// Millilitres our OWN telemetry saw arrive. `filledMl` is left exactly as
   /// the provider reported it, so the two can always be compared; on 210 rows
   /// this is zero or negative against a positive claim.
-  observedRiseMl Int?             @map("observed_rise_ml")
+  observedRiseMl    Int?             @map("observed_rise_ml")
+  /// How sure we are the VERDICT is right, 0-1 — not how sure fuel was really
+  /// added, and not a finer-grained restatement of `verdict`/`verdictReason`.
+  /// Null wherever `verdict` is PENDING; every settled row carries a number.
+  /// See fuel-adjudication.ts's Adjudication.confidence for the full
+  /// reasoning and modules/fuel/fuel-adjudication.service.ts's
+  /// bufferConfidence/getBufferedConfidence for the in-memory stage this
+  /// replaces — the sweep does not populate this column until it is wired up.
+  verdictConfidence Float?           @map("verdict_confidence")
 
   vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
   reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
@@ -918,12 +926,15 @@ model FuelTheft {
   /// Our verdict on the provider's claim — see FuelEventVerdict and
   /// modules/fuel/fuel-adjudication. Rows stay on the ledger whatever the
   /// verdict, so the rule can always be audited back against Wialon.
-  verdict       FuelEventVerdict @default(PENDING)
-  verdictAt     DateTime?        @map("verdict_at")
+  verdict           FuelEventVerdict @default(PENDING)
+  verdictAt         DateTime?        @map("verdict_at")
   /// Millilitres of the observed drop that came back, from our own telemetry.
-  recoveredMl   Int?            @map("recovered_ml")
+  recoveredMl       Int?             @map("recovered_ml")
   /// Short slug naming which rule decided it, for auditing.
-  verdictReason String?         @map("verdict_reason")
+  verdictReason     String?          @map("verdict_reason")
+  /// How sure we are the VERDICT is right, 0-1 — see the identical field on
+  /// FuelFilling for the full reasoning. Null wherever `verdict` is PENDING.
+  verdictConfidence Float?           @map("verdict_confidence")
 
   vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
   driver          User?           @relation("TheftDriver", fields: [driverId], references: [id])
