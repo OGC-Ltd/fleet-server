@@ -66,6 +66,38 @@ enum FuelEventVerdict {
   SENSOR_FAULT
 }
 
+/// WHY the fuel left, once `FuelEventVerdict` has established that it did.
+///
+/// A SECOND question and therefore a second field. `verdict` answers "did the
+/// fuel leave the tank" and is written on 3,300 historical rows read by the
+/// analytics, the reports, the AI insight and the dashboard; folding cause into
+/// it would silently change what every one of those means.
+///
+/// Only UNEXPLAINED_BURN and SIPHON reach an operator, and only SIPHON may be
+/// worded as possible theft — see `modules/fuel/fuel-theft-classifier`.
+enum FuelDrainCause {
+  /// Consistent with what this machine burns. Not an incident.
+  ENGINE_BURN
+  /// Above the expected band but below the alerting multiple. Silent.
+  HIGH_BURN
+  /// Far above anything the machine's own consumption explains. Announced,
+  /// but NEVER as theft: a leak, a mis-calibrated probe and a wrong expected
+  /// rate all produce this, and so does theft.
+  UNEXPLAINED_BURN
+  /// Engine provably off, sustained, not settling and not a probe step. The
+  /// only cause that may be described as possible theft.
+  SIPHON
+  /// A rate no engine could burn and no pump could draw — the reading, not
+  /// the tank.
+  SLOSH
+  /// Parked, and the fall decays like liquid finding its level.
+  SETTLING
+  /// Not enough evidence to say. The default, and the most common by far:
+  /// half the ledger has no measured ignition, which is an accepted blind
+  /// spot rather than a gap to be guessed across.
+  INDETERMINATE
+}
+
 /// Shape of a geofence boundary.
 enum GeofenceType {
   CIRCLE  // defined by centerLat + centerLng + radiusM
@@ -336,6 +368,24 @@ model Vehicle {
   // RaiFactorySuite vehicle UUID — the stable upsert key for sync:vehicles.
   externalId         String?  @unique @map("external_id")
   vehicleType        String   @map("vehicle_type")      // TRACTOR, TRUCK, COMPANY_VEHICLE, …
+  /// Manufacturer model, e.g. "CAT D8T", "KOMATSU D155A", "JOHN DEERE 6110B".
+  ///
+  /// Free text, and nullable because almost nothing has it yet. It exists
+  /// because fuel consumption is a property of the MODEL and not of
+  /// `vehicleType`: a Cat D6 burns 14-22 L/h and a D11 59-97, and both are
+  /// "PLANT". Measured 2026-08-16, `vehicleType` alone was the single largest
+  /// source of false fuel alerts — KASULU's TRACTOR label spans 84 L to 1,631 L
+  /// tanks and 1.6 to 28.3 L/h, and two machines held to its median produced
+  /// 64% of every alert the classifier raised in thirty days.
+  ///
+  /// Recorded nowhere else. `name` is a copy of the plate on this fleet, and
+  /// the Wialon units carry only probe identifiers and SIM ICCIDs in their
+  /// custom fields — both checked, neither has it.
+  ///
+  /// Read by `modules/fuel/fuel-theft-classifier` to pick a burn band. A
+  /// vehicle without one falls back to its derived rate, and a vehicle with
+  /// neither cannot be judged on consumption at all.
+  model              String?  @map("model")
   // Registry status as reported by the provider (AVAILABLE / DISPATCHED /
   // DECOMMISSIONED). Operational status (moving, idling, …) comes from
   // telemetry, not this column.
@@ -936,6 +986,17 @@ model FuelTheft {
   /// FuelFilling for the full reasoning. Null wherever `verdict` is PENDING.
   verdictConfidence Float?           @map("verdict_confidence")
 
+  /// WHY the fuel left, for rows the verdict settled as DRAIN — see
+  /// FuelDrainCause and modules/fuel/fuel-theft-classifier. Null on rows that
+  /// never reached a drain verdict, and on every row written before this
+  /// existed.
+  drainCause       FuelDrainCause? @map("drain_cause")
+  /// How sure we are the CAUSE is right, 0-1. Distinct from
+  /// `verdictConfidence`, which grades a different decision.
+  causeConfidence  Float?          @map("cause_confidence")
+  /// Short slug naming which cause rule decided, for auditing.
+  causeReason      String?         @map("cause_reason")
+
   vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
   driver          User?           @relation("TheftDriver", fields: [driverId], references: [id])
   reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
@@ -946,6 +1007,12 @@ model FuelTheft {
   /// Drives the adjudication sweep: "which drains are still PENDING and old
   /// enough to judge?"
   @@index([verdict, detectedAt])
+  /// Drives the dashboard's red-vehicle lookup: "which vehicles have an
+  /// announced cause inside the recency window?" Leads on `drainCause`
+  /// because only two of its seven values are ever asked for, so the scan
+  /// starts from a small slice of the table rather than from a date range
+  /// covering every drain in it.
+  @@index([drainCause, beganAt])
   @@map("fuel_thefts")
 }
 
