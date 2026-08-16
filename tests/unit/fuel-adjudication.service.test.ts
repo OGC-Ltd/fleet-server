@@ -19,7 +19,7 @@ const NOW      = new Date('2026-08-04T13:40:00Z')   // past the settle window
 const DRAIN = {
   id: 'ft_1', vehicleId: 'veh_1', beganAt: BEGAN, detectedAt: DETECTED,
   stolenMl: 40_000, initialLocation: 'Nyalulanga', finalFuelLevelMl: 160_000,
-  vehicle: { organisationId: 'org_1', registrationPlate: 'CTR 03' },
+  vehicle: { organisationId: 'org_1', registrationPlate: 'KDL 182X' },
 }
 
 /**
@@ -37,13 +37,25 @@ const levels = (mls: number[]) =>
   mls.map((fuelLevelMl, i) => ({
     captured_at:    new Date(Date.parse('2026-08-04T12:55:00Z') + i * 60_000),
     fuel_level_ml:  fuelLevelMl,
-    engine_on:      false,
+    engine_on:      true,
     speed_kmh:      0,
-    ignition_known: false,
+    ignition_known: true,
   }))
 
 const STEADY = [200_000, 200_000, 200_000, 200_000, 200_000, 200_000]
-const DRAINING = [180_000, 170_000, 160_000, 160_000, 160_000]
+/**
+ * A descent spread over ten minutes, not two.
+ *
+ * The rate matters now that a CAUSE gates the notification. Falling 42 L in
+ * eight minutes implies 315 L/h, which correctly trips
+ * MAX_PLAUSIBLE_REMOVAL_LPH and comes back SLOSH — no pump draws that. A
+ * fixture has to describe an event that could physically happen, or it tests
+ * the guard rather than the rule.
+ */
+const DRAINING = [
+  195_000, 190_000, 185_000, 180_000, 175_000,
+  170_000, 165_000, 160_000, 160_000, 160_000,
+]
 
 const published = () =>
   (publishNotificationDurable as unknown as { mock: { calls: [Record<string, unknown>][] } }).mock.calls
@@ -84,14 +96,21 @@ beforeEach(() => {
   __resetBandCache()           // ...and so would the fleet-wide band lookup
   profileCalls = 0
   installQueryRaw()
-  // The cause classifier resolves an expected burn band per vehicle. Empty
-  // here: these cases are about VERDICTS, and a drain with no band simply
-  // reaches INDETERMINATE, which is the state the shadow run writes for most
-  // of the live ledger anyway.
+  // The cause classifier needs an expected burn band, and since 2026-08-17 the
+  // notification gate is the CAUSE rather than the verdict — so without one
+  // every case here would reach INDETERMINATE and announce nothing, which
+  // would make every publishing assertion vacuously pass.
+  //
+  // 10 L/h and no lPerKm: a machine judged on engine hours, not distance.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ;(prismaMock.vehicle.findMany as any).mockResolvedValue([])
+  ;(prismaMock.vehicle.findMany as any).mockResolvedValue([
+    { id: 'veh_1', registrationPlate: 'KDL 182X', vehicleType: 'TRUCK',
+      organisationId: 'org_1', organisation: { code: 'SUKARI' } },
+  ])
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ;(prismaMock.vehicleFuelRate.findMany as any).mockResolvedValue([])
+  ;(prismaMock.vehicleFuelRate.findMany as any).mockResolvedValue([
+    { vehicleId: 'veh_1', lPerHour: 10, lPerKm: null, runs: 5 },
+  ])
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([DRAIN])
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -124,40 +143,52 @@ describe('adjudicatePendingDrains', () => {
 
     expect(out).toMatchObject({ drain: 1, drainConfirmed: 1, redistribution: 0, published: 1 })
     const item = published()[0]![0]
-    expect(item['severity']).toBe('critical')
     expect(item['alertType']).toBe('fuelInconsistency')
-    expect(item['text']).toContain('FUEL DRAIN: CTR 03')
-    // The level fell and did not come back. That is all this says — where the
-    // fuel went is not something a probe can see, so the words "loss",
-    // "theft", "stolen" and "suspicious" appear nowhere.
-    expect(item['text']).toContain('40 L down and not recovered')
-    expect(item['text']).not.toMatch(/loss|lost|theft|stolen|suspicious/i)
+    // 40 L against a 10 L/h machine is far more than its consumption explains
+    // — but an unexplained BURN is not a theft finding, and the wording must
+    // not say it is. A leak and a wrong expected rate produce this too.
+    expect(item['text']).toContain('FUEL UNEXPLAINED: KDL 182X')
+    expect(item['text']).not.toMatch(/theft|stolen|suspicious|loss|lost/i)
+    expect(item['severity']).toBe('warning')
     expect(item['text']).toContain('Nyalulanga')
     expect(item['text']).toContain('Tank now 160 L')
     // The event's own time, never the moment we got round to judging it.
     expect(item['at']).toEqual(BEGAN)
   })
 
-  it('does not sound as certain about a claim it could not check', async () => {
-    // The provider saw something and our telemetry cannot speak to it. The
-    // distinction is carried by the wording and the severity — not by a
-    // trailing explanation, which on this fleet followed a place string long
-    // enough that nobody reached the end of it.
+  it('says nothing at all about a claim it could not check', async () => {
+    // Two readings cannot describe a fall. Until the cause gate shipped this
+    // still announced — "reported, not confirmed" — and that class was the
+    // bulk of the noise: the provider saw something, we could not look, and an
+    // operator was notified anyway. It is now silent, and the row still
+    // carries its verdict for the ledger.
     setLevels([200_000, 160_000])
 
     const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
 
     expect(out).toMatchObject({ drain: 1, drainConfirmed: 0 })
-    const item = published()[0]![0]
-    expect(item['severity']).toBe('warning')          // a confirmed drain is 'critical'
-    expect(item['text']).toContain('reported, not confirmed')
-    expect(item['text']).not.toMatch(/loss|lost|theft|stolen|suspicious/i)
+    expect(publishNotificationDurable).not.toHaveBeenCalled()
+    expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ verdict: 'DRAIN', drainCause: expect.any(String) }),
+    }))
   })
 
   it('makes no claim of escalation', async () => {
     setLevels([...STEADY, ...DRAINING, 160_000, 159_000, 158_000, 158_000])
     await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
     expect(String(published()[0]![0]['text'])).not.toMatch(/security|alerted|notified|dispatched/i)
+  })
+
+  it('stays silent on a drain the machine could plausibly have burned', async () => {
+    // The whole point of the gate: a small fall on a running machine is a
+    // working day, not an incident, and it used to be a notification.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([{ ...DRAIN, stolenMl: 2_000 }])
+    setLevels([200_000, 200_000, 200_000, 199_500, 199_000, 198_500, 198_000, 198_000, 198_000])
+
+    await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    expect(publishNotificationDurable).not.toHaveBeenCalled()
   })
 
   it('still judges a drain when a refuel happens LATER in the window', async () => {
@@ -205,11 +236,13 @@ describe('adjudicatePendingDrains', () => {
     expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ verdict: 'DRAIN', verdictReason: 'probe-swings' }),
     }))
-    // Announced at warning severity rather than critical, so it stops reading
-    // as an accusation against whoever was driving.
-    const item = published()[0]![0]
-    expect(item['severity']).toBe('warning')
-    expect(item['text']).toContain('reported, not confirmed')
+    // ...and the classifier will not attribute anything measured on an
+    // instrument that moves 25 L on a standing machine, so nothing is
+    // announced at all. This used to arrive as a warning.
+    expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ drainCause: 'INDETERMINATE' }),
+    }))
+    expect(publishNotificationDurable).not.toHaveBeenCalled()
   })
 
   it('does not let a filling the tank never received close the window', async () => {

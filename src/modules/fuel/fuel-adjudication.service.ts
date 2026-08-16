@@ -28,7 +28,9 @@ import {
   type Adjudication, type DrainClaim, type LevelSample, type ProbeProfile, type Verdict,
 } from './fuel-adjudication.js'
 import { measureFall, type FallSample } from './fuel-drop-shape.js'
-import { classifyDrain, resolveBand, type CauseJudgement } from './fuel-theft-classifier.js'
+import {
+  classifyDrain, resolveBand, isAnnounced, mayUseTheftWording, type CauseJudgement,
+} from './fuel-theft-classifier.js'
 import { resolveRates, MIN_RUNS, type ResolvedRate } from './fuel-rate.js'
 
 /**
@@ -395,43 +397,60 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
       },
     })
 
-    // Only a drain is news, and only one recent enough to be news — see
-    // notifyCutoff.
+    // ── the gate ─────────────────────────────────────────────────────────
     //
-    // A REDISTRIBUTION never reaches the feed: the fuel came back, so there is
-    // nothing to send anyone to look at. Nor does a REFILL, which is a
-    // refuelling reported as a theft by the provider and is the opposite of an
-    // exception. Nor does a SENSOR_FAULT — a dead probe reads a full tank
-    // draining to nothing, and announcing that names whoever happened to be
-    // driving for an event that never occurred, the one outcome here worse than
-    // missing a real one. Dead probes get their own daily list instead, which
-    // sends a fitter rather than an investigator: see fuel-probe-health.
-    if (!opts.notify || verdict.verdict !== 'DRAIN') continue
+    // A DRAIN is no longer news by itself. Until 2026-08-17 it was, and that
+    // is the complaint this whole branch exists to answer: the ledger could
+    // not tell fuel a machine burned from fuel that left, so it announced all
+    // of it — 46.9 items a day, of which the great majority were a machine
+    // working normally.
+    //
+    // Now only a CAUSE is news, and only two of the seven are:
+    //
+    //   UNEXPLAINED_BURN  the tank fell by more than this machine's own
+    //                     consumption accounts for
+    //   SIPHON            the engine was provably off, the fall was sustained,
+    //                     and it was neither settling nor a probe step
+    //
+    // Everything else lands on the ledger and the dashboard tables silently.
+    // ENGINE_BURN and HIGH_BURN are a machine doing its job; SLOSH and
+    // SETTLING are the instrument or the liquid; INDETERMINATE is us admitting
+    // we cannot say, which is 60% of the ledger and is not something to
+    // announce. A REDISTRIBUTION or SENSOR_FAULT never even reaches a cause.
+    //
+    // Measured over 30 days of real drains: 90 announcements against 1,407,
+    // spread across 31 vehicles. Reversible in one line if it proves wrong.
+    if (!opts.notify || verdict.cause == null || !isAnnounced(verdict.cause.cause)) continue
     if (opts.notifyCutoff && t.beganAt < opts.notifyCutoff) continue
 
+    const cause = verdict.cause
     const plate = t.vehicle.registrationPlate
     const where = t.initialLocation ? ` at ${t.initialLocation}` : ''
     const tank  = t.finalFuelLevelMl != null ? `. Tank now ${L(t.finalFuelLevelMl)}.` : '.'
-    // Neither line says "loss", "theft", "stolen" or "suspicious". A DRAIN is
-    // the level going down and not coming back; where the fuel went is not
-    // something a probe can see, and the wording used to decide that question
-    // for whoever read it. The message's job is to send someone to look.
+
+    // ONLY a SIPHON may say theft, and only qualified — "when we have
+    // determined that truly it was a theft then we need to use the word
+    // possible theft" (operator, 2026-08-16). Everything else keeps the
+    // vocabulary rule that has held since the LOSS verdict was removed: the
+    // message says what the tank did and sends someone to look, and does not
+    // decide where the fuel went on the reader's behalf.
     //
-    // What the two lines DO distinguish is whether we watched it ourselves, and
-    // that is carried by the wording and the severity rather than by a trailing
-    // caveat — the place string alone runs to a full line on this fleet, and a
-    // caveat nobody reaches the end of is not a caveat.
-    const text = verdict.confirmed
-      ? `FUEL DRAIN: ${plate} — ${L(t.stolenMl)} down and not recovered${where}${tank}`
-      : `FUEL DRAIN: ${plate} — ${L(t.stolenMl)} reported, not confirmed${where}${tank}`
+    // UNEXPLAINED_BURN deliberately does not qualify. A leak, a mis-calibrated
+    // probe and a wrong expected rate all produce it, and so does theft —
+    // naming it would answer a question this data cannot.
+    const headline = mayUseTheftWording(cause.cause)
+      ? `POSSIBLE THEFT: ${plate} — ${L(t.stolenMl)} drawn off while parked${where}${tank}`
+      : `FUEL UNEXPLAINED: ${plate} — ${L(t.stolenMl)} down, more than this machine burns${where}${tank}`
 
     const { published } = await publishNotificationDurable({
       orgId:     t.vehicle.organisationId,
       id:        `fuel-drain-${t.vehicleId}-${t.id}`,
       source:    'wialon',
       alertType: 'fuelInconsistency',
-      severity:  verdict.confirmed ? 'critical' : 'warning',
-      text,
+      // A siphon is the only one we are prepared to call theft, so it is the
+      // only one that arrives as critical.
+      severity:  cause.cause === 'SIPHON' ? 'critical' : 'warning',
+      text:      headline,
       at:        t.beganAt,
       plate,
       vehicleId: t.vehicleId,
