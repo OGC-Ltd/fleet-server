@@ -4,11 +4,11 @@ import {
   type Adjudication, type ProbeProfile,
 } from '../../src/modules/fuel/fuel-adjudication.js'
 
-const DRAIN:  Adjudication = { verdict: 'DRAIN',          recoveredMl: 1_200,  reason: 'level-stayed-down', confirmed: true }
-const REDIS:  Adjudication = { verdict: 'REDISTRIBUTION', recoveredMl: 40_000, reason: 'level-recovered',   confirmed: true }
-const UNSURE: Adjudication = { verdict: 'DRAIN',          recoveredMl: null,   reason: 'drop-not-observed', confirmed: false }
-const REFILL: Adjudication = { verdict: 'REFILL',         recoveredMl: null,   reason: 'filling-in-window', confirmed: false }
-const FAULT:  Adjudication = { verdict: 'SENSOR_FAULT',   recoveredMl: null,   reason: 'fsl-dead',          confirmed: true }
+const DRAIN:  Adjudication = { verdict: 'DRAIN',          recoveredMl: 1_200,  reason: 'level-stayed-down', confirmed: true,  confidence: 0.8  }
+const REDIS:  Adjudication = { verdict: 'REDISTRIBUTION', recoveredMl: 40_000, reason: 'level-recovered',   confirmed: true,  confidence: 0.8  }
+const UNSURE: Adjudication = { verdict: 'DRAIN',          recoveredMl: null,   reason: 'drop-not-observed', confirmed: false, confidence: 0.3  }
+const REFILL: Adjudication = { verdict: 'REFILL',         recoveredMl: null,   reason: 'filling-in-window', confirmed: false, confidence: 0.5  }
+const FAULT:  Adjudication = { verdict: 'SENSOR_FAULT',   recoveredMl: null,   reason: 'fsl-dead',          confirmed: true,  confidence: 0.9  }
 
 /** MUFINDI: DZ 07 — 9 of its 12 parked half-hours swing, worst 116 L. */
 const DZ_07:  ProbeProfile = { parkedWindows: 12, swingWindows: 9 }
