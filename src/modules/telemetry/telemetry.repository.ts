@@ -558,6 +558,22 @@ export async function findLatest(vehicleId: string, orgId: string) {
 }
 
 /** Latest telemetry snapshot for every vehicle in an org — powers the initial map render. */
+/**
+ * How long a vehicle stays flagged after a fuel incident.
+ *
+ * A FIXED window that clears itself, per the operator (2026-08-16) — no
+ * acknowledgement table, no endpoint, no button. 24 hours rather than 12 so an
+ * overnight siphon is still red when the day shift arrives, which is the shift
+ * that can actually go and look at the machine.
+ *
+ * The cost of a timer rather than an acknowledgement is that nothing records
+ * whether a human saw it, so an incident can expire unnoticed by a shift that
+ * was not watching. That is the accepted trade for not building the table
+ * tonight, and it is the obvious next increment the first time someone asks
+ * "did anyone look at this one".
+ */
+export const FUEL_INCIDENT_WINDOW_MS = 24 * 60 * 60 * 1000
+
 export async function findFleetSnapshot(orgId: string) {
   // The live fleet is every ACTIVE vehicle in the org — the registry synced
   // from the RaiFactorySuite API (sync:vehicles). Vehicles the provider has
@@ -646,8 +662,42 @@ export async function findFleetSnapshot(orgId: string) {
   `
   const pingByVehicle = new Map(pings.map(p => [p.vehicle_id, p]))
 
+  // ── open fuel incidents ──────────────────────────────────────────────────
+  //
+  // The dashboard turns a vehicle RED from `flags.fuelInconsistency`, and on
+  // live data that flag has never once been set: the Wialon adapter hardcodes
+  // it false, because a position payload cannot see a fuel event. The whole
+  // red path — marker, pulse, critical count — has been dead since the fleet
+  // moved to Wialon. This is what feeds it.
+  //
+  // Only an ANNOUNCED cause counts. A vehicle does not go red for a drain we
+  // decided was ordinary consumption, a probe swing, or one we could not
+  // attribute at all — those are 94% of the ledger and turning the fleet red
+  // for them is the behaviour this work removed from the feed.
+  //
+  // One query for the whole org rather than a LATERAL per vehicle: the window
+  // is a day and announced causes are ~3 a day fleet-wide, so this reads a
+  // handful of rows off (drain_cause, began_at) and the join is done in
+  // memory. DISTINCT ON keeps the newest per vehicle.
+  const incidents = await prisma.$queryRaw<Array<{
+    vehicle_id: string; id: string; drain_cause: string; cause_reason: string | null
+    cause_confidence: number | null; stolen_ml: number; began_at: Date; detected_at: Date
+    initial_location: string | null; final_fuel_level_ml: number | null
+  }>>`
+    SELECT DISTINCT ON (t.vehicle_id)
+           t.vehicle_id, t.id, t.drain_cause::text AS drain_cause, t.cause_reason,
+           t.cause_confidence, t.stolen_ml, t.began_at, t.detected_at,
+           t.initial_location, t.final_fuel_level_ml
+      FROM fuel_thefts t
+     WHERE t.vehicle_id = ANY(${vehicleIds}::text[])
+       AND t.drain_cause IN ('SIPHON', 'UNEXPLAINED_BURN')
+       AND t.began_at >= ${new Date(Date.now() - FUEL_INCIDENT_WINDOW_MS)}
+     ORDER BY t.vehicle_id, t.began_at DESC`
+  const incidentByVehicle = new Map(incidents.map(i => [i.vehicle_id, i]))
+
   return vehicles.map((v) => {
       const ping            = pingByVehicle.get(v.id)
+      const incident        = incidentByVehicle.get(v.id)
       const fuelLevelMl     = ping?.fuel_level_ml ?? null
       // Tank capacity comes from the provider's registry. When it hasn't been
       // provisioned we report NO percentage rather than inventing one against
@@ -699,6 +749,26 @@ export async function findFleetSnapshot(orgId: string) {
         garageLat:      maintenance?.garageLat ?? null,
         garageLng:      maintenance?.garageLng ?? null,
         phase:          ping?.phase ?? null,
+
+        // Everything the card and the map popup need to explain a red vehicle
+        // without a second request. Null on the great majority.
+        fuelIncident: incident == null ? null : {
+          id:          incident.id,
+          cause:       incident.drain_cause,
+          reason:      incident.cause_reason,
+          confidence:  incident.cause_confidence,
+          volumeMl:    incident.stolen_ml,
+          beganAt:     incident.began_at.toISOString(),
+          detectedAt:  incident.detected_at.toISOString(),
+          location:    incident.initial_location,
+          tankAfterMl: incident.final_fuel_level_ml,
+          // Whether this one may be described as a possible theft. Derived
+          // HERE from the cause rather than left to the client, so a second
+          // implementation of the vocabulary rule cannot drift from the
+          // server's — the same reasoning that keeps `confirmed` derived from
+          // `verdictReason`. See modules/fuel/fuel-theft-classifier.
+          mayUseTheftWording: incident.drain_cause === 'SIPHON',
+        },
       }
     })
 }
