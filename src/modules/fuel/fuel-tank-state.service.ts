@@ -18,6 +18,7 @@ import {
   type LevelReading, type TankState,
 } from './fuel-tank-state.js'
 import { getOrgFuelRates } from './fuel-rate.service.js'
+import { normalisedRate } from './fuel-normalised-rate.js'
 import { engineBurnMl } from './fuel-rate.js'
 
 /*
@@ -132,6 +133,11 @@ async function readStoredTankState(orgId: string, asOf: Date): Promise<VehicleTa
 
   return rows.map(r => {
     const rate = rates.get(r.vehicleId) ?? null
+    // Recomputed from the stored columns rather than stored itself. The
+    // arithmetic is cheap and derived-and-stored is how a figure comes to
+    // disagree with the numbers printed next to it — the same reasoning that
+    // keeps `engineBurnMl` out of the table.
+    const norm = normalisedRate(r.consumedMl, r.turbulenceMl, r.engineSeconds)
     return {
       vehicleId:      r.vehicleId,
       initialMl:      r.openingMl,
@@ -147,6 +153,10 @@ async function readStoredTankState(orgId: string, asOf: Date): Promise<VehicleTa
       engineHoursMeter: r.engineHoursMeter,
       engineSeconds:  r.engineSeconds,
       engineBurnMl:   engineBurnMl(r.engineSeconds, rate),
+      normalisedLPerHour:       norm?.lPerHour    ?? null,
+      normalisedMinLPerHour:    norm?.minLPerHour ?? null,
+      normalisedMaxLPerHour:    norm?.maxLPerHour ?? null,
+      normalisedNoiseDominates: norm?.noiseDominates ?? false,
       engineRateLPerHour: rate?.lPerHour ?? null,
       engineRateBasis:    rate?.basis    ?? null,
       engineRateSpread:   rate?.spread   ?? null,

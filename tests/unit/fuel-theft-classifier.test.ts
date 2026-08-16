@@ -13,7 +13,7 @@ import { describe, it, expect } from 'vitest'
 import {
   classifyDrain, resolveBand, isAnnounced, mayUseTheftWording,
   ANNOUNCE_MULTIPLE, MAX_PLAUSIBLE_REMOVAL_LPH, SIPHON_MIN_DROP_ML,
-  DERIVED_BAND_SPREAD, MACHINE_CLASS, CLASS_BANDS, machinePrefix,
+  DERIVED_BAND_SPREAD, MACHINE_CLASS, CLASS_BANDS, CLASS_CEILING_LPH, machinePrefix,
   type DropEvidence, type BurnBand, type DrainCause,
 } from '../../src/modules/fuel/fuel-theft-classifier.js'
 import type { ProbeProfile } from '../../src/modules/fuel/fuel-adjudication.js'
@@ -42,6 +42,8 @@ function running(lph: number, hours = 1): DropEvidence {
     kT:             0.1,
     decayResidual:  0.02,
     samples:        60,
+    // Heavy machinery: engine hours are the basis, distance is noise.
+    distanceKm:     null,
   }
 }
 
@@ -57,6 +59,7 @@ function parked(dropL: number, minutes: number, over: Partial<DropEvidence> = {}
     kT:             0.1,
     decayResidual:  0.02,
     samples:        40,
+    distanceKm:     null,
     ...over,
   }
 }
@@ -125,6 +128,95 @@ describe('the parked branch — the only route to SIPHON', () => {
   })
 })
 
+describe('road vehicles — distance explains part of the drop', () => {
+  /** A truck at 3 km/L, with no machine class: judged on distance. */
+  const ROAD: BurnBand = { lowLph: 8, highLph: 12, source: 'type', kmPerL: 3 }
+
+  /** A drop with no engine time, so only the distance rule can speak. */
+  const drove = (dropL: number, km: number): DropEvidence => ({
+    dropMl: dropL * 1000, fallSeconds: 3600, engineSeconds: 0, engineEvidence: 0,
+    moved: km > 0, stepFraction: 0.2, kT: 0.1, decayResidual: 0.02, samples: 40,
+    distanceKm: km,
+  })
+
+  it('subtracts what the driving should have cost', () => {
+    // 50 km at 3 km/L is 16.7 L. A 95 L drop leaves 78 L unexplained.
+    const j = classifyDrain(drove(95, 50), ROAD, STEADY)
+    expect(j.cause).toBe('UNEXPLAINED_BURN')
+    expect(j.reason).toBe('drop-exceeds-distance')
+  })
+
+  it('clears a drop that the distance accounts for', () => {
+    // 60 km at 3 km/L is 20 L; a 22 L drop leaves 2 L, under the 5 L floor.
+    expect(classifyDrain(drove(22, 60), ROAD, STEADY).cause).toBe('ENGINE_BURN')
+  })
+
+  it('treats a stationary drop as wholly unexplained', () => {
+    // The operator's idling case: nothing driven, so nothing explained.
+    const j = classifyDrain(drove(25.6, 0), ROAD, STEADY)
+    expect(j.cause).toBe('UNEXPLAINED_BURN')
+    expect(j.reason).toBe('drop-while-stationary')
+  })
+
+  it('ignores drops below the operator floor', () => {
+    // 14 L parked would be 100% unexplained, but it is under ROAD_MIN_DROP_L.
+    expect(classifyDrain(drove(14, 0), ROAD, STEADY).cause).not.toBe('UNEXPLAINED_BURN')
+  })
+
+  it('cannot announce a stationary drop on a probe that swings', () => {
+    // The guard that makes the idling rule safe. Without gate 1 this rule
+    // alone would call every parked probe swing a theft.
+    expect(classifyDrain(drove(60, 0), ROAD, SWINGY).cause).toBe('INDETERMINATE')
+  })
+
+  it('does not apply to heavy machinery, which has no km baseline', () => {
+    expect(BAND.kmPerL).toBeUndefined()
+    expect(classifyDrain(running(8), BAND, STEADY).cause).toBe('ENGINE_BURN')
+  })
+})
+
+describe("the operator's absolute class ceiling", () => {
+  /** An excavator band with the operator's own 20 L/h alerting ceiling. */
+  const EXC: BurnBand = { lowLph: 5, highLph: 12, source: 'operator', ceilingLph: 20 }
+
+  it('announces above the ceiling, well before the multiple would', () => {
+    // 4x a 5-12 band is 48 L/h. The operator's rule fires at 20, so this is a
+    // markedly more sensitive instrument for the classes that have one.
+    expect(classifyDrain(running(25), EXC, STEADY).cause).toBe('UNEXPLAINED_BURN')
+    expect(classifyDrain(running(25), BAND, STEADY).cause).toBe('HIGH_BURN')
+  })
+
+  it('leaves an ordinary working day alone', () => {
+    // DZ 14's own figure: 11.66 L/h. Inside the band, nowhere near the ceiling.
+    expect(classifyDrain(running(11.66), EXC, STEADY).cause).toBe('ENGINE_BURN')
+    // ...and just under the ceiling is still not an alert.
+    expect(classifyDrain(running(19.9), EXC, STEADY).cause).toBe('HIGH_BURN')
+  })
+
+  it('raises the LARGE ceiling above the crawler rate that shares its band', () => {
+    // CTR 23's own derived rate is 28.26 L/h over 15 runs. A 20 L/h ceiling on
+    // the class it shares with the excavators flagged its ordinary day 76
+    // times in 30 days.
+    expect(CLASS_CEILING_LPH.get('EXCAVATOR_LARGE')).toBe(30)
+  })
+
+  it('carries the excavator ceiling the operator supplied, and no invented ones', () => {
+    expect(CLASS_CEILING_LPH.get('EXCAVATOR_MEDIUM')).toBe(20)
+    // Tractors and dozers were not given ceilings. A guessed one would decide
+    // whether a machine is investigated, so they fall back to the multiple.
+    expect(CLASS_CEILING_LPH.get('TRACTOR_LARGE')).toBeUndefined()
+    expect(CLASS_CEILING_LPH.get('DOZER_CAT_D8T')).toBeUndefined()
+  })
+
+  it('still yields to the physical ceiling — a sensor fault is not a big burn', () => {
+    expect(classifyDrain(running(MAX_PLAUSIBLE_REMOVAL_LPH * 2), EXC, STEADY).cause).toBe('SLOSH')
+  })
+
+  it('cannot fire on a probe the trust gate distrusts', () => {
+    expect(classifyDrain(running(25), EXC, SWINGY).cause).toBe('INDETERMINATE')
+  })
+})
+
 describe('the rules that must not be relaxed', () => {
   it('an untrusted probe ends the enquiry — including the reassuring answers', () => {
     // Not ENGINE_BURN either. A probe that swings 25 L on a standing machine
@@ -173,6 +265,26 @@ describe('the rules that must not be relaxed', () => {
 })
 
 describe('resolveBand', () => {
+  it('gives a classified machine its class band, not a derived one', () => {
+    // The whole point: an EX unit is judged on the operator's excavator band
+    // even where a derived rate exists, because the derived rates are
+    // measurably biased low.
+    const b = resolveBand('KASULU', 'MUFINDI: EX 17', { lPerHour: 4.3, basis: 'type' })!
+    expect(b.source).toBe('operator')
+    expect(b.lowLph).toBe(15)
+    expect(b.highLph).toBe(25)
+    expect(b.ceilingLph).toBe(30)
+  })
+
+  it('attaches a km/L baseline only to unclassified (road) units', () => {
+    const road = resolveBand('SUKARI', 'KTCB 295U', { lPerHour: 9, basis: 'vehicle', lPerKm: 0.25 })!
+    expect(road.kmPerL).toBeCloseTo(4, 6)
+    // Heavy machinery gets none: distance is noise on a machine that works
+    // without travelling.
+    const plant = resolveBand('KASULU', 'MUFINDI: EX 17', { lPerHour: 9, basis: 'vehicle', lPerKm: 0.25 })!
+    expect(plant.kmPerL).toBeUndefined()
+  })
+
   it('carries the operator bands verbatim', () => {
     // Their figures, not ours, and not adjusted to fit the fleet.
     expect(CLASS_BANDS.get('TRACTOR_SMALL')).toEqual({ lowLph: 2, highLph: 4 })
@@ -180,10 +292,23 @@ describe('resolveBand', () => {
     expect(CLASS_BANDS.get('EXCAVATOR_LARGE')).toEqual({ lowLph: 15, highLph: 25 })
   })
 
-  it('assigns no machine to a class until the operator confirms the mapping', () => {
-    // A 10x decision on the denominator of a live alert. Empty is the correct
-    // state, not an oversight — see MACHINE_CLASS.
-    expect(MACHINE_CLASS.size).toBe(0)
+  it('bands the CTR crawlers well above the excavators', () => {
+    // They were briefly given the same band. Per machine they are not alike:
+    // an EX drain implies 17-30 L/h and a CTR drain 46-111, and on the
+    // excavator band three crawlers produced 76% of every alert raised.
+    expect(MACHINE_CLASS.get('KASULU:EX')).toBe('EXCAVATOR_LARGE')
+    expect(MACHINE_CLASS.get('KASULU:CTR')).toBe('DOZER_CAT_D10')
+    const ex  = CLASS_BANDS.get(MACHINE_CLASS.get('KASULU:EX')!)!
+    const ctr = CLASS_BANDS.get(MACHINE_CLASS.get('KASULU:CTR')!)!
+    expect(ctr.lowLph).toBeGreaterThan(ex.highLph)
+  })
+
+  it('leaves the machines nobody has classified unmapped', () => {
+    // Dozers need a MODEL, not a size class, and SUKARI's plates carry no
+    // family at all. Both fall back to a derived rate rather than a guess.
+    expect(MACHINE_CLASS.get('KASULU:DZ')).toBeUndefined()
+    expect(MACHINE_CLASS.get('KASULU:WL')).toBeUndefined()
+    expect(MACHINE_CLASS.get('SUKARI:KTCB')).toBeUndefined()
   })
 
   it('reads the operator machine family off the plate', () => {
@@ -195,14 +320,16 @@ describe('resolveBand', () => {
   })
 
   it('widens a derived point estimate into a band', () => {
-    const b = resolveBand('KASULU', 'MUFINDI - CTR 10', { lPerHour: 10, basis: 'vehicle' })!
+    // A machine with no class — a dozer, which needs a model rather than a
+    // size — so the derived rate is what it gets.
+    const b = resolveBand('KASULU', 'MUFINDI: DZ 14', { lPerHour: 10, basis: 'vehicle' })!
     expect(b.lowLph).toBe(10)
     expect(b.highLph).toBe(10 * DERIVED_BAND_SPREAD)
     expect(b.source).toBe('vehicle')
   })
 
   it('is null when nothing is known, so the caller must not judge', () => {
-    expect(resolveBand('KASULU', 'MUFINDI - CTR 10', null)).toBeNull()
-    expect(resolveBand('KASULU', 'MUFINDI - CTR 10', { lPerHour: 0, basis: 'type' })).toBeNull()
+    expect(resolveBand('KASULU', 'MUFINDI: DZ 14', null)).toBeNull()
+    expect(resolveBand('KASULU', 'MUFINDI: DZ 14', { lPerHour: 0, basis: 'type' })).toBeNull()
   })
 })

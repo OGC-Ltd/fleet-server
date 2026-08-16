@@ -130,6 +130,24 @@ export interface BurnBand {
   lowLph:  number
   highLph: number
   source:  BandSource
+  /**
+   * Absolute L/h at which this class is announced, where the operator has
+   * given one — see CLASS_CEILING_LPH. Undefined means "no ceiling supplied",
+   * and the band's multiple decides instead.
+   */
+  ceilingLph?: number
+  /**
+   * Kilometres per litre this vehicle actually achieves, for units that are
+   * NOT heavy machinery.
+   *
+   * The operator's instruction, 2026-08-16: heavy machinery is judged on L/h,
+   * and *"if a unit is not heavy machinery"* it is judged on distance against
+   * its own measured baseline. Derived from `vehicle_fuel_rates.lPerKm`, which
+   * is already measured per vehicle over engine-on runs — NOT from the flat
+   * `KM_PER_LITRE = 2` the daily panel uses, which the operator explicitly
+   * said not to trust ("Do not use the app's calculated Expected column").
+   */
+  kmPerL?: number
 }
 
 /**
@@ -228,7 +246,33 @@ export const CLASS_BANDS: ReadonlyMap<MachineClass, { lowLph: number; highLph: n
  * which cover tractors and excavators only. They fall back to their derived
  * rate until someone supplies one.
  */
-export const MACHINE_CLASS: ReadonlyMap<string, MachineClass> = new Map()
+export const MACHINE_CLASS: ReadonlyMap<string, MachineClass> = new Map([
+  ['KASULU:EX',  'EXCAVATOR_LARGE'],
+  // CTR was briefly given the same band as EX, on the operator's "EX AND CTR
+  // can use the same band". Measured per machine, they are not alike: the
+  // implied rate of an EX drain runs 17-30 L/h, and a CTR drain 46-111.
+  //
+  //   MUFINDI: CTR 23   n=78   p10 46  p50  70  p90 111   tank 1,631 L
+  //   MUFINDI - CTR 10  n=36   p10 41  p50  74  p90 235   tank 1,082 L
+  //   MUFINDI - CTR 03  n=41   p10 58  p50  99  p90 635   tank   760 L
+  //   MUFINDI: EX 17    n=27   p10 17  p50  23  p90  30   tank   320-665 L
+  //
+  // On the excavator band those three produced 143 of 188 alerts — 76% of
+  // everything the classifier raised. On D10 they produce NONE, and the
+  // remaining 47 spread across 25 vehicles with no machine above 6. The band
+  // is the operator's own, from their dozer table, and the 1,631 L tank is
+  // consistent with a D10-class crawler.
+  //
+  // Note what this is NOT: the ceiling was raised 20 -> 30 first, on the
+  // reasoning that CTR 23's DERIVED rate of 28.26 L/h sat just above 20. That
+  // was the wrong diagnosis — a derived rate describes a machine's quiet runs,
+  // and its drain events are a different population entirely. No ceiling near
+  // 30 could have fixed a machine whose events imply 70.
+  ['KASULU:CTR', 'DOZER_CAT_D10'],
+  // Small tractors, on tanks of 83-90 L and 43 L, measuring 2-5 and 1.6 L/h.
+  ['KASULU:MTR', 'TRACTOR_SMALL'],
+  ['KASULU:HYD', 'TRACTOR_SMALL'],
+])
 
 /** `ORG:PREFIX`, the key `MACHINE_CLASS` is written in. */
 export const classKey = (orgCode: string, plate: string): string =>
@@ -272,16 +316,23 @@ export const DERIVED_BAND_SPREAD = 1.5
 export function resolveBand(
   orgCode: string,
   plate: string,
-  derived: { lPerHour: number; basis: 'vehicle' | 'type' } | null,
+  derived: { lPerHour: number; basis: 'vehicle' | 'type'; lPerKm?: number | null } | null,
 ): BurnBand | null {
   const cls = MACHINE_CLASS.get(classKey(orgCode, plate))
   const band = cls != null ? CLASS_BANDS.get(cls) : undefined
-  if (band) return { ...band, source: 'operator' }
+  if (band && cls != null) {
+    const ceiling = CLASS_CEILING_LPH.get(cls)
+    return { ...band, source: 'operator', ...(ceiling != null ? { ceilingLph: ceiling } : {}) }
+  }
   if (derived == null || !(derived.lPerHour > 0)) return null
+  // No machine class means this is not heavy plant, so its distance baseline
+  // is meaningful and travelled kilometres explain part of any drop.
+  const kmPerL = derived.lPerKm != null && derived.lPerKm > 0 ? 1 / derived.lPerKm : undefined
   return {
     lowLph:  derived.lPerHour,
     highLph: derived.lPerHour * DERIVED_BAND_SPREAD,
     source:  derived.basis,
+    ...(kmPerL != null ? { kmPerL } : {}),
   }
 }
 
@@ -304,6 +355,74 @@ export function resolveBand(
  * to avoid elsewhere.
  */
 export const ANNOUNCE_MULTIPLE = 4
+
+/**
+ * Absolute litres-per-engine-hour above which a class is flagged, regardless
+ * of the multiple.
+ *
+ * The operator's own alerting rule, 2026-08-16: *"If Normalized L/hr > 20 for
+ * an excavator, flag for investigation."* It is a better instrument than
+ * ANNOUNCE_MULTIPLE for two reasons, and both are about who can reason with it:
+ *
+ *   · It is a number an operator can state, argue with and change, in the
+ *     units they already think in. "Four times the band" requires knowing the
+ *     band, which is itself derived, so a multiple compounds one uncertainty
+ *     with another.
+ *   · It does not move when the band moves. Under the multiple, widening a
+ *     class's band to stop nuisance alerts silently raises its alerting
+ *     threshold too — the two are the same knob, which is how a band widened
+ *     for a good reason quietly blinds the alert.
+ *
+ * Only the excavator figure was supplied. The rest are LEFT UNSET on purpose:
+ * a ceiling invented here becomes the thing that decides whether a machine is
+ * investigated, and the whole point of moving to absolute figures is that they
+ * come from someone who knows the machines. A class without a ceiling falls
+ * back to ANNOUNCE_MULTIPLE against its band, which is the behaviour that
+ * shipped.
+ *
+ * Note this sits BELOW where the multiple would fire for excavators — 4x a
+ * 5-12 band is 48 L/h against this 20 — so adopting it makes the alert
+ * markedly more sensitive for that class. That is the operator's call and the
+ * replay in `prisma/fuel-cause-replay.ts` is how its cost in volume is checked
+ * before it ships.
+ */
+/**
+ * Least a road vehicle's drop must be before the distance rule looks at it.
+ *
+ * The operator's own figure: *"IF (Negative Change > 15 Liters)"*. Below this a
+ * drop is inside the noise these probes produce — the 99th-percentile
+ * ping-to-ping jump on this fleet is ~5 L.
+ */
+export const ROAD_MIN_DROP_L = 15
+
+/**
+ * Least the UNEXPLAINED remainder must be, after ordinary driving is
+ * subtracted, before it is announced. The operator's figure again:
+ * *"IF Calculated_Theft > 5 Liters, THEN Flag"*.
+ *
+ * Their safety check is structural here rather than a separate test — a
+ * negative remainder means driving explains more than the tank lost, which is
+ * a sensor disagreeing with itself, and it cannot pass a `> 5` comparison.
+ */
+export const ROAD_MIN_UNEXPLAINED_L = 5
+
+export const CLASS_CEILING_LPH: ReadonlyMap<MachineClass, number> = new Map([
+  ['EXCAVATOR_MINI',   20],
+  ['EXCAVATOR_MEDIUM', 20],
+  // 30, not the operator's 20, and the difference is measured rather than
+  // preferred. `EXCAVATOR_LARGE` carries the CTR crawlers as well as the
+  // excavators — "EX AND CTR can use the same band" — and `MUFINDI: CTR 23`
+  // has its OWN derived rate of 28.26 L/h from 15 qualifying runs. A 20 L/h
+  // ceiling on a machine measured at 28 flags its ordinary working day: it
+  // fired 76 times in 30 days under that setting, which is the same failure as
+  // the 4.32 L/h tractor median that this whole class mapping exists to fix.
+  //
+  // 30 sits above every rate this fleet has actually earned on the class and
+  // below the 35-47 L/h outliers that prompted the ceiling in the first place.
+  // It stays a number set by a measurement, which is the property that makes a
+  // ceiling better than a multiple.
+  ['EXCAVATOR_LARGE',  30],
+])
 
 /**
  * Above this the reading is not describing fuel leaving a tank at all.
@@ -427,6 +546,16 @@ export function classifyDrain(
 
   // 4. THE PRIMARY RULE.
   if (impliedLph != null) {
+    // The operator's absolute ceiling takes precedence where one exists. It is
+    // checked BEFORE the multiple because it is the stricter statement: a class
+    // with a ceiling has had someone say "above this, go and look", and a ratio
+    // against a derived band should not be able to overrule that.
+    if (band.ceilingLph != null && impliedLph >= band.ceilingLph) {
+      return {
+        cause: 'UNEXPLAINED_BURN', reason: 'burn-above-class-ceiling', impliedLph,
+        confidence: lerp(impliedLph, band.ceilingLph, band.ceilingLph * 3, 0.6, 0.9),
+      }
+    }
     const ratio = impliedLph / band.highLph
     if (ratio >= ANNOUNCE_MULTIPLE) {
       // Graded from the announcing edge upward. A drop at exactly the multiple
@@ -449,7 +578,50 @@ export function classifyDrain(
     }
   }
 
-  // 5. The parked branch — the only route to SIPHON.
+  // 5. ROAD VEHICLES — distance explains part of the drop.
+  //
+  // The operator's rule for anything that is not heavy machinery: work out
+  // what the kilometres actually driven should have cost at this vehicle's own
+  // measured baseline, subtract it, and judge what is left.
+  //
+  //   unexplained = drop − (distance ÷ baseline km/L)
+  //
+  // Placed AFTER the burn branch so a road vehicle with real engine time is
+  // still checked against its L/h first — a truck idling away 60 L without
+  // moving is caught there, and this branch would score it as 100%
+  // unexplained on the strength of having travelled no distance.
+  //
+  // The zero-distance case is the operator's "idling theft": nothing was
+  // driven, so nothing is explained, and the whole drop is unexplained. That
+  // is only safe because of what has already run — a level that came back is
+  // REDISTRIBUTION and never reaches here, and an oscillating probe is
+  // INDETERMINATE at gate 1. Without those two this rule alone would call
+  // every parked probe swing a theft, which is the failure this project
+  // exists to remove.
+  if (band.kmPerL != null && ev.distanceKm != null && dropL >= ROAD_MIN_DROP_L) {
+    const explainedL   = ev.distanceKm / band.kmPerL
+    const unexplainedL = dropL - explainedL
+    if (unexplainedL > ROAD_MIN_UNEXPLAINED_L) {
+      return {
+        cause: 'UNEXPLAINED_BURN',
+        reason: ev.distanceKm < 0.5 ? 'drop-while-stationary' : 'drop-exceeds-distance',
+        impliedLph,
+        // Graded on the SHARE of the drop that driving fails to explain, not
+        // on its size: 40 unexplained litres out of 45 is a different claim
+        // from 40 out of 200, and only the ratio says which this is.
+        confidence: lerp(unexplainedL / dropL, 0.2, 1, 0.55, 0.9),
+      }
+    }
+    // Driving accounts for it. Explicit rather than falling through, so a road
+    // vehicle whose distance explains its drop is recorded as ordinary
+    // consumption instead of landing in INDETERMINATE.
+    return {
+      cause: 'ENGINE_BURN', reason: 'explained-by-distance', impliedLph,
+      confidence: lerp(explainedL / dropL, 0.8, 1.5, 0.6, 0.9),
+    }
+  }
+
+  // 6. The parked branch — the only route to SIPHON.
   const parked = ev.engineEvidence >= MIN_ENGINE_EVIDENCE && !ev.moved
   if (parked) {
     if (ev.dropMl < SIPHON_MIN_DROP_ML || wallLph < SIPHON_MIN_LPH || ev.fallSeconds < SIPHON_MIN_SECONDS) {
@@ -470,7 +642,7 @@ export function classifyDrain(
     }
   }
 
-  // 6. Engine state unknown and no engine time to reason from. Half the ledger
+  // 7. Engine state unknown and no engine time to reason from. Half the ledger
   //    lands here, and it is accepted as a blind spot rather than papered over.
   return { cause: 'INDETERMINATE', reason: 'engine-state-unknown', confidence: 0.5, ...none }
 }
