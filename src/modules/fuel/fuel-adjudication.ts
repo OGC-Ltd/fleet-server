@@ -208,6 +208,46 @@ export interface Adjudication {
    * we could not confirm.
    */
   confirmed:   boolean
+  /**
+   * How sure we are the VERDICT is right, 0-1. Not how sure we are fuel was
+   * stolen, and not a restatement of `confirmed` at finer grain.
+   *
+   * `confirmed` is binary and answers "did our own telemetry settle this, or
+   * are we relaying the provider" — it never moves once a reason is fixed.
+   * `confidence` answers a narrower question: given the branch we landed in,
+   * how close was the call. A `level-stayed-down` DRAIN at 0% recovery and one
+   * at 55% (just under RECOVERY_THRESHOLD) are both `confirmed: true`, but the
+   * second is a near-miss on REDISTRIBUTION and the first is not, and only
+   * `confidence` carries that.
+   *
+   * Deliberately never read by `adjudicateDrain`, `applyProbeTrustGate` or
+   * anything upstream of it: it is a report on the decision already made, the
+   * same relationship `confirmed` has to `verdict`. Nothing here should let a
+   * confidence figure talk a categorical verdict into changing — that was the
+   * exact failure UNVERIFIED shipped with, just at a different resolution.
+   *
+   * `null` only for PENDING, where there is no decision yet to be confident
+   * about. Every settled verdict — SENSOR_FAULT included — carries a number.
+   *
+   * The specific bands below (0.55, 0.9, 0.95...) are starting points reasoned
+   * from the shape of each rule, NOT fitted to this fleet's ledger the way
+   * RECOVERY_THRESHOLD or SWING_ML were. Treat them as a scaffold: before this
+   * is shown anywhere a human acts on, backtest it the way the median filter
+   * was backtested (see `smoothLevels`) and adjust the interpolation ranges to
+   * match what the score actually predicts on real drains.
+   */
+  confidence:  number | null
+}
+
+/**
+ * Linear interpolation of `x` from [x0, x1] onto [y0, y1], clamped both ends.
+ * Exported so `fuel-filling-adjudication.ts` grades its own near-misses the
+ * same way rather than re-implementing the curve.
+ */
+export function lerp(x: number, x0: number, x1: number, y0: number, y1: number): number {
+  if (x1 === x0) return y0
+  const t = Math.min(1, Math.max(0, (x - x0) / (x1 - x0)))
+  return y0 + t * (y1 - y0)
 }
 
 /** The reasons that mean we watched the level ourselves and saw the outcome. */
@@ -401,7 +441,14 @@ export const probeSwings = (p: ProbeProfile | null | undefined): boolean =>
  */
 export function applyProbeTrustGate(a: Adjudication, profile: ProbeProfile | null): Adjudication {
   if (a.verdict !== 'DRAIN' || !a.confirmed || !probeSwings(profile)) return a
-  return { verdict: 'DRAIN', recoveredMl: a.recoveredMl, reason: 'probe-swings', confirmed: false }
+  // Damped, not discarded and not floored to a fresh constant. The level
+  // series still said what it said — a clean 0.95 read (nothing came back at
+  // all) is still better evidence than a marginal 0.55 one, even on a probe
+  // this gate no longer trusts unreservedly. 0.5 halves it and caps it: this
+  // branch must never rank ABOVE an ungated 'level-stayed-down', since the
+  // whole point of the gate is that this evidence is weaker, not stronger.
+  const confidence = a.confidence == null ? null : Math.min(0.5, a.confidence * 0.5)
+  return { verdict: 'DRAIN', recoveredMl: a.recoveredMl, reason: 'probe-swings', confirmed: false, confidence }
 }
 
 /**
@@ -511,7 +558,7 @@ export function adjudicateDrain(
   // Not yet ripe. Judging early is how you confirm a loss that was about to
   // come back — the failure mode this whole module exists to prevent.
   if (now.getTime() - claim.detectedAt.getTime() < SETTLE_MINUTES * 60_000) {
-    return { verdict: 'PENDING', recoveredMl: null, reason: 'settling', confirmed: false }
+    return { verdict: 'PENDING', recoveredMl: null, reason: 'settling', confirmed: false, confidence: null }
   }
 
   // ── is the probe working at all? ─────────────────────────────────────────
@@ -539,7 +586,12 @@ export function adjudicateDrain(
     const running = samples.filter(s => s.engineOn === true).length
     const flat = Math.min(...vals) === Math.max(...vals)
     if (vals.every(v => v === 0) || (flat && running >= DROPOUT_MIN_RUNNING)) {
-      return { verdict: 'SENSOR_FAULT', recoveredMl: null, reason: 'fsl-dead', confirmed: true }
+      // A pattern match on the raw series (all-zero, or flat while running),
+      // not a probabilistic call — there is no ratio here to grade a near-miss
+      // against. Fixed high rather than 1.0: the rule itself is a heuristic
+      // (see fuel-probe-health.ts on engine evidence not being universal), so
+      // room is left for it to occasionally be wrong.
+      return { verdict: 'SENSOR_FAULT', recoveredMl: null, reason: 'fsl-dead', confirmed: true, confidence: 0.9 }
     }
   }
 
@@ -584,7 +636,16 @@ export function adjudicateDrain(
     //
     // So no drain row is ever a REFILL. A refill is a level INCREASE and lives
     // in `fuel_fillings`; this table only ever holds reported drops.
-    return { verdict: 'DRAIN', recoveredMl: null, confirmed: false,
+    // We have nothing to grade this claim against, so confidence cannot come
+    // from THIS event's evidence — it can only be a prior over the population
+    // these rows are drawn from. The module docstring's own measurement is the
+    // only honest source for that: over the 250 most recent decidable drains
+    // per org, 40-50% of claimed volume came back. That is a base rate for
+    // "this kind of claim, unchecked", not a fitted constant, and it should be
+    // re-measured against THIS branch specifically (not decidable drains in
+    // general) before being trusted at the second decimal place.
+    const NO_EVIDENCE_PRIOR = 0.5
+    return { verdict: 'DRAIN', recoveredMl: null, confirmed: false, confidence: NO_EVIDENCE_PRIOR,
              reason: fillingAt != null && after.length < MIN_SAMPLES
                ? 'filling-too-soon'
                : 'insufficient-telemetry' }
@@ -603,7 +664,7 @@ export function adjudicateDrain(
       baselineBefore >= DROPOUT_MIN_BASELINE_ML &&
       rawAfter.every(s => s.fuelLevelMl === 0) &&
       rawAfter.filter(s => s.engineOn === true).length >= DROPOUT_MIN_RUNNING) {
-    return { verdict: 'SENSOR_FAULT', recoveredMl: null, reason: 'fsl-dropout', confirmed: true }
+    return { verdict: 'SENSOR_FAULT', recoveredMl: null, reason: 'fsl-dropout', confirmed: true, confidence: 0.9 }
   }
 
   // The drop as OUR telemetry saw it — the highest level before it started
@@ -649,7 +710,12 @@ export function adjudicateDrain(
     // it is evidence the two sources disagree about what happened — so the
     // provider's claim stands as a DRAIN, unconfirmed. A filling in the window
     // does NOT make it a refill: see the filling-too-soon note above.
-    return { verdict: 'DRAIN', recoveredMl: null, reason: 'no-drop-observed', confirmed: false }
+    // Not zero: we did not disprove the claim (see the module note on why this
+    // stays a DRAIN), and a probe that missed a real drop entirely is not
+    // impossible. But our series actively disagrees with the report rather
+    // than merely lacking one, which is weaker ground than the no-evidence
+    // branch above, so the prior sits below it.
+    return { verdict: 'DRAIN', recoveredMl: null, reason: 'no-drop-observed', confirmed: false, confidence: 0.15 }
   }
   // ...and the same is true when it saw a fall far too SMALL to be the one
   // claimed. The recovery ratio below is measured against `drop`, so without
@@ -661,7 +727,16 @@ export function adjudicateDrain(
   // `drop <= 0` was the only version of this check, so anything above zero was
   // treated as the claimed event no matter its size.
   if (claim.stolenMl > 0 && drop < claim.stolenMl * OBSERVED_DROP_MIN_RATIO) {
-    return { verdict: 'DRAIN', recoveredMl: null, reason: 'drop-not-observed', confirmed: false }
+    // We saw SOME fall, just not enough of the claim to corroborate it. A drop
+    // near zero (the KTCC 850B pattern this branch exists to catch — 19 ml
+    // against a 25.8 L claim) is barely different from no-drop-observed above;
+    // a drop just under the OBSERVED_DROP_MIN_RATIO line is a near-miss that
+    // could easily be real. Scaled between the two rather than a second fixed
+    // constant, since unlike the branches above there IS a ratio here to grade
+    // against.
+    const dropRatio = drop / claim.stolenMl
+    const confidence = lerp(dropRatio, 0, OBSERVED_DROP_MIN_RATIO, 0.1, 0.45)
+    return { verdict: 'DRAIN', recoveredMl: null, reason: 'drop-not-observed', confirmed: false, confidence }
   }
 
   // Only readings at or after the low point can speak to a recovery from it.
@@ -671,7 +746,22 @@ export function adjudicateDrain(
 
   // The only two outcomes we watched happen ourselves, and so the only two
   // that come back confirmed.
-  return (peakAfter - trough) / drop >= RECOVERY_THRESHOLD
-    ? { verdict: 'REDISTRIBUTION', recoveredMl, reason: 'level-recovered',  confirmed: true }
-    : { verdict: 'DRAIN',          recoveredMl, reason: 'level-stayed-down', confirmed: true }
+  //
+  // Both sides are graded by distance from RECOVERY_THRESHOLD, not from 0 or
+  // 1: the threshold is where the case for one verdict over the other is
+  // weakest, so a ratio that lands right on it earns the LOWEST confidence
+  // either side can produce, and a ratio far from it — nothing came back at
+  // all, or everything did — earns the highest. This is the one place a real
+  // continuous measurement already exists (`recoveryRatio`), so it is used
+  // directly rather than bucketed like the branches above.
+  const recoveryRatio = (peakAfter - trough) / drop
+  return recoveryRatio >= RECOVERY_THRESHOLD
+    ? {
+        verdict: 'REDISTRIBUTION', recoveredMl, reason: 'level-recovered', confirmed: true,
+        confidence: lerp(recoveryRatio, RECOVERY_THRESHOLD, 1, 0.55, 0.95),
+      }
+    : {
+        verdict: 'DRAIN', recoveredMl, reason: 'level-stayed-down', confirmed: true,
+        confidence: lerp(recoveryRatio, RECOVERY_THRESHOLD, 0, 0.55, 0.95),
+      }
 }
