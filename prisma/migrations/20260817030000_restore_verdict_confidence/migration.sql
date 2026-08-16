@@ -1,0 +1,40 @@
+-- Restore `verdict_confidence`, which a recorded migration never created.
+--
+-- `20260816120000_add_verdict_confidence` is in `_prisma_migrations` with
+-- `finished_at = 2026-08-16 02:42:02`, and neither of its two columns exists in
+-- the database. Prisma will therefore never re-run it: as far as the migration
+-- table is concerned that work is done. This migration is the only way to close
+-- the gap without editing history.
+--
+-- ## What it broke, and for how long
+--
+-- Everything. `adjudicatePendingDrains` writes `verdictConfidence` on every row
+-- it judges, so every `fuelTheft.update()` threw `P2022 ColumnNotFound` and the
+-- whole pass aborted. Measured on the box 2026-08-17: four consecutive cycles
+-- logged `Fuel adjudication pass failed` with `"adjudicated": 0`.
+--
+-- The failure is SILENT in the way that matters. The pass is wrapped in a
+-- try/catch that logs a warning and lets the cycle continue, so
+-- `Fuel sync cycle complete` still reported healthy-looking `thefts` and
+-- `published` counts while no verdict was written at all. Nothing in the ledger
+-- says "this row was never judged" — a PENDING row looks the same whether it is
+-- waiting for its settle window or whether the pass that should have judged it
+-- has been dying for a day.
+--
+-- So the drains in the ledger carrying verdicts got them from the backfill
+-- script, not from the running server, and anything newer than 2026-08-16 02:42
+-- has simply been sitting PENDING.
+--
+-- ## Why IF NOT EXISTS
+--
+-- The state that produced this is a migration whose record and whose effect
+-- disagree, and the honest response is a statement that is true in either
+-- world. If a box somewhere DID get the original columns, this is a no-op
+-- there; if it did not, this creates them. A bare ADD COLUMN would fail on the
+-- first kind of box and turn one drifted environment into two.
+--
+-- Additive and nullable, so this is a catalogue update rather than a table
+-- rewrite — nothing scans `fuel_thefts` (3,350 rows) or `fuel_fillings`.
+
+ALTER TABLE "fuel_thefts"   ADD COLUMN IF NOT EXISTS "verdict_confidence" DOUBLE PRECISION;
+ALTER TABLE "fuel_fillings" ADD COLUMN IF NOT EXISTS "verdict_confidence" DOUBLE PRECISION;
