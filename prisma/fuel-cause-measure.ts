@@ -118,6 +118,10 @@ interface Measured {
   wallLph:   number
   kT:        number | null
   halfSlope: number | null
+  /** Kilometres covered during the fall, integrated from reported speed. */
+  distanceKm:  number | null
+  /** The vehicle's own measured km per litre, where it has earned one. */
+  kmPerL:      number | null
   /** Largest single-interval drop ÷ total drop. 1 = the whole fall was a step. */
   stepFraction: number
   linRmse:   number | null
@@ -130,6 +134,7 @@ async function measureOne(
        verdictReason: string | null
        vehicle: { registrationPlate: string; organisation: { code: string } | null } },
   rateByVehicle: Map<string, number>,
+  kmPerLByVehicle: Map<string, number>,
 ): Promise<Measured | null> {
   const from = new Date(t.beganAt.getTime() - LOOKBEHIND_MS)
   const to   = new Date(t.detectedAt.getTime() + LOOKAHEAD_MS)
@@ -197,6 +202,8 @@ async function measureOne(
     evidence: ev.engineEvidence, moved: ev.moved,
     impliedLph, expectedLph: rateByVehicle.get(t.vehicleId) ?? null, wallLph,
     kT: ev.kT, halfSlope: halfSlopeRatio(fall), stepFraction: ev.stepFraction,
+    distanceKm: ev.distanceKm,
+    kmPerL: kmPerLByVehicle.get(t.vehicleId) ?? null,
     linRmse: lin?.rmse ?? null,
     // Back to millilitres: the dump's consumers divide by dropMl themselves.
     decRmse: ev.decayResidual != null ? ev.decayResidual * ev.dropMl : null,
@@ -243,6 +250,11 @@ async function main(): Promise<void> {
     groupRows.map(v => ({ vehicleId: v.id, organisationId: v.organisationId, vehicleType: String(v.vehicleType) })),
   )
   const rateByVehicle = new Map([...resolved].map(([id, r]) => [id, r.lPerHour]))
+  // Only a vehicle's OWN lPerKm is usable: a type median pools machines that
+  // travel differently, so its distance figure describes nothing.
+  const kmPerLByVehicle = new Map(
+    rateRows.filter(r => r.runs >= 3 && r.lPerKm != null && r.lPerKm > 0)
+            .map(r => [r.vehicleId, 1 / r.lPerKm!]))
   const ownRates = rateRows.filter(r => r.runs >= 3).length
   console.log(`Expected L/h available for ${rateByVehicle.size} vehicles ` +
               `(${ownRates} own, ${rateByVehicle.size - ownRates} borrowed from a type median)`)
@@ -250,7 +262,7 @@ async function main(): Promise<void> {
   const out: Measured[] = []
   let skipped = 0
   for (const [i, d] of drains.entries()) {
-    const m = await measureOne(d, rateByVehicle)
+    const m = await measureOne(d, rateByVehicle, kmPerLByVehicle)
     if (m) out.push(m); else skipped++
     if ((i + 1) % 250 === 0) process.stderr.write(`  …${i + 1}/${drains.length}\n`)
   }
@@ -264,6 +276,9 @@ async function main(): Promise<void> {
   console.log(`  engine state on >=50% of fall readings   ${withEngineEvidence.length} / ${out.length}  ${((withEngineEvidence.length / out.length) * 100).toFixed(1)}%`)
   console.log(`  vehicle has its own expected L/h         ${withExpected.length} / ${out.length}  ${((withExpected.length / out.length) * 100).toFixed(1)}%`)
   console.log(`  both                                     ${out.filter(m => m.evidence >= 0.5 && m.expectedLph != null).length} / ${out.length}`)
+
+  console.log(`  fall carries a distance          ${out.filter(m => m.distanceKm != null).length} / ${out.length}`)
+  console.log(`  ...and a km/L baseline (road)    ${out.filter(m => m.distanceKm != null && m.kmPerL != null).length} / ${out.length}`)
 
   // ── 2. engine state during the fall ──
   //

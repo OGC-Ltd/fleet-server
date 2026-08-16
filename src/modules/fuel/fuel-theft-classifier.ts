@@ -325,9 +325,12 @@ export function resolveBand(
     return { ...band, source: 'operator', ...(ceiling != null ? { ceilingLph: ceiling } : {}) }
   }
   if (derived == null || !(derived.lPerHour > 0)) return null
-  // No machine class means this is not heavy plant, so its distance baseline
-  // is meaningful and travelled kilometres explain part of any drop.
-  const kmPerL = derived.lPerKm != null && derived.lPerKm > 0 ? 1 / derived.lPerKm : undefined
+  // No machine class SUGGESTS this is not heavy plant — but the class table is
+  // incomplete, so the baseline itself has to corroborate it. A machine that
+  // travels less than ROAD_MIN_KM_PER_L gets no distance basis and is judged
+  // on L/h alone.
+  const rawKmPerL = derived.lPerKm != null && derived.lPerKm > 0 ? 1 / derived.lPerKm : null
+  const kmPerL = rawKmPerL != null && rawKmPerL >= ROAD_MIN_KM_PER_L ? rawKmPerL : undefined
   return {
     lowLph:  derived.lPerHour,
     highLph: derived.lPerHour * DERIVED_BAND_SPREAD,
@@ -405,6 +408,39 @@ export const ROAD_MIN_DROP_L = 15
  * a sensor disagreeing with itself, and it cannot pass a `> 5` comparison.
  */
 export const ROAD_MIN_UNEXPLAINED_L = 5
+
+/**
+ * Kilometres per litre below which a machine does not travel enough for
+ * distance to be a basis for anything.
+ *
+ * Without this the road rule reaches PLANT. A vehicle with no `MachineClass`
+ * falls through to the distance branch, and on this fleet that includes every
+ * SUKARI tractor — their plates carry no family prefix, so nothing classifies
+ * them — and any excavator whose group is unmapped. Measured over the 33
+ * vehicles that have earned their own km/L (2026-08-17), the population is
+ * plainly two:
+ *
+ *   MUFINDI: EX 20   0.02      KDL 208X   1.91
+ *   MUFINDI - EX 24  0.03      KDL 705E   2.05
+ *   MUFINDI - EX 26  0.05      KTCB 293U  2.40
+ *   KTCB 295U        0.31      KCX 802S   3.38
+ *
+ * p25 is 0.07 km/L and p75 is 2.05, with nothing in between. 1.5 sits in that
+ * gap: it keeps every road vehicle and drops every machine.
+ *
+ * The failure it prevents is not subtle. At 0.31 km/L a 40 L drop with 0.7 km
+ * driven scores 36 L "unexplained" by construction, because the baseline says
+ * the machine should have burned 2.3 L. `KTCB 295U` — a 160 L tractor — was
+ * being judged that way. `fuel-rate` already records the same thing from the
+ * other direction: PLANT measures 7.361 L/km, which its docstring calls "not
+ * a rate anyone can use".
+ *
+ * A vehicle below the floor is not left unjudged; it simply keeps the L/h
+ * comparison, which is the correct basis for a machine that works without
+ * travelling. That makes this the safe default for SUKARI's 482 unclassified
+ * tractors until someone supplies their classes.
+ */
+export const ROAD_MIN_KM_PER_L = 1.5
 
 export const CLASS_CEILING_LPH: ReadonlyMap<MachineClass, number> = new Map([
   ['EXCAVATOR_MINI',   20],

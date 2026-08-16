@@ -277,12 +277,26 @@ describe('resolveBand', () => {
   })
 
   it('attaches a km/L baseline only to unclassified (road) units', () => {
-    const road = resolveBand('SUKARI', 'KTCB 295U', { lPerHour: 9, basis: 'vehicle', lPerKm: 0.25 })!
+    const road = resolveBand('SUKARI', 'KDL 208X', { lPerHour: 9, basis: 'vehicle', lPerKm: 0.25 })!
     expect(road.kmPerL).toBeCloseTo(4, 6)
     // Heavy machinery gets none: distance is noise on a machine that works
     // without travelling.
     const plant = resolveBand('KASULU', 'MUFINDI: EX 17', { lPerHour: 9, basis: 'vehicle', lPerKm: 0.25 })!
     expect(plant.kmPerL).toBeUndefined()
+  })
+
+  it('withholds the distance basis from a machine that barely travels', () => {
+    // KTCB 295U is a 160 L SUKARI tractor with no class — its plate carries no
+    // family — and a measured 0.31 km/L. Judged on distance, a 40 L drop over
+    // 0.7 km scores 36 L "unexplained" by construction. It keeps the L/h
+    // comparison instead.
+    const plant = resolveBand('SUKARI', 'KTCB 295U', { lPerHour: 13, basis: 'vehicle', lPerKm: 1 / 0.31 })!
+    expect(plant.kmPerL).toBeUndefined()
+    expect(plant.lowLph).toBe(13)
+
+    // ...and a genuine road vehicle keeps it.
+    const road = resolveBand('SUKARI', 'KCX 802S', { lPerHour: 9, basis: 'vehicle', lPerKm: 1 / 3.38 })!
+    expect(road.kmPerL).toBeCloseTo(3.38, 4)
   })
 
   it('carries the operator bands verbatim', () => {

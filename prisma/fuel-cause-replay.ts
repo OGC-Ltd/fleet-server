@@ -28,6 +28,7 @@ interface MeasuredRow {
   impliedLph: number | null; expectedLph: number | null; wallLph: number
   kT: number | null; halfSlope: number | null; stepFraction: number
   linRmse: number | null; decRmse: number | null; samples: number
+  distanceKm: number | null; kmPerL: number | null
 }
 
 const arg = (name: string, dflt: string): string => {
@@ -62,6 +63,10 @@ const evidenceOf = (r: MeasuredRow): DropEvidence => ({
   // millilitre figure means nothing without the fall it belongs to.
   decayResidual:  r.decRmse != null && r.dropMl > 0 ? r.decRmse / r.dropMl : null,
   samples:        r.samples,
+  // Older dumps predate this field. Undefined silently disables the road
+  // branch — which it did, and quietly, because prisma/*.ts sits outside
+  // tsconfig's include and is never typechecked.
+  distanceKm:     r.distanceKm ?? null,
 })
 
 const pad  = (s: string, n: number): string => s.length >= n ? s : s + ' '.repeat(n - s.length)
@@ -73,7 +78,9 @@ const announced: Array<{ r: MeasuredRow; cause: DrainCause; conf: number }> = []
 for (const r of rows) {
   // The band resolves exactly as it will live: operator table first (empty
   // today), then the derived rate widened into a band.
-  const band = resolveBand(r.org, r.plate, r.expectedLph != null ? { lPerHour: r.expectedLph, basis: 'type' } : null)
+  const band = resolveBand(r.org, r.plate, r.expectedLph != null
+    ? { lPerHour: r.expectedLph, basis: 'type', lPerKm: r.kmPerL != null ? 1 / r.kmPerL : null }
+    : null)
   const j = classifyDrain(evidenceOf(r), band, profileFor(r))
   counts.set(j.cause, (counts.get(j.cause) ?? 0) + 1)
   if (isAnnounced(j.cause)) announced.push({ r, cause: j.cause, conf: j.confidence })
