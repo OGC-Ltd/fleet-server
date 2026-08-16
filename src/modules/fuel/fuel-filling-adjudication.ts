@@ -54,7 +54,7 @@
  * same word as a "theft" that was really the probe swinging.
  */
 
-import { smoothLevels, type Adjudication, type LevelSample } from './fuel-adjudication.js'
+import { smoothLevels, lerp, type Adjudication, type LevelSample } from './fuel-adjudication.js'
 
 /**
  * How much of the CLAIMED volume our own series must show arriving before the
@@ -118,7 +118,7 @@ export function adjudicateFilling(
   now: Date,
 ): Adjudication {
   if (now.getTime() - claim.filledAt.getTime() < (FILL_SETTLE_MINUTES + FILL_HOLD_MINUTES) * 60_000) {
-    return { verdict: 'PENDING', recoveredMl: null, reason: 'settling', confirmed: false }
+    return { verdict: 'PENDING', recoveredMl: null, reason: 'settling', confirmed: false, confidence: null }
   }
 
   const level  = smoothLevels(samples)
@@ -133,19 +133,42 @@ export function adjudicateFilling(
     // rather than contradicting it — the same posture the drains take, and for
     // the same reason: we remove what we can DISPROVE, not what we doubt.
     // 3,929 of 5,794 fillings are in this state.
-    return { verdict: 'REFILL', recoveredMl: null, reason: 'insufficient-telemetry', confirmed: false }
+    // No evidence to grade this claim against, so — same reasoning as the
+    // equivalent drain branch — the confidence is a population prior, not a
+    // measurement of this row. Fillings are a friendlier population than
+    // drains here: of the DECIDABLE ones, 1,558 of 1,865 (84%) show at least
+    // half the claimed volume arriving, and the module docstring's own
+    // percentiles put the median observed rise at 0.96 of the claim. That is
+    // still a claim about decidable fillings, not this unchecked bucket
+    // specifically, so treat 0.75 as a starting point pending its own
+    // backtest, not a fitted figure.
+    return { verdict: 'REFILL', recoveredMl: null, reason: 'insufficient-telemetry', confirmed: false, confidence: 0.75 }
   }
 
   const baseline = median(before.map(s => s.fuelLevelMl))
   const settledLevel = median(after.map(s => s.fuelLevelMl))
   const rise = settledLevel - baseline
 
+  // Both confirmed branches graded the same way as the drain module's
+  // level-stayed-down / level-recovered pair: distance from the threshold that
+  // decided them, not distance from zero. riseRatio can run negative (the
+  // tank fell) or past 1 (more arrived than claimed), so it is not clamped
+  // before the lerp — lerp itself clamps the OUTPUT, which is what bounds the
+  // score to [0,1].
+  const riseRatio = claim.filledMl > 0 ? rise / claim.filledMl : 0
+
   if (claim.filledMl > 0 && rise >= claim.filledMl * FILL_OBSERVED_MIN_RATIO) {
-    return { verdict: 'REFILL', recoveredMl: rise, reason: 'level-rose', confirmed: true }
+    return {
+      verdict: 'REFILL', recoveredMl: rise, reason: 'level-rose', confirmed: true,
+      confidence: lerp(riseRatio, FILL_OBSERVED_MIN_RATIO, 1, 0.55, 0.95),
+    }
   }
 
   // Fuel was supposedly added and the tank is no fuller for it. On these
   // machines that is the probe swinging, not a delivery — so it takes the same
   // word as a drain that turned out to be the probe swinging.
-  return { verdict: 'REDISTRIBUTION', recoveredMl: rise, reason: 'no-rise-observed', confirmed: true }
+  return {
+    verdict: 'REDISTRIBUTION', recoveredMl: rise, reason: 'no-rise-observed', confirmed: true,
+    confidence: lerp(riseRatio, FILL_OBSERVED_MIN_RATIO, -1, 0.55, 0.95),
+  }
 }

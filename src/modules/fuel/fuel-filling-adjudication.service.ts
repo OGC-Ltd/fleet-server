@@ -116,12 +116,13 @@ export async function adjudicateFillings(opts: FillingAdjudicateOptions): Promis
     await prisma.fuelFilling.update({
       where: { id: f.id },
       data:  {
-        verdict:        verdict.verdict,
-        verdictAt:      now,
-        verdictReason:  verdict.reason,
+        verdict:           verdict.verdict,
+        verdictAt:         now,
+        verdictReason:     verdict.reason,
         // What OUR telemetry saw arrive. `filledMl` is never touched — the
         // provider's claim stays on the row so the two can be compared.
-        observedRiseMl: verdict.recoveredMl,
+        observedRiseMl:    verdict.recoveredMl,
+        verdictConfidence: verdict.confidence,
       },
     })
   }

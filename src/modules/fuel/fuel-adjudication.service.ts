@@ -112,6 +112,76 @@ export function __resetProbeProfileCache(): void {
   profileCache.clear()
 }
 
+// ─── confidence buffer ─────────────────────────────────────────────────────
+//
+// `verdictConfidence` has no column yet — see the migration note in
+// `fuel-adjudication.ts`. Rather than drop the figure on the floor between
+// computing it and having somewhere durable to put it, it is held here for the
+// lifetime of the process: readable by anything in the same running instance
+// (a request handler, a debug endpoint) without a schema change, and gone on
+// restart, which is the correct failure mode for a value nothing yet depends
+// on. This is NOT a substitute for persistence — see the module note at the
+// bottom of this section for what it does not survive.
+
+/** How long a buffered confidence figure is considered current. */
+const CONFIDENCE_BUFFER_TTL_MS = 24 * 60 * 60_000
+
+/** Cap on buffered entries, oldest evicted first — see the note below. */
+const CONFIDENCE_BUFFER_MAX = 20_000
+
+const confidenceBuffer = new Map<string, { confidence: number | null; at: number }>()
+
+/**
+ * Record one row's confidence for the lifetime of this process.
+ *
+ * Bounded rather than left to grow with every sweep: a backfill re-judges the
+ * whole ledger (2,571+ drains and counting), and an unbounded map fed by a
+ * daily cron is a slow leak, not a cache. Oldest-inserted is evicted first —
+ * `Map` preserves insertion order, so the first key is the oldest — which is
+ * an approximation of least-recently-set rather than least-recently-read, and
+ * good enough for a value nothing yet depends on.
+ */
+export function bufferConfidence(id: string, confidence: number | null): void {
+  if (confidenceBuffer.size >= CONFIDENCE_BUFFER_MAX) {
+    const oldest = confidenceBuffer.keys().next().value
+    if (oldest !== undefined) confidenceBuffer.delete(oldest)
+  }
+  confidenceBuffer.set(id, { confidence, at: Date.now() })
+}
+
+/**
+ * A buffered confidence figure, or `undefined` if this row was never judged
+ * in this process's lifetime, or its entry aged out or was evicted.
+ *
+ * `undefined` deliberately, not `null` — `null` is a real value here (see
+ * `Adjudication.confidence`, which is `null` for a PENDING row on purpose).
+ * Collapsing "never buffered" and "buffered as null" into the same return
+ * would make the caller unable to tell "check the DB, we have nothing" from
+ * "this genuinely has no confidence figure".
+ *
+ * ## What this does NOT survive, and why that is still the right trade for now
+ *
+ * A process restart, a second app instance, or this row simply never having
+ * been swept in the current process's lifetime. That is a real limitation —
+ * an API response or a notification built from this can go stale or come back
+ * empty for reasons that have nothing to do with the row itself. It is
+ * accepted here because nothing yet reads this value for anything a person
+ * acts on (see the "expose it" step this was deferred from); the moment
+ * something does, this buffer stops being sufficient and the migration in
+ * `migration_add_verdict_confidence.sql` is the next step, not an alternative
+ * to it.
+ */
+export function getBufferedConfidence(id: string): number | null | undefined {
+  const hit = confidenceBuffer.get(id)
+  if (!hit || Date.now() - hit.at >= CONFIDENCE_BUFFER_TTL_MS) return undefined
+  return hit.confidence
+}
+
+/** Test seam — same reason `__resetProbeProfileCache` exists. */
+export function __resetConfidenceBuffer(): void {
+  confidenceBuffer.clear()
+}
+
 /**
  * How much this vehicle's fuel probe moves while the machine is standing still.
  *
@@ -264,6 +334,9 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
         verdictReason: verdict.reason,
       },
     })
+    // Confidence is not a column yet — see confidenceBuffer below. Buffered in
+    // memory rather than persisted, so this write is unchanged.
+    bufferConfidence(t.id, verdict.confidence)
 
     // Only a drain is news, and only one recent enough to be news — see
     // notifyCutoff.
