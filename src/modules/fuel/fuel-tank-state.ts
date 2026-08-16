@@ -40,6 +40,7 @@
  */
 
 import { engineBurnMl, type RateBasis, type ResolvedRate } from './fuel-rate.js'
+import { normalisedRate } from './fuel-normalised-rate.js'
 
 /**
  * How much of the end of a day is averaged into its closing level.
@@ -275,6 +276,35 @@ export interface TankState {
    * measured this one".
    */
   engineBurnMl: number | null
+  /**
+   * What the machine ACTUALLY burned per engine-hour that day, corrected for
+   * probe turbulence, with the band that turbulence implies.
+   *
+   * The operator's own formula and the answer to their objection that a
+   * distance figure is meaningless for plant: *"Stop using km for excavators,
+   * bull dozers or heavy machinery... at least manually divide fuel used by
+   * engine hours."* See `fuel-normalised-rate`.
+   *
+   * This is a MEASUREMENT, where `engineBurnMl` beside it is an EXPECTATION —
+   * the pair is the point. A day where the two diverge is the thing worth
+   * looking at, and neither alone says anything.
+   *
+   * Null where the day cannot produce a rate at all: no engine time, or a tank
+   * that ended level or higher. On a noisy probe that is common rather than
+   * exceptional — three of `MUFINDI: DZ 14`'s last eight days ended higher
+   * than they started.
+   */
+  normalisedLPerHour: number | null
+  /** Low and high edge of that figure at ±turbulence. Null with the above. */
+  normalisedMinLPerHour: number | null
+  normalisedMaxLPerHour: number | null
+  /**
+   * Turbulence met or exceeded the day's consumption, so the corrected figure
+   * floored at zero and means nothing. The band still does. Surfaced rather
+   * than hidden so a panel can render "unmeasurable" instead of "0 L/h", which
+   * would read as a machine that burned nothing.
+   */
+  normalisedNoiseDominates: boolean
   /** The rate `engineBurnMl` was computed at, echoed so the figure is auditable. */
   engineRateLPerHour: number | null
   /**
@@ -308,6 +338,8 @@ export const UNKNOWN_TANK_STATE: TankState = {
   initialMl: null, currentMl: null, consumedMl: null,
   turbulenceMl: null, stopsAveraged: 0, runSloshMl: [],
   temporaryStops: 0, heavyStops: 0, distanceM: null, expectedBurnMl: null,
+  normalisedLPerHour: null, normalisedMinLPerHour: null, normalisedMaxLPerHour: null,
+  normalisedNoiseDominates: false,
   engineHoursMeter: null, engineSeconds: null, engineBurnMl: null,
   engineRateLPerHour: null, engineRateBasis: null, engineRateSpread: null,
   engineRateRuns: null,
@@ -463,12 +495,14 @@ export function deriveTankState(
   const currentMl = closingLevel(dayReadings)
   const { runSloshMl, temporaryStops, heavyStops } = dayRuns(dayReadings)
   const { mean, stops } = movingAverage([...priorRunSloshMl, ...runSloshMl])
+  const consumedMl = previousDayCloseMl != null && currentMl != null
+    ? previousDayCloseMl - currentMl
+    : null
+  const norm = normalisedRate(consumedMl, mean, engineSeconds)
   return {
     initialMl:  previousDayCloseMl,
     currentMl,
-    consumedMl: previousDayCloseMl != null && currentMl != null
-      ? previousDayCloseMl - currentMl
-      : null,
+    consumedMl,
     turbulenceMl:  mean,
     stopsAveraged: stops,
     runSloshMl,
@@ -482,6 +516,13 @@ export function deriveTankState(
       : Math.round((distanceM / 1000 / KM_PER_LITRE) * 1000),
     engineHoursMeter,
     engineSeconds,
+    // The operator's turbulence-corrected L/h. Computed from the SAME
+    // consumption, turbulence and engine seconds this row already carries, so
+    // a reader can check the arithmetic against the columns beside it.
+    normalisedLPerHour:       norm?.lPerHour    ?? null,
+    normalisedMinLPerHour:    norm?.minLPerHour ?? null,
+    normalisedMaxLPerHour:    norm?.maxLPerHour ?? null,
+    normalisedNoiseDominates: norm?.noiseDominates ?? false,
     engineBurnMl:       engineBurnMl(engineSeconds, rate),
     engineRateLPerHour: rate?.lPerHour ?? null,
     engineRateBasis:    rate?.basis    ?? null,

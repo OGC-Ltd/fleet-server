@@ -29,7 +29,7 @@ import {
 } from './fuel-adjudication.js'
 import { measureFall, type FallSample } from './fuel-drop-shape.js'
 import { classifyDrain, resolveBand, type CauseJudgement } from './fuel-theft-classifier.js'
-import { resolveRates, type ResolvedRate } from './fuel-rate.js'
+import { resolveRates, MIN_RUNS, type ResolvedRate } from './fuel-rate.js'
 
 /**
  * How far before the drain to read levels. Needs to comfortably precede the
@@ -268,8 +268,10 @@ export async function judgeDrain(
     return { ...gated, cause: { cause: 'INDETERMINATE', reason: 'no-measurable-fall', confidence: 0.5, impliedLph: null } }
   }
 
-  const { orgCode, plate, rate } = await getBandInputs(drain.vehicleId, now)
-  const band    = resolveBand(orgCode, plate, rate)
+  const { orgCode, plate, rate, lPerKm } = await getBandInputs(drain.vehicleId, now)
+  const band    = resolveBand(orgCode, plate, rate == null ? null : {
+    lPerHour: rate.lPerHour, basis: rate.basis, lPerKm,
+  })
   const profile = await getProbeProfile(drain.vehicleId, now)
   return { ...gated, cause: classifyDrain(measured.evidence, band, profile) }
 }
@@ -289,17 +291,22 @@ export async function judgeDrain(
  * vehicle's rate), so they are built once and cached rather than per drain.
  */
 const BAND_TTL_MS = 6 * 60 * 60_000
-let bandCache: { at: number; byVehicle: Map<string, { orgCode: string; plate: string; rate: ResolvedRate | null }> } | null = null
+let bandCache: { at: number; byVehicle: Map<string, BandInputs> } | null = null
+
+/**
+ * `lPerKm` rides alongside the resolved rate rather than inside it: a type
+ * MEDIAN has no meaningful distance figure — it is pooled across machines that
+ * travel differently — so only a vehicle's OWN measured lPerKm is carried, and
+ * a vehicle without one gets no distance baseline and is judged on L/h alone.
+ */
+interface BandInputs { orgCode: string; plate: string; rate: ResolvedRate | null; lPerKm: number | null }
 
 /** Test seam — the cache is module-global and would leak between cases. */
 export function __resetBandCache(): void {
   bandCache = null
 }
 
-async function getBandInputs(
-  vehicleId: string,
-  now: Date,
-): Promise<{ orgCode: string; plate: string; rate: ResolvedRate | null }> {
+async function getBandInputs(vehicleId: string, now: Date): Promise<BandInputs> {
   if (bandCache == null || now.getTime() - bandCache.at >= BAND_TTL_MS) {
     const [vehicles, rates] = await Promise.all([
       prisma.vehicle.findMany({
@@ -316,16 +323,19 @@ async function getBandInputs(
       rates.map(r => ({ vehicleId: r.vehicleId, lPerHour: r.lPerHour, lPerKm: r.lPerKm, runs: r.runs })),
       vehicles.map(v => ({ vehicleId: v.id, organisationId: v.organisationId, vehicleType: v.vehicleType })),
     )
+    const ownKm = new Map(rates.filter(r => r.runs >= MIN_RUNS && r.lPerKm != null)
+      .map(r => [r.vehicleId, r.lPerKm!]))
     bandCache = {
       at: now.getTime(),
       byVehicle: new Map(vehicles.map(v => [v.id, {
         orgCode: v.organisation?.code ?? '',
         plate:   v.registrationPlate,
         rate:    resolved.get(v.id) ?? null,
+        lPerKm:  ownKm.get(v.id) ?? null,
       }])),
     }
   }
-  return bandCache.byVehicle.get(vehicleId) ?? { orgCode: '', plate: '', rate: null }
+  return bandCache.byVehicle.get(vehicleId) ?? { orgCode: '', plate: '', rate: null, lPerKm: null }
 }
 
 export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<AdjudicateOutcome> {

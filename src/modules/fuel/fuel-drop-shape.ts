@@ -375,6 +375,21 @@ export interface DropEvidence {
   decayResidual:  number | null
   /** Readings in the fall. */
   samples:        number
+  /**
+   * Ground covered during the fall, kilometres, integrated from the reported
+   * speed rather than from positions.
+   *
+   * Speed is already on every reading; positions would need a haversine per
+   * pair for a figure this only has to be approximately right. It works out
+   * how much of a drop ordinary driving explains, so an error of a few percent
+   * moves the EXPLAINED part by a few percent, not the drop.
+   *
+   * Zero is meaningful and distinct from null: a vehicle that reported speed
+   * throughout and never moved is the idling-drain case, where nothing about
+   * the drop is explained by travel. Null means no reading carried a speed at
+   * all, and no distance-based statement can be made.
+   */
+  distanceKm:     number | null
 }
 
 /**
@@ -465,6 +480,25 @@ export function measureFall(
     s.capturedAt >= fallStart.capturedAt && s.capturedAt <= lowest.capturedAt)
   const decay = fitDecay(fall)
 
+  // Trapezoid over speed: each interval contributes the mean of its endpoints
+  // times its length, capped at MAX_ENGINE_GAP_SECONDS for the same reason
+  // engine time is — a unit that goes quiet for hours must not be credited
+  // with having driven at its last reported speed throughout.
+  const withSpeed = fall.filter(s => s.speedKmh != null)
+  let distanceKm: number | null = null
+  if (withSpeed.length >= 2) {
+    distanceKm = 0
+    for (let i = 0; i < fall.length - 1; i++) {
+      const a = fall[i]!.speedKmh, b = fall[i + 1]!.speedKmh
+      if (a == null || b == null) continue
+      const dt = Math.min(
+        (fall[i + 1]!.capturedAt.getTime() - fall[i]!.capturedAt.getTime()) / 1000,
+        MAX_ENGINE_GAP_SECONDS,
+      )
+      distanceKm += ((a + b) / 2) * (dt / 3600)
+    }
+  }
+
   return {
     fall,
     evidence: {
@@ -477,6 +511,7 @@ export function measureFall(
       kT:             decay?.kT ?? null,
       decayResidual:  normalisedResidual(decay, dropMl),
       samples:        fall.length,
+      distanceKm,
     },
   }
 }
