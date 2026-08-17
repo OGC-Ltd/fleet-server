@@ -689,11 +689,12 @@ export async function findFleetSnapshot(orgId: string) {
     vehicle_id: string; id: string; drain_cause: string; cause_reason: string | null
     cause_confidence: number | null; stolen_ml: number; began_at: Date; detected_at: Date
     initial_location: string | null; final_fuel_level_ml: number | null
+    initial_fuel_level_ml: number | null
   }>>`
     SELECT DISTINCT ON (t.vehicle_id)
            t.vehicle_id, t.id, t.drain_cause::text AS drain_cause, t.cause_reason,
            t.cause_confidence, t.stolen_ml, t.began_at, t.detected_at,
-           t.initial_location, t.final_fuel_level_ml
+           t.initial_location, t.final_fuel_level_ml, t.initial_fuel_level_ml
       FROM fuel_thefts t
      WHERE t.vehicle_id = ANY(${vehicleIds}::text[])
        AND t.drain_cause::text = ANY(${ANNOUNCED_CAUSES as unknown as string[]}::text[])
@@ -767,7 +768,11 @@ export async function findFleetSnapshot(orgId: string) {
           beganAt:     incident.began_at.toISOString(),
           detectedAt:  incident.detected_at.toISOString(),
           location:    incident.initial_location,
-          tankAfterMl: incident.final_fuel_level_ml,
+          // Both ends of the tank, so the card can state the fall rather than
+          // only its size — "205.6 L down to 158.0 L" is checkable against the
+          // gauge in a way "47.6 L" is not.
+          tankBeforeMl: incident.initial_fuel_level_ml,
+          tankAfterMl:  incident.final_fuel_level_ml,
           // Whether this one may be described as a possible theft. Derived
           // HERE from the cause rather than left to the client, so a second
           // implementation of the vocabulary rule cannot drift from the
