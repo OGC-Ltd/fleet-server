@@ -136,4 +136,12 @@ ${total} simulated items across ${ORGS.length} organisation(s)`)
 
 main()
   .catch((err: unknown) => { console.error(err); process.exitCode = 1 })
-  .finally(() => prisma.$disconnect())
+  .finally(async () => {
+    await prisma.$disconnect()
+    // Redis holds the event loop open. On the box — the only place this is
+    // meant to run, because the feed's first page comes from that cache —
+    // the script did its work and then hung until a timeout killed it, which
+    // reads like a failure when it is not. Nothing here outlives the run, so
+    // exiting explicitly is honest rather than a shortcut.
+    process.exit(process.exitCode ?? 0)
+  })
