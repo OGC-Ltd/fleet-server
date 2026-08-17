@@ -59,7 +59,7 @@
  * reference data wearing the costume of a finding. See ANNOUNCED.
  */
 
-import { lerp, probeSwings, type ProbeProfile } from './fuel-adjudication.js'
+import { lerp, probeSwings, probeOverreads, type ProbeProfile } from './fuel-adjudication.js'
 import type { DropEvidence } from './fuel-drop-shape.js'
 
 export type { DropEvidence }
@@ -635,6 +635,28 @@ export const MAX_PLAUSIBLE_REMOVAL_LPH = 300
 export const MIN_ENGINE_SECONDS = 120
 
 /**
+ * How long a fall must last before its implied rate may ANNOUNCE.
+ *
+ * A rate is a quotient, and over a short enough window the denominator stops
+ * describing anything. `MIN_ENGINE_SECONDS` already refuses to compute a rate
+ * from almost no engine time, but two minutes is still enough to turn a small
+ * drop into a wild figure: 12 L over 120 s implies 363 L/h, which clears any
+ * band by twenty times while being, physically, one bad pair of readings.
+ *
+ * `KTCB 295U` is the case. A SUKARI tractor whose probe reads 18-404 L on a
+ * 160 L tank — two and a half times its declared capacity — produced two
+ * announcements from drains with ZERO-LENGTH windows: 12.1 L and 15.1 L with
+ * `beganAt` equal to `detectedAt`. It was half of all alerts on the fleet.
+ *
+ * Ten minutes, because that is the floor the parked branch already uses
+ * (`SIPHON_MIN_SECONDS`) for the same reason: below it, a fall is an event we
+ * watched too briefly to describe. A shorter fall still gets a CAUSE — it is
+ * still classified and still on the ledger — it simply cannot be announced on
+ * the strength of a rate measured across a couple of readings.
+ */
+export const MIN_RATE_WINDOW_SECONDS = 10 * 60
+
+/**
  * Share of a fall's readings that must carry a MEASURED ignition before the
  * engine state is treated as known.
  *
@@ -713,6 +735,13 @@ export function classifyDrain(
     return { cause: 'INDETERMINATE', reason: 'probe-swings', confidence: 0.5, ...none }
   }
 
+  // ...and the other way an instrument can be untrustworthy: reporting volumes
+  // the tank could not hold. A separate fault from swing and caught separately
+  // — KTCB 295U is steady parked and reads 404 L on a 160 L tank.
+  if (probeOverreads(profile)) {
+    return { cause: 'INDETERMINATE', reason: 'probe-overreads', confidence: 0.5, ...none }
+  }
+
   // 2. No expectation to compare against.
   if (band == null) {
     return { cause: 'INDETERMINATE', reason: 'no-expected-rate', confidence: 0.5, ...none }
@@ -736,13 +765,24 @@ export function classifyDrain(
     // checked BEFORE the multiple because it is the stricter statement: a class
     // with a ceiling has had someone say "above this, go and look", and a ratio
     // against a derived band should not be able to overrule that.
-    if (band.ceilingLph != null && impliedLph >= band.ceilingLph) {
+    if (band.ceilingLph != null && impliedLph >= band.ceilingLph
+        && ev.fallSeconds >= MIN_RATE_WINDOW_SECONDS) {
       return {
         cause: 'UNEXPLAINED_BURN', reason: 'burn-above-class-ceiling', impliedLph,
         confidence: lerp(impliedLph, band.ceilingLph, band.ceilingLph * 3, 0.6, 0.9),
       }
     }
+    // A rate measured across a fall too short to be a fall cannot carry an
+    // announcement — see MIN_RATE_WINDOW_SECONDS. It is still classified, so
+    // the ledger and the tables keep it; it just does not speak.
+    const rateIsMeasurable = ev.fallSeconds >= MIN_RATE_WINDOW_SECONDS
     const ratio = impliedLph / band.highLph
+    if (ratio >= ANNOUNCE_MULTIPLE && !rateIsMeasurable) {
+      return {
+        cause: 'HIGH_BURN', reason: 'burn-window-too-short', impliedLph,
+        confidence: 0.4,
+      }
+    }
     if (ratio >= ANNOUNCE_MULTIPLE) {
       // Graded from the announcing edge upward. A drop at exactly the multiple
       // is the weakest case this branch produces, which is the same reasoning

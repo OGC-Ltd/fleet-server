@@ -17,7 +17,7 @@ import {
   DERIVED_BAND_SPREAD, MACHINE_CLASS, CLASS_BANDS, CLASS_CEILING_LPH, machinePrefix,
   type DropEvidence, type BurnBand, type DrainCause,
 } from '../../src/modules/fuel/fuel-theft-classifier.js'
-import type { ProbeProfile } from '../../src/modules/fuel/fuel-adjudication.js'
+import { probeSwings, probeOverreads, MAX_FILL_RATIO, type ProbeProfile } from '../../src/modules/fuel/fuel-adjudication.js'
 
 /** A band whose upper edge is exactly 10 L/h, so ratios read off directly. */
 const BAND: BurnBand = { lowLph: 5, highLph: 10, source: 'operator' }
@@ -222,6 +222,30 @@ describe("the operator's absolute class ceiling", () => {
 })
 
 describe('the rules that must not be relaxed', () => {
+  it('a probe reading above its own tank ends the enquiry too', () => {
+    // A DIFFERENT fault from swing, and the reason both gates exist. KTCB 295U
+    // is steady parked — 23 windows, 0 swinging — and reads a p99 of 404 L on
+    // a declared 160 L tank. It passed the swing gate cleanly and produced 95
+    // drains in thirty days.
+    const OVERREADS: ProbeProfile = { parkedWindows: 23, swingWindows: 0, fillRatio: 2.52 }
+    expect(probeSwings(OVERREADS)).toBe(false)          // swing cannot see it
+    expect(probeOverreads(OVERREADS)).toBe(true)        // this can
+    expect(causeOf(running(400), BAND, OVERREADS)).toBe('INDETERMINATE')
+    expect(causeOf(parked(40, 60), BAND, OVERREADS)).toBe('INDETERMINATE')
+  })
+
+  it('leaves a probe reading inside its tank alone', () => {
+    // The median unit sustains 0.64 of declared capacity and 120 of 299 never
+    // read above half, so under-reading is the NORMAL direction and must not
+    // be touched. Only reading above the vessel is a calibration claim.
+    for (const fillRatio of [0.31, 0.64, 1.0, 1.3]) {
+      expect(probeOverreads({ parkedWindows: 40, swingWindows: 0, fillRatio })).toBe(false)
+    }
+    // ...and an unknown ratio is not evidence of a fault.
+    expect(probeOverreads({ parkedWindows: 40, swingWindows: 0, fillRatio: null })).toBe(false)
+    expect(probeOverreads({ parkedWindows: 40, swingWindows: 0 })).toBe(false)
+  })
+
   it('an untrusted probe ends the enquiry — including the reassuring answers', () => {
     // Not ENGINE_BURN either. A probe that swings 25 L on a standing machine
     // cannot support ANY statement about why the level fell.
@@ -365,6 +389,17 @@ describe('what reaches an operator', () => {
     for (const r of ANNOUNCED_REASON_SLUGS) {
       expect(announces({ cause: 'UNEXPLAINED_BURN', reason: r })).toBe(true)
     }
+  })
+})
+
+describe('the overread threshold', () => {
+  it('sits above the observed population, not inside it', () => {
+    // Measured 2026-08-17 over 339 reporting units: seven exceed 1.5x, and the
+    // next one down is 1.30x — a plausible overfill or a slightly wrong
+    // capacity rather than a broken scale.
+    expect(MAX_FILL_RATIO).toBe(1.5)
+    expect(probeOverreads({ parkedWindows: 10, swingWindows: 0, fillRatio: 1.30 })).toBe(false)
+    expect(probeOverreads({ parkedWindows: 10, swingWindows: 0, fillRatio: 1.59 })).toBe(true)
   })
 })
 
