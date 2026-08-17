@@ -48,12 +48,15 @@
  *
  * ## What this module refuses to do
  *
- * It never says where the fuel went. `UNEXPLAINED_BURN` means the tank fell by
- * more than this machine's consumption accounts for — it does not mean theft,
- * and the wording downstream must not imply it. Only `SIPHON`, which requires
- * the engine to have been provably off and the fall to be neither settling nor
- * a probe step, is announced with the operator's agreed phrase. That split is
- * the whole reason there are two causes rather than one.
+ * It never says where the fuel went, and since 2026-08-17 it announces only
+ * one thing: `SIPHON`, where the engine was provably off and the fall was
+ * sustained, neither settling nor a probe step.
+ *
+ * `UNEXPLAINED_BURN` is still computed and stored — it is a real measurement
+ * against a stated expectation — but it reaches nobody. It described OUR
+ * inability to account for a drop rather than the fuel's behaviour, and on a
+ * fleet where most machines have no band that is a statement about our
+ * reference data wearing the costume of a finding. See ANNOUNCED.
  */
 
 import { lerp, probeSwings, type ProbeProfile } from './fuel-adjudication.js'
@@ -74,7 +77,10 @@ export type DrainCause =
   | 'ENGINE_BURN'
   /** Above the expected band, below the alerting multiple. Silent by decision. */
   | 'HIGH_BURN'
-  /** Far above anything the machine's own consumption explains. Announced. */
+  /**
+   * Far above anything the machine's own consumption explains. STORED, and
+   * not announced — see ANNOUNCED for why the operator withdrew it.
+   */
   | 'UNEXPLAINED_BURN'
   /** Engine provably off, sustained, not settling, not a probe step. Announced. */
   | 'SIPHON'
@@ -95,8 +101,49 @@ export interface CauseJudgement {
   impliedLph: number | null
 }
 
-/** Only these reach an operator. Everything else lands silently on the ledger. */
-const ANNOUNCED: ReadonlySet<DrainCause> = new Set<DrainCause>(['UNEXPLAINED_BURN', 'SIPHON'])
+/**
+ * Only these reach an operator. Everything else lands silently on the ledger.
+ *
+ * ## Why UNEXPLAINED_BURN is not in this set
+ *
+ * It was, for a few hours on 2026-08-17, and the operator withdrew it — not
+ * over the wording but over the idea. The name described OUR failure to
+ * account for a drop rather than anything that happened to the fuel, which is
+ * the exact defect that got `UNVERIFIED` deleted from the verdict enum: *"not
+ * a description of the fuel at all — a description of OUR evidence, promoted
+ * to a verdict."*
+ *
+ * `MUFINDI - DG 13` is what made it concrete. It is a generator: moving in
+ * 0.95% of readings over 14.6 days, engine on 85.9% of the time, a 1,696 L
+ * tank refuelled 710-1,488 L every day or two, burning a steady 40-50 L/h.
+ * Nothing about its consumption is unexplained. It reads that way only because
+ * it has no band — `vehicleType` is UNSPECIFIED and its derived rate is
+ * 13.23 L/h from two runs, against an actual 40-50. Announcing that would tell
+ * an operator a machine is behaving abnormally when the abnormality is a hole
+ * in OUR reference data.
+ *
+ * And while MACHINE_CLASS covers four KASULU prefixes, that is the common case
+ * rather than the rare one: SUKARI's 482 tractors and 19 dozers have no class
+ * at all.
+ *
+ * So the tier stays COMPUTED and STORED — it is real, it is visible in the
+ * fuel tables, and it is what the bands will eventually be judged against —
+ * but it says nothing to anyone until a machine's expected rate is something
+ * we can stand behind. Put it back in this set when the class table is
+ * populated, and the replay will say what it costs.
+ */
+const ANNOUNCED: ReadonlySet<DrainCause> = new Set<DrainCause>(['SIPHON'])
+
+/**
+ * The causes that reach an operator, for callers that need them in a query.
+ *
+ * Exported so the fleet snapshot's red-vehicle lookup selects on the SAME set
+ * this module announces on, rather than a second hardcoded list that can drift
+ * from it — which is precisely what happened here: the snapshot query named
+ * `('SIPHON', 'UNEXPLAINED_BURN')` inline, so withdrawing one from the feed
+ * would have left vehicles going red for it anyway.
+ */
+export const ANNOUNCED_CAUSES: readonly DrainCause[] = [...ANNOUNCED]
 
 /** Does this cause put something in front of a human? */
 export const isAnnounced = (c: DrainCause): boolean => ANNOUNCED.has(c)
@@ -106,11 +153,10 @@ export const isAnnounced = (c: DrainCause): boolean => ANNOUNCED.has(c)
  * only qualified — *"when we have determined that truly it was a theft then we
  * need to use the word possible theft"* (operator, 2026-08-16).
  *
- * `UNEXPLAINED_BURN` deliberately does NOT qualify. It says the tank fell by
- * more than consumption explains, which is a real finding and a different one:
- * a leak, a mis-calibrated probe and a wrong expected rate all produce it, and
- * so does theft. Naming it theft would decide that question for the reader —
- * the exact failure the `LOSS` verdict was removed for.
+ * Nothing else qualifies. `UNEXPLAINED_BURN` does not reach an operator at all
+ * now, but the rule is kept rather than collapsed into "always theft": the
+ * moment a second cause is announced, the wording question returns, and a
+ * guard that only holds while the set has one member is not a guard.
  */
 export const mayUseTheftWording = (c: DrainCause): boolean => c === 'SIPHON'
 

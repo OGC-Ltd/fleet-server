@@ -82,6 +82,14 @@ const installQueryRaw = () =>
 const setLevels = (mls: number[]) => { telemetryRows = levels(mls) }
 
 /**
+ * The same series with the engine MEASURED OFF throughout — the only state
+ * that can reach SIPHON, which is now the sole announced cause.
+ */
+const setLevelsParked = (mls: number[]) => {
+  telemetryRows = levels(mls).map(r => ({ ...r, engine_on: false }))
+}
+
+/**
  * The vehicle's parked-swing profile, which the trust gate reads for any drain
  * that reaches a confirmed DRAIN. Steady by default — the gate is meant to be
  * silent on the 97 of 139 machines that never swing.
@@ -141,19 +149,15 @@ describe('adjudicatePendingDrains', () => {
 
     const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
 
-    expect(out).toMatchObject({ drain: 1, drainConfirmed: 1, redistribution: 0, published: 1 })
-    const item = published()[0]![0]
-    expect(item['alertType']).toBe('fuelInconsistency')
-    // 40 L against a 10 L/h machine is far more than its consumption explains
-    // — but an unexplained BURN is not a theft finding, and the wording must
-    // not say it is. A leak and a wrong expected rate produce this too.
-    expect(item['text']).toContain('FUEL UNEXPLAINED: KDL 182X')
-    expect(item['text']).not.toMatch(/theft|stolen|suspicious|loss|lost/i)
-    expect(item['severity']).toBe('warning')
-    expect(item['text']).toContain('Nyalulanga')
-    expect(item['text']).toContain('Tank now 160 L')
-    // The event's own time, never the moment we got round to judging it.
-    expect(item['at']).toEqual(BEGAN)
+    // 40 L against a 10 L/h machine is far more than its consumption explains,
+    // and it is still recorded as such. But it reaches nobody: on a fleet where
+    // most machines have no band, "more than expected" is a claim about our
+    // reference data, not about the fuel. Withdrawn 2026-08-17.
+    expect(out).toMatchObject({ drain: 1, drainConfirmed: 1, redistribution: 0, published: 0 })
+    expect(publishNotificationDurable).not.toHaveBeenCalled()
+    expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ drainCause: 'UNEXPLAINED_BURN' }),
+    }))
   })
 
   it('says nothing at all about a claim it could not check', async () => {
@@ -173,10 +177,34 @@ describe('adjudicatePendingDrains', () => {
     }))
   })
 
-  it('makes no claim of escalation', async () => {
-    setLevels([...STEADY, ...DRAINING, 160_000, 159_000, 158_000, 158_000])
-    await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
-    expect(String(published()[0]![0]['text'])).not.toMatch(/security|alerted|notified|dispatched/i)
+  it('announces a SIPHON — the one thing it will still say out loud', async () => {
+    // Engine measured OFF for the whole fall, stationary, sustained — the only
+    // route to an operator now.
+    //
+    // A LINEAR descent, not DRAINING. That series decelerates into a flat tail
+    // and is correctly read as SETTLING (kT 1.90): a tank finding its level.
+    // A siphon draws at a steady rate and does not ease off, which is the
+    // whole distinction the shape test exists to make.
+    const SIPHONING = [
+      197_000, 194_000, 191_000, 188_000, 185_000, 182_000, 179_000,
+      176_000, 173_000, 170_000, 167_000, 164_000, 161_000, 158_000,
+    ]
+    setLevelsParked([...STEADY, ...SIPHONING])
+
+    const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    expect(out.published).toBe(1)
+    const item = published()[0]![0]
+    expect(item['alertType']).toBe('fuelInconsistency')
+    expect(item['severity']).toBe('critical')
+    // The operator's agreed phrase, and the ONLY cause permitted to use it.
+    expect(item['text']).toContain('POSSIBLE THEFT: KDL 182X')
+    expect(item['text']).toContain('Nyalulanga')
+    expect(item['text']).toContain('Tank now 160 L')
+    // The event's own time, never the moment we got round to judging it.
+    expect(item['at']).toEqual(BEGAN)
+    // Still no claim that anyone has been sent, told or dispatched.
+    expect(String(item['text'])).not.toMatch(/security|alerted|notified|dispatched/i)
   })
 
   it('stays silent on a drain the machine could plausibly have burned', async () => {

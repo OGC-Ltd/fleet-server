@@ -572,6 +572,8 @@ export async function findLatest(vehicleId: string, orgId: string) {
  * tonight, and it is the obvious next increment the first time someone asks
  * "did anyone look at this one".
  */
+import { ANNOUNCED_CAUSES } from '../fuel/fuel-theft-classifier.js'
+
 export const FUEL_INCIDENT_WINDOW_MS = 24 * 60 * 60 * 1000
 
 export async function findFleetSnapshot(orgId: string) {
@@ -670,10 +672,14 @@ export async function findFleetSnapshot(orgId: string) {
   // red path — marker, pulse, critical count — has been dead since the fleet
   // moved to Wialon. This is what feeds it.
   //
-  // Only an ANNOUNCED cause counts. A vehicle does not go red for a drain we
-  // decided was ordinary consumption, a probe swing, or one we could not
-  // attribute at all — those are 94% of the ledger and turning the fleet red
-  // for them is the behaviour this work removed from the feed.
+  // Only an ANNOUNCED cause counts, and the set comes from the classifier
+  // rather than being named here. A second hardcoded list is a second one that
+  // drifts: when UNEXPLAINED_BURN was withdrawn from the feed on 2026-08-17,
+  // an inline list here would have kept turning vehicles red for it — telling
+  // an operator in colour what we had just decided not to tell them in words.
+  //
+  // A vehicle does not go red for a drain we decided was ordinary consumption,
+  // a probe swing, or one we could not attribute at all.
   //
   // One query for the whole org rather than a LATERAL per vehicle: the window
   // is a day and announced causes are ~3 a day fleet-wide, so this reads a
@@ -690,7 +696,7 @@ export async function findFleetSnapshot(orgId: string) {
            t.initial_location, t.final_fuel_level_ml
       FROM fuel_thefts t
      WHERE t.vehicle_id = ANY(${vehicleIds}::text[])
-       AND t.drain_cause IN ('SIPHON', 'UNEXPLAINED_BURN')
+       AND t.drain_cause::text = ANY(${ANNOUNCED_CAUSES as unknown as string[]}::text[])
        AND t.began_at >= ${new Date(Date.now() - FUEL_INCIDENT_WINDOW_MS)}
      ORDER BY t.vehicle_id, t.began_at DESC`
   const incidentByVehicle = new Map(incidents.map(i => [i.vehicle_id, i]))
