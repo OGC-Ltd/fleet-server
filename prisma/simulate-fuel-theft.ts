@@ -39,7 +39,11 @@ const arg = (n: string, d: string): string => {
 }
 const CLEAN = process.argv.includes('--clean')
 const COUNT = Number(arg('count', '3'))
-const ORG   = arg('org', 'KASULU')
+// Both fleets by default. They are genuinely different populations — KASULU
+// is plant and generators with 1,700 L tanks, SUKARI is 482 tractors and
+// trucks — and a simulation that only ever exercised one would leave the
+// other's feed, cards and vocabulary untested.
+const ORGS = arg('org', 'KASULU,SUKARI').split(',').map(o => o.trim()).filter(Boolean)
 
 /** The marker every simulated item carries, in its id and in its text. */
 const SIM_PREFIX = 'sim-fuel-'
@@ -63,11 +67,9 @@ async function clean(): Promise<void> {
   console.log('      until the cache rotates — this clears the durable store.')
 }
 
-async function main(): Promise<void> {
-  if (CLEAN) { await clean(); return }
-
-  const org = await prisma.organisation.findFirst({ where: { code: ORG }, select: { id: true, code: true } })
-  if (!org) throw new Error(`no organisation ${ORG}`)
+async function publishFor(code: string): Promise<number> {
+  const org = await prisma.organisation.findFirst({ where: { code }, select: { id: true, code: true } })
+  if (!org) { console.log(`  ${code}: no such organisation, skipped`); return 0 }
 
   // Real drains, recent enough to look current, with everything the feed line
   // and the incident window need to render.
@@ -117,9 +119,19 @@ async function main(): Promise<void> {
     })
     console.log(`  ${published ? 'published' : 'deduped  '}  ${plate.padEnd(18)} ${L(t.stolenMl).padStart(8)}`)
   }
-
-  console.log(`\nRemove them with:  npm run sim:fuel -- --clean`)
   logger.info({ org: org.code, count: rows.length }, 'Simulated fuel-theft feed items published')
+  return rows.length
+}
+
+async function main(): Promise<void> {
+  if (CLEAN) { await clean(); return }
+
+  let total = 0
+  for (const code of ORGS) total += await publishFor(code)
+
+  console.log(`
+${total} simulated items across ${ORGS.length} organisation(s)`)
+  console.log('Remove them with:  npm run sim:fuel -- --clean')
 }
 
 main()
