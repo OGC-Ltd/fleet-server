@@ -321,10 +321,10 @@ export async function judgeDrain(
     return { ...gated, cause: { cause: 'INDETERMINATE', reason: 'no-measurable-fall', confidence: 0.5, impliedLph: null } }
   }
 
-  const { orgCode, plate, rate, lPerKm } = await getBandInputs(drain.vehicleId, now)
-  const band    = resolveBand(orgCode, plate, rate == null ? null : {
-    lPerHour: rate.lPerHour, basis: rate.basis, lPerKm,
-  })
+  const { orgCode, plate, rate, lPerKm, vehicleType, tankCapacityLitres } =
+    await getBandInputs(drain.vehicleId, now)
+  const band = resolveBand(orgCode, { plate, vehicleType, tankCapacityLitres },
+    rate == null ? null : { lPerHour: rate.lPerHour, basis: rate.basis, lPerKm })
   const profile = await getProbeProfile(drain.vehicleId, now)
   return { ...gated, cause: classifyDrain(measured.evidence, band, profile) }
 }
@@ -352,7 +352,11 @@ let bandCache: { at: number; byVehicle: Map<string, BandInputs> } | null = null
  * travel differently — so only a vehicle's OWN measured lPerKm is carried, and
  * a vehicle without one gets no distance baseline and is judged on L/h alone.
  */
-interface BandInputs { orgCode: string; plate: string; rate: ResolvedRate | null; lPerKm: number | null }
+interface BandInputs {
+  orgCode: string; plate: string; rate: ResolvedRate | null; lPerKm: number | null
+  /** Both carried because a class can be decided by either — see resolveClass. */
+  vehicleType: string | null; tankCapacityLitres: number | null
+}
 
 /** Test seam — the cache is module-global and would leak between cases. */
 export function __resetBandCache(): void {
@@ -365,6 +369,7 @@ async function getBandInputs(vehicleId: string, now: Date): Promise<BandInputs> 
       prisma.vehicle.findMany({
         select: {
           id: true, registrationPlate: true, vehicleType: true, organisationId: true,
+          tankCapacityLitres: true,
           organisation: { select: { code: true } },
         },
       }),
@@ -385,10 +390,13 @@ async function getBandInputs(vehicleId: string, now: Date): Promise<BandInputs> 
         plate:   v.registrationPlate,
         rate:    resolved.get(v.id) ?? null,
         lPerKm:  ownKm.get(v.id) ?? null,
+        vehicleType:        v.vehicleType,
+        tankCapacityLitres: v.tankCapacityLitres,
       }])),
     }
   }
-  return bandCache.byVehicle.get(vehicleId) ?? { orgCode: '', plate: '', rate: null, lPerKm: null }
+  return bandCache.byVehicle.get(vehicleId)
+      ?? { orgCode: '', plate: '', rate: null, lPerKm: null, vehicleType: null, tankCapacityLitres: null }
 }
 
 export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<AdjudicateOutcome> {
