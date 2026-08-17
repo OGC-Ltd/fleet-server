@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from 'vitest'
 import {
-  classifyDrain, resolveBand, isAnnounced, mayUseTheftWording,
+  classifyDrain, resolveBand, isAnnounced, mayUseTheftWording, ANNOUNCED_CAUSES,
   ANNOUNCE_MULTIPLE, MAX_PLAUSIBLE_REMOVAL_LPH, SIPHON_MIN_DROP_ML,
   DERIVED_BAND_SPREAD, MACHINE_CLASS, CLASS_BANDS, CLASS_CEILING_LPH, machinePrefix,
   type DropEvidence, type BurnBand, type DrainCause,
@@ -78,10 +78,13 @@ describe('the burn branch — the primary rule', () => {
     expect(isAnnounced(j.cause)).toBe(false)
   })
 
-  it('far above the band is announced', () => {
+  it('far above the band is classified, but no longer announced', () => {
+    // The tier is still computed — it is a real measurement and the fuel
+    // tables show it. It simply says nothing to anyone until machines have
+    // bands worth judging against. See ANNOUNCED.
     const j = classifyDrain(running(10 * ANNOUNCE_MULTIPLE), BAND, STEADY)
     expect(j.cause).toBe('UNEXPLAINED_BURN')
-    expect(isAnnounced(j.cause)).toBe(true)
+    expect(isAnnounced(j.cause)).toBe(false)
     expect(j.impliedLph).toBeCloseTo(10 * ANNOUNCE_MULTIPLE, 6)
   })
 
@@ -257,10 +260,23 @@ describe('the rules that must not be relaxed', () => {
     }
   })
 
-  it('exactly two causes reach an operator', () => {
+  it('exactly ONE cause reaches an operator', () => {
+    // Withdrawn 2026-08-17: a burn "far above expected" is a claim about our
+    // reference data on a fleet where most machines have no band. MUFINDI - DG
+    // 13, a generator burning a legitimate 40-50 L/h against a 13.23 L/h rate
+    // derived from two runs, is the case that settled it.
     const announced = (['ENGINE_BURN', 'HIGH_BURN', 'UNEXPLAINED_BURN', 'SIPHON', 'SLOSH', 'SETTLING', 'INDETERMINATE'] as const)
       .filter(isAnnounced)
-    expect([...announced].sort()).toEqual(['SIPHON', 'UNEXPLAINED_BURN'])
+    expect(announced).toEqual(['SIPHON'])
+  })
+
+  it('the announced set and the query list cannot drift apart', () => {
+    // The snapshot's red-vehicle lookup selects on ANNOUNCED_CAUSES. If that
+    // ever disagreed with isAnnounced, a vehicle would go red for something we
+    // had decided not to say.
+    expect([...ANNOUNCED_CAUSES].sort()).toEqual(
+      (['ENGINE_BURN', 'HIGH_BURN', 'UNEXPLAINED_BURN', 'SIPHON', 'SLOSH', 'SETTLING', 'INDETERMINATE'] as const)
+        .filter(isAnnounced).sort())
   })
 })
 
