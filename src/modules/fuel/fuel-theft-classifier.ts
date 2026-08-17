@@ -151,7 +151,24 @@ const ANNOUNCED: ReadonlySet<DrainCause> = new Set<DrainCause>(['SIPHON'])
  * generator's engine is on 87-96% of the time. Without this they are the
  * largest tanks on the fleet with no detection of any kind.
  */
-const ANNOUNCED_REASONS: ReadonlySet<string> = new Set(['burn-above-class-ceiling'])
+const ANNOUNCED_REASONS: ReadonlySet<string> = new Set([
+  // Heavy machinery, against a band a human specified.
+  'burn-above-class-ceiling',
+  // Heavy machinery on its own or its type's DERIVED rate. This is the tier
+  // the operator withdrew on 2026-08-17 and restored the same day once every
+  // category needed covering. The objection was real and is answered two ways
+  // rather than by ignoring it: the machines that produced nonsense derived
+  // bands are now CLASSED (EX, CTR, MTR, HYD, DG), and the wording no longer
+  // claims the drop is "unexplained" — it states the measured rate against
+  // the expected one and lets a reader judge. 26 events over 30 days.
+  'burn-far-above-band',
+  // Regular vehicles, against their OWN measured kilometres per litre — not a
+  // type median, and only above ROAD_MIN_KM_PER_L. That is a per-vehicle
+  // baseline, so it never had the "this names our missing reference data"
+  // problem the L/h bands had.
+  'drop-exceeds-distance',
+  'drop-while-stationary',
+])
 
 /**
  * Does this judgement reach an operator?

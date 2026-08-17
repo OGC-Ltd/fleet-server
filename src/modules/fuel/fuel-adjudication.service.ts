@@ -474,9 +474,22 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     // UNEXPLAINED_BURN deliberately does not qualify. A leak, a mis-calibrated
     // probe and a wrong expected rate all produce it, and so does theft —
     // naming it would answer a question this data cannot.
+    // Per RULE, because a single non-theft headline cannot be honest across
+    // four different findings. "FUEL UNEXPLAINED" was one line for all of
+    // them, and it described OUR failure to account for a drop rather than
+    // what was measured — the operator's objection, and the same defect that
+    // removed the LOSS verdict. Each line below states the observation and
+    // leaves the conclusion to the reader.
+    const rate = cause.impliedLph != null ? `${Math.round(cause.impliedLph)} L/h` : null
     const headline = mayUseTheftWording(cause.cause)
       ? `POSSIBLE THEFT: ${plate} — ${L(t.stolenMl)} drawn off while parked${where}${tank}`
-      : `FUEL UNEXPLAINED: ${plate} — ${L(t.stolenMl)} down, more than this machine burns${where}${tank}`
+      : cause.reason === 'drop-while-stationary'
+      ? `FUEL DOWN: ${plate} — ${L(t.stolenMl)} while stationary, nothing driven${where}${tank}`
+      : cause.reason === 'drop-exceeds-distance'
+      ? `FUEL DOWN: ${plate} — ${L(t.stolenMl)}, more than the distance driven accounts for${where}${tank}`
+      : rate
+      ? `FUEL RATE: ${plate} — ${L(t.stolenMl)} at ${rate}, above what this machine is measured to burn${where}${tank}`
+      : `FUEL RATE: ${plate} — ${L(t.stolenMl)} above this machine's measured rate${where}${tank}`
 
     const { published } = await publishNotificationDurable({
       orgId:     t.vehicle.organisationId,

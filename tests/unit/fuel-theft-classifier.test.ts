@@ -321,15 +321,32 @@ describe('generators — the class that can never be engine-off', () => {
 })
 
 describe('what reaches an operator', () => {
-  it('a burn finding on a DERIVED band stays silent', () => {
-    // The withdrawal: on a machine with no operator band, "above expected"
-    // names our missing reference data.
+  it('a burn finding on a DERIVED band is reported too', () => {
+    // Withdrawn on 2026-08-17 and restored the same day once every category
+    // needed covering. The original objection — that "above expected" named
+    // our missing reference data — is answered by classing the machines that
+    // produced nonsense bands and by wording that states the measured rate
+    // rather than claiming the drop is unexplained.
+    //
     // The derived band is the rate widened by DERIVED_BAND_SPREAD, so its
     // upper edge is 15 and the announcing multiple sits at 60 L/h.
     const derived = resolveBand('KASULU', 'MUFINDI: DZ 14', { lPerHour: 10, basis: 'type' })!
     const j = classifyDrain(running(70), derived, STEADY)
     expect(j.reason).toBe('burn-far-above-band')
-    expect(announces(j)).toBe(false)
+    expect(announces(j)).toBe(true)
+    // ...but it is still not theft, and may never be worded as such.
+    expect(mayUseTheftWording(j.cause)).toBe(false)
+  })
+
+  it('covers regular vehicles on their own measured km/L', () => {
+    const road: BurnBand = { lowLph: 8, highLph: 12, source: 'vehicle', kmPerL: 3 }
+    const ev = (dropL: number, km: number): DropEvidence => ({
+      dropMl: dropL * 1000, fallSeconds: 3600, engineSeconds: 0, engineEvidence: 0,
+      moved: km > 0, stepFraction: 0.2, kT: 0.1, decayResidual: 0.02, samples: 40, distanceKm: km,
+    })
+    expect(announces(classifyDrain(ev(95, 50), road, STEADY))).toBe(true)   // beyond the distance
+    expect(announces(classifyDrain(ev(25.6, 0), road, STEADY))).toBe(true)  // stationary
+    expect(announces(classifyDrain(ev(22, 60), road, STEADY))).toBe(false)  // explained
   })
 
   it('the same finding on an OPERATOR ceiling is announced', () => {
