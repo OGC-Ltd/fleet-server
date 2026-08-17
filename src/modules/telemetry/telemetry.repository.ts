@@ -576,6 +576,45 @@ import { ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS } from '../fuel/fuel-theft-cla
 
 export const FUEL_INCIDENT_WINDOW_MS = 24 * 60 * 60 * 1000
 
+/**
+ * A clean slate: nothing that BEGAN before this moment is announced.
+ *
+ * Set once, on the operator's instruction (2026-08-17), to take the CRITICAL
+ * count to zero across both orgs and let the fleet re-flag itself from live
+ * events. Two Kasulu drains were open at the time — MUFINDI - DG 12
+ * (burn-above-class-ceiling, 02:45Z) and MUFINDI - DZ 20 (burn-far-above-band,
+ * 06:04Z); Sukari was already clear.
+ *
+ * ## Why an epoch and not a delete
+ *
+ * Deleting the rows would have done neither of the things it looks like it
+ * does. `fuel_thefts` is SYNCED from Wialon, and the settle pass re-reads a
+ * rotating slice over a 24 h window ending 6 h back with `reconcile` on,
+ * CREATING ledger rows for provider events it cannot find — so both drains,
+ * which began that same morning, would have been re-created and re-adjudicated
+ * within hours and gone red again. It would also have destroyed audit rows
+ * that the reports and the fuel ledger still count. See lib/queues/fuel-events.
+ *
+ * ## Why not an acknowledgement column
+ *
+ * Because that is a different feature and nobody has asked for it. Clearing
+ * ONE incident, with a name and a time against it, needs a column, an endpoint
+ * and a button; this is a one-off line under the fleet, and a constant that
+ * says so is honest about being exactly that.
+ *
+ * ## It does not stop anything
+ *
+ * Only the announcement is suppressed, and only for drains already in the past
+ * when the line was drawn. Adjudication, the ledger, the fuel reports and the
+ * notification feed are all untouched, and any drain beginning after this
+ * moment announces normally — which is the whole point of a fresh start.
+ *
+ * Removing this constant restores every suppressed incident that is still
+ * inside the 24 h window; after 2026-08-18T07:45Z it has no effect at all and
+ * can be deleted.
+ */
+export const FUEL_INCIDENT_EPOCH = new Date('2026-08-17T07:45:00.000Z')
+
 export async function findFleetSnapshot(orgId: string) {
   // The live fleet is every ACTIVE vehicle in the org — the registry synced
   // from the RaiFactorySuite API (sync:vehicles). Vehicles the provider has
@@ -705,6 +744,9 @@ export async function findFleetSnapshot(orgId: string) {
        AND (t.drain_cause::text = ANY(${ANNOUNCED_CAUSES as unknown as string[]}::text[])
          OR t.cause_reason      = ANY(${ANNOUNCED_REASON_SLUGS as unknown as string[]}::text[]))
        AND t.began_at >= ${new Date(Date.now() - FUEL_INCIDENT_WINDOW_MS)}
+       -- The clean slate. Both bounds are on began_at, so this is the same
+       -- index walk with a tighter floor — no extra cost. See the constant.
+       AND t.began_at >= ${FUEL_INCIDENT_EPOCH}
      ORDER BY t.vehicle_id, t.began_at DESC`
   const incidentByVehicle = new Map(incidents.map(i => [i.vehicle_id, i]))
 
