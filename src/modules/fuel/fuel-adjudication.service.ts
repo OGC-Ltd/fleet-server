@@ -170,7 +170,7 @@ export async function getProbeProfile(vehicleId: string, now: Date): Promise<Pro
   if (hit && now.getTime() - hit.at < PROFILE_TTL_MS) return hit.profile
 
   const from = new Date(now.getTime() - PROFILE_DAYS * 24 * 3_600_000)
-  const rows = await prisma.$queryRaw<Array<{ parked: bigint; swinging: bigint }>>`
+  const rows = await prisma.$queryRaw<Array<{ parked: bigint; swinging: bigint; fill_ratio: number | null }>>`
     WITH win AS (
       SELECT date_trunc('hour', captured_at)
                + interval '30 min' * floor(extract(minute FROM captured_at) / 30) AS bucket,
@@ -184,14 +184,29 @@ export async function getProbeProfile(vehicleId: string, now: Date): Promise<Pro
          AND fuel_level_ml IS NOT NULL
        GROUP BY 1
     )
+    , cap AS (
+      -- The probe's sustained ceiling against the tank it is fitted to. p99
+      -- rather than max, so one spurious reading cannot condemn an
+      -- instrument — this is about a scale that is wrong, not a glitch.
+      SELECT percentile_cont(0.99) WITHIN GROUP (ORDER BY t.fuel_level_ml) / 1000.0
+               / NULLIF(v.tank_capacity_litres, 0) AS fill_ratio
+        FROM vehicle_telemetries t
+        JOIN vehicles v ON v.id = t.vehicle_id
+       WHERE t.vehicle_id = ${vehicleId}
+         AND t.captured_at >= ${from}
+         AND t.fuel_level_ml IS NOT NULL
+       GROUP BY v.tank_capacity_litres
+    )
     SELECT count(*)                                       AS parked,
-           count(*) FILTER (WHERE swing >= ${SWING_ML})    AS swinging
+           count(*) FILTER (WHERE swing >= ${SWING_ML})    AS swinging,
+           (SELECT fill_ratio FROM cap)                    AS fill_ratio
       FROM win
      WHERE n >= ${PROFILE_MIN_SAMPLES} AND top_speed = 0 AND running = 0`
 
   const profile: ProbeProfile = {
     parkedWindows: Number(rows[0]?.parked   ?? 0),
     swingWindows:  Number(rows[0]?.swinging ?? 0),
+    fillRatio:     rows[0]?.fill_ratio != null ? Number(rows[0].fill_ratio) : null,
   }
   profileCache.set(vehicleId, { profile, at: now.getTime() })
   return profile

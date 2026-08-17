@@ -400,7 +400,59 @@ export interface ProbeProfile {
   parkedWindows: number
   /** How many of those swung at least SWING_ML from trough to peak. */
   swingWindows:  number
+  /**
+   * The probe's sustained ceiling as a share of the tank it is fitted to —
+   * p99 of its readings over the profile window, divided by
+   * `vehicles.tankCapacityLitres`. Null when either is unavailable.
+   */
+  fillRatio?:    number | null
 }
+
+/**
+ * How far above its own tank a probe may read before it is not measuring that
+ * tank at all.
+ *
+ * A DIFFERENT fault from the swing gate, and the reason both exist. Swing asks
+ * whether the instrument MOVES while the machine is still; this asks whether
+ * its RANGE corresponds to the vessel. A probe can be perfectly steady parked
+ * and still be reporting a scale that has nothing to do with the tank — which
+ * is exactly `KTCB 295U`: 23 parked windows, 0 swinging, and a p99 of 404 L on
+ * a declared 160 L tank. It passed the swing gate cleanly and produced 95
+ * drains in thirty days, half the fleet's alerts.
+ *
+ * ## Why this can lean on tank capacity when nothing else does
+ *
+ * `applyProbeTrustGate` records that `vehicles.tankCapacityLitres` disagrees
+ * with the probes on 180 of 299 units and refuses to build a fill fraction on
+ * it. That disagreement runs LOW — the median unit sustains 0.64 of its
+ * declared capacity and 120 never read above half. Reading ABOVE capacity is
+ * the rare direction: measured 2026-08-17, six units of 339 exceed it by more
+ * than 20%.
+ *
+ * So capacity is a bad DENOMINATOR and a usable CEILING. This never asks how
+ * full a tank is; it asks only whether the instrument reports volumes the
+ * vessel cannot hold, which is a statement about calibration and does not
+ * depend on the figure being accurate — only on it being the right order of
+ * magnitude.
+ *
+ * 1.5 with a 20% measurement floor between it and the observed population:
+ *
+ *     MUFINDI: DZ 16    540 L tank    p99 8,616 L    15.95x
+ *     KTCC 114C         270 L         p99 1,723 L     6.38x
+ *     KTCB 295U         160 L         p99   404 L     2.52x
+ *     MUFINDI: DZ 04    640 L         p99 1,142 L     1.78x
+ *     MUFINDI: MTR 11    85 L         p99   135 L     1.59x
+ *     MUFINDI: 012      254 L         p99   329 L     1.30x   <- below the line
+ *
+ * The last is a plausible over-fill or a slightly wrong capacity; the rest are
+ * not tanks. Erring high is the safe direction, as it is everywhere else here:
+ * failing this only withholds a verdict, it never manufactures one.
+ */
+export const MAX_FILL_RATIO = 1.5
+
+/** Does this probe report volumes its tank could not hold? */
+export const probeOverreads = (p: ProbeProfile | null | undefined): boolean =>
+  p != null && p.fillRatio != null && p.fillRatio > MAX_FILL_RATIO
 
 /** Does this probe move about on a machine that is standing still? */
 export const probeSwings = (p: ProbeProfile | null | undefined): boolean =>
