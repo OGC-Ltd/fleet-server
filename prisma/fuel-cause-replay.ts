@@ -16,7 +16,7 @@
 
 import { readFileSync } from 'node:fs'
 import {
-  classifyDrain, resolveBand, isAnnounced, mayUseTheftWording,
+  classifyDrain, resolveBand, announces, mayUseTheftWording,
   type DropEvidence, type DrainCause,
 } from '../src/modules/fuel/fuel-theft-classifier.js'
 import type { ProbeProfile } from '../src/modules/fuel/fuel-adjudication.js'
@@ -83,7 +83,7 @@ for (const r of rows) {
     : null)
   const j = classifyDrain(evidenceOf(r), band, profileFor(r))
   counts.set(j.cause, (counts.get(j.cause) ?? 0) + 1)
-  if (isAnnounced(j.cause)) announced.push({ r, cause: j.cause, conf: j.confidence })
+  if (announces(j)) announced.push({ r, cause: j.cause, conf: j.confidence })
 }
 
 console.log(`\nreplayed ${rows.length} measured drains over ${DAYS} days\n`)

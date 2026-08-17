@@ -135,6 +135,36 @@ export interface CauseJudgement {
 const ANNOUNCED: ReadonlySet<DrainCause> = new Set<DrainCause>(['SIPHON'])
 
 /**
+ * The one burn finding that IS announced, identified by its rule rather than
+ * its cause.
+ *
+ * `UNEXPLAINED_BURN` was withdrawn because on a machine with no trustworthy
+ * band it names our missing reference data. That objection does not apply
+ * where the OPERATOR set the line: `burn-above-class-ceiling` can only be
+ * reached through `CLASS_CEILING_LPH`, and a ceiling exists only for a class
+ * someone has actually specified. So the reason slug is already a reliable
+ * marker for "a human said what this machine should burn, and it exceeded it"
+ * — no new field needed, and nothing to keep in step.
+ *
+ * This is what gives generators a route to a theft finding at all. They can
+ * never reach SIPHON: that branch requires the engine provably off, and a
+ * generator's engine is on 87-96% of the time. Without this they are the
+ * largest tanks on the fleet with no detection of any kind.
+ */
+const ANNOUNCED_REASONS: ReadonlySet<string> = new Set(['burn-above-class-ceiling'])
+
+/**
+ * Does this judgement reach an operator?
+ *
+ * Takes the whole judgement rather than the cause alone, because since
+ * 2026-08-17 announceability is not a property of the cause: the same
+ * UNEXPLAINED_BURN is silent on a derived band and announced on an
+ * operator-set ceiling.
+ */
+export const announces = (j: Pick<CauseJudgement, 'cause' | 'reason'>): boolean =>
+  ANNOUNCED.has(j.cause) || ANNOUNCED_REASONS.has(j.reason)
+
+/**
  * The causes that reach an operator, for callers that need them in a query.
  *
  * Exported so the fleet snapshot's red-vehicle lookup selects on the SAME set
@@ -144,6 +174,12 @@ const ANNOUNCED: ReadonlySet<DrainCause> = new Set<DrainCause>(['SIPHON'])
  * would have left vehicles going red for it anyway.
  */
 export const ANNOUNCED_CAUSES: readonly DrainCause[] = [...ANNOUNCED]
+
+/**
+ * Reason slugs the snapshot's red-vehicle lookup must also match, for the same
+ * no-second-list reason as ANNOUNCED_CAUSES.
+ */
+export const ANNOUNCED_REASON_SLUGS: readonly string[] = [...ANNOUNCED_REASONS]
 
 /** Does this cause put something in front of a human? */
 export const isAnnounced = (c: DrainCause): boolean => ANNOUNCED.has(c)
@@ -216,6 +252,12 @@ export type MachineClass =
   | 'DOZER_CAT_D6'    | 'DOZER_CAT_D7'     | 'DOZER_CAT_D8T'
   | 'DOZER_CAT_D9'    | 'DOZER_CAT_D10'    | 'DOZER_CAT_D11'
   | 'DOZER_KOMATSU_D85' | 'DOZER_KOMATSU_D155A'
+  /**
+   * A generator, or anything else that runs its engine hard while standing
+   * still — pumps, crushers. Its own category because distance means nothing
+   * to it and, unlike every other class here, it is almost never engine-off.
+   */
+  | 'GENERATOR'
 
 /**
  * Litres per engine-hour by class, as supplied by the operator 2026-08-16.
@@ -264,6 +306,30 @@ export const CLASS_BANDS: ReadonlyMap<MachineClass, { lowLph: number; highLph: n
   // Komatsu.
   ['DOZER_KOMATSU_D85',    { lowLph: 10, highLph: 29 }],
   ['DOZER_KOMATSU_D155A',  { lowLph: 13, highLph: 38 }],
+  /**
+   * Generators, one band for all of them at the operator's instruction
+   * (2026-08-17), around their stated 45 L/h.
+   *
+   * The upper edge is 95 rather than anything near 45 because a shared band
+   * has to cover the spread of the machines sharing it. Measured over 14 days
+   * on the three units that actually behave like generators — moving in 0.0%
+   * of readings, engine on 87-96% — the hourly burn is:
+   *
+   *   MUFINDI - DG 12   p10 51.3   p50 71.3   p90 94.6   (1,696 L tank)
+   *   MUFINDI - DG 13   p10 36.6   p50 49.5   p90 61.1   (1,696 L tank)
+   *   KHMA 449U         p10 22.4   p50 45.2   p90 90.0   (  520 L tank)
+   *
+   * So 45 L/h is a fair centre for DG 13 and KHMA 449U and badly low for DG
+   * 12, which runs half again as much on an identical tank. A band ending at
+   * 45 would have flagged DG 12's ordinary operation continuously — the same
+   * mistake the CTR crawlers taught, one class over.
+   *
+   * The spread is also wider than a generator's steady reputation suggests:
+   * 1.7x from p10 to p90 on DG 13 over 154 measured hours, 4x on KHMA 449U.
+   * That is load, and it is why the ALERTING line is a ceiling well above p90
+   * rather than a multiple of this band — see CLASS_CEILING_LPH.
+   */
+  ['GENERATOR',            { lowLph: 35, highLph: 95 }],
 ])
 
 /**
@@ -318,6 +384,10 @@ export const MACHINE_CLASS: ReadonlyMap<string, MachineClass> = new Map([
   // Small tractors, on tanks of 83-90 L and 43 L, measuring 2-5 and 1.6 L/h.
   ['KASULU:MTR', 'TRACTOR_SMALL'],
   ['KASULU:HYD', 'TRACTOR_SMALL'],
+  // The generators. Found by BEHAVIOUR rather than trusted from the prefix —
+  // moving in 0.0% of readings over 14 days with the engine on 87-89% — and
+  // the prefix then used as the durable key.
+  ['KASULU:DG',  'GENERATOR'],
 ])
 
 /** `ORG:PREFIX`, the key `MACHINE_CLASS` is written in. */
@@ -504,6 +574,23 @@ export const CLASS_CEILING_LPH: ReadonlyMap<MachineClass, number> = new Map([
   // It stays a number set by a measurement, which is the property that makes a
   // ceiling better than a multiple.
   ['EXCAVATOR_LARGE',  30],
+  /**
+   * 120 L/h for a generator — above every hour any of them has actually
+   * worked, and far below the 300 L/h at which a reading stops describing
+   * fuel leaving a tank at all.
+   *
+   * The worst observed hour across the three units is 94.6 (DG 12 p90), so
+   * this clears real operation by ~27%. The window it leaves open is 120-300
+   * L/h, which is exactly where drawing fuel off a running generator lands: a
+   * theft adding 60 L/h on top of a 45-70 L/h burn crosses it, while the
+   * machine's own hardest hour does not.
+   *
+   * A MULTIPLE could not do this job here. Four times the band's upper edge
+   * is 380 L/h, above MAX_PLAUSIBLE_REMOVAL_LPH, so every excursion would be
+   * dismissed as a sensor artifact before it was ever compared — the burn rule
+   * would be silently dead for the class with the largest tanks on the fleet.
+   */
+  ['GENERATOR',        120],
 ])
 
 /**

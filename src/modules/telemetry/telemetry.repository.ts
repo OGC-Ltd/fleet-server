@@ -572,7 +572,7 @@ export async function findLatest(vehicleId: string, orgId: string) {
  * tonight, and it is the obvious next increment the first time someone asks
  * "did anyone look at this one".
  */
-import { ANNOUNCED_CAUSES } from '../fuel/fuel-theft-classifier.js'
+import { ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS } from '../fuel/fuel-theft-classifier.js'
 
 export const FUEL_INCIDENT_WINDOW_MS = 24 * 60 * 60 * 1000
 
@@ -697,7 +697,8 @@ export async function findFleetSnapshot(orgId: string) {
            t.initial_location, t.final_fuel_level_ml, t.initial_fuel_level_ml
       FROM fuel_thefts t
      WHERE t.vehicle_id = ANY(${vehicleIds}::text[])
-       AND t.drain_cause::text = ANY(${ANNOUNCED_CAUSES as unknown as string[]}::text[])
+       AND (t.drain_cause::text = ANY(${ANNOUNCED_CAUSES as unknown as string[]}::text[])
+         OR t.cause_reason      = ANY(${ANNOUNCED_REASON_SLUGS as unknown as string[]}::text[]))
        AND t.began_at >= ${new Date(Date.now() - FUEL_INCIDENT_WINDOW_MS)}
      ORDER BY t.vehicle_id, t.began_at DESC`
   const incidentByVehicle = new Map(incidents.map(i => [i.vehicle_id, i]))

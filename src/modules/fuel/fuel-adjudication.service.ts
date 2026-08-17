@@ -29,7 +29,7 @@ import {
 } from './fuel-adjudication.js'
 import { measureFall, type FallSample } from './fuel-drop-shape.js'
 import {
-  classifyDrain, resolveBand, isAnnounced, mayUseTheftWording, type CauseJudgement,
+  classifyDrain, resolveBand, announces, mayUseTheftWording, type CauseJudgement,
 } from './fuel-theft-classifier.js'
 import { resolveRates, MIN_RUNS, type ResolvedRate } from './fuel-rate.js'
 
@@ -456,7 +456,7 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     //
     // Measured over 30 days of real drains: 90 announcements against 1,407,
     // spread across 31 vehicles. Reversible in one line if it proves wrong.
-    if (!opts.notify || verdict.cause == null || !isAnnounced(verdict.cause.cause)) continue
+    if (!opts.notify || verdict.cause == null || !announces(verdict.cause)) continue
     if (opts.notifyCutoff && t.beganAt < opts.notifyCutoff) continue
 
     const cause = verdict.cause
