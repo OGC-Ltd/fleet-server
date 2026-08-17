@@ -15,8 +15,9 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { prisma } from '../src/lib/prisma.js'
 import {
-  classifyDrain, resolveBand, announces, mayUseTheftWording,
+  classifyDrain, resolveBand, announces, mayUseTheftWording, type MachineIdentity,
   type DropEvidence, type DrainCause,
 } from '../src/modules/fuel/fuel-theft-classifier.js'
 import type { ProbeProfile } from '../src/modules/fuel/fuel-adjudication.js'
@@ -42,11 +43,43 @@ if (!path || path.startsWith('--')) throw new Error('usage: fuel-cause-replay.ts
 const rows: MeasuredRow[] = JSON.parse(readFileSync(path, 'utf8'))
 
 /**
+ * Tank capacity and vehicle type, which `resolveClass` now needs and the dump
+ * does not carry — the measurement predates tank-size classing.
+ *
+ * Read live rather than re-dumped: they are properties of the machine, not of
+ * the drain, so they are as true now as they were during the window. Keyed on
+ * `ORG:PLATE` because plates are only unique within an organisation.
+ */
+const identities = new Map<string, MachineIdentity>()
+{
+  const vs = await prisma.vehicle.findMany({
+    select: {
+      registrationPlate: true, vehicleType: true, tankCapacityLitres: true,
+      organisation: { select: { code: true } },
+    },
+  })
+  for (const v of vs) {
+    identities.set(`${v.organisation?.code ?? ''}:${v.registrationPlate}`, {
+      plate: v.registrationPlate,
+      vehicleType: v.vehicleType,
+      tankCapacityLitres: v.tankCapacityLitres,
+    })
+  }
+  await prisma.$disconnect()
+}
+
+/**
  * The probe trust gate is applied UPSTREAM of the classifier by
  * `judgeDrain`, and the profile it uses is not in the dump. The measurement
  * carries the adjudication reason instead, and `probe-swings` is precisely the
  * rows that gate already caught — so they are replayed as a swinging profile,
  * which is what the live pass would hand the classifier.
+ *
+ * The CAPACITY guard is not modelled at all: `fillRatio` is measured by a query
+ * this harness does not run and is absent from every dump. So the replay
+ * OVERSTATES announcements for the overreading probes — `KTCB 295U` at 2.52x
+ * its tank is judged live as `probe-overreads` and never reaches the classifier,
+ * but appears here as a siphon. Read its rows as harness artefacts.
  */
 const profileFor = (r: MeasuredRow): ProbeProfile | null =>
   r.reason === 'probe-swings' ? { parkedWindows: 40, swingWindows: 20 } : { parkedWindows: 40, swingWindows: 0 }
@@ -78,7 +111,7 @@ const announced: Array<{ r: MeasuredRow; cause: DrainCause; conf: number }> = []
 for (const r of rows) {
   // The band resolves exactly as it will live: operator table first (empty
   // today), then the derived rate widened into a band.
-  const band = resolveBand(r.org, r.plate, r.expectedLph != null
+  const band = resolveBand(r.org, identities.get(`${r.org}:${r.plate}`) ?? { plate: r.plate }, r.expectedLph != null
     ? { lPerHour: r.expectedLph, basis: 'type', lPerKm: r.kmPerL != null ? 1 / r.kmPerL : null }
     : null)
   const j = classifyDrain(evidenceOf(r), band, profileFor(r))

@@ -270,6 +270,12 @@ export type MachineClass =
   | 'DOZER_CAT_D9'    | 'DOZER_CAT_D10'    | 'DOZER_CAT_D11'
   | 'DOZER_KOMATSU_D85' | 'DOZER_KOMATSU_D155A'
   /**
+   * A dozer smaller than anything in the operator's model table. `MUFINDI - DZ
+   * 02` and `DZ 03` run 450-455 L tanks at 5.6-12.9 L/h median, below even a
+   * Cat D6's 14-22. Measured, not assumed — see CLASS_BY_TANK.
+   */
+  | 'DOZER_SMALL'
+  /**
    * A generator, or anything else that runs its engine hard while standing
    * still — pumps, crushers. Its own category because distance means nothing
    * to it and, unlike every other class here, it is almost never engine-off.
@@ -347,6 +353,18 @@ export const CLASS_BANDS: ReadonlyMap<MachineClass, { lowLph: number; highLph: n
    * rather than a multiple of this band — see CLASS_CEILING_LPH.
    */
   ['GENERATOR',            { lowLph: 35, highLph: 95 }],
+  /**
+   * The small dozers, from their own 21 days rather than a manufacturer sheet,
+   * because no band in the operator's table goes low enough:
+   *
+   *   MUFINDI - DZ 02   450 L   p50 12.9   p90 19.4
+   *   MUFINDI: DZ 03    455 L   p50  5.6   p90 15.0
+   *
+   * 5-20 spans both machines' ordinary hours and stops just above the worse
+   * p90. Only two contributors, so it is the weakest band here and should be
+   * revisited when either has more history.
+   */
+  ['DOZER_SMALL',          { lowLph:  5, highLph: 20 }],
 ])
 
 /**
@@ -407,6 +425,60 @@ export const MACHINE_CLASS: ReadonlyMap<string, MachineClass> = new Map([
   ['KASULU:DG',  'GENERATOR'],
 ])
 
+/**
+ * Prefix groups that are NOT one class, split on tank capacity.
+ *
+ * `KASULU:DZ` covers two plainly different machines. Measured over 21 days of
+ * clean engine-hours, with the three overreading probes (DZ 16, DZ 04, DZ 09)
+ * set aside because their volumes are not measurements of their tanks:
+ *
+ *   DZ 13   645 L   p50 40.4   p90 60.3      DZ 02   450 L   p50 12.9   p90 19.4
+ *   DZ 14   640 L   p50 34.5   p90 58.1      DZ 03   455 L   p50  5.6   p90 15.0
+ *   DZ 05   640 L   p50 32.5   p90 68.6
+ *   DZ 20   642 L   p50 30.3   p90 50.5
+ *
+ * The 640 L group lands at 30-40 L/h, which is `DOZER_CAT_D8T` (25-40) almost
+ * exactly — the operator's own figure, arrived at independently. The 450 L
+ * pair runs a third of that. One band across both would hold the small
+ * machines to three times what they burn, which is the CTR mistake again.
+ *
+ * ## Tank size is a PROXY and is being used as one
+ *
+ * The operator's table is per MODEL, and no model is recorded anywhere — not
+ * in the database, not in Wialon's custom fields, both checked. Capacity is
+ * the only size signal available. It is unreliable as a denominator (it
+ * disagrees with the probes on 180 of 299 units) but the split here is 450 vs
+ * 640 L, a gap far wider than that error, and it is only being asked which
+ * SIDE a machine falls on.
+ *
+ * Ordered ascending; the first entry whose `maxTankL` the vehicle does not
+ * exceed wins.
+ */
+export const CLASS_BY_TANK: ReadonlyMap<string, ReadonlyArray<{ maxTankL: number; cls: MachineClass }>> = new Map([
+  ['KASULU:DZ', [
+    { maxTankL: 500,      cls: 'DOZER_SMALL' },
+    { maxTankL: Infinity, cls: 'DOZER_CAT_D8T' },
+  ]],
+])
+
+/**
+ * Classes keyed on `ORG:VEHICLE_TYPE`, for fleets whose plates carry no
+ * machine family.
+ *
+ * SUKARI is the case: 482 tractors on ordinary registrations, with nothing in
+ * the plate to group them by. Only 32 have earned a derived rate, and those
+ * read p10 0.8, p50 5.2, p75 6.9, p90 8.0, max 13.4 L/h on 75-165 L tanks —
+ * squarely `TRACTOR_MEDIUM` (5-12).
+ *
+ * Read that with its sample size attached: 32 machines standing in for 482.
+ * It is a reasonable central estimate for the group and a weak claim about any
+ * individual tractor, which is why it is a BAND and why the announcing
+ * multiple sits well above it.
+ */
+export const TYPE_CLASS: ReadonlyMap<string, MachineClass> = new Map([
+  ['SUKARI:TRACTOR', 'TRACTOR_MEDIUM'],
+])
+
 /** `ORG:PREFIX`, the key `MACHINE_CLASS` is written in. */
 export const classKey = (orgCode: string, plate: string): string =>
   `${orgCode.toUpperCase()}:${machinePrefix(plate)}`
@@ -446,12 +518,42 @@ export function machinePrefix(plate: string): string {
  */
 export const DERIVED_BAND_SPREAD = 1.5
 
+/** What the classifier needs to know about a machine to place it in a class. */
+export interface MachineIdentity {
+  plate:              string
+  vehicleType?:       string | null
+  tankCapacityLitres?: number | null
+}
+
+/**
+ * Which class a machine belongs to, by prefix, then by tank inside a prefix,
+ * then by vehicle type. Null when nothing places it.
+ */
+export function resolveClass(orgCode: string, m: MachineIdentity): MachineClass | null {
+  const key = classKey(orgCode, m.plate)
+
+  // A prefix that splits by tank is asked first — it is the more specific
+  // statement about the same group.
+  const bands = CLASS_BY_TANK.get(key)
+  if (bands && m.tankCapacityLitres != null) {
+    for (const b of bands) if (m.tankCapacityLitres <= b.maxTankL) return b.cls
+  }
+  const direct = MACHINE_CLASS.get(key)
+  if (direct) return direct
+
+  // ...and the type table last, for fleets whose plates carry no family.
+  if (m.vehicleType) return TYPE_CLASS.get(`${orgCode.toUpperCase()}:${m.vehicleType.toUpperCase()}`) ?? null
+  return null
+}
+
 export function resolveBand(
   orgCode: string,
-  plate: string,
+  machine: string | MachineIdentity,
   derived: { lPerHour: number; basis: 'vehicle' | 'type'; lPerKm?: number | null } | null,
 ): BurnBand | null {
-  const cls = MACHINE_CLASS.get(classKey(orgCode, plate))
+  const m: MachineIdentity = typeof machine === 'string' ? { plate: machine } : machine
+  const plate = m.plate
+  const cls = resolveClass(orgCode, m)
   const band = cls != null ? CLASS_BANDS.get(cls) : undefined
   if (band && cls != null) {
     const ceiling = CLASS_CEILING_LPH.get(cls)

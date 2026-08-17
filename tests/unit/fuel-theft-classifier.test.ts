@@ -15,6 +15,7 @@ import {
   ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS,
   ANNOUNCE_MULTIPLE, MAX_PLAUSIBLE_REMOVAL_LPH, SIPHON_MIN_DROP_ML,
   DERIVED_BAND_SPREAD, MACHINE_CLASS, CLASS_BANDS, CLASS_CEILING_LPH, machinePrefix,
+  resolveClass, CLASS_BY_TANK, TYPE_CLASS,
   type DropEvidence, type BurnBand, type DrainCause,
 } from '../../src/modules/fuel/fuel-theft-classifier.js'
 import { probeSwings, probeOverreads, MAX_FILL_RATIO, type ProbeProfile } from '../../src/modules/fuel/fuel-adjudication.js'
@@ -472,9 +473,32 @@ describe('resolveBand', () => {
     expect(machinePrefix('KTCB 295U')).toBe('KTCB')
   })
 
-  it('widens a derived point estimate into a band', () => {
-    // A machine with no class — a dozer, which needs a model rather than a
-    // size — so the derived rate is what it gets.
+  it('splits one prefix into two classes on tank size', () => {
+    // KASULU: DZ is two different machines. The 640 L group burns three times
+    // what the 450 L pair does, and one band across both would hold the small
+    // ones to a ceiling they never approach.
+    const big   = resolveClass('KASULU', { plate: 'MUFINDI: DZ 14', tankCapacityLitres: 640 })
+    const small = resolveClass('KASULU', { plate: 'MUFINDI - DZ 02', tankCapacityLitres: 450 })
+    expect(big).toBe('DOZER_CAT_D8T')
+    expect(small).toBe('DOZER_SMALL')
+    expect(CLASS_BANDS.get(small!)!.highLph).toBeLessThan(CLASS_BANDS.get(big!)!.lowLph)
+  })
+
+  it('classes on vehicle type when the plate carries no family', () => {
+    // SUKARI's 482 tractors are on ordinary registrations. Type is the only
+    // thing that groups them.
+    expect(resolveClass('SUKARI', { plate: 'KTCC 100G', vehicleType: 'TRACTOR' })).toBe('TRACTOR_MEDIUM')
+    expect(TYPE_CLASS.get('SUKARI:TRACTOR')).toBe('TRACTOR_MEDIUM')
+    // A road vehicle in the same fleet must NOT pick up a burn band — it is
+    // judged on km/L, and a tractor's litres-per-hour would be meaningless.
+    expect(resolveClass('SUKARI', { plate: 'KCX 802S', vehicleType: 'TRUCK' })).toBeNull()
+  })
+
+  it('falls through to the derived rate when the tank is unknown', () => {
+    // The size split needs a capacity. Without one the machine is unclassed and
+    // gets its own measured rate, widened — never a guessed band.
+    expect(resolveClass('KASULU', { plate: 'MUFINDI: DZ 14' })).toBeNull()
+    expect(CLASS_BY_TANK.has('KASULU:DZ')).toBe(true)
     const b = resolveBand('KASULU', 'MUFINDI: DZ 14', { lPerHour: 10, basis: 'vehicle' })!
     expect(b.lowLph).toBe(10)
     expect(b.highLph).toBe(10 * DERIVED_BAND_SPREAD)
