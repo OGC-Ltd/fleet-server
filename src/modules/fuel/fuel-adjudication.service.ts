@@ -126,9 +126,44 @@ export function __resetProbeProfileCache(): void {
 /**
  * How much this vehicle's fuel probe moves while the machine is standing still.
  *
- * A half-hour counts as parked when it holds PROFILE_MIN_SAMPLES readings and
- * never records any speed at all — a machine that moved was burning fuel, and
- * a level falling because it is being consumed is not the probe's fault.
+ * A half-hour counts as parked when it holds PROFILE_MIN_SAMPLES readings, never
+ * records any speed, AND never records the engine running.
+ *
+ * ## Why speed alone was not enough
+ *
+ * The original test was `top_speed = 0`, on the reasoning that "a machine that
+ * moved was burning fuel, and a level falling because it is being consumed is
+ * not the probe's fault". That reasoning is right and the test does not
+ * implement it: a machine can burn fuel hard without moving a metre, and this
+ * fleet is full of them.
+ *
+ * `MUFINDI - DG 13` is the clearest case — a generator, moving in 0.95% of
+ * readings over 14.6 days, engine on 85.9% of the time, burning a steady
+ * 40-50 L/h with a 1,696 L tank refuelled every day or two. Under the speed
+ * test, 143 of its 326 half-hours "swung" 25 L or more, so 44% of its windows
+ * were counted as the instrument misbehaving. They were the machine working.
+ * Requiring the engine to be off as well leaves it 2 parked windows and 0
+ * swings, which is the truth: it is essentially never idle.
+ *
+ * That mattered because this gate is the FIRST thing `classifyDrain` checks
+ * and it returns INDETERMINATE — which blocks every verdict, including the
+ * reassuring ones. Any stationary plant that runs its engine hard was being
+ * quietly disqualified from fuel judgement altogether: gensets, pumps,
+ * crushers, an excavator that works all day without travelling. That is the
+ * exact population the engine-hours redesign was built for.
+ *
+ * ## What this does on a unit with no ignition
+ *
+ * Nothing, deliberately. `engine_on` is NOT NULL with a default of false and
+ * the adapter fills it as `ignition ?? (speed > 0)`, so where ignition is
+ * absent the column restates movement — and a window with no speed also has no
+ * engine-on reading. Those units keep exactly the behaviour they have today.
+ *
+ * The stricter alternative — count a window only where ignition was MEASURED
+ * and off — was rejected. It would leave a unit without ignition zero parked
+ * windows, `probeSwings` would return false for want of evidence, and its
+ * genuinely noisy probe would stop being distrusted at all. That is the
+ * dangerous direction: it turns missing evidence into a clean bill of health.
  */
 export async function getProbeProfile(vehicleId: string, now: Date): Promise<ProbeProfile> {
   const hit = profileCache.get(vehicleId)
@@ -141,7 +176,8 @@ export async function getProbeProfile(vehicleId: string, now: Date): Promise<Pro
                + interval '30 min' * floor(extract(minute FROM captured_at) / 30) AS bucket,
              count(*)                                          AS n,
              max(fuel_level_ml) - min(fuel_level_ml)           AS swing,
-             max(coalesce(speed_kmh, 0))                       AS top_speed
+             max(coalesce(speed_kmh, 0))                       AS top_speed,
+             count(*) FILTER (WHERE engine_on)                 AS running
         FROM vehicle_telemetries
        WHERE vehicle_id = ${vehicleId}
          AND captured_at >= ${from}
@@ -151,7 +187,7 @@ export async function getProbeProfile(vehicleId: string, now: Date): Promise<Pro
     SELECT count(*)                                       AS parked,
            count(*) FILTER (WHERE swing >= ${SWING_ML})    AS swinging
       FROM win
-     WHERE n >= ${PROFILE_MIN_SAMPLES} AND top_speed = 0`
+     WHERE n >= ${PROFILE_MIN_SAMPLES} AND top_speed = 0 AND running = 0`
 
   const profile: ProbeProfile = {
     parkedWindows: Number(rows[0]?.parked   ?? 0),
