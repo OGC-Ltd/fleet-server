@@ -144,20 +144,25 @@ describe('adjudicatePendingDrains', () => {
     }))
   })
 
-  it('announces a drain whose level stayed down, with volume and place', async () => {
+  it('reports a burn far above the machine’s measured rate, without calling it theft', async () => {
     setLevels([...STEADY, ...DRAINING, 160_000, 159_000, 158_000, 158_000])
 
     const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
 
-    // 40 L against a 10 L/h machine is far more than its consumption explains,
-    // and it is still recorded as such. But it reaches nobody: on a fleet where
-    // most machines have no band, "more than expected" is a claim about our
-    // reference data, not about the fuel. Withdrawn 2026-08-17.
-    expect(out).toMatchObject({ drain: 1, drainConfirmed: 1, redistribution: 0, published: 0 })
-    expect(publishNotificationDurable).not.toHaveBeenCalled()
+    expect(out).toMatchObject({ drain: 1, drainConfirmed: 1, redistribution: 0, published: 1 })
     expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ drainCause: 'UNEXPLAINED_BURN' }),
     }))
+
+    const item = published()[0]![0]
+    // States the MEASUREMENT — a rate against an expectation — rather than
+    // claiming the drop is "unexplained", which described our own gap and is
+    // the wording the operator rejected.
+    expect(item['text']).toContain('FUEL RATE: KDL 182X')
+    expect(item['text']).toMatch(/L\/h/)
+    expect(item['text']).not.toMatch(/theft|stolen|suspicious|loss|lost|unexplained/i)
+    expect(item['severity']).toBe('warning')
+    expect(item['at']).toEqual(BEGAN)
   })
 
   it('says nothing at all about a claim it could not check', async () => {
