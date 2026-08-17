@@ -11,7 +11,8 @@
 
 import { describe, it, expect } from 'vitest'
 import {
-  classifyDrain, resolveBand, isAnnounced, mayUseTheftWording, ANNOUNCED_CAUSES,
+  classifyDrain, resolveBand, isAnnounced, announces, mayUseTheftWording,
+  ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS,
   ANNOUNCE_MULTIPLE, MAX_PLAUSIBLE_REMOVAL_LPH, SIPHON_MIN_DROP_ML,
   DERIVED_BAND_SPREAD, MACHINE_CLASS, CLASS_BANDS, CLASS_CEILING_LPH, machinePrefix,
   type DropEvidence, type BurnBand, type DrainCause,
@@ -277,6 +278,76 @@ describe('the rules that must not be relaxed', () => {
     expect([...ANNOUNCED_CAUSES].sort()).toEqual(
       (['ENGINE_BURN', 'HIGH_BURN', 'UNEXPLAINED_BURN', 'SIPHON', 'SLOSH', 'SETTLING', 'INDETERMINATE'] as const)
         .filter(isAnnounced).sort())
+  })
+})
+
+describe('generators — the class that can never be engine-off', () => {
+  const GEN = resolveBand('KASULU', 'MUFINDI - DG 13', null)!
+
+  it('is mapped, banded and given a ceiling', () => {
+    expect(MACHINE_CLASS.get('KASULU:DG')).toBe('GENERATOR')
+    expect(GEN.lowLph).toBe(35)
+    expect(GEN.highLph).toBe(95)
+    expect(GEN.ceilingLph).toBe(120)
+  })
+
+  it('leaves every hour these machines have actually worked alone', () => {
+    // Measured p50s: DG 13 49.5, KHMA 449U 45.2, DG 12 71.3. The worst single
+    // observed hour is DG 12's p90 at 94.6.
+    for (const lph of [45, 49.5, 71.3, 94.6]) {
+      expect(announces(classifyDrain(running(lph), GEN, STEADY))).toBe(false)
+    }
+  })
+
+  it('announces an excursion above the operator ceiling', () => {
+    // A theft adding ~60 L/h on top of a 70 L/h burn.
+    const j = classifyDrain(running(130), GEN, STEADY)
+    expect(j.cause).toBe('UNEXPLAINED_BURN')
+    expect(j.reason).toBe('burn-above-class-ceiling')
+    expect(announces(j)).toBe(true)
+  })
+
+  it('still yields to the physical ceiling above 300 L/h', () => {
+    // Beyond what any pump draws, so the reading is what is wrong.
+    expect(classifyDrain(running(400), GEN, STEADY).cause).toBe('SLOSH')
+  })
+
+  it('a MULTIPLE could not have done this job', () => {
+    // 4x the band's upper edge is 380 L/h, past MAX_PLAUSIBLE_REMOVAL_LPH, so
+    // every excursion would be dismissed as a sensor artifact before it was
+    // compared. The ceiling is what keeps the rule alive for this class.
+    expect(GEN.highLph * ANNOUNCE_MULTIPLE).toBeGreaterThan(MAX_PLAUSIBLE_REMOVAL_LPH)
+  })
+})
+
+describe('what reaches an operator', () => {
+  it('a burn finding on a DERIVED band stays silent', () => {
+    // The withdrawal: on a machine with no operator band, "above expected"
+    // names our missing reference data.
+    // The derived band is the rate widened by DERIVED_BAND_SPREAD, so its
+    // upper edge is 15 and the announcing multiple sits at 60 L/h.
+    const derived = resolveBand('KASULU', 'MUFINDI: DZ 14', { lPerHour: 10, basis: 'type' })!
+    const j = classifyDrain(running(70), derived, STEADY)
+    expect(j.reason).toBe('burn-far-above-band')
+    expect(announces(j)).toBe(false)
+  })
+
+  it('the same finding on an OPERATOR ceiling is announced', () => {
+    const gen = resolveBand('KASULU', 'MUFINDI - DG 13', null)!
+    expect(announces(classifyDrain(running(130), gen, STEADY))).toBe(true)
+  })
+
+  it('announces() and the query lists cannot drift apart', () => {
+    // The snapshot's red-vehicle lookup matches on BOTH exported lists. If
+    // either disagreed with announces(), a vehicle would go red for something
+    // we had decided not to say — or stay grey for something we had.
+    const causes = (['ENGINE_BURN','HIGH_BURN','UNEXPLAINED_BURN','SIPHON','SLOSH','SETTLING','INDETERMINATE'] as const)
+    for (const c of causes) {
+      expect(announces({ cause: c, reason: 'whatever' })).toBe(ANNOUNCED_CAUSES.includes(c))
+    }
+    for (const r of ANNOUNCED_REASON_SLUGS) {
+      expect(announces({ cause: 'UNEXPLAINED_BURN', reason: r })).toBe(true)
+    }
   })
 })
 
