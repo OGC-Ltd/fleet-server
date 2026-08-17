@@ -36,6 +36,12 @@ const facts = (over: Partial<VehicleFacts> = {}): VehicleFacts => ({
   lastRunDestination: null,
   lastRunDispatchedAtLocal: null,
   lastRunReturnedAtLocal: null,
+  // One run, which is the ordinary case — 147 of the 155 vehicles dispatched on
+  // the day this was measured — and the case in which the count is not said.
+  runsToday: 1,
+  runsCompletedToday: 0,
+  runIndex: 1,
+  earlierRunDestinations: [],
   speedKmh: 42,
   fuelLevelPct: 63,
   online: true,
@@ -44,6 +50,59 @@ const facts = (over: Partial<VehicleFacts> = {}): VehicleFacts => ({
 })
 
 describe('buildFallback', () => {
+  it('never says the vehicle is on its way out', () => {
+    // The operator asked for this claim to go. It was the phrase for the
+    // 'outbound' leg and it now has none, so the sentence simply omits it —
+    // the dispatch, the departure and the due-back time all still land.
+    const msg = buildFallback(facts({ leg: 'outbound' }))
+    expect(msg).not.toMatch(/on its way out|outbound/i)
+    expect(msg).toContain('Dispatched 23:16 yesterday to OPAPO')
+    expect(msg).toContain('due back 11:04')
+    expect(msg).toContain('left the yard at 01:02')
+  })
+
+  it('says which run of the day it is, once there has been more than one', () => {
+    const msg = buildFallback(facts({
+      runsToday: 3, runIndex: 3, runsCompletedToday: 2,
+      earlierRunDestinations: ['KODUOGO', 'PALA PRIMARY'],
+    }))
+    expect(msg).toContain('its 3rd run today')
+    expect(msg).toContain('after KODUOGO and PALA PRIMARY')
+  })
+
+  it('does not name the destination twice when the unit is shuttling', () => {
+    // Production, KTCC 840B: dispatched to PALA PRIMARY having already run to
+    // PALA PRIMARY. Repeat runs to one place are the normal shape of a second
+    // dispatch on this fleet.
+    const msg = buildFallback(facts({
+      destination: 'PALA PRIMARY', runsToday: 2, runIndex: 2,
+      earlierRunDestinations: ['PALA PRIMARY'],
+    }))
+    expect(msg).toContain('its 2nd run there today')
+    expect(msg.match(/PALA PRIMARY/g)).toHaveLength(1)
+  })
+
+  it('says nothing about the count on a single-run vehicle', () => {
+    // The common case by a wide margin, and "its 1st run today" would repeat
+    // what the dispatch sentence just said.
+    const msg = buildFallback(facts({ runsToday: 1, runIndex: 1 }))
+    expect(msg).not.toMatch(/run today|1st run|first run|only run/i)
+  })
+
+  it('counts the day rather than describing one leg of it, once closed', () => {
+    const msg = buildFallback(facts({
+      dispatchStatus: null, dispatchedAtLocal: null, destination: null, leg: null,
+      dueBackLocal: null, dueBackAt: null, leftYardLocal: null, yardWaitHours: null,
+      driverSource: 'last-dispatch',
+      lastRunDestination: 'OGANDO CENTRAL', lastRunDispatchedAtLocal: '06:10',
+      lastRunReturnedAtLocal: '09:05',
+      runsToday: 2, runsCompletedToday: 2, runIndex: null,
+    }))
+    expect(msg).toContain('made 2 runs today')
+    expect(msg).toContain('the last to OGANDO CENTRAL')
+    expect(msg).toContain('back at 09:05')
+  })
+
   it('answers the operator question: who, since when, what, where, due back', () => {
     const msg = buildFallback(facts())
     expect(msg).toContain('VICTOR OOKO OKELLO')
@@ -177,6 +236,25 @@ describe('buildFallback', () => {
  * sentence — and the deterministic sentence is already written, so there is no
  * cost to refusing. Both rejection cases below are verbatim production output.
  */
+describe('the outbound ban is enforced, not merely requested', () => {
+  it('rejects a model reply that says the vehicle is on its way out', () => {
+    // The prompt forbids it in capitals. This module has already watched the
+    // model ignore an instruction given exactly that way, and the fallback
+    // sentence does not contain the phrase at all — so rejecting is safe.
+    const f = facts()
+    const msg = `${f.plate} is with ${f.driver} on today's dispatch. `
+      + `It has covered ${f.distanceTodayKm} km and is on its way out to OPAPO.`
+    expect(modelBriefRejectionReason(msg, f)).toMatch(/outbound/)
+  })
+
+  it('still allows the legs that were kept', () => {
+    const f = facts()
+    const msg = `${f.plate} is with ${f.driver} on today's dispatch. `
+      + `It has covered ${f.distanceTodayKm} km and is on its way back from OPAPO.`
+    expect(modelBriefRejectionReason(msg, f)).toBeNull()
+  })
+})
+
 describe('modelBriefRejectionReason', () => {
   it('accepts a faithful rendering', () => {
     const msg = 'KCW 865K is with VICTOR OOKO OKELLO, out since 23:16 yesterday. '

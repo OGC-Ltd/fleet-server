@@ -142,6 +142,28 @@ export interface VehicleFacts {
   lastRunDestination: string | null
   lastRunDispatchedAtLocal: string | null
   lastRunReturnedAtLocal: string | null
+  /**
+   * How many runs this unit has been given today, cancellations excluded, and
+   * how many of them are closed. `runIndex` is which of them is open right now
+   * — 2 when the vehicle is on its second run — and is null when nothing is.
+   *
+   * Counted because "it is out on a job" is the same sentence for a tractor on
+   * its first run of the morning and one on its third, and those are different
+   * days. Measured 2026-08-17: 155 vehicles dispatched, 8 of them more than
+   * once, so this is a fact about a minority — which is exactly why it is worth
+   * saying when it is true and worth omitting when it is not. A brief that
+   * announced "1st run today" on all 147 others would be noise in 95% of cases.
+   *
+   * CANCELLED dispatches are not runs and are excluded everywhere here. The
+   * provider raises and voids them — KTCC 763G had one on 16 Aug — and counting
+   * them would credit a vehicle with work it never did.
+   */
+  runsToday: number
+  runsCompletedToday: number
+  runIndex: number | null
+  /** Where its EARLIER runs today went, oldest first, excluding the open one.
+   *  Empty on a unit with a single run, which is most of them. */
+  earlierRunDestinations: string[]
   speedKmh: number | null
   fuelLevelPct: number | null
   online: boolean | null
@@ -214,24 +236,41 @@ async function collectFacts(orgId: string, vehicleId: string): Promise<VehicleFa
 
   const dispatchedAt = trip ? new Date(trip.dispatchedAt) : null
 
-  // Today's run, after it has been closed.
+  // EVERY run this vehicle was given today, not just the last one.
   //
-  // Only asked when nothing is open, and it answers the question the brief was
-  // getting wrong: who drove this vehicle today. The open dispatch is the only
-  // thing that names a driver for 502 of the 597 vehicles — there is no standing
-  // assignment for them — so the moment a run completed, the unit went back to
-  // reading "has no driver on record" while the Live Feed above it still carried
-  // that driver's name against the same plate. The dispatch row does not vanish
-  // when it closes; nothing was ever looking at it.
-  const lastRun = trip ? null : await prisma.dispatch.findFirst({
+  // This used to be a `findFirst` for the most recent dispatch, asked only when
+  // nothing was open. It answered the question the brief was getting wrong —
+  // who drove this vehicle today, since the dispatch is the only thing naming a
+  // driver for 502 of the 597 vehicles — but it could not tell a unit on its
+  // first run from one on its third, and the brief read identically either way.
+  //
+  // Asked unconditionally now, because the count is worth having whether or not
+  // something is open, and it is one indexed read on (vehicle_id, dispatched_at)
+  // for a single vehicle on a single day. That is cheaper than the two queries
+  // this replaces in the common case.
+  const dayRuns = await prisma.dispatch.findMany({
     where: {
       organisationId: orgId,
       vehicleId,
       dispatchedAt:   { gte: dayStart },
+      // A cancelled dispatch is not a run. The provider raises and voids them,
+      // and both counting one and narrating one as "it ran to X today, no
+      // return time recorded" credit the vehicle with work it never did.
+      status: { not: 'CANCELLED' },
     },
-    orderBy: { dispatchedAt: 'desc' },
+    orderBy: { dispatchedAt: 'asc' },
     select:  { driverName: true, destination: true, dispatchedAt: true, actualReturnAt: true },
   })
+
+  // The one that is open, by its dispatch clock — the same instant the snapshot
+  // built `trip` from. Falls back to the last run of the day, which is what an
+  // open dispatch always is, so a clock that does not match to the millisecond
+  // still yields the right ordinal rather than a null.
+  const runIndex = trip
+    ? (dayRuns.findIndex(r => r.dispatchedAt.getTime() === dispatchedAt?.getTime()) + 1 || dayRuns.length) || null
+    : null
+
+  const lastRun = trip ? null : (dayRuns[dayRuns.length - 1] ?? null)
 
   // Whichever came first: the wheels turning, or the paperwork. A unit can be
   // dispatched hours before it leaves, and it can also be working since dawn
@@ -364,6 +403,15 @@ async function collectFacts(orgId: string, vehicleId: string): Promise<VehicleFa
     // open nor returned is paperwork in an unknown state, and saying "back at
     // —" would be worse than saying nothing.
     lastRunReturnedAtLocal:   lastRun?.actualReturnAt ? localStamp(lastRun.actualReturnAt, dayStart) : null,
+    runsToday:          dayRuns.length,
+    runsCompletedToday: dayRuns.filter(r => r.actualReturnAt != null).length,
+    runIndex,
+    // Every run but the one being described, so the brief can say where the day
+    // has already taken it without repeating the destination it is heading to.
+    earlierRunDestinations: dayRuns
+      .slice(0, runIndex != null ? runIndex - 1 : Math.max(dayRuns.length - 1, 0))
+      .map(r => r.destination)
+      .filter((d): d is string => Boolean(d)),
     speedKmh:      (row as { speedKmh?: number | null } | undefined)?.speedKmh ?? null,
     fuelLevelPct:  (row as { fuelLevelPct?: number | null } | undefined)?.fuelLevelPct ?? null,
     online:        (row as { connectionOnline?: boolean | null } | undefined)?.connectionOnline ?? null,
@@ -373,10 +421,21 @@ async function collectFacts(orgId: string, vehicleId: string): Promise<VehicleFa
 
 // ── the sentence ────────────────────────────────────────────────────────────
 
-const LEG_PHRASE: Record<string, string> = {
+/**
+ * How each leg reads in a sentence. Undefined means the leg is DELIBERATELY not
+ * narrated and the brief simply omits it.
+ *
+ * 'outbound' has no phrase. It used to read "is on its way out", which the
+ * operator asked to be removed: it is the weakest claim the geometry makes —
+ * only that the unit is somewhere past the yard radius and not yet at its
+ * destination — and it adds nothing to a sentence that has already said where
+ * the vehicle was sent, when it left and when it is due. The stronger legs
+ * ('at-destination', 'returning', 'back') each say something the reader cannot
+ * work out from the dispatch alone, so they stay.
+ */
+const LEG_PHRASE: Record<string, string | undefined> = {
   'no-fix':         'has not reported since it was dispatched',
   'at-yard':        'is still at the yard',
-  'outbound':       'is on its way out',
   'at-destination': 'is at the destination',
   'returning':      'is on its way back',
   'back':           'is back at the yard',
@@ -390,6 +449,13 @@ const LEG_PHRASE: Record<string, string> = {
  * either way. Sentences are only emitted for figures that exist, so an absent
  * fact leaves a shorter brief rather than a zero.
  */
+/** 1st, 2nd, 3rd, 4th — for the run ordinal, which never gets large. */
+function ordinal(n: number): string {
+  const suffix = n % 100 >= 11 && n % 100 <= 13 ? 'th'
+    : n % 10 === 1 ? 'st' : n % 10 === 2 ? 'nd' : n % 10 === 3 ? 'rd' : 'th'
+  return `${n}${suffix}`
+}
+
 export function buildFallback(f: VehicleFacts): string {
   const parts: string[] = []
 
@@ -426,6 +492,23 @@ export function buildFallback(f: VehicleFacts): string {
       ? `${head} and ${leg}${f.dueBackLocal ? `; due back ${f.dueBackLocal}` : ''}.`
       : `${head}${f.dueBackLocal ? `, due back ${f.dueBackLocal}` : ''}.`)
 
+    // Which run of the day this is — only once there has been more than one.
+    // On a single-run vehicle "its 1st run today" is four words that tell the
+    // operator what the previous sentence already did, and that is 147 of the
+    // 155 units dispatched on the day this was measured.
+    if (f.runIndex != null && f.runsToday > 1) {
+      // Shuttling to the same place is the normal shape of a second run here —
+      // OPAPO twice, PALA PRIMARY twice, ONGITO SHILINGI twice on the day this
+      // was measured — and "Dispatched to PALA PRIMARY… after PALA PRIMARY"
+      // names it twice in one breath. When every earlier run went where this
+      // one is going, "there" carries it.
+      const others   = [...new Set(f.earlierRunDestinations.filter(d => d !== f.destination))]
+      const shuttling = f.earlierRunDestinations.length > 0 && others.length === 0
+      parts.push(shuttling
+        ? `That is its ${ordinal(f.runIndex)} run there today.`
+        : `That is its ${ordinal(f.runIndex)} run today${others.length ? `, after ${others.join(' and ')}` : ''}.`)
+    }
+
     // Leaving is a separate event from being dispatched, and on this fleet the
     // gap between them is the thing worth knowing — a quarter of the units
     // carrying an open dispatch are still standing in the yard.
@@ -440,9 +523,14 @@ export function buildFallback(f: VehicleFacts): string {
     // ran to OGANDO CENTRAL and came back at 09:05 is the opposite of the truth.
     const where = f.lastRunDestination ? ` to ${f.lastRunDestination}` : ''
     const out   = f.lastRunDispatchedAtLocal ? `, out ${f.lastRunDispatchedAtLocal}` : ''
+    // "It ran to X" is the whole day for a unit with one run and only the last
+    // leg of it for a unit with three, so the count leads once there is one.
+    const runs  = f.runsToday > 1
+      ? `It made ${f.runsToday} runs today, the last${where}${out}`
+      : `It ran${where} today${out}`
     parts.push(f.lastRunReturnedAtLocal
-      ? `It ran${where} today${out}, and was back at ${f.lastRunReturnedAtLocal}. Nothing open now.`
-      : `Today's run${where}${out} is closed on the provider's books, with no return time recorded.`)
+      ? `${runs}, and was back at ${f.lastRunReturnedAtLocal}. Nothing open now.`
+      : `${runs}, closed on the provider's books with no return time recorded.`)
   } else if (f.lastReportedLocal) {
     parts.push(`No dispatch open; last reported ${f.lastReportedLocal}.`)
   }
@@ -460,6 +548,16 @@ const SYSTEM_PROMPT =
   'NAME THE VEHICLE AND THE DRIVER. Open with the `plate`, and whenever `driver` is a name, write that name out ' +
   'in full and EXACTLY as spelled in the JSON — never re-spell it, shorten it, or replace it with a description. ' +
   'Never call a fact unreported when the JSON contains it. ' +
+  'SAY WHICH RUN OF THE DAY THIS IS. When runsToday is 2 or more, state the number — "its 2nd run today", ' +
+  '"it has made 3 runs today" — using runIndex for the one that is open and runsToday for the total, and name ' +
+  'the earlier destinations from earlierRunDestinations when they differ from the destination it is on now — ' +
+  'when they are the SAME place the unit is shuttling, so write "its 2nd run there today" and do not name that ' +
+  'place twice in one brief. When runsToday is 1 or 0, say ' +
+  'NOTHING about the count at all: do not write "its first run", "its only run" or "one run today". ' +
+  'NEVER say the vehicle is "on its way out", "outbound", "heading out" or "en route out", and never describe ' +
+  'it as having left and not yet arrived. The `leg` field may contain "outbound"; that value must not be ' +
+  'narrated in any wording. The other legs may be: at the yard, at the destination, on its way back, back at ' +
+  'the yard. ' +
   'When driverSource is "last-dispatch" the run has already finished, so write about the driver and the run in ' +
   'the PAST tense: that person drove it today, and it is back. In that case there is no destination, leg or due ' +
   'back — use lastRunDestination, lastRunDispatchedAtLocal and lastRunReturnedAtLocal instead, and do not imply ' +
@@ -480,6 +578,18 @@ const SYSTEM_PROMPT =
 const ABSENCE_PHRASE = /\b(not (reported|recorded|available|known|provided)|no data|unknown|unreported|n\/?a)\b/i
 
 /**
+ * The outbound claim, which the operator asked not to be made.
+ *
+ * Enforced here and not only in the prompt, for the reason the whole validator
+ * exists: the prompt is a request. This module has already watched the model
+ * ignore an instruction it was given in capitals, and a banned phrase that
+ * survives into production is worse than a rejected reply — the fallback
+ * sentence no longer contains it at all, so falling back is a strictly correct
+ * outcome.
+ */
+const OUTBOUND_PHRASE = /\b(on (its|the) way out|out(-|\s)?bound|heading out|en route out|on its way there)\b/i
+
+/**
  * Is the model's sentence a faithful rendering of the facts it was given?
  *
  * The contract of this module is that the model buys PHRASING, not information.
@@ -497,6 +607,9 @@ const ABSENCE_PHRASE = /\b(not (reported|recorded|available|known|provided)|no d
 export function modelBriefRejectionReason(msg: string, f: VehicleFacts): string | null {
   const absence = msg.match(ABSENCE_PHRASE)
   if (absence) return `narrates an absence ("${absence[0]}")`
+
+  const outbound = msg.match(OUTBOUND_PHRASE)
+  if (outbound) return `states the vehicle is outbound ("${outbound[0]}")`
 
   // Matched case-insensitively on the whole name. The provider writes these in
   // upper case and a model reasonably renders them in title case.
