@@ -47,7 +47,8 @@
     "seed:silos": "tsx prisma/seed-silos.ts",
     "backfill:notifications": "tsx prisma/backfill-notifications.ts",
     "build:trips": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/build-trips.ts",
-    "fuel:adjudicate": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/adjudicate-fuel.ts"
+    "fuel:adjudicate": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/adjudicate-fuel.ts",
+    "sim:fuel": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/simulate-fuel-theft.ts"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",

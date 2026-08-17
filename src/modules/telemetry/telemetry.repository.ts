@@ -690,11 +690,16 @@ export async function findFleetSnapshot(orgId: string) {
     cause_confidence: number | null; stolen_ml: number; began_at: Date; detected_at: Date
     initial_location: string | null; final_fuel_level_ml: number | null
     initial_fuel_level_ml: number | null
+    verdict: string; verdict_reason: string | null; verdict_confidence: number | null
+    recovered_ml: number | null
+    initial_speed_kmh: number | null; final_speed_kmh: number | null
   }>>`
     SELECT DISTINCT ON (t.vehicle_id)
            t.vehicle_id, t.id, t.drain_cause::text AS drain_cause, t.cause_reason,
            t.cause_confidence, t.stolen_ml, t.began_at, t.detected_at,
-           t.initial_location, t.final_fuel_level_ml, t.initial_fuel_level_ml
+           t.initial_location, t.final_fuel_level_ml, t.initial_fuel_level_ml,
+           t.verdict::text AS verdict, t.verdict_reason, t.verdict_confidence,
+           t.recovered_ml, t.initial_speed_kmh, t.final_speed_kmh
       FROM fuel_thefts t
      WHERE t.vehicle_id = ANY(${vehicleIds}::text[])
        AND (t.drain_cause::text = ANY(${ANNOUNCED_CAUSES as unknown as string[]}::text[])
@@ -780,6 +785,26 @@ export async function findFleetSnapshot(orgId: string) {
           // server's — the same reasoning that keeps `confirmed` derived from
           // `verdictReason`. See modules/fuel/fuel-theft-classifier.
           mayUseTheftWording: incident.drain_cause === 'SIPHON',
+
+          // ── how the verdict was reached, not just what it was ────────────
+          //
+          // The cause answers "why did the fuel leave". These answer "how do
+          // we know", which is a different question and the one an operator
+          // asks second. `verdictReason` names the rule that settled whether
+          // the fuel left AT ALL, `recoveredMl` says how much came back
+          // before we decided it had not, and `confirmed` says whether our own
+          // telemetry watched it or we are relaying the provider.
+          verdict:           incident.verdict,
+          verdictReason:     incident.verdict_reason,
+          verdictConfidence: incident.verdict_confidence,
+          recoveredMl:       incident.recovered_ml,
+          // Derived here for the same reason mayUseTheftWording is: the set of
+          // reasons that mean "we watched this ourselves" is the server's to
+          // define, and a copy in the client is a copy that drifts.
+          confirmed: incident.verdict_reason === 'level-stayed-down'
+                  || incident.verdict_reason === 'level-recovered',
+          speedAtStart: incident.initial_speed_kmh,
+          speedAtEnd:   incident.final_speed_kmh,
         },
       }
     })
