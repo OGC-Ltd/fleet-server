@@ -413,6 +413,7 @@ model Vehicle {
   garageVisits       VehicleGarageVisit[]
 
   // Live telemetry relations
+  sensors            VehicleSensor[]
   telemetry          VehicleTelemetry[]
   geofences          VehicleGeofence[]
   geofenceViolations GeofenceViolation[]
@@ -1033,6 +1034,56 @@ model FuelTheft {
 ///     to keep this hot table narrow and cache-friendly.
 ///   • Geofence evaluation is NEVER run on this insert path; it is enqueued as a
 ///     BullMQ job and processed asynchronously by the geofence worker.
+/// What the provider says is FITTED to a unit, as opposed to what the unit has
+/// lately reported.
+///
+/// The two are different questions and the fleet needs both. Telemetry history
+/// answers "is this channel alive"; only the provider's sensor configuration
+/// answers "is there anything there to be alive". Without this table a fuel
+/// channel that reports nothing is indistinguishable from one that was never
+/// installed, and the operator cannot tell a probe to service from a Wialon
+/// record to correct.
+///
+/// ## Why calibrationPoints is the field that matters
+///
+/// A Wialon fuel sensor converts a raw parameter to litres through a
+/// calibration table. `wialon.sensors.calibrateFuel` returns null when that
+/// table is empty, and `readFuelProbeFault` skips such a sensor entirely — so a
+/// unit whose sensor exists but carries no table produces no level and no
+/// fault. It is silently invisible, and it is a configuration error rather than
+/// a hardware one. Zero here names that case.
+///
+/// Refreshed wholesale by the sensor sync; rows are provider state, never
+/// edited by hand.
+model VehicleSensor {
+  id                String   @id @default(cuid())
+  vehicleId         String   @map("vehicle_id")
+  /// The sensor's own id within the unit, as the provider numbers it.
+  externalId        String   @map("external_id")
+  /// The provider's label, e.g. "Fuel level" or "22.BLE Probe Status".
+  name              String
+  /// Provider sensor type, e.g. "fuel level", "engine operation".
+  type              String
+  /// The parameter it reads, e.g. "io_270". Two sensors can share one.
+  parameter         String
+  /// Points in the calibration table. ZERO means it cannot produce a value.
+  calibrationPoints Int      @map("calibration_points")
+  /// Highest raw value the table covers — above it a reading is a fault code,
+  /// not a measurement. Null when there is no table.
+  calibratedMax     Float?   @map("calibrated_max")
+  firstSeenAt       DateTime @default(now()) @map("first_seen_at")
+  syncedAt          DateTime @updatedAt      @map("synced_at")
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@unique([vehicleId, externalId])
+  @@index([vehicleId])
+  /// "every unit carrying a fuel sensor, calibrated or not" — the report's
+  /// leading question.
+  @@index([type, calibrationPoints])
+  @@map("vehicle_sensors")
+}
+
 model VehicleTelemetry {
   id         BigInt   @id @default(autoincrement())
   vehicleId  String   @map("vehicle_id")
