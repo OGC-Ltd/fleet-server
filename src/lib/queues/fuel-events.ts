@@ -182,10 +182,41 @@ export interface FuelSyncResult {
   adjudicated:   number
   /** Of those, the ones whose fuel came back — never announced as a loss. */
   redistributed: number
+  /**
+   * The adjudication pass threw and judged nothing this cycle.
+   *
+   * Its own field because `adjudicated: 0` cannot carry the difference between
+   * "nothing was ripe to judge", which is the ordinary state, and "the detector
+   * did not run", which is an outage.
+   */
+  adjudicationFailed: boolean
+  /** How many cycles in a row it has now failed. 0 when this one succeeded. */
+  adjudicationFailStreak: number
   failed:     number
   /** Wall clock, so an overrunning cycle is visible rather than inferred. */
   ms:         number
 }
+
+/**
+ * Consecutive cycles in which the adjudication pass has thrown.
+ *
+ * Module state rather than a database column because the question it answers —
+ * "is the detector down RIGHT NOW" — is about this process, and a restart
+ * genuinely does reset it: the first cycle after a restart re-establishes
+ * whether the fault is still there.
+ */
+let adjudicationFailStreak = 0
+
+/**
+ * How many consecutive failures stop being a blip and become an outage.
+ *
+ * The cycle is quarter-hourly, so three is roughly forty-five minutes. Chosen
+ * against a real incident: on 2026-08-17 the pass failed 110 times across about
+ * ten hours while every cycle-complete line looked ordinary, and nothing in the
+ * logs ever said the failures were CONSECUTIVE. One timeout against a 1 GB RDS
+ * is background noise; three in a row is the fuel detector being off.
+ */
+const ADJUDICATION_OUTAGE_STREAK = 3
 
 /** Run one cycle. Exported so it can be invoked by hand or from a test. */
 export async function runFuelSync(): Promise<FuelSyncResult> {
@@ -193,6 +224,7 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   const result: FuelSyncResult = {
     candidates: 0, fillings: 0, thefts: 0, published: 0, deduped: 0,
     corrected: 0, settled: 0, removed: 0, adjudicated: 0, redistributed: 0,
+    adjudicationFailed: false, adjudicationFailStreak: 0,
     failed: 0, ms: 0,
   }
 
@@ -301,14 +333,40 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
       result.adjudicated   = verdicts.examined
       result.redistributed = verdicts.redistribution
       result.published    += verdicts.published
+      // It ran. Whatever was wrong before is not wrong now.
+      adjudicationFailStreak = 0
     } catch (err) {
-      logger.warn({ err }, 'Fuel adjudication pass failed')
+      // ERROR, not warn. This is the fuel detector not running, and it used to
+      // be reported at the same level as a single vehicle's report failing —
+      // which is how ten hours of it went unnoticed.
+      adjudicationFailStreak += 1
+      result.adjudicationFailed = true
+      result.adjudicationFailStreak = adjudicationFailStreak
+      logger.error(
+        { err, streak: adjudicationFailStreak },
+        'Fuel adjudication pass failed — no drains were judged this cycle',
+      )
+      // A streak is a different event from a failure, and it is the one worth
+      // waking somebody for: nothing has been judged for the best part of an
+      // hour, so no fuel finding can reach the feed no matter what the machines
+      // are doing.
+      if (adjudicationFailStreak >= ADJUDICATION_OUTAGE_STREAK) {
+        logger.error(
+          { streak: adjudicationFailStreak, cron: env.FUEL_SYNC_CRON },
+          'FUEL DETECTOR DOWN — adjudication has failed every cycle in a row; nothing is being judged',
+        )
+      }
     }
   }
 
   result.ms = Date.now() - startedAt
 
-  const log = result.published > 0 || result.fillings > 0 || result.thefts > 0
+  // A quiet cycle is logged at debug, which production never emits — right for
+  // the ordinary case and exactly wrong for a broken one. An adjudication
+  // failure leaves every counter at zero, so without this the cycle in which
+  // the detector died is the least visible line in the log.
+  const log = result.adjudicationFailed
+           || result.published > 0 || result.fillings > 0 || result.thefts > 0
            || result.corrected > 0 || result.removed > 0 || result.adjudicated > 0
     ? logger.info.bind(logger)
     : logger.debug.bind(logger)
