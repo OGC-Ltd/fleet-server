@@ -404,7 +404,7 @@ async function getBandInputs(vehicleId: string, now: Date): Promise<BandInputs> 
  * How far back a repeat is still a repeat.
  *
  * Thirty days, matching the window every other fuel measurement here uses, and
- * comfortably wider than the pattern it has to catch: measured 2026-08-17 over
+ * comfortably wider than the pattern it has to catch: measured 2026-08-19 over
  * the live ledger, the repeat vehicles clustered tightly — KCX 802S took six
  * flagged events inside 1.3 days, MUFINDI - DZ 20 four inside 2.0. A week would
  * have caught both. Thirty days also catches the slower case, a unit losing
@@ -439,7 +439,7 @@ export interface IncidentHistory {
  * ## Why this counts ANNOUNCED events and not siphons
  *
  * The operator asked for repeat THEFT. Taken literally that means repeat
- * `SIPHON`, and measured against the live ledger on 2026-08-17 it would never
+ * `SIPHON`, and measured against the live ledger on 2026-08-19 it would never
  * fire once: there are no siphons in it at all, and there were only six in the
  * best thirty days this detector has ever had. A feature that cannot fire is
  * not a cautious feature, it is an absent one.
