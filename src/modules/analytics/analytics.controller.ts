@@ -1,4 +1,5 @@
 import type { RequestHandler } from 'express'
+import { earlyStartsByCategory, operatingHoursByCategory } from './machine-operations.service.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { env } from '../../config/env.js'
 import * as repo from './analytics.repository.js'
@@ -68,6 +69,33 @@ export const fuelCost: RequestHandler = async (req, res, next) => {
  * uses, so the two cards on the Analytics page can never quote a different
  * pump price for the same fuel.
  */
+/**
+ * When machines started work today, by category — see machine-operations.
+ *
+ * Separate from operationsToday's `earlyDepartures`, which counts tractor
+ * SIGN-OUTS. That is the right clock for a fleet whose units mostly have no
+ * tracker; it is the wrong one for plant, which is never signed out. An
+ * excavator is switched on in a pit and works without going anywhere.
+ */
+export const machineStarts: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await earlyStartsByCategory(p(req, 'orgId')))
+  } catch (err) { next(err) }
+}
+
+/**
+ * Hours actually run against the 18-hour day, by category, over a day, a week
+ * or a month. An unrecognised range falls back to `day` rather than erroring —
+ * this drives a chart, and a bad query string should not blank it.
+ */
+export const machineHours: RequestHandler = async (req, res, next) => {
+  try {
+    const asked = String(req.query['range'] ?? 'day')
+    const range = asked === 'week' || asked === 'month' ? asked : 'day'
+    sendSuccess(res, await operatingHoursByCategory(p(req, 'orgId'), range))
+  } catch (err) { next(err) }
+}
+
 export const operationsToday: RequestHandler = async (req, res, next) => {
   try {
     const data = await repo.operationsToday(p(req, 'orgId'))
