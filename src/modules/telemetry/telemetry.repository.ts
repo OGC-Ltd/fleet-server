@@ -577,6 +577,18 @@ import { ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS } from '../fuel/fuel-theft-cla
 export const FUEL_INCIDENT_WINDOW_MS = 24 * 60 * 60 * 1000
 
 /**
+ * How far back the card counts REPEATS, as opposed to how far back a vehicle
+ * stays red.
+ *
+ * Deliberately much longer than FUEL_INCIDENT_WINDOW_MS and deliberately a
+ * different question. A unit goes red for a day because something happened to
+ * it today; it is a repeat offender because of what has happened to it over a
+ * month. Kept in step with REPEAT_WINDOW_MS in the adjudication service, which
+ * writes the same count into the notification text.
+ */
+export const FUEL_REPEAT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+
+/**
  * A clean slate: nothing that BEGAN before this moment is announced.
  *
  * Set once, on the operator's instruction (2026-08-17), to take the CRITICAL
@@ -750,6 +762,50 @@ export async function findFleetSnapshot(orgId: string) {
      ORDER BY t.vehicle_id, t.began_at DESC`
   const incidentByVehicle = new Map(incidents.map(i => [i.vehicle_id, i]))
 
+  /**
+   * The unit's recent record, for the vehicles that have an open incident.
+   *
+   * A second query rather than an aggregate bolted onto the one above, because
+   * that one is a DISTINCT ON returning the NEWEST row per vehicle and this is
+   * a count over ALL of them — different shapes, and fusing them would need a
+   * window function over a range this one does not otherwise read.
+   *
+   * Cheap regardless: it is restricted to the handful of vehicles that already
+   * have an incident, and thirty days of announcements across the whole fleet
+   * is 22 rows. Empty map when nothing is flagged, which is the usual case.
+   *
+   * The clean-slate epoch is deliberately NOT applied here. It suppresses the
+   * ANNOUNCEMENT of drains from before the line; the ledger, the reports and
+   * the notification feed all still count them, and this is a ledger fact. It
+   * also has to agree with `getIncidentHistory` in the adjudication service,
+   * which writes the same count into the notification text — two numbers
+   * describing the same unit must not disagree because one of them respects a
+   * one-off display cutoff.
+   */
+  const flaggedIds = incidents.map(i => i.vehicle_id)
+  const historyByVehicle = new Map<string, { n: number; ml: number; siphons: number; firstAt: Date }>()
+  if (flaggedIds.length > 0) {
+    const hist = await prisma.$queryRaw<Array<{
+      vehicle_id: string; n: bigint; ml: bigint; siphons: bigint; first_at: Date
+    }>>`
+      SELECT t.vehicle_id,
+             count(*)::bigint                     AS n,
+             coalesce(sum(t.stolen_ml), 0)::bigint AS ml,
+             count(*) FILTER (WHERE t.drain_cause::text = 'SIPHON')::bigint AS siphons,
+             min(t.began_at)                      AS first_at
+        FROM fuel_thefts t
+       WHERE t.vehicle_id = ANY(${flaggedIds}::text[])
+         AND t.began_at >= ${new Date(Date.now() - FUEL_REPEAT_WINDOW_MS)}
+         AND (t.drain_cause::text = ANY(${ANNOUNCED_CAUSES as unknown as string[]}::text[])
+           OR t.cause_reason      = ANY(${ANNOUNCED_REASON_SLUGS as unknown as string[]}::text[]))
+       GROUP BY t.vehicle_id`
+    for (const h of hist) {
+      historyByVehicle.set(h.vehicle_id, {
+        n: Number(h.n), ml: Number(h.ml), siphons: Number(h.siphons), firstAt: h.first_at,
+      })
+    }
+  }
+
   return vehicles.map((v) => {
       const ping            = pingByVehicle.get(v.id)
       const incident        = incidentByVehicle.get(v.id)
@@ -808,6 +864,17 @@ export async function findFleetSnapshot(orgId: string) {
         // Everything the card and the map popup need to explain a red vehicle
         // without a second request. Null on the great majority.
         fuelIncident: incident == null ? null : {
+          /**
+           * The unit's record over the last 30 days, so the incident modal can
+           * open with "4th flagged event, 192.7 L in total" rather than making
+           * the operator work that out by scrolling the feed. `repeatCount` is
+           * 1 on a first event, which is six of the eleven flagged vehicles.
+           */
+          repeatCount:   historyByVehicle.get(v.id)?.n       ?? 1,
+          repeatMl:      historyByVehicle.get(v.id)?.ml      ?? incident.stolen_ml,
+          repeatSiphons: historyByVehicle.get(v.id)?.siphons ?? 0,
+          repeatSinceAt: historyByVehicle.get(v.id)?.firstAt?.toISOString()
+                      ?? incident.began_at.toISOString(),
           id:          incident.id,
           cause:       incident.drain_cause,
           reason:      incident.cause_reason,

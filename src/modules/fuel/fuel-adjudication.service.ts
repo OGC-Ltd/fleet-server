@@ -30,6 +30,7 @@ import {
 import { measureFall, type FallSample } from './fuel-drop-shape.js'
 import {
   classifyDrain, resolveBand, announces, mayUseTheftWording, type CauseJudgement,
+  ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS,
 } from './fuel-theft-classifier.js'
 import { resolveRates, MIN_RUNS, type ResolvedRate } from './fuel-rate.js'
 
@@ -399,6 +400,112 @@ async function getBandInputs(vehicleId: string, now: Date): Promise<BandInputs> 
       ?? { orgCode: '', plate: '', rate: null, lPerKm: null, vehicleType: null, tankCapacityLitres: null }
 }
 
+/**
+ * How far back a repeat is still a repeat.
+ *
+ * Thirty days, matching the window every other fuel measurement here uses, and
+ * comfortably wider than the pattern it has to catch: measured 2026-08-17 over
+ * the live ledger, the repeat vehicles clustered tightly — KCX 802S took six
+ * flagged events inside 1.3 days, MUFINDI - DZ 20 four inside 2.0. A week would
+ * have caught both. Thirty days also catches the slower case, a unit losing
+ * fuel once a fortnight, which is the one an operator would otherwise never
+ * connect.
+ */
+export const REPEAT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+
+/** How many earlier volumes the headline quotes before it stops listing. */
+const RECENT_VOLUMES_SHOWN = 3
+
+export interface IncidentHistory {
+  /** Announced events on this unit BEFORE this one, inside the window. */
+  priorCount: number
+  /** This one included — the ordinal the operator reads. */
+  totalCount: number
+  /** Every announced event in the window including this one, millilitres. */
+  totalMl: number
+  /** The most recent earlier volumes, newest first, capped. */
+  recentMl: number[]
+  /**
+   * How many of them were siphons, which are the only ones that may be called
+   * theft. Zero in the live ledger today; carried so the wording can change the
+   * moment that is not true.
+   */
+  siphonCount: number
+}
+
+/**
+ * What else has been announced about this unit lately.
+ *
+ * ## Why this counts ANNOUNCED events and not siphons
+ *
+ * The operator asked for repeat THEFT. Taken literally that means repeat
+ * `SIPHON`, and measured against the live ledger on 2026-08-17 it would never
+ * fire once: there are no siphons in it at all, and there were only six in the
+ * best thirty days this detector has ever had. A feature that cannot fire is
+ * not a cautious feature, it is an absent one.
+ *
+ * What DOES repeat is the announcement — the thing the operator was actually
+ * told about. Five of the eleven flagged vehicles in the last thirty days were
+ * flagged more than once, and the worst, KCX 802S, six times for 417.7 L inside
+ * thirty-two hours. That is the pattern worth putting in front of somebody.
+ *
+ * The vocabulary does not move with it. `siphonCount` is carried separately so
+ * the sentence says "possible theft" only when the events genuinely were
+ * siphons and "flagged event" otherwise — the rule that has held since the LOSS
+ * verdict was removed, and the reason this counts events without claiming to
+ * know where the fuel went.
+ *
+ * One indexed range scan on (vehicle_id, began_at), run only for a drain that
+ * is about to be announced — a few a day against roughly fifty judged.
+ */
+export async function getIncidentHistory(
+  vehicleId: string, beganAt: Date, thisMl: number, thisIsSiphon: boolean,
+): Promise<IncidentHistory> {
+  const from = new Date(beganAt.getTime() - REPEAT_WINDOW_MS)
+  // Strictly BEFORE this drain, so the ordinal counts what came first rather
+  // than whatever the settle pass happens to have written already.
+  const prior = await prisma.$queryRaw<Array<{ stolen_ml: number; is_siphon: boolean }>>`
+    SELECT t.stolen_ml, (t.drain_cause::text = 'SIPHON') AS is_siphon
+      FROM fuel_thefts t
+     WHERE t.vehicle_id = ${vehicleId}
+       AND t.began_at  >= ${from}
+       AND t.began_at   < ${beganAt}
+       AND (t.drain_cause::text = ANY(${[...ANNOUNCED_CAUSES]}::text[])
+         OR t.cause_reason      = ANY(${[...ANNOUNCED_REASON_SLUGS]}::text[]))
+     ORDER BY t.began_at DESC`
+
+  return {
+    priorCount:  prior.length,
+    totalCount:  prior.length + 1,
+    totalMl:     prior.reduce((a, r) => a + r.stolen_ml, 0) + thisMl,
+    recentMl:    prior.slice(0, RECENT_VOLUMES_SHOWN).map(r => r.stolen_ml),
+    siphonCount: prior.filter(r => r.is_siphon).length + (thisIsSiphon ? 1 : 0),
+  }
+}
+
+/** 1st, 2nd, 3rd — the count never gets large enough to need more. */
+function ordinal(n: number): string {
+  const suffix = n % 100 >= 11 && n % 100 <= 13 ? 'th'
+    : n % 10 === 1 ? 'st' : n % 10 === 2 ? 'nd' : n % 10 === 3 ? 'rd' : 'th'
+  return `${n}${suffix}`
+}
+
+/**
+ * The repeat clause, or empty when there is nothing to repeat.
+ *
+ * Silent on a first event, which is six of the eleven flagged vehicles — an
+ * operator told "1st flagged event" has learned nothing, and a tail that is
+ * usually noise is a tail nobody reads when it matters.
+ */
+export function repeatClause(h: IncidentHistory, allSiphons: boolean): string {
+  if (h.totalCount < 2) return ''
+  const what   = allSiphons ? 'possible theft' : 'flagged event'
+  const recent = h.recentMl.length
+    ? ` (before this: ${h.recentMl.map(ml => L(ml)).join(', ')})`
+    : ''
+  return ` ${ordinal(h.totalCount)} ${what} on this unit in 30 days — ${L(h.totalMl)} in total${recent}.`
+}
+
 export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<AdjudicateOutcome> {
   const now = opts.now ?? new Date()
   const ripeBefore = new Date(now.getTime() - SETTLE_MINUTES * 60_000)
@@ -503,6 +610,18 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     // what was measured — the operator's objection, and the same defect that
     // removed the LOSS verdict. Each line below states the observation and
     // leaves the conclusion to the reader.
+    // What else this unit has been flagged for lately. Asked only here, past
+    // the gate, so it costs one indexed read per ANNOUNCEMENT rather than per
+    // drain — a few a day against roughly fifty.
+    const history = await getIncidentHistory(
+      t.vehicleId, t.beganAt, t.stolenMl, cause.cause === 'SIPHON',
+    )
+    // "Possible theft" only when EVERY event being counted was a siphon. A
+    // count that mixed one siphon with five rate findings and called the total
+    // theft would be the strongest claim in the sentence resting on the
+    // weakest evidence in it.
+    const repeat = repeatClause(history, history.siphonCount === history.totalCount)
+
     const rate = cause.impliedLph != null ? `${Math.round(cause.impliedLph)} L/h` : null
     const headline = mayUseTheftWording(cause.cause)
       ? `POSSIBLE THEFT: ${plate} — ${L(t.stolenMl)} drawn off while parked${where}${tank}`
@@ -520,9 +639,16 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
       source:    'wialon',
       alertType: 'fuelInconsistency',
       // A siphon is the only one we are prepared to call theft, so it is the
-      // only one that arrives as critical.
-      severity:  cause.cause === 'SIPHON' ? 'critical' : 'warning',
-      text:      headline,
+      // only one that arrives as critical on its own merits.
+      //
+      // A REPEAT is the other route to critical, and it is the point of
+      // counting: one unexplained drop on a machine is a reading, the fourth in
+      // a fortnight is a pattern, and the operator should not have to notice
+      // that themselves by scrolling the feed. Third and beyond, because a
+      // second event is a coincidence often enough to be worth staying quiet
+      // about — of the five repeat vehicles measured, two stopped at two.
+      severity:  cause.cause === 'SIPHON' || history.totalCount >= 3 ? 'critical' : 'warning',
+      text:      `${headline}${repeat}`,
       at:        t.beganAt,
       plate,
       vehicleId: t.vehicleId,
