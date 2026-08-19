@@ -46,8 +46,17 @@ console.log(`  last verdict written : ${pulse!.last?.toISOString() ?? 'never'}  
 console.log(`  judged in ${HOURS} h        : ${Number(pulse!.judged)}`)
 // The cycle is quarter-hourly. Anything past an hour means it is not running,
 // whatever the logs say.
+//
+// This is the check that catches the failure mode the cycle log could not: the
+// adjudication pass is wrapped in a try/catch, so on 2026-08-17 it threw 110
+// times across about ten hours while the poller carried on reporting normal
+// counts. `max(verdict_at)` going stale is the symptom that cannot be faked —
+// if nothing has been judged, nothing has been judged.
 if (!pulse!.last || Date.now() - pulse!.last.getTime() > 3600_000) {
   console.log(`  *** STALE — the cycle is quarter-hourly; check the box ***`)
+  console.log(`      grep the log for 'Fuel adjudication pass failed' — it now`)
+  console.log(`      logs at ERROR with a consecutive-failure streak, and says`)
+  console.log(`      'FUEL DETECTOR DOWN' once it has failed 3 cycles running.`)
 }
 
 // ── 2. classifying ──────────────────────────────────────────────────────────
