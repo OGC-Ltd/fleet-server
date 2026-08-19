@@ -76,8 +76,53 @@ const CANDIDATE_WINDOW_MS = 45 * 60_000
  * Feed items are published for events inside this age. Slightly tighter than
  * the window: the extra window depth exists to catch late-maturing events, not
  * to re-announce old ones on every cycle.
+ *
+ * This is the SYNC path's cutoff — refuellings, which are published from a
+ * window the poller has just read. Two hours is right for them and wrong for
+ * an adjudicated drain: see ADJUDICATION_NOTIFY_AGE_MS.
  */
 const NOTIFY_AGE_MS = 2 * 60 * 60_000
+
+/**
+ * The same gate for the ADJUDICATION pass, which needs a far longer reach.
+ *
+ * ## Why one constant could not serve both
+ *
+ * The two paths publish on completely different clocks. The sync publishes an
+ * event the poller has just read from the provider, so it is always minutes
+ * old. Adjudication publishes only after a drain has settled and been JUDGED,
+ * and measured over the live ledger on 2026-08-19 that takes a mean of 8.9
+ * hours — four times the cutoff it was being held to.
+ *
+ * The result was silent and total for the slow cases. Every announceable drain
+ * judged inside two hours reached the feed; every one that took longer was
+ * dropped without a trace:
+ *
+ *     lag 0.5, 0.5, 0.6, 0.6, 0.8, 0.8, 0.9, 0.9 h   all published
+ *     lag 3.0, 3.0, 3.7, 8.4 h                       none published
+ *
+ * `MUFINDI - DG 13` is what that costs. Two findings on the same generator
+ * three hours apart, 337.9 L between them, both judged, both sitting red on the
+ * dashboard, and neither ever announced.
+ *
+ * ## Why 24 h and not simply "no cutoff"
+ *
+ * The guard is still needed and its reason has not changed: the ledger holds 30
+ * days, and a first run over a backlog would replay all of it onto a feed that
+ * is meant to show what is happening now. Twenty-four hours matches
+ * SETTLE_SPAN_MS, so the reach of the announcement matches the reach of the
+ * pass that produces it, and nothing older than a day can ever arrive.
+ *
+ * Measured over 30 days: 13 announceable drains published under the 2 h rule,
+ * 5 more are recovered by this, and 6 were judged more than 24 h after they
+ * began and are still dropped. Those six are the honest cost of keeping the
+ * backlog guard, and a fuel finding two days late is worth little anyway.
+ *
+ * Deliberately NOT applied to the sync path. Widening that one too would have
+ * published 23 refuellings from the last 24 hours in a single cycle — the exact
+ * flood this guard exists to prevent.
+ */
+const ADJUDICATION_NOTIFY_AGE_MS = 24 * 60 * 60_000
 
 /** A tank whose level moved less than this cannot have been filled or drained. */
 const CANDIDATE_THRESHOLD_ML = 15_000
@@ -244,10 +289,14 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   // still run on a cycle where every report failed.
   if (env.FUEL_ADJUDICATION_ENABLED) {
     try {
-      // Same age gate the sync used for its own feed items: a backlog being
-      // worked through must not narrate weeks of history onto the live feed.
+      // The same KIND of age gate the sync uses — a backlog being worked
+      // through must not narrate weeks of history onto the live feed — but a
+      // much longer one, because a judged drain is hours old by construction.
       const verdicts = await adjudicatePendingDrains({
-        apply: true, notify: true, notifyCutoff: cutoff,
+        apply: true, notify: true,
+        // NOT `cutoff` — that is the sync's two-hour reach, and adjudication
+        // takes a mean of 8.9 h to reach a verdict. See the constant.
+        notifyCutoff: new Date(to.getTime() - ADJUDICATION_NOTIFY_AGE_MS),
       })
       result.adjudicated   = verdicts.examined
       result.redistributed = verdicts.redistribution
