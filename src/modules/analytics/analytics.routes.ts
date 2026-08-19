@@ -22,6 +22,9 @@ router.get('/fuel-cost',            validateQuery(fuelCostQuerySchema),  ctrl.fu
 // Today on the ground — local midnight → now. No query params: the window is
 // the fleet day, which is not something a caller gets to choose.
 router.get('/operations-today',     ctrl.operationsToday)
+// Plant and trucks, on their own telemetry rather than the yard's paperwork.
+router.get('/machine-starts',       ctrl.machineStarts)
+router.get('/machine-hours',        ctrl.machineHours)
 router.get('/speeding',             validateQuery(speedingQuerySchema),   ctrl.speeding)
 router.get('/violation-heatmap',    validateQuery(analyticsRangeSchema), ctrl.violationHeatmap)
 
