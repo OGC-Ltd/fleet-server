@@ -39,6 +39,7 @@ import { env } from '../../config/env.js'
 import { logger } from '../logger.js'
 import { prisma } from '../prisma.js'
 import { trimCachedNotifications } from '../notifications/notification-cache.js'
+import { syncSensorInventory } from '../../modules/fuel/sensor-inventory.service.js'
 import { sweepProbeHealth } from '../../modules/fuel/fuel-probe-health.service.js'
 import { adjudicateFillings } from '../../modules/fuel/fuel-filling-adjudication.service.js'
 import { recordFuelTrends } from '../../modules/fuel/fuel-trend.service.js'
@@ -58,6 +59,18 @@ const PRUNE_JOB = 'notifications:prune'
  * machines that need a fitter.
  */
 const PROBE_JOB = 'fuel:probe-health'
+/**
+ * What the provider says is FITTED to each unit — see sensor-inventory.service.
+ *
+ * Daily and here rather than on the Wialon poll, for the same reason the probe
+ * sweep is: it is a maintenance job whose output is a list of records to fix,
+ * and it belongs nowhere near the 15-minute session. Sensor configuration
+ * changes when an engineer edits the account, so a day's staleness costs
+ * nothing — but without this the inventory is only ever as fresh as the last
+ * time somebody ran it by hand, and a probe report built on a stale inventory
+ * would call a newly-fitted sensor missing.
+ */
+const SENSOR_JOB = 'fuel:sensor-inventory'
 /**
  * Fillings are adjudicated on the same daily cadence, and for the same reason
  * the probe sweep is here: it reads a window of our own telemetry and belongs
@@ -236,7 +249,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   // previous one firing forever alongside the new one.
   for (const r of await queue.getRepeatableJobs()) {
     if (r.name === PRUNE_JOB || r.name === PROBE_JOB || r.name === FILLING_JOB
-     || r.name === TREND_JOB || r.name === RATE_JOB) {
+     || r.name === TREND_JOB || r.name === RATE_JOB || r.name === SENSOR_JOB) {
       await queue.removeRepeatableByKey(r.key)
     }
   }
@@ -257,6 +270,17 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     // it scrolls away before anyone reads it. Clear of the prune above, which
     // holds a connection to the same pooler in batches.
     repeat:            { pattern: '23 4 * * *' },
+    removeOnComplete:  { count: 30 },
+    removeOnFail:      { count: 30 },
+    attempts:          3,
+    backoff:           { type: 'exponential', delay: 60_000 },
+  })
+
+  await queue.add(SENSOR_JOB, {}, {
+    // 04:11 UTC — after the filling pass and BEFORE the probe sweep at 04:23,
+    // so the day's fault list is built against configuration read the same
+    // morning rather than yesterday's.
+    repeat:            { pattern: '11 4 * * *' },
     removeOnComplete:  { count: 30 },
     removeOnFail:      { count: 30 },
     attempts:          3,
@@ -301,6 +325,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     if (job.name === TREND_JOB) return recordFuelTrends(new Date(Date.now() - 30 * 60_000))
     if (job.name === RATE_JOB) return deriveFuelRates({ apply: true })
     if (job.name === FILLING_JOB) return adjudicateFillings({ apply: true })
+    if (job.name === SENSOR_JOB) return syncSensorInventory()
     if (job.name === PROBE_JOB) return sweepProbeHealth({ notify: true })
     if (job.name !== PRUNE_JOB) return
     return runRetentionSweep()
