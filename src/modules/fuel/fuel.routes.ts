@@ -16,6 +16,10 @@ router.post('/fillings', ingestLimiter, validateBody(createFillingSchema), ctrl.
 // Whole-fleet, no pagination: the FSL table draws every vehicle at once.
 router.get('/tank-state', ctrl.listTankState)
 
+// Whole-fleet probe and sensor health. Unpaginated for the same reason as
+// tank-state, and cached in the service — see probe-report.service.
+router.get('/probe-health', ctrl.listProbeHealth)
+
 router.get('/thefts', validateQuery(listTheftQuerySchema), ctrl.listThefts)
 router.get('/thefts/:theftId', ctrl.getTheft)
 router.post('/thefts', ingestLimiter, validateBody(createTheftSchema), ctrl.createTheft)

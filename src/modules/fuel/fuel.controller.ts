@@ -1,6 +1,7 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as service from './fuel.service.js'
+import { getProbeReport } from './probe-report.service.js'
 import { getFleetTankState } from './fuel-tank-state.service.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery } from './fuel.schema.js'
@@ -54,6 +55,42 @@ export const createTheft: RequestHandler = async (req, res, next) => {
  * per-vehicle endpoint would have the dashboard fire 200 requests against a
  * 100 req/60s limit.
  */
+/**
+ * Every probe and sensor on the fleet, with its state, its history and what it
+ * is fitted to — see probe-report.service.
+ *
+ * Whole-fleet and unpaginated, like `tank-state`: the grid draws every unit at
+ * once and an operator triaging faults is reading the WHOLE list, not a page of
+ * it. Served from a ten-minute cache because the build scans a month of
+ * telemetry; probe faults do not move faster than that.
+ *
+ * `?state=` narrows to what wants attention, which is the view the report is
+ * generated from. Anything else returns the fleet.
+ */
+export const listProbeHealth: RequestHandler = async (req, res, next) => {
+  try {
+    const rows = await getProbeReport(p(req, 'orgId'))
+    const state = String(req.query['state'] ?? '').toLowerCase()
+    const filtered = state === 'faulty'  ? rows.filter(r => r.needsAttention)
+                   : state === 'healthy' ? rows.filter(r => !r.needsAttention)
+                   : rows
+    sendSuccess(res, {
+      rows: filtered,
+      // Counted over the WHOLE fleet, not the filtered set: the tallies are
+      // what the operator filters BY, so they must not move when they do.
+      summary: {
+        total:        rows.length,
+        needsAttention: rows.filter(r => r.needsAttention).length,
+        probeDied:    rows.filter(r => r.fuelProbe.state === 'DIED').length,
+        probeSilent:  rows.filter(r => r.fuelProbe.state === 'SILENT').length,
+        probeOk:      rows.filter(r => r.fuelProbe.state === 'OK').length,
+        sensorUncalibrated: rows.filter(r => r.fuelSensor.uncalibrated).length,
+      },
+      generatedAt: new Date().toISOString(),
+    })
+  } catch (err) { next(err) }
+}
+
 export const listTankState: RequestHandler = async (req, res, next) => {
   try {
     // `?date=YYYY-MM-DD` reads the tank as it stood at the END of that fleet
