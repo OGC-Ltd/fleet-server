@@ -89,12 +89,31 @@ const DWELL_MS = 3 * 60_000
  * How recently a vehicle must have MOVED for a boundary change to count as a
  * crossing.
  *
- * A parked vehicle cannot cross a fence. Its fix still wanders — measured over
- * 12 hours of live crossings, 277 of 2,319 (11.9%) fired while the unit's own
- * telemetry reported a top speed of exactly 0 km/h across a four-minute window
- * around the event. That is GPS drift on a machine standing near a boundary,
- * and it survives DWELL_MS because drift is persistent: it holds the wrong side
- * for minutes at a time, which is precisely what the dwell was built to trust.
+ * A parked vehicle cannot cross a fence. Its fix still wanders, and that drift
+ * survives DWELL_MS because it is persistent — it holds the wrong side for
+ * minutes at a time, which is precisely what the dwell was built to trust.
+ *
+ * ## How much this actually removes, measured rather than assumed
+ *
+ * 11.9% of crossings fire while the vehicle reads 0 km/h across a four-minute
+ * window, which looks like a large jitter population and is not one. Asking
+ * when those units last ACTUALLY moved, over 401 such crossings in 24 h:
+ *
+ *     moved < 13 min ago                333   83.0%   <- real, not drift
+ *     moved 13-60 min ago                53   13.2%
+ *     moved 1-6 h ago                    11    2.7%
+ *     moved over 6 h ago                  4    1.0%
+ *
+ * "Stationary at the moment of crossing" is NOT "drifting while parked". Five
+ * in six of them had driven within the previous quarter hour: they pulled up to
+ * a boundary and stopped, or stopped just after crossing it, and the crossing
+ * is real. This gate deliberately leaves those alone and removes the ~17% that
+ * had genuinely stood still — roughly 68 items a day against 3,481 zone
+ * crossings, so about 2% of zone traffic, not the 12% the raw figure suggests.
+ *
+ * That is a small win and it is the honest size of the problem. Zone volume is
+ * high because the machines really do cross constantly; it is not a defect, and
+ * widening this window to chase the other 83% would suppress real crossings.
  *
  * Not "moving right now", because a vehicle that drives in and parks
  * immediately is a real arrival whose every confirming frame reads zero. It was
