@@ -93,6 +93,23 @@ export interface ProbeReportRow {
     odometer:    ChannelHealth
     engineHours: ChannelHealth
   }
+  /**
+   * When this unit last sent ANY telemetry, at any point in its life. Null when
+   * it never has.
+   */
+  lastReportedAt: Date | null
+  /**
+   * The TRACKER has been silent for the whole lookback.
+   *
+   * A category the telemetry-only version could not represent at all, because
+   * it was built by grouping telemetry: a unit with none simply had no row.
+   * Measured on SUKARI 2026-08-20, 66 of 284 tracked units are in this state —
+   * a device registered, provisioned and silent, several for over a year. They
+   * are not a probe fault and no channel on them can be judged; the fault is
+   * upstream of every question this report otherwise asks, which is exactly why
+   * hiding them was wrong.
+   */
+  trackerSilent: boolean
   /** True when anything on this unit wants attention. Drives the default filter. */
   needsAttention: boolean
 }
@@ -171,15 +188,17 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
        ${orgFilter}
      GROUP BY 1`
 
+  // The units that reported. NOT the population — see step 5, which starts from
+  // the registry so a unit with no telemetry still gets a row.
   const vehicleIds = rows.map(r => r.vehicle_id)
-  if (vehicleIds.length === 0) return []
+  const aggByVehicle = new Map(rows.map(r => [r.vehicle_id, r]))
 
   // ── 2. the dead window: what each unit is reporting now ──────────────────
   // GPS and ignition presence live here rather than in the month's scan. The
   // question they answer is "is this channel alive today", and asking it of
   // 436 k rows instead of 8.8 M is the difference between running and timing
   // out. The newest row's id is carried out for step 3.
-  const recent = await prisma.$queryRaw<Array<{
+  const recent = vehicleIds.length === 0 ? [] : await prisma.$queryRaw<Array<{
     vehicle_id: string; latest_id: bigint; latest_at: Date
     gps_at: Date | null; ign_at: Date | null
   }>>`
@@ -226,18 +245,39 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
      ORDER BY t.vehicle_id, t.fuel_level_ml DESC NULLS LAST`
   const lastValueByVehicle = new Map(lastValues.map(v => [v.vehicle_id, v.fuel_level_ml]))
 
-  // ── 5. registry and provider configuration ───────────────────────────────
+  // ── 5. the population, from the REGISTRY ─────────────────────────────────
+  //
+  // Every active unit with a tracker bound — not every unit that reported. The
+  // difference is the point: a unit whose tracker has said nothing for a year
+  // has no telemetry to group, so a telemetry-first query cannot produce a row
+  // for it, and it was invisible. On SUKARI that is 66 of 284.
   const vehicles = await prisma.vehicle.findMany({
-    where:  { id: { in: vehicleIds } },
+    where: {
+      isActive: true,
+      deviceId: { startsWith: 'wialon:' },
+      ...(opts.orgId ? { organisationId: opts.orgId } : {}),
+    },
     select: {
       id: true, registrationPlate: true, name: true, deviceId: true,
       organisation: { select: { code: true } },
     },
   })
-  const vehicleById = new Map(vehicles.map(v => [v.id, v]))
+
+  // How long the silent ones have been silent. Asked only of those units and
+  // served by (vehicle_id, captured_at) as a backward index scan, so it is a
+  // few dozen key lookups rather than a scan of the table.
+  const darkIds = vehicles.filter(v => !aggByVehicle.has(v.id)).map(v => v.id)
+  const lastSeen = darkIds.length === 0 ? [] : await prisma.$queryRaw<Array<{
+    vehicle_id: string; last_at: Date | null
+  }>>`
+    SELECT vehicle_id, max(captured_at) AS last_at
+      FROM vehicle_telemetries
+     WHERE vehicle_id IN (${Prisma.join(darkIds)})
+     GROUP BY 1`
+  const lastSeenByVehicle = new Map(lastSeen.map(l => [l.vehicle_id, l.last_at]))
 
   const sensors = await prisma.vehicleSensor.findMany({
-    where:  { type: FUEL_SENSOR_TYPE, vehicleId: { in: vehicleIds } },
+    where:  { type: FUEL_SENSOR_TYPE, vehicleId: { in: vehicles.map(v => v.id) } },
     select: {
       vehicleId: true, name: true, parameter: true,
       calibrationPoints: true, calibratedMax: true,
@@ -250,24 +290,27 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
   for (const s of sensors) if (!sensorByVehicle.has(s.vehicleId)) sensorByVehicle.set(s.vehicleId, s)
 
   const out: ProbeReportRow[] = []
-  for (const r of rows) {
-    const v = vehicleById.get(r.vehicle_id)
-    if (!v) continue
+  // Over the REGISTRY, so a unit with no telemetry still produces a row. `r` is
+  // undefined for those, and every channel below resolves to UNKNOWN — which is
+  // the honest answer: with no readings there is nothing to judge.
+  for (const v of vehicles) {
+    const r = aggByVehicle.get(v.id)
+    const trackerSilent = r == null
 
-    const pings  = Number(r.pings)
+    const pings  = r ? Number(r.pings) : 0
     const enough = pings >= MIN_PINGS
 
     const verdict = classifyProbe({
       pings,
-      levelPings:   Number(r.level_pings),
-      peakMl:       r.peak_ml,
-      lastAliveAt:  r.last_alive_at,
-      recentPings:  Number(r.recent_pings),
-      recentPeakMl: r.recent_peak_ml,
-      recentMoving: Number(r.recent_moving),
+      levelPings:   r ? Number(r.level_pings) : 0,
+      peakMl:       r?.peak_ml ?? null,
+      lastAliveAt:  r?.last_alive_at ?? null,
+      recentPings:  r ? Number(r.recent_pings) : 0,
+      recentPeakMl: r?.recent_peak_ml ?? null,
+      recentMoving: r ? Number(r.recent_moving) : 0,
     })
 
-    const cfg = sensorByVehicle.get(r.vehicle_id)
+    const cfg = sensorByVehicle.get(v.id)
     const fuelSensor: FuelSensorConfig = {
       fitted:            cfg != null,
       name:              cfg?.name ?? null,
@@ -277,7 +320,7 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
       uncalibrated:      cfg != null && cfg.calibrationPoints === 0,
     }
 
-    const rec = recentByVehicle.get(r.vehicle_id)
+    const rec = recentByVehicle.get(v.id)
     const ctr = rec ? counterById.get(String(rec.latest_id)) : undefined
     // A counter reads UNKNOWN rather than NOT_FITTED when the unit has been
     // quiet: one day of silence says nothing about what is installed on it.
@@ -294,25 +337,31 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
     }
 
     out.push({
-      vehicleId: r.vehicle_id,
+      vehicleId: v.id,
       plate:     v.registrationPlate,
       name:      v.name,
       deviceId:  v.deviceId,
       orgCode:   v.organisation?.code ?? '',
       fuelProbe: {
         state:       verdict.state,
-        reason:      verdict.reason,
-        lastAliveAt: r.last_alive_at,
-        lastValueMl: lastValueByVehicle.get(r.vehicle_id) ?? null,
-        lastSeenAt:  r.last_level_at,
+        reason:      trackerSilent ? 'tracker-silent' : verdict.reason,
+        lastAliveAt: r?.last_alive_at ?? null,
+        lastValueMl: lastValueByVehicle.get(v.id) ?? null,
+        lastSeenAt:  r?.last_level_at ?? null,
         pings,
       },
       fuelSensor,
       channels,
+      // For a reporting unit the newest frame in the dead window; for a silent
+      // one the last time it EVER spoke, which is the number that says how long
+      // this has been going on.
+      lastReportedAt: r ? (rec?.latest_at ?? null) : (lastSeenByVehicle.get(v.id) ?? null),
+      trackerSilent,
       // A dead probe, a sensor nobody calibrated, or a channel that has gone
       // quiet on a unit still reporting. NOT_FITTED is not attention — nothing
       // is broken about a machine that never had the hardware.
       needsAttention:
+        trackerSilent ||
         verdict.state === 'DIED' || verdict.state === 'SILENT' ||
         fuelSensor.uncalibrated ||
         Object.values(channels).some(c => c.state === 'NOT_REPORTING'),

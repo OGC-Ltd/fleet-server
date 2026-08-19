@@ -85,6 +85,9 @@ export const listProbeHealth: RequestHandler = async (req, res, next) => {
         probeSilent:  rows.filter(r => r.fuelProbe.state === 'SILENT').length,
         probeOk:      rows.filter(r => r.fuelProbe.state === 'OK').length,
         sensorUncalibrated: rows.filter(r => r.fuelSensor.uncalibrated).length,
+        // Provisioned and saying nothing. Counted separately because it is not
+        // a probe fault — no channel on the unit can be judged at all.
+        trackerSilent:      rows.filter(r => r.trackerSilent).length,
       },
       generatedAt: new Date().toISOString(),
     })
