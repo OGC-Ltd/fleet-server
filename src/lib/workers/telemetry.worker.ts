@@ -170,6 +170,8 @@ export function startTelemetryWorker(): () => void {
       void trackZonePresence({
         orgId, vehicleId, plate, driverName,
         lat: payload.lat, lng: payload.lng, capturedAt: payload.capturedAt,
+        // Lets zone-presence tell a crossing from drift on a parked machine.
+        speedKmh: payload.speedKmh,
       }).catch(err => logger.warn({ err, vehicleId }, 'Zone presence tracking failed'))
 
       // The MEASURED "left the yard" — the provider's own EXIT event fires

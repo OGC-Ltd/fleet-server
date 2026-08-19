@@ -86,6 +86,44 @@ const pending = new Map<string, Map<string, { inside: boolean; since: number }>>
 const DWELL_MS = 3 * 60_000
 
 /**
+ * How recently a vehicle must have MOVED for a boundary change to count as a
+ * crossing.
+ *
+ * A parked vehicle cannot cross a fence. Its fix still wanders — measured over
+ * 12 hours of live crossings, 277 of 2,319 (11.9%) fired while the unit's own
+ * telemetry reported a top speed of exactly 0 km/h across a four-minute window
+ * around the event. That is GPS drift on a machine standing near a boundary,
+ * and it survives DWELL_MS because drift is persistent: it holds the wrong side
+ * for minutes at a time, which is precisely what the dwell was built to trust.
+ *
+ * Not "moving right now", because a vehicle that drives in and parks
+ * immediately is a real arrival whose every confirming frame reads zero. It was
+ * moving a minute ago; a unit that has stood still for hours was not, and that
+ * gap is what this separates.
+ *
+ * Expressed as DWELL_MS plus ten minutes rather than a flat figure, because the
+ * two are coupled: the check runs only AFTER the dwell has elapsed, so any
+ * grace shorter than the dwell could never pass, and a grace only slightly
+ * longer leaves a park-on-arrival at the mercy of the frame rate. Measured
+ * 2026-08-19, frame gaps run p50 28 s and p90 34 s — six frames to satisfy the
+ * dwell — but p99 is 905 s, so sparse reporters do exist and a flat five
+ * minutes would have silenced their genuine arrivals. Ten minutes of slack past
+ * the dwell covers them and still separates a machine parked for hours by a
+ * wide margin.
+ */
+const MOVEMENT_GRACE_MS = DWELL_MS + 10 * 60_000
+
+/**
+ * When each vehicle was last seen moving. Keyed by vehicle, bounded by the
+ * fleet.
+ *
+ * A frame with no speed at all leaves no entry and is treated as MOVING at the
+ * check below — an absent reading is not evidence of stillness, and failing
+ * open keeps a provider that omits speed narrating normally.
+ */
+const lastMovingAt = new Map<string, number>()
+
+/**
  * vehicleId → the geofence ids ASSIGNED to it (vehicle_geofences).
  *
  * Presence above is computed against every zone in the org, because the feed
@@ -272,6 +310,12 @@ export interface ZonePresenceInput {
   lat:        number | null
   lng:        number | null
   capturedAt: string
+  /**
+   * The frame's speed, used to tell a crossing from GPS drift on a parked
+   * machine — see MOVEMENT_GRACE_MS. Optional: undefined means the caller
+   * cannot say, and the crossing is trusted as before.
+   */
+  speedKmh?:  number | null
 }
 
 /**
@@ -281,6 +325,14 @@ export interface ZonePresenceInput {
 export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
   const { lat, lng } = p
   if (lat == null || lng == null || !Number.isFinite(lat) || !Number.isFinite(lng)) return
+
+  // The movement clock, stamped before any early return below. "Was this unit
+  // moving lately" is a question about the VEHICLE, and the first frame after a
+  // restart — the one that seeds presence and announces nothing — carries the
+  // speed that proves a subsequent arrival was real. Recording it after that
+  // return lost exactly the frame that mattered.
+  const at = Date.parse(p.capturedAt) || Date.now()
+  if (p.speedKmh != null && p.speedKmh > 0) lastMovingAt.set(p.vehicleId, at)
 
   const zones = await getZones(p.orgId)
   if (zones.length === 0) return
@@ -298,8 +350,21 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
   // restart would report the whole fleet "arriving" where it already was.
   if (!before) return
 
-  const at = Date.parse(p.capturedAt) || Date.now()
   const who = p.driverName ? `${p.plate} · ${p.driverName}` : p.plate
+
+  /**
+   * Could this vehicle have crossed anything?
+   *
+   * True when the provider gave no speed at all, so a feed never goes quiet
+   * because a frame was thin. `at` can precede the recorded moment when frames
+   * arrive out of order, and an absolute difference treats that as recent
+   * rather than as centuries of stillness.
+   */
+  const couldHaveCrossed = (): boolean => {
+    if (p.speedKmh == null) return true
+    const seen = lastMovingAt.get(p.vehicleId)
+    return seen != null && Math.abs(at - seen) <= MOVEMENT_GRACE_MS
+  }
 
   // What the feed currently believes, seeded from the raw set on first sight so
   // a restart does not replay the fleet's existing positions as arrivals.
@@ -332,6 +397,15 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
     const p0 = waiting.get(z.id)
     if (!p0 || p0.inside !== isIn) { waiting.set(z.id, { inside: isIn, since: at }); continue }
     if (at - p0.since < DWELL_MS) continue
+
+    // Held long enough to be real, but only a vehicle that has MOVED can have
+    // crossed. Deliberately `continue` WITHOUT clearing the pending entry: the
+    // change is still observed and still waiting, so if the unit later drives
+    // off it announces then, and if it drifts back the side-flip clears it. A
+    // delete here would re-arm the dwell and let drift announce on the next
+    // wobble, which is the bug rather than the fix.
+    if (!couldHaveCrossed()) continue
+
     waiting.delete(z.id)
 
     const key = `${p.vehicleId}:${z.id}:${isIn ? 'in' : 'out'}`
