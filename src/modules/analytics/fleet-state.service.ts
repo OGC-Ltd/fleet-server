@@ -126,11 +126,36 @@ export interface FleetStateRow {
   areaMonthAvgKm2: number | null
 }
 
+/**
+ * How much of the fleet the system can actually see.
+ *
+ * A different question from what the units are DOING, and the one that matters
+ * on a fleet whose vehicles mostly carry no tracker: measured on SUKARI, 284 of
+ * 597 active vehicles have a device bound at all, so the working/idling/parked
+ * split describes under half the yard and says nothing about the other half.
+ *
+ * The three counts are disjoint and sum to `total`, which is what lets them be
+ * drawn as one ring. "Monitored" is the two tracked slices together; it is not
+ * a slice of its own, because a category that contains another category cannot
+ * be a wedge beside it.
+ */
+export interface FleetMonitoring {
+  /** Every active vehicle on the org, tracked or not. */
+  total: number
+  /** Tracked and seen inside the online window. */
+  reportingNow: number
+  /** Tracked, but nothing inside the window — provisioned and quiet. */
+  trackedSilent: number
+  /** No device bound at all. Not a fault; most of a haulage fleet. */
+  untracked: number
+}
+
 export interface FleetState {
   counts: Record<UnitState, number>
   /** State by machine category, for the donut's breakdown. */
   byCategory: Array<{ category: string; working: number; idling: number; parked: number; offline: number }>
   units: FleetStateRow[]
+  monitoring: FleetMonitoring
 }
 
 export async function fleetState(orgId: string): Promise<FleetState> {
@@ -282,6 +307,28 @@ export async function fleetState(orgId: string): Promise<FleetState> {
      GROUP BY 1`
   const areaByVehicle = new Map(areaRows.map(a => [a.vehicle_id, a]))
 
+  // Coverage, in one pass. `device_id LIKE 'wialon:%'` is the same test the
+  // probe report uses for "has a tracker at all" — kept identical so the two
+  // cards cannot disagree about how many units are monitored.
+  const [cover] = await prisma.$queryRaw<Array<{
+    total: bigint; reporting: bigint; tracked: bigint
+  }>>`
+    SELECT count(*)::bigint AS total,
+           count(*) FILTER (WHERE v.device_id LIKE 'wialon:%')::bigint AS tracked,
+           count(*) FILTER (WHERE v.device_id LIKE 'wialon:%' AND EXISTS (
+             SELECT 1 FROM vehicle_telemetries t
+              WHERE t.vehicle_id = v.id AND t.captured_at >= ${onlineAt}
+           ))::bigint AS reporting
+      FROM vehicles v
+     WHERE v.organisation_id = ${orgId} AND v.is_active`
+
+  const monitoring: FleetMonitoring = {
+    total:         Number(cover?.total ?? 0),
+    reportingNow:  Number(cover?.reporting ?? 0),
+    trackedSilent: Number(cover?.tracked ?? 0) - Number(cover?.reporting ?? 0),
+    untracked:     Number(cover?.total ?? 0) - Number(cover?.tracked ?? 0),
+  }
+
   const vehicles = await prisma.vehicle.findMany({
     where:  { organisationId: orgId, isActive: true },
     select: { id: true, registrationPlate: true },
@@ -360,6 +407,7 @@ export async function fleetState(orgId: string): Promise<FleetState> {
 
   return {
     counts,
+    monitoring,
     // Most units first — a category of two should not head the breakdown.
     byCategory: [...cats.values()]
       .sort((a, b) => (b.working + b.idling + b.parked + b.offline) - (a.working + a.idling + a.parked + a.offline)),
