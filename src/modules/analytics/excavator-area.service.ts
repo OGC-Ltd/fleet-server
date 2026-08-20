@@ -206,10 +206,17 @@ export async function getExcavatorArea(orgId: string, day?: Date) {
  * different claims for a heatmap to make.
  */
 export async function areaByDay(
-  orgId: string, days = 30,
+  orgId: string, days = 30, to?: Date,
 ): Promise<{ days: Array<{ day: string; m2: number; km2: number; machines: number }>
              totalM2: number; measuredDays: number; windowDays: number }> {
-  const from = fleetDayKey(new Date(fleetDayStart().getTime() - (days - 1) * 86_400_000))
+  // Anchored, not rolling. The page is driven by a month picker, so the window
+  // has to be the month the operator chose — 1st to today for the current one,
+  // 1st to last for a past one. `to` is the same anchor the delivery analytics
+  // take, and `days` the same length, so a heatmap and the figures beside it
+  // cannot end up describing different stretches of time.
+  const anchor  = to ?? new Date()
+  const lastDay = fleetDayKey(anchor)
+  const from    = fleetDayKey(new Date(fleetDayStart(anchor).getTime() - (days - 1) * 86_400_000))
 
   const rows = await prisma.$queryRaw<Array<{ day: Date; m2: number; machines: bigint }>>`
     SELECT s.day,
@@ -221,6 +228,7 @@ export async function areaByDay(
        AND v.is_active
        AND s.dig_area_m2 IS NOT NULL
        AND s.day >= ${from}
+       AND s.day <= ${lastDay}
      GROUP BY 1
      ORDER BY 1`
 
@@ -246,13 +254,16 @@ export async function areaByDay(
 const dayCache = createWarmCache<Awaited<ReturnType<typeof areaByDay>>>({
   name: 'excavator-area-by-day',
   refreshMs: AREA_REFRESH_MS,
-  warmKeysFor: (orgId) => [`${orgId}|30`],
+  // Only the current month is warmed. A past month is immutable and asked for
+  // occasionally; warming every month anyone had ever paged to would keep the
+  // sweep rebuilding history nobody is looking at.
+  warmKeysFor: (orgId) => [`${orgId}|31|now`],
   compute: (key) => {
-    const sep = key.lastIndexOf('|')
-    return areaByDay(key.slice(0, sep), Number(key.slice(sep + 1)))
+    const [orgId, days, anchor] = key.split('|')
+    return areaByDay(orgId, Number(days), anchor === 'now' ? undefined : new Date(anchor))
   },
 })
 
-export async function getAreaByDay(orgId: string, days = 30) {
-  return dayCache.get(`${orgId}|${days}`)
+export async function getAreaByDay(orgId: string, days = 30, to?: Date) {
+  return dayCache.get(`${orgId}|${days}|${to ? to.toISOString() : 'now'}`)
 }
