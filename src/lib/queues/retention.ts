@@ -42,7 +42,7 @@ import { trimCachedNotifications } from '../notifications/notification-cache.js'
 import { syncSensorInventory } from '../../modules/fuel/sensor-inventory.service.js'
 import { sweepProbeHealth } from '../../modules/fuel/fuel-probe-health.service.js'
 import { adjudicateFillings } from '../../modules/fuel/fuel-filling-adjudication.service.js'
-import { recordFuelTrends } from '../../modules/fuel/fuel-trend.service.js'
+import { recordFuelTrendsWithCatchUp } from '../../modules/fuel/fuel-trend.service.js'
 import { recordVehicleDailyStats } from '../../modules/analytics/vehicle-daily-stats.service.js'
 import { deriveFuelRates } from '../../modules/fuel/fuel-rate.service.js'
 
@@ -345,7 +345,9 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
 
   worker = new Worker(RETENTION_QUEUE, async (job: Job) => {
     // Records the day that just ended, not the one starting.
-    if (job.name === TREND_JOB) return recordFuelTrends(new Date(Date.now() - 30 * 60_000))
+    // WithCatchUp: three attempts inside five minutes is not enough to survive
+    // a busy hour, and a day lost that way stayed lost — see 2026-08-17.
+    if (job.name === TREND_JOB) return recordFuelTrendsWithCatchUp(new Date(Date.now() - 30 * 60_000))
     if (job.name === STATS_JOB) return recordVehicleDailyStats(new Date(Date.now() - 30 * 60_000))
     if (job.name === RATE_JOB) return deriveFuelRates({ apply: true })
     if (job.name === FILLING_JOB) return adjudicateFillings({ apply: true })
