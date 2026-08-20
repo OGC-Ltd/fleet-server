@@ -35,6 +35,8 @@
 
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
+import { createWarmCache } from '../../lib/warm-cache.js'
+import { logger } from '../../lib/logger.js'
 import {
   classifyProbe, LOOKBACK_DAYS, DEAD_HOURS, MIN_PINGS,
   type ProbeState,
@@ -164,6 +166,14 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
   const deadFrom  = new Date(now.getTime() - DEAD_HOURS * 3_600_000)
   const orgFilter = opts.orgId ? Prisma.sql`AND v.organisation_id = ${opts.orgId}` : Prisma.empty
 
+  // Per-stage timing. The build is six sequential round trips and we know only
+  // the total; this says which one to attack next without an EXPLAIN, which
+  // needs database access the deploy path does not have.
+  const t0 = Date.now()
+  let mark = t0
+  const ms: Record<string, number> = {}
+  const lap = (stage: string): void => { const n = Date.now(); ms[stage] = n - mark; mark = n }
+
   // ── 1. the month, in the shape that completes ────────────────────────────
   const rows = await prisma.$queryRaw<Array<{
     vehicle_id: string
@@ -187,6 +197,8 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
        AND v.is_active
        ${orgFilter}
      GROUP BY 1`
+
+  lap('month')
 
   // The units that reported. NOT the population — see step 5, which starts from
   // the registry so a unit with no telemetry still gets a row.
@@ -216,6 +228,8 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
      GROUP BY 1`
   const recentByVehicle = new Map(recent.map(r => [r.vehicle_id, r]))
 
+  lap('recent')
+
   // ── 3. the counters, by primary key ──────────────────────────────────────
   // Odometer and engine hours are not columns; they sit in the raw payload.
   // Joined on the few hundred ids from step 2 rather than across the window,
@@ -231,6 +245,8 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
      WHERE r.telemetry_id IN (${Prisma.join(latestIds)})`
   const counterById = new Map(counters.map(c => [String(c.telemetry_id), c]))
 
+  lap('counters')
+
   // ── 4. what the probe read when it was last alive ────────────────────────
   const alivePairs = rows
     .filter(r => r.last_alive_at != null)
@@ -244,6 +260,8 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
         ON w.vehicle_id = t.vehicle_id AND w.captured_at = t.captured_at
      ORDER BY t.vehicle_id, t.fuel_level_ml DESC NULLS LAST`
   const lastValueByVehicle = new Map(lastValues.map(v => [v.vehicle_id, v.fuel_level_ml]))
+
+  lap('lastValues')
 
   // ── 5. the population, from the REGISTRY ─────────────────────────────────
   //
@@ -367,33 +385,39 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
         Object.values(channels).some(c => c.state === 'NOT_REPORTING'),
     })
   }
+  lap('assemble')
+  logger.info({ orgId: opts.orgId ?? 'all', totalMs: Date.now() - t0, ms, units: out.length },
+    'probe report built')
   return out
 }
 
 /**
- * How long a built report stays fresh.
+ * How old a built report may get before it is rebuilt.
  *
- * Probe faults move on the scale of days and the build costs about fifteen
- * seconds, so this is emphatically not a per-request job.
+ * Unchanged from the TTL this replaced: probe faults move on the scale of days,
+ * so ten minutes is generous. What changed is WHO waits for the rebuild.
+ *
+ * The previous cache expired hard — past ten minutes the next request found no
+ * entry and blocked on the whole build. Measured against production KASULU on
+ * 2026-08-20 that was **36.6 s** for the unlucky visitor and 1.1 s for everyone
+ * after, which is precisely the "thirty seconds or more" the maintenance page
+ * was reported to take. It was never a slow page; it was a fast page that
+ * periodically made one person rebuild it.
+ *
+ * The database does exactly as much work as before — one build per org per ten
+ * minutes. It now happens on the warmer's clock instead of a request's.
  */
-const CACHE_TTL_MS = 10 * 60_000
+const REFRESH_MS = 10 * 60_000
 
-const cache    = new Map<string, { at: number; rows: ProbeReportRow[] }>()
-/** Concurrent callers for one org share a single build rather than each
- *  starting their own fifteen-second scan. */
-const inflight = new Map<string, Promise<ProbeReportRow[]>>()
+const reportCache = createWarmCache<ProbeReportRow[]>({
+  name: 'probe-report',
+  refreshMs: REFRESH_MS,
+  // Primed at boot and kept hot per org, so even the first request of the
+  // process is served from memory.
+  warmKeysFor: (orgId) => [orgId],
+  compute: (key) => buildProbeReport({ orgId: key === 'all' ? undefined : key }),
+})
 
 export async function getProbeReport(orgId?: string): Promise<ProbeReportRow[]> {
-  const key = orgId ?? 'all'
-  const hit = cache.get(key)
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.rows
-
-  const running = inflight.get(key)
-  if (running) return running
-
-  const p = buildProbeReport({ orgId })
-    .then((built) => { cache.set(key, { at: Date.now(), rows: built }); return built })
-    .finally(() => { inflight.delete(key) })
-  inflight.set(key, p)
-  return p
+  return reportCache.get(orgId ?? 'all')
 }
