@@ -20,6 +20,9 @@ import { logger } from './logger.js'
 
 const REFRESH_MS = 60_000
 
+/** Above this, a build is worth a log line — see the note in `refresh`. */
+const SLOW_BUILD_MS = 1_000
+
 interface Registered {
   name:    string
   keysFor: (orgId: string) => string[]
@@ -89,7 +92,19 @@ export function createWarmCache<T>(opts: {
     if (running) return running
 
     const p = (async () => {
+      // Every cache's build cost, in one place. Which endpoint is expensive is
+      // otherwise invisible: the whole point of this cache is that nobody waits
+      // for the build, so a query that has quietly grown to fifteen seconds
+      // looks exactly like one that takes fifty milliseconds from outside. The
+      // probe report sat at 36 s for weeks on that basis.
+      const startedAt = Date.now()
       const data = await opts.compute(key)
+      const ms = Date.now() - startedAt
+      // Only the slow ones. A line per cache per sweep per org would be a
+      // thousand lines a day saying nothing.
+      if (ms >= SLOW_BUILD_MS) {
+        logger.info({ cache: opts.name, key, ms }, 'warm-cache slow build')
+      }
       if (store.size >= maxEntries && !store.has(key)) {
         let oldest: string | null = null, oldestAt = Infinity
         for (const [k, e] of store) if (e.fetchedAt < oldestAt) { oldestAt = e.fetchedAt; oldest = k }
