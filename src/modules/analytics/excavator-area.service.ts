@@ -137,7 +137,20 @@ export async function excavatorAreaByDay(
   })
 
   return {
-    day: start.toISOString(),
+  // The fleet day's own DATE, not the instant it began.
+  //
+  // A fleet day starts at 21:00 UTC the previous evening, so returning that
+  // instant labelled the day one earlier than the day it describes, and every
+  // reader had to know the convention to undo it. Neither did. The dash's
+  // fmtDay appends "T00:00:00Z" to whatever it is given, so a full ISO string
+  // became "...ZT00:00:00Z" and rendered "Invalid Date"; FleetStateSection
+  // formatted the instant in the VIEWER's timezone, so a reader in Nairobi and
+  // a reader in London saw different dates for the same figures.
+  //
+  // A bare YYYY-MM-DD has no timezone to get wrong, and it matches what every
+  // other endpoint already returns — fuel trends, vehicle daily stats and the
+  // telemetry repository all send fleetDayKey sliced to ten characters.
+    day: fleetDayKey(new Date(start.getTime() + 1)).toISOString().slice(0, 10),
     reachMetres: REACH_METRES,
     units,
     totalM2: units.reduce((a, u) => a + u.areaM2, 0),
