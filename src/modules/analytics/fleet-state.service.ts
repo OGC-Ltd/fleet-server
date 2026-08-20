@@ -168,6 +168,24 @@ export async function fleetState(orgId: string): Promise<FleetState> {
   const onlineAt = new Date(now.getTime() - ONLINE_WINDOW_MINUTES * 60_000)
   const weekFrom  = new Date(today.getTime() -  6 * 24 * 3_600_000)
   const monthFrom = new Date(today.getTime() - 29 * 24 * 3_600_000)
+  // The same two boundaries as fuel_daily_trends files its rows under.
+  //
+  // The rollup query below compared `${weekFrom}::date` against a DATE column.
+  // `weekFrom` is 21:00 UTC six evenings ago — the fleet day's start — and
+  // casting that in a UTC session yields the PREVIOUS calendar date, so the
+  // window reached a day further back than the one it was named for: measured
+  // 2026-08-20, '2026-08-13' where the fleet day is '2026-08-14'. The week
+  // averaged eight days and called itself seven.
+  //
+  // It went unnoticed while every figure in the service shared the same wrong
+  // boundary. Reading the idle ratio from the rollup surfaced it, because that
+  // query used fleetDayKey and three KASULU units came back with a different
+  // week average from the neighbouring numerator.
+  //
+  // fleetDayKey is the one place this conversion is allowed to happen — the
+  // same fix fuel-trend.service took on 2026-08-14, for the same reason.
+  const weekFromDay  = fleetDayKey(weekFrom)
+  const monthFromDay = fleetDayKey(monthFrom)
 
   // ── the live state, from each unit's newest frame ────────────────────────
   const live = await prisma.$queryRaw<Array<{
@@ -189,16 +207,16 @@ export async function fleetState(orgId: string): Promise<FleetState> {
     month_s: bigint; month_m: bigint; month_days: bigint
   }>>`
     SELECT t.vehicle_id,
-           coalesce(sum(t.engine_seconds) FILTER (WHERE t.day >= ${weekFrom}::date), 0)::bigint AS week_s,
-           coalesce(sum(t.distance_m)     FILTER (WHERE t.day >= ${weekFrom}::date), 0)::bigint AS week_m,
-           count(*) FILTER (WHERE t.day >= ${weekFrom}::date)::bigint AS week_days,
+           coalesce(sum(t.engine_seconds) FILTER (WHERE t.day >= ${weekFromDay}), 0)::bigint AS week_s,
+           coalesce(sum(t.distance_m)     FILTER (WHERE t.day >= ${weekFromDay}), 0)::bigint AS week_m,
+           count(*) FILTER (WHERE t.day >= ${weekFromDay})::bigint AS week_days,
            coalesce(sum(t.engine_seconds), 0)::bigint AS month_s,
            coalesce(sum(t.distance_m), 0)::bigint     AS month_m,
            count(*)::bigint                           AS month_days
       FROM fuel_daily_trends t
       JOIN vehicles v ON v.id = t.vehicle_id
      WHERE v.organisation_id = ${orgId} AND v.is_active
-       AND t.day >= ${monthFrom}::date
+       AND t.day >= ${monthFromDay}
      GROUP BY 1`
   const rollupByVehicle = new Map(rollup.map(r => [r.vehicle_id, r]))
 
@@ -240,7 +258,7 @@ export async function fleetState(orgId: string): Promise<FleetState> {
     prisma.fuelDailyTrend.groupBy({
       by:    ['vehicleId'],
       where: {
-        day:     { gte: fleetDayKey(weekFrom) },
+        day:     { gte: weekFromDay },
         vehicle: { organisationId: orgId, isActive: true },
       },
       _sum: { engineFixes: true, idleFixes: true },
