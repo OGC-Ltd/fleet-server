@@ -1,6 +1,7 @@
 import type { RequestHandler } from 'express'
 import { earlyStartsByCategory, operatingHoursByCategory, fleetWeekSummary } from './machine-operations.service.js'
 import { getFleetState } from './fleet-state.service.js'
+import { getExcavatorArea } from './excavator-area.service.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { env } from '../../config/env.js'
 import * as repo from './analytics.repository.js'
@@ -111,6 +112,16 @@ export const machineSummary: RequestHandler = async (req, res, next) => {
 export const fleetStateHandler: RequestHandler = async (req, res, next) => {
   try {
     sendSuccess(res, await getFleetState(p(req, 'orgId')))
+  } catch (err) { next(err) }
+}
+
+/** Ground each excavator worked over, and the hours it spent — see
+ *  excavator-area.service. Defaults to the last COMPLETE fleet day. */
+export const excavatorArea: RequestHandler = async (req, res, next) => {
+  try {
+    const asked = String(req.query['day'] ?? '')
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(asked) ? new Date(`${asked}T00:00:00Z`) : undefined
+    sendSuccess(res, await getExcavatorArea(p(req, 'orgId'), day))
   } catch (err) { next(err) }
 }
 
