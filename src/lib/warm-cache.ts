@@ -23,6 +23,9 @@ const REFRESH_MS = 60_000
 /** Above this, a build is worth a log line — see the note in `refresh`. */
 const SLOW_BUILD_MS = 1_000
 
+/** How many caches the sweep rebuilds at once. See the note in `sweep`. */
+const SWEEP_WIDTH = 2
+
 interface Registered {
   name:    string
   keysFor: (orgId: string) => string[]
@@ -172,12 +175,43 @@ export function startCacheWarmer(): () => void {
       const orgs = await prisma.organisation.findMany({ select: { id: true } })
       for (const org of orgs) {
         if (stopped) return
-        await Promise.all(registry.flatMap(reg =>
-          reg.keysFor(org.id).map(key =>
-            reg.refreshIfStale(key).catch(err =>
-              logger.warn({ err, cache: reg.name, key }, 'warm-cache sweep refresh failed')),
-          ),
-        ))
+
+        // Bounded, not Promise.all over the whole registry.
+        //
+        // Firing every cache at once looks like it should be free — they are
+        // independent queries and the database can interleave them. It is not,
+        // on this instance. Concurrent builds contend for the same starved
+        // buffer cache and the same fraction of a vCPU, and the measured effect
+        // is close to linear: the same query run three ways at once took 3x as
+        // long as it did alone. So the fan-out does not finish sooner, it just
+        // makes every build slower and holds more connections while doing it.
+        //
+        // Measured 2026-08-20 with fifteen caches registered, a boot sweep put
+        // excavator-area at 20.5 s against 8 s solo, fleet-state at 17.6 s
+        // against 7 s, and fleet-tank-state at 14.0 s against 6.4 s — every one
+        // of them roughly doubled by the company it was keeping.
+        //
+        // This is also the shape of the outage on 2026-08-10 03:00-04:00, when
+        // concurrent builds produced "Query read timeout" on open-trips,
+        // fleet-snapshot and dashboard-summary together and stretched one
+        // telemetry poll cycle to 418 s.
+        //
+        // A small width keeps one slow cache from serialising the whole sweep
+        // behind it while staying well short of the contention cliff.
+        const jobs = registry.flatMap(reg =>
+          reg.keysFor(org.id).map(key => ({ reg, key })))
+
+        let next = 0
+        await Promise.all(
+          Array.from({ length: Math.min(SWEEP_WIDTH, jobs.length) }, async () => {
+            for (;;) {
+              const j = jobs[next++]
+              if (!j || stopped) return
+              await j.reg.refreshIfStale(j.key).catch(err =>
+                logger.warn({ err, cache: j.reg.name, key: j.key }, 'warm-cache sweep refresh failed'))
+            }
+          }),
+        )
       }
     } catch (err) {
       logger.warn({ err }, 'warm-cache sweep failed')
