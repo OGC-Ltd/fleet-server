@@ -270,12 +270,19 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   // Repeatable jobs accumulate in Redis when their cron changes, so the old
   // schedulers are cleared first — otherwise changing the time leaves the
   // previous one firing forever alongside the new one.
+  //
+  // Every scheduler on this queue, not a list of names we happen to remember.
+  // The list version only removed jobs it already knew about, so RENAMING one
+  // orphaned the old scheduler permanently: `fuel:probe-daily-stats` became
+  // `vehicle:daily-stats` on 2026-08-20 and the old name kept its 21:40 slot,
+  // firing into a dispatcher with no branch for it. Harmless that time, because
+  // an unmatched name falls through and completes as a no-op — but it was one
+  // rename away from being a job nobody could see running.
+  //
+  // This queue's schedulers are all declared immediately below, so clearing
+  // them wholesale cannot drop one that belongs to somebody else.
   for (const r of await queue.getRepeatableJobs()) {
-    if (r.name === PRUNE_JOB || r.name === PROBE_JOB || r.name === FILLING_JOB
-     || r.name === TREND_JOB || r.name === RATE_JOB || r.name === SENSOR_JOB
-     || r.name === STATS_JOB) {
-      await queue.removeRepeatableByKey(r.key)
-    }
+    await queue.removeRepeatableByKey(r.key)
   }
 
   await queue.add(PRUNE_JOB, {}, {
