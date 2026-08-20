@@ -56,6 +56,16 @@ export const DIG_SPEED_KMH = 2
  *  the rollup's cap so these hours are the same measure as every other. */
 const MAX_GAP_SECONDS = 900
 
+/**
+ * Grid the digging positions are snapped to before they are deduplicated, in
+ * degrees. 5e-6 deg is about 0.55 m at this latitude.
+ *
+ * Sized against REACH_METRES rather than against GPS accuracy: the question is
+ * how far the snapped disc sits from the true one, and half a metre of centre
+ * shift on an eight-metre radius is under a tenth of the reach.
+ */
+const SNAP_DEGREES = 0.000005
+
 /** Fixes below which a day's geometry is too thin to report. */
 const MIN_DIG_FIXES = 20
 
@@ -106,22 +116,50 @@ export async function excavatorAreaByDay(
          AND NOT (t.lat = 0 AND t.lng = 0)
          AND t.engine_on = true
          AND coalesce(t.speed_kmh, 0) <= ${DIG_SPEED_KMH}
+    ),
+    -- Distinct DIGGING POSITIONS, and the per-vehicle totals, separately.
+    --
+    -- The union has to see each place the machine stood, not each frame it sent
+    -- while standing there. An excavator holds one spot for hours: MUFINDI - EX
+    -- 29 sent 12,371 digging frames on 2026-08-18, and buffering every one of
+    -- them built twelve thousand 33-vertex polygons to merge pairwise for a
+    -- single machine. Identical positions contribute nothing to a union, so
+    -- collapsing them first is free area and a far smaller computation.
+    --
+    -- Snapped to about half a metre before the DISTINCT, because raw GPS jitter
+    -- means a stationary machine never reports the exact same pair twice. Half
+    -- a metre against an eight-metre reach is well inside what this figure
+    -- already claims — an upper bound on ground the bucket could reach, not a
+    -- survey.
+    pos AS (
+      SELECT DISTINCT vehicle_id,
+             ST_SnapToGrid(ST_MakePoint(lng, lat), ${SNAP_DEGREES}) AS pt
+        FROM dig
+    ),
+    -- Counted over every frame, not over the distinct positions: these are
+    -- measurements of time and sampling, and deduplicating them would be wrong.
+    tot AS (
+      SELECT vehicle_id,
+             min(plate) AS plate,
+             coalesce(sum(least(gap, ${MAX_GAP_SECONDS})) FILTER (WHERE gap > 0), 0)::float8 AS dig_seconds,
+             count(*)::bigint AS dig_fixes
+        FROM dig GROUP BY vehicle_id
+    ),
+    area AS (
+      SELECT vehicle_id,
+             ST_Area(ST_Union(
+               ST_Buffer(pt::geography, ${REACH_METRES})::geometry
+             )::geography) AS area_m2
+        FROM pos GROUP BY vehicle_id
     )
-    SELECT vehicle_id,
-           min(plate) AS plate,
-           -- The union of the machine's reach at every place it dug.
-           ST_Area(ST_Union(
-             ST_Buffer(ST_MakePoint(lng, lat)::geography, ${REACH_METRES})::geometry
-           )::geography) AS area_m2,
-           -- Integrated, never a fix count times an assumed interval: the
-           -- sampling runs p50 28 s but p99 905 s, so any single interval is
-           -- wrong for most units and gave 103 hours inside a 24-hour day.
-           coalesce(sum(least(gap, ${MAX_GAP_SECONDS})) FILTER (WHERE gap > 0), 0)::float8 AS dig_seconds,
-           count(*)::bigint AS dig_fixes
-      FROM dig
-     GROUP BY vehicle_id
-    HAVING count(*) >= ${MIN_DIG_FIXES}
-     ORDER BY 3 DESC`
+    SELECT tot.vehicle_id,
+           tot.plate,
+           area.area_m2,
+           tot.dig_seconds,
+           tot.dig_fixes
+      FROM tot JOIN area ON area.vehicle_id = tot.vehicle_id
+     WHERE tot.dig_fixes >= ${MIN_DIG_FIXES}
+     ORDER BY area.area_m2 DESC`
 
   const units: ExcavatorDay[] = rows.map((r) => {
     const digHours = Math.round((r.dig_seconds / 3600) * 10) / 10
