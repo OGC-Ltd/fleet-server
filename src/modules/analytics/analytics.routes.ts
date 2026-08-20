@@ -26,6 +26,7 @@ router.get('/operations-today',     ctrl.operationsToday)
 router.get('/machine-starts',       ctrl.machineStarts)
 router.get('/machine-hours',        ctrl.machineHours)
 router.get('/machine-summary',      ctrl.machineSummary)
+router.get('/fleet-state',          ctrl.fleetStateHandler)
 router.get('/speeding',             validateQuery(speedingQuerySchema),   ctrl.speeding)
 router.get('/violation-heatmap',    validateQuery(analyticsRangeSchema), ctrl.violationHeatmap)
 
