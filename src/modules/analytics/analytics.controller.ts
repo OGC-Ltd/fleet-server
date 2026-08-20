@@ -1,5 +1,5 @@
 import type { RequestHandler } from 'express'
-import { earlyStartsByCategory, operatingHoursByCategory } from './machine-operations.service.js'
+import { earlyStartsByCategory, operatingHoursByCategory, fleetWeekSummary } from './machine-operations.service.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { env } from '../../config/env.js'
 import * as repo from './analytics.repository.js'
@@ -93,6 +93,15 @@ export const machineHours: RequestHandler = async (req, res, next) => {
     const asked = String(req.query['range'] ?? 'day')
     const range = asked === 'week' || asked === 'month' ? asked : 'day'
     sendSuccess(res, await operatingHoursByCategory(p(req, 'orgId'), range))
+  } catch (err) { next(err) }
+}
+
+/** The week for the summary card. Carries blocks worked rather than area
+ *  cleared, which nothing on this fleet can measure — see the service. */
+export const machineSummary: RequestHandler = async (req, res, next) => {
+  try {
+    const days = Number(req.query['days']) || 7
+    sendSuccess(res, await fleetWeekSummary(p(req, 'orgId'), days))
   } catch (err) { next(err) }
 }
 
