@@ -56,16 +56,6 @@ export const DIG_SPEED_KMH = 2
  *  the rollup's cap so these hours are the same measure as every other. */
 const MAX_GAP_SECONDS = 900
 
-/**
- * Grid the digging positions are snapped to before they are unioned, in
- * degrees. 5e-6 deg is about 0.55 m at this latitude.
- *
- * Sized against REACH_METRES, not against GPS accuracy: the question is how
- * much the snapped disc differs from the true one, and half a metre of centre
- * shift on an eight-metre radius is under a tenth of the reach.
- */
-const SNAP_DEGREES = 0.000005
-
 /** Fixes below which a day's geometry is too thin to report. */
 const MIN_DIG_FIXES = 20
 
@@ -102,13 +92,7 @@ export async function excavatorAreaByDay(
     WITH dig AS (
       SELECT t.vehicle_id,
              v.registration_plate AS plate,
-             -- Snapped to about half a metre. An excavator digging holds one
-             -- spot for hours and reports it hundreds of times; identical
-             -- points add nothing to a union, so collapsing them is free area
-             -- and a much smaller geometry. Half a metre against an eight-metre
-             -- reach is well inside what this figure already claims — an upper
-             -- bound on ground the bucket could reach, not a survey.
-             ST_SnapToGrid(ST_MakePoint(t.lng, t.lat), ${SNAP_DEGREES}) AS pt,
+             t.lat, t.lng,
              EXTRACT(EPOCH FROM (t.captured_at - lag(t.captured_at) OVER (
                PARTITION BY t.vehicle_id ORDER BY t.captured_at))) AS gap
         FROM vehicle_telemetries t
@@ -126,21 +110,9 @@ export async function excavatorAreaByDay(
     SELECT vehicle_id,
            min(plate) AS plate,
            -- The union of the machine's reach at every place it dug.
-           --
-           -- Buffer the COLLECTED points once, rather than buffering each fix
-           -- and unioning the results. Those are the same shape by definition —
-           -- buffer(A u B, r) = buffer(A, r) u buffer(B, r) for a fixed radius —
-           -- but the second form built one 33-vertex polygon per fix and then
-           -- unioned them pairwise. MUFINDI - EX 29 dug through 12,371 fixes on
-           -- 2026-08-18, so that was twelve thousand polygons to allocate and
-           -- merge for ONE machine, on an instance with about 1 GB of RAM.
-           -- Running it twice by hand took the database down on 2026-08-20.
-           -- DISTINCT inside the aggregate, so the snapping above actually
-           -- collapses anything. It does not touch dig_fixes or dig_seconds,
-           -- which still count every frame.
-           ST_Area(ST_Buffer(
-             ST_SetSRID(ST_Collect(DISTINCT pt), 4326)::geography, ${REACH_METRES}
-           )) AS area_m2,
+           ST_Area(ST_Union(
+             ST_Buffer(ST_MakePoint(lng, lat)::geography, ${REACH_METRES})::geometry
+           )::geography) AS area_m2,
            -- Integrated, never a fix count times an assumed interval: the
            -- sampling runs p50 28 s but p99 905 s, so any single interval is
            -- wrong for most units and gave 103 hours inside a 24-hour day.
