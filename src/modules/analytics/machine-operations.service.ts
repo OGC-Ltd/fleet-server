@@ -40,6 +40,8 @@ import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import { machinePrefix } from '../fuel/fuel-theft-classifier.js'
+// The SHARED distance measurement — see vehicle-brief on why not a second copy.
+import { coveredSince } from '../dispatches/dispatch.repository.js'
 
 /**
  * How long a unit must have been idle for its next movement to count as
@@ -227,10 +229,18 @@ export async function operatingHoursByCategory(
 export interface FleetWeekSummary {
   days: number
   expectedHoursPerDay: number
-  /** Mean hours a unit ran per day it reported, across the whole fleet. */
+  /**
+   * Mean hours a unit ran per day it reported, over COMPLETE days only. Today
+   * is excluded on purpose: a part-day counted whole makes the mean a clock
+   * reading rather than a measure of the fleet.
+   */
   avgHoursPerDay: number
-  /** Every hour the fleet ran in the window. */
+  /** Every hour the fleet ran in the window, today included. */
   totalHours: number
+  /** Hours run since midnight. */
+  hoursToday: number
+  /** Ground covered since midnight, kilometres. */
+  distanceTodayKm: number
   unitsReporting: number
   /** Ground covered by the whole fleet, kilometres. */
   totalDistanceKm: number
@@ -269,6 +279,15 @@ export interface FleetWeekSummary {
  * What IS measured is which estate blocks were worked, from the zone crossings
  * the fleet already records, and those blocks have true PostGIS areas. So the
  * card reports blocks worked and their extent.
+ *
+ * ## Today is included, and has to be
+ *
+ * `fuel_daily_trends` records days that have ENDED, so a window read from it
+ * alone stops at yesterday — the card would sit on last night's numbers all
+ * day and read as broken to anyone watching the fleet work. Today's engine
+ * seconds and distance are integrated live from the fixes, the same way the
+ * rollup does it and capped at the same 900 s per gap, then added in. The card
+ * moves during the day because the fleet does.
  *
  * `blocksExtentHa` is the size of the blocks ENTERED, not ground cleared, and
  * the two differ by orders of magnitude — FARM#211 alone is 16,301 ha and a
@@ -334,6 +353,31 @@ export async function fleetWeekSummary(
      GROUP BY 1 ORDER BY 1`
   const blocksByDay = new Map(blocksPerDay.map(b => [b.day.toISOString().slice(0, 10), Number(b.blocks)]))
 
+  // Today, live. The rollup stops at yesterday — see the header.
+  const today = fleetDayStart()
+  const [live] = await prisma.$queryRaw<Array<{ seconds: number; units: bigint }>>`
+    WITH gaps AS (
+      SELECT t.vehicle_id, t.engine_on,
+             EXTRACT(EPOCH FROM (t.captured_at - lag(t.captured_at) OVER (
+               PARTITION BY t.vehicle_id ORDER BY t.captured_at))) AS gap
+        FROM vehicle_telemetries t
+        JOIN vehicles v ON v.id = t.vehicle_id
+       WHERE v.organisation_id = ${orgId} AND v.is_active
+         AND t.captured_at >= ${today})
+    SELECT coalesce(sum(least(gap, 900)) FILTER (WHERE engine_on AND gap > 0), 0)::float8 AS seconds,
+           count(DISTINCT vehicle_id)::bigint AS units
+      FROM gaps`
+  const liveSeconds  = Number(live?.seconds ?? 0)
+  const liveUnits    = Number(live?.units ?? 0)
+
+  const liveDistance = await coveredSince(
+    (await prisma.vehicle.findMany({
+      where: { organisationId: orgId, isActive: true }, select: { id: true },
+    })).map(v => ({ vehicleId: v.id, since: today })),
+  )
+  const liveMetres = [...liveDistance.values()].reduce((a, r) => a + r.coveredM, 0)
+
+  // Complete days only, for the mean — see the header.
   const unitDays = Number(work?.unit_days ?? 0)
   const seconds  = Number(work?.seconds ?? 0)
   const areas    = blocks.map(b => b.ha)
@@ -344,9 +388,13 @@ export async function fleetWeekSummary(
     // Per OBSERVED unit-day, for the reason operatingHoursByCategory gives:
     // dividing by calendar days reports a hard-working fleet as idle.
     avgHoursPerDay:  unitDays > 0 ? Math.round((seconds / 3600 / unitDays) * 10) / 10 : 0,
-    totalHours:      Math.round(seconds / 3600),
+    // Cumulative, so today belongs in it.
+    totalHours:      Math.round((seconds + liveSeconds) / 3600),
+    /** Hours run since midnight, so the caller can say the card is live. */
+    hoursToday:      Math.round((liveSeconds / 3600) * 10) / 10,
+    distanceTodayKm: Math.round(liveMetres / 1000),
     unitsReporting:  Number(work?.units ?? 0),
-    totalDistanceKm: Math.round(Number(work?.metres ?? 0) / 1000),
+    totalDistanceKm: Math.round((Number(work?.metres ?? 0) + liveMetres) / 1000),
     blocksWorked:    areas.length,
     blocksExtentHa:  Math.round(areas.reduce((a, b) => a + b, 0)),
     smallestBlockHa: areas.length ? areas[0]! : null,
