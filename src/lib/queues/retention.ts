@@ -43,6 +43,7 @@ import { syncSensorInventory } from '../../modules/fuel/sensor-inventory.service
 import { sweepProbeHealth } from '../../modules/fuel/fuel-probe-health.service.js'
 import { adjudicateFillings } from '../../modules/fuel/fuel-filling-adjudication.service.js'
 import { recordFuelTrends } from '../../modules/fuel/fuel-trend.service.js'
+import { recordProbeDailyStats } from '../../modules/fuel/probe-stats.service.js'
 import { deriveFuelRates } from '../../modules/fuel/fuel-rate.service.js'
 
 export const RETENTION_QUEUE = 'maintenance'
@@ -101,6 +102,14 @@ const TREND_JOB = 'fuel:daily-trend'
  * rows read whatever this last wrote.
  */
 const RATE_JOB = 'fuel:consumption-rates'
+
+/**
+ * The probe report's daily rollup. Rolls up the day that just ended, so the
+ * report reads ~8,500 stored rows plus today rather than scanning thirty days
+ * of telemetry — see modules/fuel/probe-stats.service for why an index could
+ * not have done this instead.
+ */
+const STATS_JOB = 'fuel:probe-daily-stats'
 
 /**
  * Rows deleted per statement. Deliberately small: this runs against the same
@@ -249,7 +258,8 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   // previous one firing forever alongside the new one.
   for (const r of await queue.getRepeatableJobs()) {
     if (r.name === PRUNE_JOB || r.name === PROBE_JOB || r.name === FILLING_JOB
-     || r.name === TREND_JOB || r.name === RATE_JOB || r.name === SENSOR_JOB) {
+     || r.name === TREND_JOB || r.name === RATE_JOB || r.name === SENSOR_JOB
+     || r.name === STATS_JOB) {
       await queue.removeRepeatableByKey(r.key)
     }
   }
@@ -308,6 +318,18 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
+  await queue.add(STATS_JOB, {}, {
+    // 21:40 UTC — twenty minutes after the trend job, which reads the same
+    // fleet day. Sequential rather than concurrent: the worker runs one job at
+    // a time anyway, and spacing them keeps two full-day scans off the same
+    // 1 GB instance at once.
+    repeat:            { pattern: '40 21 * * *' },
+    removeOnComplete:  { count: 30 },
+    removeOnFail:      { count: 30 },
+    attempts:          3,
+    backoff:           { type: 'exponential', delay: 60_000 },
+  })
+
   await queue.add(RATE_JOB, {}, {
     // 02:40 UTC on SUNDAY. Weekly because a consumption rate moves over weeks,
     // and clear of every daily job above — this one sorts the whole
@@ -323,6 +345,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   worker = new Worker(RETENTION_QUEUE, async (job: Job) => {
     // Records the day that just ended, not the one starting.
     if (job.name === TREND_JOB) return recordFuelTrends(new Date(Date.now() - 30 * 60_000))
+    if (job.name === STATS_JOB) return recordProbeDailyStats(new Date(Date.now() - 30 * 60_000))
     if (job.name === RATE_JOB) return deriveFuelRates({ apply: true })
     if (job.name === FILLING_JOB) return adjudicateFillings({ apply: true })
     if (job.name === SENSOR_JOB) return syncSensorInventory()
@@ -342,7 +365,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   logger.info({
     queue: RETENTION_QUEUE, cron: '17 3 * * *',
     fillingCron: '5 4 * * *', probeCron: '23 4 * * *', trendCron: '20 21 * * *',
-    rateCron: '40 2 * * 0',
+    rateCron: '40 2 * * 0', statsCron: '40 21 * * *',
     retentionDays: env.NOTIFICATION_RETENTION_DAYS,
   }, 'Maintenance jobs scheduled')
 
