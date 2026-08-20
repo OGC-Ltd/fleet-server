@@ -283,17 +283,40 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
 
   lap('registry')
 
-  // How long the silent ones have been silent. Asked only of those units and
-  // served by (vehicle_id, captured_at) as a backward index scan, so it is a
-  // few dozen key lookups rather than a scan of the table.
+  // How long the silent ones have been silent.
+  //
+  // One index descent per unit, via LATERAL. The obvious form of this —
+  //
+  //     SELECT vehicle_id, max(captured_at) ... WHERE vehicle_id IN (...)
+  //     GROUP BY 1
+  //
+  // read as "a few dozen key lookups" and was not. Postgres does not convert a
+  // grouped max() into a per-group backward index scan; it reads EVERY row for
+  // those vehicle_ids and aggregates them. A unit is on this list precisely
+  // because it has said nothing for thirty days, which says nothing at all
+  // about how much history sits behind it, and the timings bore that out:
+  // 9.9 s of a 23 s build, 42% of the whole thing, second only to the
+  // month-long scan it was supposed to be a cheap postscript to.
+  //
+  // ORDER BY captured_at DESC LIMIT 1 inside a LATERAL is the form the planner
+  // can serve from (vehicle_id, captured_at) by walking one key backwards and
+  // stopping. LEFT JOIN, not a plain one, so a unit that has never reported at
+  // all still comes back — with a null, which is the honest answer and the one
+  // the caller already handles.
   const darkIds = vehicles.filter(v => !aggByVehicle.has(v.id)).map(v => v.id)
   const lastSeen = darkIds.length === 0 ? [] : await prisma.$queryRaw<Array<{
     vehicle_id: string; last_at: Date | null
   }>>`
-    SELECT vehicle_id, max(captured_at) AS last_at
-      FROM vehicle_telemetries
-     WHERE vehicle_id IN (${Prisma.join(darkIds)})
-     GROUP BY 1`
+    SELECT d.vehicle_id, t.captured_at AS last_at
+      FROM (VALUES ${Prisma.join(darkIds.map(id => Prisma.sql`(${id})`))})
+             AS d(vehicle_id)
+      LEFT JOIN LATERAL (
+        SELECT captured_at
+          FROM vehicle_telemetries
+         WHERE vehicle_id = d.vehicle_id
+         ORDER BY captured_at DESC
+         LIMIT 1
+      ) t ON true`
   const lastSeenByVehicle = new Map(lastSeen.map(l => [l.vehicle_id, l.last_at]))
 
   lap('lastSeen')
