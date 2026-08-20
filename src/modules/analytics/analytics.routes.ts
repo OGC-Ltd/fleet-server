@@ -25,6 +25,7 @@ router.get('/operations-today',     ctrl.operationsToday)
 // Plant and trucks, on their own telemetry rather than the yard's paperwork.
 router.get('/machine-starts',       ctrl.machineStarts)
 router.get('/machine-hours',        ctrl.machineHours)
+router.get('/machine-summary',      ctrl.machineSummary)
 router.get('/speeding',             validateQuery(speedingQuerySchema),   ctrl.speeding)
 router.get('/violation-heatmap',    validateQuery(analyticsRangeSchema), ctrl.violationHeatmap)
 

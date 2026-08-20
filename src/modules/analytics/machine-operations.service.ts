@@ -222,3 +222,104 @@ export async function operatingHoursByCategory(
 
   return { range, days, expectedHoursPerDay: EXPECTED_HOURS_PER_DAY, categories }
 }
+
+
+export interface FleetWeekSummary {
+  days: number
+  expectedHoursPerDay: number
+  /** Mean hours a unit ran per day it reported, across the whole fleet. */
+  avgHoursPerDay: number
+  /** Every hour the fleet ran in the window. */
+  totalHours: number
+  unitsReporting: number
+  /** Ground covered by the whole fleet, kilometres. */
+  totalDistanceKm: number
+  /** Estate blocks a machine worked in. */
+  blocksWorked: number
+  /** Their combined extent, hectares. NOT ground cleared — see below. */
+  blocksExtentHa: number
+  /** Smallest and largest block worked, hectares — the "range". */
+  smallestBlockHa: number | null
+  largestBlockHa: number | null
+}
+
+/**
+ * The week, for the summary card.
+ *
+ * ## Why there is no "area cleared" here
+ *
+ * It was asked for and it cannot be measured. Converting ground covered into
+ * ground cleared needs the width of the implement doing the clearing, and
+ * nothing records it: `vehicles.model` is set on 0 of KASULU's 218 active
+ * units, so there is no blade, bucket or swath width to multiply by. Any
+ * hectare figure would be a constant somebody invented times a distance.
+ *
+ * The machines that clear do move — dozers cover 1.27 km per engine hour,
+ * crawlers 3.49 — so the arithmetic is possible the moment those widths exist.
+ * Excavators, at 0.55, mostly work in place, and no width would make their
+ * distance mean area.
+ *
+ * What IS measured is which estate blocks were worked, from the zone crossings
+ * the fleet already records, and those blocks have true PostGIS areas. So the
+ * card reports blocks worked and their extent.
+ *
+ * `blocksExtentHa` is the size of the blocks ENTERED, not ground cleared, and
+ * the two differ by orders of magnitude — FARM#211 alone is 16,301 ha and a
+ * machine crossing a corner of it has not cleared 16,301 hectares. The field is
+ * named `blocksExtent` rather than `area` so no caller can quietly render it as
+ * one, and the range is carried beside it because "19 blocks between 2 and
+ * 16,301 ha" is honest where a single total is not.
+ */
+export async function fleetWeekSummary(
+  orgId: string, days = 7,
+): Promise<FleetWeekSummary> {
+  const from = new Date(fleetDayStart().getTime() - (days - 1) * 24 * 3_600_000)
+
+  const [work] = await prisma.$queryRaw<Array<{
+    unit_days: bigint; units: bigint; seconds: bigint; metres: bigint
+  }>>`
+    SELECT count(*)::bigint                                AS unit_days,
+           count(DISTINCT t.vehicle_id)::bigint            AS units,
+           coalesce(sum(t.engine_seconds), 0)::bigint      AS seconds,
+           coalesce(sum(t.distance_m), 0)::bigint          AS metres
+      FROM fuel_daily_trends t
+      JOIN vehicles v ON v.id = t.vehicle_id
+     WHERE v.organisation_id = ${orgId}
+       AND v.is_active
+       AND t.day >= ${from}::date`
+
+  // Blocks a machine worked in, from the zone crossings already recorded, with
+  // each block's true area off its PostGIS geometry. The feed id encodes the
+  // zone — see lib/zone-presence, which builds `zn-<vehicle>-<zone>-i|o-<ms>`.
+  const blocks = await prisma.$queryRaw<Array<{ ha: number }>>`
+    WITH entered AS (
+      SELECT DISTINCT split_part(n.feed_id, '-', 3) AS zone_id
+        FROM notifications n
+       WHERE n.organisation_id = ${orgId}
+         AND n.alert_type = 'ZONE_ENTRY'
+         AND n.occurred_at >= ${from})
+    SELECT round((ST_Area(g.geom::geography) / 10000)::numeric, 1)::float8 AS ha
+      FROM entered e
+      JOIN geofences g ON g.id = e.zone_id
+     WHERE g.geom IS NOT NULL
+     ORDER BY ha`
+
+  const unitDays = Number(work?.unit_days ?? 0)
+  const seconds  = Number(work?.seconds ?? 0)
+  const areas    = blocks.map(b => b.ha)
+
+  return {
+    days,
+    expectedHoursPerDay: EXPECTED_HOURS_PER_DAY,
+    // Per OBSERVED unit-day, for the reason operatingHoursByCategory gives:
+    // dividing by calendar days reports a hard-working fleet as idle.
+    avgHoursPerDay:  unitDays > 0 ? Math.round((seconds / 3600 / unitDays) * 10) / 10 : 0,
+    totalHours:      Math.round(seconds / 3600),
+    unitsReporting:  Number(work?.units ?? 0),
+    totalDistanceKm: Math.round(Number(work?.metres ?? 0) / 1000),
+    blocksWorked:    areas.length,
+    blocksExtentHa:  Math.round(areas.reduce((a, b) => a + b, 0)),
+    smallestBlockHa: areas.length ? areas[0]! : null,
+    largestBlockHa:  areas.length ? areas[areas.length - 1]! : null,
+  }
+}
