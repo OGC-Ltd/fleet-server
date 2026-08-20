@@ -56,6 +56,7 @@
 
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
+import { createWarmCache } from '../../lib/warm-cache.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 // The SHARED distance measurement, not a fourth copy of it. vehicle-brief's own
 // comment explains why: a hand-copied twin bound its window differently and the
@@ -289,29 +290,28 @@ export async function fleetState(orgId: string): Promise<FleetState> {
 }
 
 /**
- * How long a built state stays fresh.
+ * Served from the warmer.
  *
- * Two minutes. The build costs about seven seconds — five queries, one of them
- * a window function over the day's fixes — and the live segment moves on the
- * quarter-hourly poll, so a per-request build would spend seven seconds
- * recomputing a number that cannot have changed.
+ * Was a hand-rolled Map with a two-minute TTL, which expired hard: past two
+ * minutes the next viewer blocked on the whole ~7 s build. Same shape of bug
+ * the probe report had, and the reason it went unnoticed is the same — the page
+ * is fast for whoever follows a recent visitor and slow for whoever opens it
+ * first.
+ *
+ * On the shared cache it is primed at boot and refreshed in the background, so
+ * nobody waits, and its build cost shows up in the `warm-cache slow build` log
+ * alongside every other cache instead of being invisible.
+ *
+ * The default 60 s refresh is twice as fresh as the TTL it replaces, and costs
+ * no more: the build ran every two minutes on demand before and runs every
+ * minute on the sweep now, against a page that polls at sixty seconds anyway.
  */
-const CACHE_TTL_MS = 2 * 60_000
-
-const cache    = new Map<string, { at: number; state: FleetState }>()
-/** Concurrent callers share one build rather than each starting their own. */
-const inflight = new Map<string, Promise<FleetState>>()
+const stateCache = createWarmCache<FleetState>({
+  name: 'fleet-state',
+  warmKeysFor: (orgId) => [orgId],
+  compute: (orgId) => fleetState(orgId),
+})
 
 export async function getFleetState(orgId: string): Promise<FleetState> {
-  const hit = cache.get(orgId)
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.state
-
-  const running = inflight.get(orgId)
-  if (running) return running
-
-  const p = fleetState(orgId)
-    .then((built) => { cache.set(orgId, { at: Date.now(), state: built }); return built })
-    .finally(() => { inflight.delete(orgId) })
-  inflight.set(orgId, p)
-  return p
+  return stateCache.get(orgId)
 }

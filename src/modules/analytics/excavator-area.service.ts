@@ -36,6 +36,7 @@
  */
 
 import { prisma } from '../../lib/prisma.js'
+import { createWarmCache } from '../../lib/warm-cache.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 
 /**
@@ -144,28 +145,31 @@ export async function excavatorAreaByDay(
 }
 
 /**
- * How long a built day stays fresh.
+ * Served from the warmer.
  *
- * An hour, and generous at that: the default day is already complete, so its
- * answer cannot change. The TTL exists because the union of several thousand
- * buffers costs about eleven seconds, not because the data moves.
+ * An hour between rebuilds, and generous at that: the default day is already
+ * complete, so its answer cannot change. The interval exists because the union
+ * of several thousand reach buffers costs seven to eleven seconds, not because
+ * the data moves.
+ *
+ * Only the default day is warmed. A named past day is asked for occasionally,
+ * is equally immutable once built, and enters the cache on first use — warming
+ * every date anyone had ever picked would have the sweep rebuilding history
+ * nobody is looking at.
  */
-const CACHE_TTL_MS = 60 * 60_000
+const AREA_REFRESH_MS = 60 * 60_000
 
-const cache    = new Map<string, { at: number; data: Awaited<ReturnType<typeof excavatorAreaByDay>> }>()
-const inflight = new Map<string, Promise<Awaited<ReturnType<typeof excavatorAreaByDay>>>>()
+const areaCache = createWarmCache<Awaited<ReturnType<typeof excavatorAreaByDay>>>({
+  name: 'excavator-area',
+  refreshMs: AREA_REFRESH_MS,
+  warmKeysFor: (orgId) => [`${orgId}|last`],
+  compute: (key) => {
+    const sep = key.lastIndexOf('|')
+    const day = key.slice(sep + 1)
+    return excavatorAreaByDay(key.slice(0, sep), day === 'last' ? undefined : new Date(day))
+  },
+})
 
 export async function getExcavatorArea(orgId: string, day?: Date) {
-  const key = `${orgId}:${day ? day.toISOString().slice(0, 10) : 'last'}`
-  const hit = cache.get(key)
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.data
-
-  const running = inflight.get(key)
-  if (running) return running
-
-  const p = excavatorAreaByDay(orgId, day)
-    .then((built) => { cache.set(key, { at: Date.now(), data: built }); return built })
-    .finally(() => { inflight.delete(key) })
-  inflight.set(key, p)
-  return p
+  return areaCache.get(`${orgId}|${day ? day.toISOString().slice(0, 10) : 'last'}`)
 }
