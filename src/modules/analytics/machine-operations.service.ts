@@ -39,7 +39,7 @@
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
-import { fleetDayStart } from '../../lib/provider-time.js'
+import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import { machinePrefix } from '../fuel/fuel-theft-classifier.js'
 // The SHARED distance measurement — see vehicle-brief on why not a second copy.
 import { coveredSince } from '../dispatches/dispatch.repository.js'
@@ -133,7 +133,20 @@ async function computeEarlyStarts(
   }
 
   return {
-    day: day.toISOString(),
+  // The fleet day's own DATE, not the instant it began.
+  //
+  // A fleet day starts at 21:00 UTC the previous evening, so returning that
+  // instant labelled the day one earlier than the day it describes, and every
+  // reader had to know the convention to undo it. Neither did. The dash's
+  // fmtDay appends "T00:00:00Z" to whatever it is given, so a full ISO string
+  // became "...ZT00:00:00Z" and rendered "Invalid Date"; FleetStateSection
+  // formatted the instant in the VIEWER's timezone, so a reader in Nairobi and
+  // a reader in London saw different dates for the same figures.
+  //
+  // A bare YYYY-MM-DD has no timezone to get wrong, and it matches what every
+  // other endpoint already returns — fuel trends, vehicle daily stats and the
+  // telemetry repository all send fleetDayKey sliced to ten characters.
+    day: fleetDayKey(new Date(day.getTime() + 1)).toISOString().slice(0, 10),
     // Busiest first: a category with two units should not head a chart.
     categories: [...byCat.values()].sort((a, b) => b.started - a.started),
     totalStarted: rows.length,
