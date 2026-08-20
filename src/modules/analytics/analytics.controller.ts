@@ -1,5 +1,6 @@
 import type { RequestHandler } from 'express'
 import { earlyStartsByCategory, operatingHoursByCategory, fleetWeekSummary } from './machine-operations.service.js'
+import { getFleetState } from './fleet-state.service.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { env } from '../../config/env.js'
 import * as repo from './analytics.repository.js'
@@ -102,6 +103,14 @@ export const machineSummary: RequestHandler = async (req, res, next) => {
   try {
     const days = Number(req.query['days']) || 7
     sendSuccess(res, await fleetWeekSummary(p(req, 'orgId'), days))
+  } catch (err) { next(err) }
+}
+
+/** Every unit's live state plus its hours, idle time and distance for today,
+ *  the week and the month — see fleet-state.service. */
+export const fleetStateHandler: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await getFleetState(p(req, 'orgId')))
   } catch (err) { next(err) }
 }
 
