@@ -10,6 +10,7 @@
  */
 
 import { prisma } from '../../lib/prisma.js'
+import { createWarmCache } from '../../lib/warm-cache.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import {
   closingLevel, deriveTankState, resolveEngineSeconds, dayEngineSeconds,
@@ -65,12 +66,63 @@ export interface VehicleTankState extends TankState {
  * reading; for a past day the caller passes that day's end and `currentMl` is
  * that day's closing level.
  */
-export async function getFleetTankState(orgId: string, asOf = new Date()): Promise<VehicleTankState[]> {
+async function buildFleetTankState(orgId: string, asOf: Date): Promise<VehicleTankState[]> {
   // A finished day has already been measured — read it rather than measure it
   // again. Null when the day is today, or when nothing usable is stored.
   const stored = await readStoredTankState(orgId, asOf)
   if (stored) return stored
   return computeFleetTankState(orgId, asOf)
+}
+
+/**
+ * Served from the warmer, because the expensive case is the one everybody asks
+ * for.
+ *
+ * The FSL page opens on TODAY, and today is the one day that can never come
+ * from `fuel_daily_trends` — it is still accumulating, so it recomputes from
+ * raw telemetry every single time. Measured against production KASULU on
+ * 2026-08-20: **6.4 s on every request**, with no cache of any kind in front of
+ * it. A past day that the trend job has already backfilled answers in 0.9 s;
+ * one it has not answers in 6.2 s. So the page's default view was the slow
+ * path, on every open, for every operator.
+ *
+ * Warming only today's key is deliberate. It is the key that is always asked
+ * for and never cheap; a past day is asked for occasionally and is usually
+ * cheap already, and warming every date anyone had ever picked would keep a
+ * throttled instance busy rebuilding history nobody is looking at. Past days
+ * still get the cache — they just enter it on first use rather than on the
+ * sweep.
+ *
+ * The default 60 s refresh is right here, unlike the probe report's ten
+ * minutes. `currentMl` for today means "the latest reading", which genuinely
+ * moves; a fuel level a minute stale is fine, an hour stale is not.
+ *
+ * Note this wraps only the READ path. `fuel-trend.service` calls
+ * `computeFleetTankState` directly and must keep doing so — it writes the very
+ * rows the cached path reads, and routing it through here would have it read
+ * its own previous output.
+ */
+const TODAY = 'today'
+
+const tankStateCache = createWarmCache<VehicleTankState[]>({
+  name: 'fleet-tank-state',
+  warmKeysFor: (orgId) => [`${orgId}|${TODAY}`],
+  compute: (key) => {
+    const sep   = key.lastIndexOf('|')
+    const orgId = key.slice(0, sep)
+    const day   = key.slice(sep + 1)
+    // TODAY resolves at compute time, not at key time, so each refresh picks up
+    // the current instant rather than pinning the moment the key was minted.
+    return buildFleetTankState(orgId, day === TODAY ? new Date() : new Date(day))
+  },
+})
+
+export async function getFleetTankState(orgId: string, asOf = new Date()): Promise<VehicleTankState[]> {
+  // A request for today's DATE and a request with no date at all are the same
+  // question, and must land on the same key — otherwise the page's own default
+  // would miss the one entry the warmer keeps hot.
+  const isToday = fleetDayKey(asOf).getTime() >= fleetDayKey(new Date()).getTime()
+  return tankStateCache.get(`${orgId}|${isToday ? TODAY : asOf.toISOString()}`)
 }
 
 /**
