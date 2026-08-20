@@ -38,6 +38,7 @@
 
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
+import { createWarmCache } from '../../lib/warm-cache.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import { machinePrefix } from '../fuel/fuel-theft-classifier.js'
 // The SHARED distance measurement — see vehicle-brief on why not a second copy.
@@ -77,7 +78,7 @@ export interface CategoryStarts {
  * the day to know whether the first working ping after midnight followed a
  * stand-down or a night shift.
  */
-export async function earlyStartsByCategory(
+async function computeEarlyStarts(
   orgId: string, day: Date = fleetDayStart(),
 ): Promise<{ day: string; categories: CategoryStarts[]; totalStarted: number }> {
   const dayEnd = new Date(day.getTime() + 24 * 3_600_000)
@@ -174,7 +175,7 @@ export interface CategoryHours {
  * `engine_hour_sessions` is not used either: it is the other provider's table
  * and holds zero rows for KASULU.
  */
-export async function operatingHoursByCategory(
+async function computeOperatingHours(
   orgId: string, range: OperatingRange = 'day',
 ): Promise<{
   range: OperatingRange; days: number; expectedHoursPerDay: number
@@ -296,7 +297,7 @@ export interface FleetWeekSummary {
  * one, and the range is carried beside it because "19 blocks between 2 and
  * 16,301 ha" is honest where a single total is not.
  */
-export async function fleetWeekSummary(
+async function computeFleetWeekSummary(
   orgId: string, days = 7,
 ): Promise<FleetWeekSummary> {
   const from = new Date(fleetDayStart().getTime() - (days - 1) * 24 * 3_600_000)
@@ -413,4 +414,61 @@ export async function fleetWeekSummary(
       }
     }),
   }
+}
+
+/**
+ * Warm caches for the three machine-operations endpoints.
+ *
+ * None of them had a cache of any kind, and the KASULU analytics page polls two
+ * of them every sixty seconds. Measured against production 2026-08-20:
+ * machine-starts 2.2–3.3 s and machine-summary 3.4–5.9 s, on EVERY request. So
+ * each open tab was costing six to nine CPU-seconds a minute on an instance
+ * whose sustained budget is a fraction of one vCPU, and two tabs open on the
+ * page could saturate it between them.
+ *
+ * The historical half of these figures already comes from `fuel_daily_trends`,
+ * so there is no rollup left to do here — the cost is the live day plus the
+ * fact that every poll paid for it again. Caching is the whole fix: one build
+ * per org per minute regardless of how many people are looking.
+ *
+ * The default 60 s refresh matches the page's own poll interval, so the data a
+ * viewer sees is no more stale than it was before — it simply is not recomputed
+ * per viewer.
+ */
+const startsCache = createWarmCache<Awaited<ReturnType<typeof computeEarlyStarts>>>({
+  name: 'machine-starts',
+  warmKeysFor: (orgId) => [orgId],
+  compute: (orgId) => computeEarlyStarts(orgId),
+})
+
+const hoursCache = createWarmCache<Awaited<ReturnType<typeof computeOperatingHours>>>({
+  name: 'machine-hours',
+  // Only the range the page opens on is warmed; the other two enter the cache
+  // on first use rather than having the warmer keep three ranges hot per org.
+  warmKeysFor: (orgId) => [`${orgId}|week`],
+  compute: (key) => {
+    const sep = key.lastIndexOf('|')
+    return computeOperatingHours(key.slice(0, sep), key.slice(sep + 1) as OperatingRange)
+  },
+})
+
+const summaryCache = createWarmCache<Awaited<ReturnType<typeof computeFleetWeekSummary>>>({
+  name: 'machine-summary',
+  warmKeysFor: (orgId) => [`${orgId}|7`],
+  compute: (key) => {
+    const sep = key.lastIndexOf('|')
+    return computeFleetWeekSummary(key.slice(0, sep), Number(key.slice(sep + 1)))
+  },
+})
+
+export async function earlyStartsByCategory(orgId: string) {
+  return startsCache.get(orgId)
+}
+
+export async function operatingHoursByCategory(orgId: string, range: OperatingRange = 'week') {
+  return hoursCache.get(`${orgId}|${range}`)
+}
+
+export async function fleetWeekSummary(orgId: string, days = 7) {
+  return summaryCache.get(`${orgId}|${days}`)
 }
