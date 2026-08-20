@@ -55,7 +55,14 @@ async function main() {
       updated += count
     }
 
-    console.log(`  ${day.toISOString().slice(0, 10)}  ${String(updated).padStart(4)} rows  ${((Date.now() - started) / 1000).toFixed(1)}s`)
+    // Every remaining row for a day we DID scan ran its engine zero times.
+    // That is a measurement; leaving it null would say nobody looked.
+    const { count: zeroed } = await prisma.fuelDailyTrend.updateMany({
+      where: { day, engineFixes: null },
+      data:  { engineFixes: 0, idleFixes: 0 },
+    })
+
+    console.log(`  ${day.toISOString().slice(0, 10)}  ${String(updated).padStart(4)} counted  ${String(zeroed).padStart(3)} zeroed  ${((Date.now() - started) / 1000).toFixed(1)}s`)
     if (d > 1) await new Promise(r => setTimeout(r, PAUSE_MS))
   }
 

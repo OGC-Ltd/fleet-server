@@ -96,8 +96,10 @@ export async function recordFuelTrends(asOf = new Date()): Promise<TrendOutcome[
           distanceM: r.distanceM, expectedBurnMl: r.expectedBurnMl,
           engineSeconds: r.engineSeconds, engineBurnMl: r.engineBurnMl,
           engineHoursMeter: r.engineHoursMeter,
-          engineFixes: fixes.get(r.vehicleId)?.engineFixes ?? null,
-          idleFixes:   fixes.get(r.vehicleId)?.idleFixes   ?? null,
+          // Zero, not null: the day WAS counted and the engine never ran.
+          // Null is reserved for a day nobody counted at all.
+          engineFixes: fixes.get(r.vehicleId)?.engineFixes ?? 0,
+          idleFixes:   fixes.get(r.vehicleId)?.idleFixes   ?? 0,
           computedAt: new Date(),
         },
         update: {
@@ -108,8 +110,10 @@ export async function recordFuelTrends(asOf = new Date()): Promise<TrendOutcome[
           distanceM: r.distanceM, expectedBurnMl: r.expectedBurnMl,
           engineSeconds: r.engineSeconds, engineBurnMl: r.engineBurnMl,
           engineHoursMeter: r.engineHoursMeter,
-          engineFixes: fixes.get(r.vehicleId)?.engineFixes ?? null,
-          idleFixes:   fixes.get(r.vehicleId)?.idleFixes   ?? null,
+          // Zero, not null: the day WAS counted and the engine never ran.
+          // Null is reserved for a day nobody counted at all.
+          engineFixes: fixes.get(r.vehicleId)?.engineFixes ?? 0,
+          idleFixes:   fixes.get(r.vehicleId)?.idleFixes   ?? 0,
           computedAt: new Date(),
         },
       })
