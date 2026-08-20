@@ -36,7 +36,7 @@
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
-import { probeFiguresForDay } from './probe-stats.service.js'
+import { vehicleFiguresForDay } from '../analytics/vehicle-daily-stats.service.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
 import { logger } from '../../lib/logger.js'
 import {
@@ -173,7 +173,7 @@ interface MonthFigures {
  * today live. The thirty-day scan it replaced cost 10.4 s of a 14.3 s build and
  * could not be indexed away, because retention keeps the telemetry table at
  * about thirty days and the window therefore matched all of it. The reasoning
- * and the measurements are in probe-stats.service.
+ * and the measurements are in vehicle-daily-stats.service.
  *
  * Still not a per-request job, which is why callers get `getProbeReport` and
  * its warm cache rather than this.
@@ -197,7 +197,7 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
   // 10.4 s of a 14.3 s build. It could not be indexed out of trouble: retention
   // holds that table at about thirty days, so the window matched 9,225,096 rows
   // of 9,225,230 and there was no selectivity for an index to exploit. See
-  // probe-stats.service for the measurements and for why a covering index was
+  // vehicle-daily-stats.service for the measurements and for why a covering index was
   // the wrong instrument.
   //
   // `probe_daily_stats` carries one row per unit per COMPLETE day. Today is not
@@ -225,7 +225,7 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
     new Date(todayStart.getTime() - (LOOKBACK_DAYS - 1) * 86_400_000),
   )
   const [daily, todayFigures] = await Promise.all([
-    prisma.probeDailyStat.groupBy({
+    prisma.vehicleDailyStat.groupBy({
       by:    ['vehicleId'],
       where: {
         day:     { gte: windowStart },
@@ -234,7 +234,7 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
       _sum: { pings: true, levelPings: true },
       _max: { peakMl: true, lastAliveAt: true, lastLevelAt: true },
     }),
-    probeFiguresForDay(todayStart, new Date(todayStart.getTime() + 86_400_000), opts.orgId),
+    vehicleFiguresForDay(todayStart, new Date(todayStart.getTime() + 86_400_000), opts.orgId),
   ])
 
   // Summing a count and taking a max of a max is exactly what grouping the raw

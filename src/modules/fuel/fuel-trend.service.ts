@@ -26,7 +26,6 @@ import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import { computeFleetTankState } from './fuel-tank-state.service.js'
-import { fixCountsForWindow } from '../analytics/fleet-state.service.js'
 
 export interface TrendOutcome {
   day:      string
@@ -66,16 +65,6 @@ export async function recordFuelTrends(asOf = new Date()): Promise<TrendOutcome[
     // its own previous output and write it back unchanged.
     const rows = await computeFleetTankState(org.id, asOfBounded)
 
-    // The idle ratio's two counts for this day. One query for the org rather
-    // than a column threaded through computeFleetTankState, because they answer
-    // a different question from anything else on that row and share only the
-    // day. fleet_state reads them back instead of scanning a week of raw
-    // telemetry per build.
-    const fixes = new Map(
-      (await fixCountsForWindow(dayStart, new Date(dayStart.getTime() + 86_400_000), org.id))
-        .map(f => [f.vehicleId, f]),
-    )
-
     let written = 0, withTurbulence = 0
 
     for (const r of rows) {
@@ -96,10 +85,6 @@ export async function recordFuelTrends(asOf = new Date()): Promise<TrendOutcome[
           distanceM: r.distanceM, expectedBurnMl: r.expectedBurnMl,
           engineSeconds: r.engineSeconds, engineBurnMl: r.engineBurnMl,
           engineHoursMeter: r.engineHoursMeter,
-          // Zero, not null: the day WAS counted and the engine never ran.
-          // Null is reserved for a day nobody counted at all.
-          engineFixes: fixes.get(r.vehicleId)?.engineFixes ?? 0,
-          idleFixes:   fixes.get(r.vehicleId)?.idleFixes   ?? 0,
           computedAt: new Date(),
         },
         update: {
@@ -110,10 +95,6 @@ export async function recordFuelTrends(asOf = new Date()): Promise<TrendOutcome[
           distanceM: r.distanceM, expectedBurnMl: r.expectedBurnMl,
           engineSeconds: r.engineSeconds, engineBurnMl: r.engineBurnMl,
           engineHoursMeter: r.engineHoursMeter,
-          // Zero, not null: the day WAS counted and the engine never ran.
-          // Null is reserved for a day nobody counted at all.
-          engineFixes: fixes.get(r.vehicleId)?.engineFixes ?? 0,
-          idleFixes:   fixes.get(r.vehicleId)?.idleFixes   ?? 0,
           computedAt: new Date(),
         },
       })
