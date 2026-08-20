@@ -28,6 +28,7 @@ router.get('/machine-hours',        ctrl.machineHours)
 router.get('/machine-summary',      ctrl.machineSummary)
 router.get('/fleet-state',          ctrl.fleetStateHandler)
 router.get('/excavator-area',       ctrl.excavatorArea)
+router.get('/excavator-area-days',  ctrl.excavatorAreaByDay)
 router.get('/speeding',             validateQuery(speedingQuerySchema),   ctrl.speeding)
 router.get('/violation-heatmap',    validateQuery(analyticsRangeSchema), ctrl.violationHeatmap)
 

@@ -186,3 +186,73 @@ const areaCache = createWarmCache<Awaited<ReturnType<typeof excavatorAreaByDay>>
 export async function getExcavatorArea(orgId: string, day?: Date) {
   return areaCache.get(`${orgId}|${day ? day.toISOString().slice(0, 10) : 'last'}`)
 }
+
+
+/**
+ * Ground worked per fleet day, for a heatmap.
+ *
+ * The daily card on a haulage fleet plots TRIPS, which is the right measure
+ * there and meaningless on plant — KASULU's excavators complete no trips at
+ * all. This is the same question asked of a machine that never leaves its pit:
+ * how much ground did the fleet turn over each day.
+ *
+ * Read from `vehicle_daily_stats`, never recomputed. Building one day's
+ * geometry takes about fifteen seconds per machine; a month of them is a
+ * nightly job's work, not a request's — see vehicle-daily-stats.service.
+ *
+ * Days with no stored figure are ABSENT rather than zero. A zero says the
+ * excavators worked no ground that day; a gap says nobody measured it, and on a
+ * window that reaches back past the rollup's own history those are very
+ * different claims for a heatmap to make.
+ */
+export async function areaByDay(
+  orgId: string, days = 30,
+): Promise<{ days: Array<{ day: string; m2: number; km2: number; machines: number }>
+             totalM2: number; measuredDays: number; windowDays: number }> {
+  const from = fleetDayKey(new Date(fleetDayStart().getTime() - (days - 1) * 86_400_000))
+
+  const rows = await prisma.$queryRaw<Array<{ day: Date; m2: number; machines: bigint }>>`
+    SELECT s.day,
+           sum(s.dig_area_m2)::float8 AS m2,
+           count(*)::bigint           AS machines
+      FROM vehicle_daily_stats s
+      JOIN vehicles v ON v.id = s.vehicle_id
+     WHERE v.organisation_id = ${orgId}
+       AND v.is_active
+       AND s.dig_area_m2 IS NOT NULL
+       AND s.day >= ${from}
+     GROUP BY 1
+     ORDER BY 1`
+
+  const out = rows.map(r => ({
+    day:      r.day.toISOString().slice(0, 10),
+    m2:       Math.round(r.m2),
+    km2:      Math.round((r.m2 / 1_000_000) * 1000) / 1000,
+    machines: Number(r.machines),
+  }))
+
+  return {
+    days: out,
+    totalM2: out.reduce((a, d) => a + d.m2, 0),
+    // Stated so the card can say what it is drawing. A heatmap over thirty days
+    // with four measured ones must not look like a fleet that stopped working.
+    measuredDays: out.length,
+    windowDays: days,
+  }
+}
+
+/** Cached like the day view: the answer is a stack of completed days and cannot
+ *  change until the nightly job adds one. */
+const dayCache = createWarmCache<Awaited<ReturnType<typeof areaByDay>>>({
+  name: 'excavator-area-by-day',
+  refreshMs: AREA_REFRESH_MS,
+  warmKeysFor: (orgId) => [`${orgId}|30`],
+  compute: (key) => {
+    const sep = key.lastIndexOf('|')
+    return areaByDay(key.slice(0, sep), Number(key.slice(sep + 1)))
+  },
+})
+
+export async function getAreaByDay(orgId: string, days = 30) {
+  return dayCache.get(`${orgId}|${days}`)
+}
