@@ -109,3 +109,79 @@ export async function recordFuelTrends(asOf = new Date()): Promise<TrendOutcome[
 
   return out
 }
+
+/**
+ * How far back the nightly job looks for a day it never wrote.
+ *
+ * A week. Long enough to survive a bad night and a weekend nobody was
+ * watching, short enough that the catch-up cannot run away with the evening.
+ */
+const HEAL_LOOKBACK_DAYS = 7
+
+/**
+ * Record yesterday, and repair any recent day that never got written.
+ *
+ * ## Why this is needed
+ *
+ * The job is scheduled once a night with `attempts: 3` and a 60 s exponential
+ * backoff, so all three tries land inside about five minutes. If the database
+ * is busy for longer than that, the day is simply lost and nothing ever
+ * notices. That is not hypothetical: on 2026-08-17 all three attempts failed
+ * with `Query read timeout` at 21:21, 21:23 and 21:26 UTC, and the gap sat
+ * there until someone went looking three days later. Every window containing it
+ * quietly divided by one fewer day.
+ *
+ * ## Why it recomputes forward from the gap
+ *
+ * The turbulence average spans days — it reads previous days' stored run values
+ * — so a day computed while its predecessor was missing saw less history than
+ * it should have. Filling the hole alone would leave the days after it carrying
+ * figures derived from an incomplete past. Recomputing from the earliest gap
+ * forward is what actually repairs the series, and it is why
+ * `prisma/fuel-trends.ts` walks oldest-first too.
+ *
+ * Bounded by HEAL_LOOKBACK_DAYS, so the worst case is a week of days rather
+ * than the whole table.
+ */
+export async function recordFuelTrendsWithCatchUp(asOf = new Date()): Promise<TrendOutcome[]> {
+  const out = await recordFuelTrends(asOf)
+
+  const todayStart = fleetDayStart(asOf)
+  // The complete days that should have rows: yesterday back HEAL_LOOKBACK_DAYS.
+  const wanted: Date[] = []
+  for (let d = HEAL_LOOKBACK_DAYS; d >= 1; d--) {
+    wanted.push(fleetDayKey(new Date(todayStart.getTime() - (d - 1) * 86_400_000 - 1)))
+  }
+
+  const present = new Set(
+    (await prisma.fuelDailyTrend.findMany({
+      where:  { day: { gte: wanted[0] } },
+      select: { day: true },
+      distinct: ['day'],
+    })).map(r => r.day.toISOString().slice(0, 10)),
+  )
+
+  const firstGap = wanted.findIndex(d => !present.has(d.toISOString().slice(0, 10)))
+  if (firstGap === -1) return out
+
+  const missing = wanted.filter(d => !present.has(d.toISOString().slice(0, 10)))
+  logger.warn({
+    missing: missing.map(d => d.toISOString().slice(0, 10)),
+    recomputingFrom: wanted[firstGap].toISOString().slice(0, 10),
+  }, 'Fuel daily trend gap found — recomputing forward from it')
+
+  // Forward from the earliest gap to yesterday, so each day sees the ones
+  // already written behind it.
+  for (let i = firstGap; i < wanted.length; i++) {
+    const inDay = new Date(todayStart.getTime() - (wanted.length - 1 - i) * 86_400_000 - 1)
+    try {
+      out.push(...await recordFuelTrends(inDay))
+    } catch (err) {
+      // One unrepairable day must not abandon the rest of the window.
+      logger.error({ err, day: wanted[i].toISOString().slice(0, 10) },
+        'Fuel daily trend catch-up failed for a day')
+    }
+  }
+
+  return out
+}
