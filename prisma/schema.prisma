@@ -912,6 +912,18 @@ model FuelDailyTrend {
   /// Seconds the engine ran that day, integrated from every fix and capped at
   /// MAX_ENGINE_GAP_SECONDS per gap. A measurement, not an estimate.
   engineSeconds  Int?    @map("engine_seconds")
+
+  /// Fixes that day with the engine running. The DENOMINATOR of the idle
+  /// ratio — see idleFixes.
+  engineFixes    Int?    @map("engine_fixes")
+  /// Of those, the ones the unit was not moving for.
+  ///
+  /// A COUNT, deliberately, and never converted to a duration here. The
+  /// sampling interval is irregular — p50 28 s, p99 905 s — so fixes times an
+  /// assumed interval gave 103 idle hours inside a 24-hour day. The ratio
+  /// idleFixes/engineFixes is exact whatever the interval does, and
+  /// engineSeconds on this same row supplies the scale.
+  idleFixes      Int?    @map("idle_fixes")
   /// Fuel expected to have burned over those hours, at the vehicle's measured
   /// litres-per-hour (vehicle_fuel_rates, falling back to its org+type median).
   /// The ENGINE half of the pair, and the primary basis for every type —
