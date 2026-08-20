@@ -180,7 +180,6 @@ interface MonthFigures {
  */
 export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<ProbeReportRow[]> {
   const now       = opts.now ?? new Date()
-  const from      = new Date(now.getTime() - LOOKBACK_DAYS * 24 * 3_600_000)
   const deadFrom  = new Date(now.getTime() - DEAD_HOURS * 3_600_000)
   const orgFilter = opts.orgId ? Prisma.sql`AND v.organisation_id = ${opts.orgId}` : Prisma.empty
 
@@ -206,11 +205,30 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
   // live and added on. Thirty days of frames becomes ~8,500 rollup rows plus
   // one day of frames.
   const todayStart = fleetDayStart(now)
+  // The last LOOKBACK_DAYS fleet days ENDING TODAY: today live, and the
+  // LOOKBACK_DAYS-1 complete days behind it.
+  //
+  // Not `fleetDayKey(from)`. `from` is an instant thirty days back, and rounding
+  // it down to a day boundary reaches up to 24 hours FURTHER back than the scan
+  // this replaced — a whole extra day of frames. That is not academic: it
+  // flipped MUFINDI: T 883 ENZ and KTCC 845B out of `trackerSilent`, because
+  // each last spoke on 2026-07-21, thirty days and a few hours ago. Under the
+  // old window they had no telemetry at all and were flagged as silent
+  // trackers; the wider one gave them a single ping, downgraded them to
+  // "too-little-telemetry", and quietly dropped them off the attention list.
+  // Finding units in exactly that state is what this report is for.
+  //
+  // A daily rollup cannot reproduce a mid-day cutoff, so the window is defined
+  // in whole fleet days and kept strictly INSIDE the old one. A unit can lose
+  // pings it used to have at the very edge, never gain them.
+  const windowStart = fleetDayKey(
+    new Date(todayStart.getTime() - (LOOKBACK_DAYS - 1) * 86_400_000),
+  )
   const [daily, todayFigures] = await Promise.all([
     prisma.probeDailyStat.groupBy({
       by:    ['vehicleId'],
       where: {
-        day:     { gte: fleetDayKey(from) },
+        day:     { gte: windowStart },
         vehicle: { isActive: true, ...(opts.orgId ? { organisationId: opts.orgId } : {}) },
       },
       _sum: { pings: true, levelPings: true },
