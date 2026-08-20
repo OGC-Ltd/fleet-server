@@ -57,7 +57,7 @@
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
-import { fleetDayStart } from '../../lib/provider-time.js'
+import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 // The SHARED distance measurement, not a fourth copy of it. vehicle-brief's own
 // comment explains why: a hand-copied twin bound its window differently and the
 // two figures diverged by the session offset.
@@ -126,6 +126,42 @@ export interface FleetState {
   units: FleetStateRow[]
 }
 
+/**
+ * Engine-on fixes and stationary engine-on fixes, per vehicle, for one window.
+ *
+ * Exported because the daily rollup and the live read of today must count the
+ * same thing. If IDLE_SPEED_KMH ever moves, both sides move with it — and the
+ * stored history does not, which is why `backfillTrendFixes` exists to restate
+ * it rather than leaving old rows counted under an old threshold.
+ */
+export async function fixCountsForWindow(
+  from: Date, to: Date, orgId?: string,
+): Promise<Array<{ vehicleId: string; engineFixes: number; idleFixes: number }>> {
+  const scope = orgId
+    ? Prisma.sql`JOIN vehicles v ON v.id = t.vehicle_id
+                  AND v.is_active AND v.organisation_id = ${orgId}`
+    : Prisma.empty
+
+  const rows = await prisma.$queryRaw<Array<{
+    vehicle_id: string; engine_fixes: bigint; idle_fixes: bigint
+  }>>`
+    SELECT t.vehicle_id,
+           count(*)::bigint AS engine_fixes,
+           count(*) FILTER (WHERE coalesce(t.speed_kmh, 0) <= ${IDLE_SPEED_KMH})::bigint AS idle_fixes
+      FROM vehicle_telemetries t
+      ${scope}
+     WHERE t.captured_at >= ${from}
+       AND t.captured_at <  ${to}
+       AND t.engine_on = true
+     GROUP BY 1`
+
+  return rows.map(r => ({
+    vehicleId:   r.vehicle_id,
+    engineFixes: Number(r.engine_fixes),
+    idleFixes:   Number(r.idle_fixes),
+  }))
+}
+
 export async function fleetState(orgId: string): Promise<FleetState> {
   const now      = new Date()
   const today    = fleetDayStart()
@@ -190,25 +226,45 @@ export async function fleetState(orgId: string): Promise<FleetState> {
   const todayRunByVehicle = new Map(todayRun.map(t => [t.vehicle_id, t.seconds]))
 
   // ── the idling RATIO, today and over the week ────────────────────────────
-  // Counts, never durations: the sampling interval is irregular, so a fix count
-  // times an assumed interval is wrong. The ratio is exact regardless, and the
-  // rollup's measured seconds give it a scale.
-  const idle = await prisma.$queryRaw<Array<{
-    vehicle_id: string; today_run: bigint; today_idle: bigint; week_run: bigint; week_idle: bigint
-  }>>`
-    SELECT t.vehicle_id,
-           count(*) FILTER (WHERE t.captured_at >= ${today})::bigint AS today_run,
-           count(*) FILTER (WHERE t.captured_at >= ${today}
-                              AND coalesce(t.speed_kmh, 0) <= ${IDLE_SPEED_KMH})::bigint AS today_idle,
-           count(*)::bigint AS week_run,
-           count(*) FILTER (WHERE coalesce(t.speed_kmh, 0) <= ${IDLE_SPEED_KMH})::bigint AS week_idle
-      FROM vehicle_telemetries t
-      JOIN vehicles v ON v.id = t.vehicle_id
-     WHERE v.organisation_id = ${orgId} AND v.is_active
-       AND t.captured_at >= ${weekFrom}
-       AND t.engine_on = true
-     GROUP BY 1`
-  const idleByVehicle = new Map(idle.map(i => [i.vehicle_id, i]))
+  //
+  // Counts, never durations: the sampling interval is irregular — p50 28 s, p99
+  // 905 s — so a fix count times an assumed interval is wrong, and gave 103
+  // idle hours inside a 24-hour day. The ratio is exact regardless of interval,
+  // and the rollup's measured `engineSeconds` gives it a scale.
+  //
+  // The WEEK half used to scan a week of raw telemetry on every build: 4.95 s
+  // and 2.1M buffers touched, the largest single cost in this service. Counts
+  // sum across days like everything else on fuel_daily_trends, so the week is
+  // read from the rollup and only today is counted live.
+  const [weekFixes, todayFixes] = await Promise.all([
+    prisma.fuelDailyTrend.groupBy({
+      by:    ['vehicleId'],
+      where: {
+        day:     { gte: fleetDayKey(weekFrom) },
+        vehicle: { organisationId: orgId, isActive: true },
+      },
+      _sum: { engineFixes: true, idleFixes: true },
+    }),
+    fixCountsForWindow(today, new Date(today.getTime() + 86_400_000), orgId),
+  ])
+
+  const weekByVehicle  = new Map(weekFixes.map(w => [w.vehicleId, w._sum]))
+  const todayByVehicle = new Map(todayFixes.map(t => [t.vehicleId, t]))
+
+  // Today counts toward the week too — the rollup stops at yesterday.
+  const idleByVehicle = new Map<string, {
+    today_run: number; today_idle: number; week_run: number; week_idle: number
+  }>()
+  for (const id of new Set([...weekByVehicle.keys(), ...todayByVehicle.keys()])) {
+    const w = weekByVehicle.get(id)
+    const t = todayByVehicle.get(id)
+    idleByVehicle.set(id, {
+      today_run:  t?.engineFixes ?? 0,
+      today_idle: t?.idleFixes   ?? 0,
+      week_run:  (w?.engineFixes ?? 0) + (t?.engineFixes ?? 0),
+      week_idle: (w?.idleFixes   ?? 0) + (t?.idleFixes   ?? 0),
+    })
+  }
 
   const vehicles = await prisma.vehicle.findMany({
     where:  { organisationId: orgId, isActive: true },
@@ -243,10 +299,8 @@ export async function fleetState(orgId: string): Promise<FleetState> {
 
     const todayHours = hours(todayRunByVehicle.get(v.id))
     const weekSecs   = Number(r?.week_s ?? 0)
-    const idleShareToday = Number(i?.today_run ?? 0) > 0
-      ? Number(i!.today_idle) / Number(i!.today_run) : 0
-    const idleShareWeek = Number(i?.week_run ?? 0) > 0
-      ? Number(i!.week_idle) / Number(i!.week_run) : 0
+    const idleShareToday = (i?.today_run ?? 0) > 0 ? i!.today_idle / i!.today_run : 0
+    const idleShareWeek  = (i?.week_run  ?? 0) > 0 ? i!.week_idle  / i!.week_run  : 0
 
     return {
       vehicleId: v.id,
