@@ -68,6 +68,16 @@ import { vehicleFiguresForDay, IDLE_SPEED_KMH } from './vehicle-daily-stats.serv
 /** How recently a unit must have reported to count as online. Two hours: the
  *  poll is quarter-hourly, so anything quieter than this has stopped, not
  *  skipped a beat. */
+/**
+ * How recently a tracker must have spoken to count as CONNECTED, hours.
+ *
+ * A day. Longer than the online window on purpose: the two answer different
+ * questions. Reporting-now is "is this unit sending"; connected is "is the
+ * device still on the network at all", which is what separates a lorry parked
+ * in a shed overnight from one whose tracker has been dead for a month.
+ */
+export const CONNECTED_WINDOW_HOURS = 24
+
 export const ONLINE_WINDOW_MINUTES = 120
 
 /** Longest gap between fixes that still counts as continuous running. Matches
@@ -142,8 +152,19 @@ export interface FleetStateRow {
 export interface FleetMonitoring {
   /** Every active vehicle on the org, tracked or not. */
   total: number
-  /** Tracked and seen inside the online window. */
+  /** Tracked and seen inside the online window — sending right now. */
   reportingNow: number
+  /**
+   * Tracked and seen at all in the last day: the device is alive on the
+   * network even if it has gone quiet in the last couple of hours.
+   *
+   * Not derived from the payload's `networkType` or `signalStrengthPct`. Those
+   * keys are present on every frame and null on every one of them — sampled
+   * 4,000 frames from the last two hours, not a single value — so the provider
+   * ships the fields without filling them. Recency of contact is the only
+   * evidence of a live link this fleet actually produces.
+   */
+  connected: number
   /** Tracked, but nothing inside the window — provisioned and quiet. */
   trackedSilent: number
   /** No device bound at all. Not a fault; most of a haulage fleet. */
@@ -310,21 +331,27 @@ export async function fleetState(orgId: string): Promise<FleetState> {
   // Coverage, in one pass. `device_id LIKE 'wialon:%'` is the same test the
   // probe report uses for "has a tracker at all" — kept identical so the two
   // cards cannot disagree about how many units are monitored.
+  const connectedAt = new Date(now.getTime() - CONNECTED_WINDOW_HOURS * 3_600_000)
   const [cover] = await prisma.$queryRaw<Array<{
-    total: bigint; reporting: bigint; tracked: bigint
+    total: bigint; reporting: bigint; tracked: bigint; connected: bigint
   }>>`
     SELECT count(*)::bigint AS total,
            count(*) FILTER (WHERE v.device_id LIKE 'wialon:%')::bigint AS tracked,
            count(*) FILTER (WHERE v.device_id LIKE 'wialon:%' AND EXISTS (
              SELECT 1 FROM vehicle_telemetries t
               WHERE t.vehicle_id = v.id AND t.captured_at >= ${onlineAt}
-           ))::bigint AS reporting
+           ))::bigint AS reporting,
+           count(*) FILTER (WHERE v.device_id LIKE 'wialon:%' AND EXISTS (
+             SELECT 1 FROM vehicle_telemetries t
+              WHERE t.vehicle_id = v.id AND t.captured_at >= ${connectedAt}
+           ))::bigint AS connected
       FROM vehicles v
      WHERE v.organisation_id = ${orgId} AND v.is_active`
 
   const monitoring: FleetMonitoring = {
     total:         Number(cover?.total ?? 0),
     reportingNow:  Number(cover?.reporting ?? 0),
+    connected:     Number(cover?.connected ?? 0),
     trackedSilent: Number(cover?.tracked ?? 0) - Number(cover?.reporting ?? 0),
     untracked:     Number(cover?.total ?? 0) - Number(cover?.tracked ?? 0),
   }
