@@ -37,6 +37,7 @@ import { Queue, Worker, type Job } from 'bullmq'
 import { getQueueRedis } from '../redis.js'
 import { env } from '../../config/env.js'
 import { logger } from '../logger.js'
+import { fleetDayStart } from '../provider-time.js'
 import { prisma } from '../prisma.js'
 import { trimCachedNotifications } from '../notifications/notification-cache.js'
 import { syncSensorInventory } from '../../modules/fuel/sensor-inventory.service.js'
@@ -111,6 +112,18 @@ const RATE_JOB = 'fuel:consumption-rates'
  * done this instead.
  */
 const STATS_JOB = 'vehicle:daily-stats'
+
+/**
+ * The last instant of the fleet day that has just finished.
+ *
+ * Both nightly rollups describe a COMPLETE day, and both take an `asOf` that
+ * has to fall inside it. Deriving that from the fleet day boundary rather than
+ * from a fixed offset means the answer does not depend on what time the job is
+ * scheduled for.
+ */
+function lastCompleteFleetDay(): Date {
+  return new Date(fleetDayStart(new Date()).getTime() - 1)
+}
 
 /**
  * Rows deleted per statement. Deliberately small: this runs against the same
@@ -347,8 +360,20 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     // Records the day that just ended, not the one starting.
     // WithCatchUp: three attempts inside five minutes is not enough to survive
     // a busy hour, and a day lost that way stayed lost — see 2026-08-17.
-    if (job.name === TREND_JOB) return recordFuelTrendsWithCatchUp(new Date(Date.now() - 30 * 60_000))
-    if (job.name === STATS_JOB) return recordVehicleDailyStats(new Date(Date.now() - 30 * 60_000))
+    // The day that just ENDED, computed rather than guessed at with an offset.
+    //
+    // Both of these used `Date.now() - 30 minutes`, which is not a statement
+    // about which day is meant — it is a bet that the job fires less than
+    // thirty minutes after the fleet day rolls at 21:00 UTC. The trend job at
+    // 21:20 won that bet; the stats job at 21:40 lost it, landed at 21:10, and
+    // on 2026-08-20 recorded the day that had just STARTED with forty minutes
+    // of data in it, while the completed day went unrecorded.
+    //
+    // `lastCompleteFleetDay` is the final instant of the previous fleet day, so
+    // it is right whatever time the job runs and survives anyone rescheduling
+    // it.
+    if (job.name === TREND_JOB) return recordFuelTrendsWithCatchUp(lastCompleteFleetDay())
+    if (job.name === STATS_JOB) return recordVehicleDailyStats(lastCompleteFleetDay())
     if (job.name === RATE_JOB) return deriveFuelRates({ apply: true })
     if (job.name === FILLING_JOB) return adjudicateFillings({ apply: true })
     if (job.name === SENSOR_JOB) return syncSensorInventory()
