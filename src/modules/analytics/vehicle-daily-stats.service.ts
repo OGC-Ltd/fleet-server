@@ -42,6 +42,7 @@
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
+import { REACH_METRES, DIG_SPEED_KMH, MAX_GAP_SECONDS, MIN_DIG_FIXES, SNAP_DEGREES } from './excavator-area.service.js'
 import { logger } from '../../lib/logger.js'
 
 /** What one day's aggregate looks like, before it is stored or added to. */
@@ -133,7 +134,61 @@ export async function vehicleFiguresForDay(
  * rather than doubling it, which is what makes the backfill safe to retry and
  * lets the job catch up a day it missed.
  */
-export async function recordVehicleDailyStats(inDay: Date): Promise<{ day: string; written: number }> {
+/**
+ * One excavator's worked ground for one day.
+ *
+ * Per vehicle, deliberately. The all-machines-at-once form scanned the whole
+ * day's telemetry joined to the plate filter, and measured 2026-08-20 a plain
+ * count over those rows — no geometry whatsoever — could not finish inside
+ * 45 s. Per vehicle the `(vehicle_id, captured_at)` index gives one contiguous
+ * range, which is about 19 s for the busiest machine: too slow for a request,
+ * fine for a nightly job, and each call stays well inside the 60 s client
+ * timeout that the combined query kept breaching.
+ *
+ * Positions are snapped and deduplicated before the union. A digging machine
+ * holds one spot for hours — MUFINDI - EX 29 sent 12,371 frames on 2026-08-18
+ * from 954 distinct half-metre positions — and identical points add nothing to
+ * a union.
+ */
+async function excavatorDay(
+  vehicleId: string, dayStart: Date, dayEnd: Date,
+): Promise<{ areaM2: number; digSeconds: number; digFixes: number } | null> {
+  const rows = await prisma.$queryRaw<Array<{
+    area_m2: number | null; dig_seconds: number; dig_fixes: bigint
+  }>>`
+    WITH dig AS (
+      SELECT t.lat, t.lng,
+             EXTRACT(EPOCH FROM (t.captured_at - lag(t.captured_at) OVER (
+               ORDER BY t.captured_at))) AS gap
+        FROM vehicle_telemetries t
+       WHERE t.vehicle_id = ${vehicleId}
+         AND t.captured_at >= ${dayStart}
+         AND t.captured_at <  ${dayEnd}
+         AND t.lat IS NOT NULL AND t.lng IS NOT NULL
+         AND NOT (t.lat = 0 AND t.lng = 0)
+         AND t.engine_on = true
+         AND coalesce(t.speed_kmh, 0) <= ${DIG_SPEED_KMH}
+    ),
+    pos AS (
+      SELECT DISTINCT ST_SnapToGrid(ST_MakePoint(lng, lat), ${SNAP_DEGREES}) AS pt FROM dig
+    )
+    SELECT (SELECT ST_Area(ST_Union(
+              ST_Buffer(pt::geography, ${REACH_METRES})::geometry
+            )::geography) FROM pos) AS area_m2,
+           coalesce(sum(least(gap, ${MAX_GAP_SECONDS})) FILTER (WHERE gap > 0), 0)::float8 AS dig_seconds,
+           count(*)::bigint AS dig_fixes
+      FROM dig`
+
+  const r = rows[0]
+  if (!r || Number(r.dig_fixes) < MIN_DIG_FIXES || r.area_m2 == null) return null
+  return {
+    areaM2:     Math.round(r.area_m2),
+    digSeconds: Math.round(r.dig_seconds),
+    digFixes:   Number(r.dig_fixes),
+  }
+}
+
+export async function recordVehicleDailyStats(inDay: Date): Promise<{ day: string; written: number; withArea: number }> {
   const dayStart = fleetDayStart(inDay)
   const dayEnd   = new Date(dayStart.getTime() + 86_400_000)
   const day      = fleetDayKey(dayStart)
@@ -155,7 +210,31 @@ export async function recordVehicleDailyStats(inDay: Date): Promise<{ day: strin
     })
   }
 
-  const out = { day: day.toISOString().slice(0, 10), written: figures.length }
+  // Excavator worked-area, one machine at a time. Sequential on purpose: each
+  // of these reads and unions a day of a machine's digging, and running them
+  // together is what put this on a 1 GB instance's memory ceiling.
+  const excavators = await prisma.vehicle.findMany({
+    where:  { isActive: true, registrationPlate: { contains: 'EX ' } },
+    select: { id: true },
+  })
+
+  let withArea = 0
+  for (const v of excavators) {
+    try {
+      const dug = await excavatorDay(v.id, dayStart, dayEnd)
+      if (!dug) continue
+      await prisma.vehicleDailyStat.updateMany({
+        where: { vehicleId: v.id, day },
+        data:  { digAreaM2: dug.areaM2, digSeconds: dug.digSeconds },
+      })
+      withArea++
+    } catch (err) {
+      // One machine's geometry failing must not cost the whole day's rollup.
+      logger.warn({ err, vehicleId: v.id }, 'excavator area failed for one unit')
+    }
+  }
+
+  const out = { day: day.toISOString().slice(0, 10), written: figures.length, withArea }
   logger.info(out, 'vehicle daily stats recorded')
   return out
 }

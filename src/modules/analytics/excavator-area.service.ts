@@ -37,7 +37,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
-import { fleetDayStart } from '../../lib/provider-time.js'
+import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 
 /**
  * The excavator's working reach, metres — supplied by the operator, 2026-08-20.
@@ -54,7 +54,7 @@ export const DIG_SPEED_KMH = 2
 
 /** Longest gap between fixes that still counts as continuous work — matches
  *  the rollup's cap so these hours are the same measure as every other. */
-const MAX_GAP_SECONDS = 900
+export const MAX_GAP_SECONDS = 900
 
 /**
  * Grid the digging positions are snapped to before they are deduplicated, in
@@ -64,10 +64,10 @@ const MAX_GAP_SECONDS = 900
  * how far the snapped disc sits from the true one, and half a metre of centre
  * shift on an eight-metre radius is under a tenth of the reach.
  */
-const SNAP_DEGREES = 0.000005
+export const SNAP_DEGREES = 0.000005
 
 /** Fixes below which a day's geometry is too thin to report. */
-const MIN_DIG_FIXES = 20
+export const MIN_DIG_FIXES = 20
 
 export interface ExcavatorDay {
   vehicleId: string
@@ -94,82 +94,44 @@ export async function excavatorAreaByDay(
   orgId: string, day?: Date,
 ): Promise<{ day: string; reachMetres: number; units: ExcavatorDay[]; totalM2: number }> {
   const start = day ?? new Date(fleetDayStart().getTime() - 24 * 3_600_000)
-  const end   = new Date(start.getTime() + 24 * 3_600_000)
 
-  const rows = await prisma.$queryRaw<Array<{
-    vehicle_id: string; plate: string; area_m2: number; dig_seconds: number; dig_fixes: bigint
-  }>>`
-    WITH dig AS (
-      SELECT t.vehicle_id,
-             v.registration_plate AS plate,
-             t.lat, t.lng,
-             EXTRACT(EPOCH FROM (t.captured_at - lag(t.captured_at) OVER (
-               PARTITION BY t.vehicle_id ORDER BY t.captured_at))) AS gap
-        FROM vehicle_telemetries t
-        JOIN vehicles v ON v.id = t.vehicle_id
-       WHERE v.organisation_id = ${orgId}
-         AND v.is_active
-         AND v.registration_plate LIKE '%EX %'
-         AND t.captured_at >= ${start}
-         AND t.captured_at <  ${end}
-         AND t.lat IS NOT NULL AND t.lng IS NOT NULL
-         AND NOT (t.lat = 0 AND t.lng = 0)
-         AND t.engine_on = true
-         AND coalesce(t.speed_kmh, 0) <= ${DIG_SPEED_KMH}
-    ),
-    -- Distinct DIGGING POSITIONS, and the per-vehicle totals, separately.
-    --
-    -- The union has to see each place the machine stood, not each frame it sent
-    -- while standing there. An excavator holds one spot for hours: MUFINDI - EX
-    -- 29 sent 12,371 digging frames on 2026-08-18, and buffering every one of
-    -- them built twelve thousand 33-vertex polygons to merge pairwise for a
-    -- single machine. Identical positions contribute nothing to a union, so
-    -- collapsing them first is free area and a far smaller computation.
-    --
-    -- Snapped to about half a metre before the DISTINCT, because raw GPS jitter
-    -- means a stationary machine never reports the exact same pair twice. Half
-    -- a metre against an eight-metre reach is well inside what this figure
-    -- already claims — an upper bound on ground the bucket could reach, not a
-    -- survey.
-    pos AS (
-      SELECT DISTINCT vehicle_id,
-             ST_SnapToGrid(ST_MakePoint(lng, lat), ${SNAP_DEGREES}) AS pt
-        FROM dig
-    ),
-    -- Counted over every frame, not over the distinct positions: these are
-    -- measurements of time and sampling, and deduplicating them would be wrong.
-    tot AS (
-      SELECT vehicle_id,
-             min(plate) AS plate,
-             coalesce(sum(least(gap, ${MAX_GAP_SECONDS})) FILTER (WHERE gap > 0), 0)::float8 AS dig_seconds,
-             count(*)::bigint AS dig_fixes
-        FROM dig GROUP BY vehicle_id
-    ),
-    area AS (
-      SELECT vehicle_id,
-             ST_Area(ST_Union(
-               ST_Buffer(pt::geography, ${REACH_METRES})::geometry
-             )::geography) AS area_m2
-        FROM pos GROUP BY vehicle_id
-    )
-    SELECT tot.vehicle_id,
-           tot.plate,
-           area.area_m2,
-           tot.dig_seconds,
-           tot.dig_fixes
-      FROM tot JOIN area ON area.vehicle_id = tot.vehicle_id
-     WHERE tot.dig_fixes >= ${MIN_DIG_FIXES}
-     ORDER BY area.area_m2 DESC`
+  // Read, do not compute.
+  //
+  // This used to build the geometry on demand behind an hourly cache, and it
+  // stopped fitting: measured 2026-08-20 the endpoint returned 500 after 60 s,
+  // the client query_timeout. Reading and unioning one machine's digging day
+  // takes about 19 s and there are nineteen machines. The union was never the
+  // expensive part — a count over the same rows with no geometry at all also
+  // timed out — so no amount of reshaping the query was going to fit it into a
+  // request.
+  //
+  // The day is complete and immutable, so the nightly job draws it once per
+  // machine and this reads the answer. See vehicle-daily-stats.service.
+  const rows = await prisma.vehicleDailyStat.findMany({
+    where: {
+      day:       fleetDayKey(new Date(start.getTime() + 1)),
+      digAreaM2: { not: null },
+      vehicle:   { organisationId: orgId, isActive: true },
+    },
+    select: {
+      vehicleId: true, digAreaM2: true, digSeconds: true,
+      vehicle: { select: { registrationPlate: true } },
+    },
+    orderBy: { digAreaM2: 'desc' },
+  })
 
   const units: ExcavatorDay[] = rows.map((r) => {
-    const digHours = Math.round((r.dig_seconds / 3600) * 10) / 10
-    const areaM2   = Math.round(r.area_m2)
+    const digHours = Math.round(((r.digSeconds ?? 0) / 3600) * 10) / 10
+    const areaM2   = r.digAreaM2 ?? 0
     return {
-      vehicleId: r.vehicle_id,
-      plate:     r.plate,
+      vehicleId: r.vehicleId,
+      plate:     r.vehicle.registrationPlate,
       areaM2,
       digHours,
-      digFixes:  Number(r.dig_fixes),
+      // The frame count behind the geometry is not carried on the stored row —
+      // it described the sample size of a computation that no longer happens
+      // here. Reported as the hours it produced instead.
+      digFixes:  0,
       m2PerHour: digHours > 0 ? Math.round(areaM2 / digHours) : 0,
     }
   })
