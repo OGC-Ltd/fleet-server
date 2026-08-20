@@ -875,6 +875,16 @@ model VehicleDailyStat {
   /// ratio idleFixes/engineFixes is exact whatever the interval does, and
   /// fuel_daily_trends.engineSeconds supplies the scale.
   idleFixes   Int?     @map("idle_fixes")
+  /// Ground the machine's bucket could have reached that day, square metres.
+  ///
+  /// Excavators only — null everywhere else, and null on an excavator whose day
+  /// was too thin to draw. Stored rather than computed on demand because the
+  /// geometry cannot be done inside an API request: measured 2026-08-20, one
+  /// machine's day took 19 s to read and union, and there are nineteen of them.
+  digAreaM2   Int?     @map("dig_area_m2")
+  /// Seconds that machine spent digging over that ground — the denominator of
+  /// the m2-per-hour rate, integrated the same way engineSeconds is.
+  digSeconds  Int?     @map("dig_seconds")
   computedAt  DateTime @default(now()) @map("computed_at")
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
