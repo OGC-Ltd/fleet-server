@@ -407,6 +407,7 @@ model Vehicle {
   fuelFillings       FuelFilling[]
   fuelThefts         FuelTheft[]
   fuelDailyTrends    FuelDailyTrend[]
+  probeDailyStats    ProbeDailyStat[]
   fuelRate           VehicleFuelRate?
   periodSummaries    VehiclePeriodSummary[]
   serviceRecords     VehicleServiceRecord[]
@@ -820,6 +821,60 @@ model VehicleGarageVisit {
 /// should. The drain rules have their own probe instrument, measured while
 /// PARKED (getProbeProfile). A motion-slosh average feeding a theft verdict
 /// would let a machine excuse its own drains by working rough ground.
+/// One vehicle's probe activity on one fleet day.
+///
+/// ## Why this table exists
+///
+/// The probe report classifies a unit's FLS from thirty days of behaviour, and
+/// it used to derive that by aggregating `vehicle_telemetries` directly. That
+/// query cost 10.4 s and could not be indexed out of trouble: a retention
+/// policy keeps the telemetry table at roughly thirty days, so the window
+/// predicate removed 134 rows out of 9,225,230 and the scan had to touch
+/// essentially every row. `EXPLAIN` on 2026-08-20 showed 176,073 blocks read
+/// against 8,731 cached — 1,375 MB pulled through an 88 MB `shared_buffers`,
+/// 21 s of I/O wait across three parallel workers.
+///
+/// A covering index would have shifted about a quarter of those bytes for
+/// 1.1 GB of storage and a write on every one of the ~400 k daily inserts. This
+/// costs one row per vehicle per day — about 8,500 rows for the whole window —
+/// and every figure the report needs is decomposable across days: counts sum,
+/// levels and timestamps take a max.
+///
+/// ## What is NOT here
+///
+/// Anything about the last 24 hours. Those figures decide whether a channel is
+/// alive RIGHT NOW, they change all day, and the report already scans that
+/// window separately. A rollup of today would be stale by construction.
+model ProbeDailyStat {
+  id          String   @id @default(cuid())
+  vehicleId   String   @map("vehicle_id")
+  /// The FLEET day this describes (Kenyan, not UTC — see lib/provider-time).
+  day         DateTime @db.Date
+  /// Every frame the unit sent that day, whatever it carried.
+  pings       Int
+  /// Frames carrying a fuel level at all — null is "the channel said nothing",
+  /// which is the distinction the report's NOT_REPORTING state rests on.
+  levelPings  Int      @map("level_pings")
+  /// Highest level seen that day. Max across days gives the month's peak,
+  /// which is what the calibration check compares a tank's capacity against.
+  peakMl      Int?     @map("peak_ml")
+  /// Last frame with a level ABOVE ZERO. A probe reading a flat zero all day is
+  /// reporting, and is also broken; separating these two is the whole point.
+  lastAliveAt DateTime? @map("last_alive_at")
+  /// Last frame carrying a level at all, zero included.
+  lastLevelAt DateTime? @map("last_level_at")
+  computedAt  DateTime @default(now()) @map("computed_at")
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  /// One row per unit per day — the job upserts on it, so a re-run repairs a
+  /// day rather than doubling it.
+  @@unique([vehicleId, day])
+  /// The report reads a date RANGE across all vehicles, so day leads.
+  @@index([day])
+  @@map("probe_daily_stats")
+}
+
 model FuelDailyTrend {
   id            String   @id @default(cuid())
   vehicleId     String   @map("vehicle_id")

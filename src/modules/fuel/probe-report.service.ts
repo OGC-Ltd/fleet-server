@@ -35,6 +35,8 @@
 
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
+import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
+import { probeFiguresForDay } from './probe-stats.service.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
 import { logger } from '../../lib/logger.js'
 import {
@@ -138,27 +140,43 @@ export function classifyChannel(
 }
 
 
+/** A unit's thirty-day totals: rollup days summed, today added live. */
+interface MonthFigures {
+  pings:       number
+  levelPings:  number
+  peakMl:      number | null
+  lastAliveAt: Date | null
+  lastLevelAt: Date | null
+}
+
 /**
  * Build the report.
  *
- * ## Five bounded queries, not one big one
+ * ## Bounded queries, not one big one
  *
  * The natural shape — a single aggregate over the lookback computing every
- * channel — does not run here. Thirty days is 8.8 M telemetry rows, and each
- * extra `FILTER` expression is another predicate evaluated over all of them.
- * Measured against production on 2026-08-20:
+ * channel — does not run here. Each extra `FILTER` expression is another
+ * predicate evaluated over every row in the window. Measured against production
+ * on 2026-08-20:
  *
  *     the sweep's own shape                   12.8 s   375 rows
  *     the same plus GPS/ignition FILTERs      > 60 s   client timeout
  *     odometer via DISTINCT ON over the raws  > 60 s   client timeout
  *
- * So the month is scanned ONCE, in the shape already known to complete, and
- * every other fact comes from a query bounded either to the dead window or to a
- * few hundred keys. Vehicle metadata is joined in memory rather than widening
- * the GROUP BY.
+ * So every fact comes from a query bounded either to the dead window or to a
+ * few hundred keys, and vehicle metadata is joined in memory rather than
+ * widening the GROUP BY.
  *
- * Around fifteen seconds all told, which is why callers get `getProbeReport`
- * and its cache rather than this.
+ * ## The month no longer scans telemetry at all
+ *
+ * It reads `probe_daily_stats` — one row per unit per complete day — and adds
+ * today live. The thirty-day scan it replaced cost 10.4 s of a 14.3 s build and
+ * could not be indexed away, because retention keeps the telemetry table at
+ * about thirty days and the window therefore matched all of it. The reasoning
+ * and the measurements are in probe-stats.service.
+ *
+ * Still not a per-request job, which is why callers get `getProbeReport` and
+ * its warm cache rather than this.
  */
 export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<ProbeReportRow[]> {
   const now       = opts.now ?? new Date()
@@ -174,36 +192,72 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
   const ms: Record<string, number> = {}
   const lap = (stage: string): void => { const n = Date.now(); ms[stage] = n - mark; mark = n }
 
-  // ── 1. the month, in the shape that completes ────────────────────────────
-  const rows = await prisma.$queryRaw<Array<{
-    vehicle_id: string
-    pings: bigint; level_pings: bigint; peak_ml: number | null
-    last_alive_at: Date | null; last_level_at: Date | null
-    recent_pings: bigint; recent_peak_ml: number | null; recent_moving: bigint
-  }>>`
-    SELECT t.vehicle_id,
-           count(*)                                              AS pings,
-           count(t.fuel_level_ml)                                AS level_pings,
-           max(t.fuel_level_ml)                                  AS peak_ml,
-           max(t.captured_at) FILTER (WHERE t.fuel_level_ml > 0) AS last_alive_at,
-           max(t.captured_at) FILTER (WHERE t.fuel_level_ml IS NOT NULL) AS last_level_at,
-           count(*)             FILTER (WHERE t.captured_at >= ${deadFrom}) AS recent_pings,
-           max(t.fuel_level_ml) FILTER (WHERE t.captured_at >= ${deadFrom}) AS recent_peak_ml,
-           count(*) FILTER (WHERE coalesce(t.speed_kmh, 0) > 1
-                              AND t.captured_at >= ${deadFrom})  AS recent_moving
-      FROM vehicle_telemetries t
-      JOIN vehicles v ON v.id = t.vehicle_id
-     WHERE t.captured_at >= ${from}
-       AND v.is_active
-       ${orgFilter}
-     GROUP BY 1`
+  // ── 1. the month, from the daily rollup plus today ───────────────────────
+  //
+  // Was a single GROUP BY over thirty days of `vehicle_telemetries`, costing
+  // 10.4 s of a 14.3 s build. It could not be indexed out of trouble: retention
+  // holds that table at about thirty days, so the window matched 9,225,096 rows
+  // of 9,225,230 and there was no selectivity for an index to exploit. See
+  // probe-stats.service for the measurements and for why a covering index was
+  // the wrong instrument.
+  //
+  // `probe_daily_stats` carries one row per unit per COMPLETE day. Today is not
+  // in it and must not be — the day is still running — so today is aggregated
+  // live and added on. Thirty days of frames becomes ~8,500 rollup rows plus
+  // one day of frames.
+  const todayStart = fleetDayStart(now)
+  const [daily, todayFigures] = await Promise.all([
+    prisma.probeDailyStat.groupBy({
+      by:    ['vehicleId'],
+      where: {
+        day:     { gte: fleetDayKey(from) },
+        vehicle: { isActive: true, ...(opts.orgId ? { organisationId: opts.orgId } : {}) },
+      },
+      _sum: { pings: true, levelPings: true },
+      _max: { peakMl: true, lastAliveAt: true, lastLevelAt: true },
+    }),
+    probeFiguresForDay(todayStart, new Date(todayStart.getTime() + 86_400_000), opts.orgId),
+  ])
+
+  // Summing a count and taking a max of a max is exactly what grouping the raw
+  // frames did, which is what makes this a rollup and not an estimate.
+  const monthByVehicle = new Map<string, MonthFigures>()
+  const laterOf = (a: Date | null, b: Date | null): Date | null =>
+    a && b ? (a > b ? a : b) : (a ?? b)
+
+  for (const d of daily) {
+    monthByVehicle.set(d.vehicleId, {
+      pings:       d._sum.pings ?? 0,
+      levelPings:  d._sum.levelPings ?? 0,
+      peakMl:      d._max.peakMl,
+      lastAliveAt: d._max.lastAliveAt,
+      lastLevelAt: d._max.lastLevelAt,
+    })
+  }
+  for (const t of todayFigures) {
+    const m = monthByVehicle.get(t.vehicleId)
+    if (!m) {
+      monthByVehicle.set(t.vehicleId, {
+        pings: t.pings, levelPings: t.levelPings, peakMl: t.peakMl,
+        lastAliveAt: t.lastAliveAt, lastLevelAt: t.lastLevelAt,
+      })
+      continue
+    }
+    m.pings      += t.pings
+    m.levelPings += t.levelPings
+    m.peakMl      = m.peakMl == null ? t.peakMl
+                  : t.peakMl == null ? m.peakMl
+                  : Math.max(m.peakMl, t.peakMl)
+    m.lastAliveAt = laterOf(m.lastAliveAt, t.lastAliveAt)
+    m.lastLevelAt = laterOf(m.lastLevelAt, t.lastLevelAt)
+  }
 
   lap('month')
 
   // The units that reported. NOT the population — see step 5, which starts from
   // the registry so a unit with no telemetry still gets a row.
-  const vehicleIds = rows.map(r => r.vehicle_id)
-  const aggByVehicle = new Map(rows.map(r => [r.vehicle_id, r]))
+  const vehicleIds   = [...monthByVehicle.keys()]
+  const aggByVehicle = monthByVehicle
 
   // ── 2. the dead window: what each unit is reporting now ──────────────────
   // GPS and ignition presence live here rather than in the month's scan. The
@@ -213,13 +267,21 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
   const recent = vehicleIds.length === 0 ? [] : await prisma.$queryRaw<Array<{
     vehicle_id: string; latest_id: bigint; latest_at: Date
     gps_at: Date | null; ign_at: Date | null
+    recent_pings: bigint; recent_peak_ml: number | null; recent_moving: bigint
   }>>`
     SELECT t.vehicle_id,
            (array_agg(t.id ORDER BY t.captured_at DESC))[1] AS latest_id,
            max(t.captured_at)                               AS latest_at,
            max(t.captured_at) FILTER (WHERE t.lat IS NOT NULL AND t.lng IS NOT NULL
                                         AND NOT (t.lat = 0 AND t.lng = 0)) AS gps_at,
-           max(t.captured_at) FILTER (WHERE t.engine_on IS NOT NULL)       AS ign_at
+           max(t.captured_at) FILTER (WHERE t.engine_on IS NOT NULL)       AS ign_at,
+           -- Moved here from the month's scan. These three describe the DEAD
+           -- WINDOW, which is precisely the range this query already reads, so
+           -- they cost nothing extra here and were never worth a thirty-day
+           -- scan's FILTER pass.
+           count(*)                                    AS recent_pings,
+           max(t.fuel_level_ml)                        AS recent_peak_ml,
+           count(*) FILTER (WHERE coalesce(t.speed_kmh, 0) > 1) AS recent_moving
       FROM vehicle_telemetries t
       JOIN vehicles v ON v.id = t.vehicle_id
      WHERE t.captured_at >= ${deadFrom}
@@ -248,9 +310,9 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
   lap('counters')
 
   // ── 4. what the probe read when it was last alive ────────────────────────
-  const alivePairs = rows
-    .filter(r => r.last_alive_at != null)
-    .map(r => Prisma.sql`(${r.vehicle_id}, ${r.last_alive_at}::timestamp)`)
+  const alivePairs = [...monthByVehicle.entries()]
+    .filter(([, m]) => m.lastAliveAt != null)
+    .map(([vehicleId, m]) => Prisma.sql`(${vehicleId}, ${m.lastAliveAt}::timestamp)`)
   const lastValues = alivePairs.length === 0 ? [] : await prisma.$queryRaw<Array<{
     vehicle_id: string; fuel_level_ml: number | null
   }>>`
@@ -341,20 +403,22 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
   // undefined for those, and every channel below resolves to UNKNOWN — which is
   // the honest answer: with no readings there is nothing to judge.
   for (const v of vehicles) {
-    const r = aggByVehicle.get(v.id)
+    const r   = aggByVehicle.get(v.id)
+    const rec = recentByVehicle.get(v.id)
     const trackerSilent = r == null
 
-    const pings  = r ? Number(r.pings) : 0
+    const pings  = r?.pings ?? 0
     const enough = pings >= MIN_PINGS
 
     const verdict = classifyProbe({
       pings,
-      levelPings:   r ? Number(r.level_pings) : 0,
-      peakMl:       r?.peak_ml ?? null,
-      lastAliveAt:  r?.last_alive_at ?? null,
-      recentPings:  r ? Number(r.recent_pings) : 0,
-      recentPeakMl: r?.recent_peak_ml ?? null,
-      recentMoving: r ? Number(r.recent_moving) : 0,
+      levelPings:   r?.levelPings ?? 0,
+      peakMl:       r?.peakMl ?? null,
+      lastAliveAt:  r?.lastAliveAt ?? null,
+      // The dead-window figures come from the recent query now, not the month.
+      recentPings:  rec ? Number(rec.recent_pings) : 0,
+      recentPeakMl: rec?.recent_peak_ml ?? null,
+      recentMoving: rec ? Number(rec.recent_moving) : 0,
     })
 
     const cfg = sensorByVehicle.get(v.id)
@@ -367,7 +431,6 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
       uncalibrated:      cfg != null && cfg.calibrationPoints === 0,
     }
 
-    const rec = recentByVehicle.get(v.id)
     const ctr = rec ? counterById.get(String(rec.latest_id)) : undefined
     // A counter reads UNKNOWN rather than NOT_FITTED when the unit has been
     // quiet: one day of silence says nothing about what is installed on it.
@@ -392,9 +455,9 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
       fuelProbe: {
         state:       verdict.state,
         reason:      trackerSilent ? 'tracker-silent' : verdict.reason,
-        lastAliveAt: r?.last_alive_at ?? null,
+        lastAliveAt: r?.lastAliveAt ?? null,
         lastValueMl: lastValueByVehicle.get(v.id) ?? null,
-        lastSeenAt:  r?.last_level_at ?? null,
+        lastSeenAt:  r?.lastLevelAt ?? null,
         pings,
       },
       fuelSensor,
