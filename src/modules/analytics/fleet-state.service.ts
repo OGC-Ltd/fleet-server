@@ -112,6 +112,18 @@ export interface FleetStateRow {
   distanceTodayKm: number
   distanceWeekAvgKm: number
   distanceMonthAvgKm: number
+  /**
+   * Ground WORKED, square kilometres, meaned per day the machine was measured.
+   *
+   * Excavators only — null on everything else, because nothing else has a
+   * worked area. There is no "today" figure to go with these: the geometry
+   * costs about fifteen seconds per machine and is drawn once a night, so the
+   * current day has no row until it is over. Hours have a live today and area
+   * does not, and pretending otherwise would put a figure in the column that
+   * was really yesterday's.
+   */
+  areaWeekAvgKm2: number | null
+  areaMonthAvgKm2: number | null
 }
 
 export interface FleetState {
@@ -249,6 +261,27 @@ export async function fleetState(orgId: string): Promise<FleetState> {
     })
   }
 
+  // Worked ground per machine, meaned over the days it was measured.
+  //
+  // avg() already divides by the non-null rows, so this is the mean per day the
+  // machine actually dug — not per calendar day. A machine that worked three
+  // days out of seven reports what it does on a working day, which is the
+  // figure an operator compares against another machine.
+  const areaRows = await prisma.$queryRaw<Array<{
+    vehicle_id: string; week_m2: number | null; month_m2: number | null
+  }>>`
+    SELECT s.vehicle_id,
+           avg(s.dig_area_m2) FILTER (WHERE s.day >= ${weekFromDay})::float8  AS week_m2,
+           avg(s.dig_area_m2)::float8                                        AS month_m2
+      FROM vehicle_daily_stats s
+      JOIN vehicles v ON v.id = s.vehicle_id
+     WHERE v.organisation_id = ${orgId}
+       AND v.is_active
+       AND s.dig_area_m2 IS NOT NULL
+       AND s.day >= ${monthFromDay}
+     GROUP BY 1`
+  const areaByVehicle = new Map(areaRows.map(a => [a.vehicle_id, a]))
+
   const vehicles = await prisma.vehicle.findMany({
     where:  { organisationId: orgId, isActive: true },
     select: { id: true, registrationPlate: true },
@@ -258,6 +291,10 @@ export async function fleetState(orgId: string): Promise<FleetState> {
   const coveredToday = await coveredSince(
     vehicles.map(v => ({ vehicleId: v.id, since: today })),
   )
+
+  /** Square metres to square kilometres, at the precision the card prints. */
+  const km2 = (m2: number | null | undefined): number | null =>
+    m2 == null ? null : Math.round((m2 / 1_000_000) * 10_000) / 10_000
 
   const hours = (seconds: bigint | number | undefined): number =>
     Math.round((Number(seconds ?? 0) / 3600) * 10) / 10
@@ -300,6 +337,10 @@ export async function fleetState(orgId: string): Promise<FleetState> {
       distanceTodayKm:    Math.round((coveredToday.get(v.id)?.coveredM ?? 0) / 1000),
       distanceWeekAvgKm:  perDay(Number(r?.week_m ?? 0) / 1000, r?.week_days),
       distanceMonthAvgKm: perDay(Number(r?.month_m ?? 0) / 1000, r?.month_days),
+      // Null, not zero, on a unit with no worked ground: zero would claim a
+      // machine that dug nothing where the truth is that it does not dig.
+      areaWeekAvgKm2:  km2(areaByVehicle.get(v.id)?.week_m2),
+      areaMonthAvgKm2: km2(areaByVehicle.get(v.id)?.month_m2),
     }
   })
 
