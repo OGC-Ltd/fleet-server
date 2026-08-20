@@ -43,7 +43,7 @@ import { syncSensorInventory } from '../../modules/fuel/sensor-inventory.service
 import { sweepProbeHealth } from '../../modules/fuel/fuel-probe-health.service.js'
 import { adjudicateFillings } from '../../modules/fuel/fuel-filling-adjudication.service.js'
 import { recordFuelTrends } from '../../modules/fuel/fuel-trend.service.js'
-import { recordProbeDailyStats } from '../../modules/fuel/probe-stats.service.js'
+import { recordVehicleDailyStats } from '../../modules/analytics/vehicle-daily-stats.service.js'
 import { deriveFuelRates } from '../../modules/fuel/fuel-rate.service.js'
 
 export const RETENTION_QUEUE = 'maintenance'
@@ -104,12 +104,13 @@ const TREND_JOB = 'fuel:daily-trend'
 const RATE_JOB = 'fuel:consumption-rates'
 
 /**
- * The probe report's daily rollup. Rolls up the day that just ended, so the
- * report reads ~8,500 stored rows plus today rather than scanning thirty days
- * of telemetry — see modules/fuel/probe-stats.service for why an index could
- * not have done this instead.
+ * The per-vehicle daily telemetry rollup, behind both the probe report and
+ * fleet-state's idle ratio. Rolls up the day that just ended, so each reads
+ * stored rows plus today rather than scanning weeks of raw telemetry — see
+ * modules/analytics/vehicle-daily-stats.service for why an index could not have
+ * done this instead.
  */
-const STATS_JOB = 'fuel:probe-daily-stats'
+const STATS_JOB = 'vehicle:daily-stats'
 
 /**
  * Rows deleted per statement. Deliberately small: this runs against the same
@@ -345,7 +346,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   worker = new Worker(RETENTION_QUEUE, async (job: Job) => {
     // Records the day that just ended, not the one starting.
     if (job.name === TREND_JOB) return recordFuelTrends(new Date(Date.now() - 30 * 60_000))
-    if (job.name === STATS_JOB) return recordProbeDailyStats(new Date(Date.now() - 30 * 60_000))
+    if (job.name === STATS_JOB) return recordVehicleDailyStats(new Date(Date.now() - 30 * 60_000))
     if (job.name === RATE_JOB) return deriveFuelRates({ apply: true })
     if (job.name === FILLING_JOB) return adjudicateFillings({ apply: true })
     if (job.name === SENSOR_JOB) return syncSensorInventory()

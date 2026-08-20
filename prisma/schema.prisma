@@ -407,7 +407,7 @@ model Vehicle {
   fuelFillings       FuelFilling[]
   fuelThefts         FuelTheft[]
   fuelDailyTrends    FuelDailyTrend[]
-  probeDailyStats    ProbeDailyStat[]
+  dailyStats         VehicleDailyStat[]
   fuelRate           VehicleFuelRate?
   periodSummaries    VehiclePeriodSummary[]
   serviceRecords     VehicleServiceRecord[]
@@ -821,7 +821,7 @@ model VehicleGarageVisit {
 /// should. The drain rules have their own probe instrument, measured while
 /// PARKED (getProbeProfile). A motion-slosh average feeding a theft verdict
 /// would let a machine excuse its own drains by working rough ground.
-/// One vehicle's probe activity on one fleet day.
+/// One vehicle's telemetry activity on one fleet day.
 ///
 /// ## Why this table exists
 ///
@@ -845,7 +845,7 @@ model VehicleGarageVisit {
 /// Anything about the last 24 hours. Those figures decide whether a channel is
 /// alive RIGHT NOW, they change all day, and the report already scans that
 /// window separately. A rollup of today would be stale by construction.
-model ProbeDailyStat {
+model VehicleDailyStat {
   id          String   @id @default(cuid())
   vehicleId   String   @map("vehicle_id")
   /// The FLEET day this describes (Kenyan, not UTC — see lib/provider-time).
@@ -863,6 +863,18 @@ model ProbeDailyStat {
   lastAliveAt DateTime? @map("last_alive_at")
   /// Last frame carrying a level at all, zero included.
   lastLevelAt DateTime? @map("last_level_at")
+  /// Fixes that day with the engine running — the DENOMINATOR of the idle
+  /// ratio. Zero means the engine never ran; null means the day predates these
+  /// columns.
+  engineFixes Int?     @map("engine_fixes")
+  /// Of those, the ones the unit was not moving for.
+  ///
+  /// A COUNT, and never converted to a duration here. The sampling interval is
+  /// irregular — p50 28 s, p99 905 s — so fixes times an assumed interval is
+  /// wrong, and gave 103 idle hours inside a 24-hour day once already. The
+  /// ratio idleFixes/engineFixes is exact whatever the interval does, and
+  /// fuel_daily_trends.engineSeconds supplies the scale.
+  idleFixes   Int?     @map("idle_fixes")
   computedAt  DateTime @default(now()) @map("computed_at")
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
@@ -872,7 +884,7 @@ model ProbeDailyStat {
   @@unique([vehicleId, day])
   /// The report reads a date RANGE across all vehicles, so day leads.
   @@index([day])
-  @@map("probe_daily_stats")
+  @@map("vehicle_daily_stats")
 }
 
 model FuelDailyTrend {
@@ -913,17 +925,6 @@ model FuelDailyTrend {
   /// MAX_ENGINE_GAP_SECONDS per gap. A measurement, not an estimate.
   engineSeconds  Int?    @map("engine_seconds")
 
-  /// Fixes that day with the engine running. The DENOMINATOR of the idle
-  /// ratio — see idleFixes.
-  engineFixes    Int?    @map("engine_fixes")
-  /// Of those, the ones the unit was not moving for.
-  ///
-  /// A COUNT, deliberately, and never converted to a duration here. The
-  /// sampling interval is irregular — p50 28 s, p99 905 s — so fixes times an
-  /// assumed interval gave 103 idle hours inside a 24-hour day. The ratio
-  /// idleFixes/engineFixes is exact whatever the interval does, and
-  /// engineSeconds on this same row supplies the scale.
-  idleFixes      Int?    @map("idle_fixes")
   /// Fuel expected to have burned over those hours, at the vehicle's measured
   /// litres-per-hour (vehicle_fuel_rates, falling back to its org+type median).
   /// The ENGINE half of the pair, and the primary basis for every type —

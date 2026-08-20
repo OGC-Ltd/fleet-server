@@ -1,5 +1,5 @@
 /**
- * The daily rollup behind the probe report.
+ * The daily rollup behind the probe report and the idle ratio.
  *
  * ## Why the report cannot just aggregate telemetry
  *
@@ -45,14 +45,29 @@ import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import { logger } from '../../lib/logger.js'
 
 /** What one day's aggregate looks like, before it is stored or added to. */
-export interface ProbeDayFigures {
+export interface VehicleDayFigures {
   vehicleId:   string
   pings:       number
   levelPings:  number
   peakMl:      number | null
   lastAliveAt: Date | null
   lastLevelAt: Date | null
+  /** Fixes with the engine running — the idle ratio's denominator. */
+  engineFixes: number
+  /** Of those, the ones the unit was not moving for. */
+  idleFixes:   number
 }
+
+/**
+ * Speed at or below which a running engine counts as idling rather than
+ * working. Two km/h — walking pace — because GPS jitter on a stationary machine
+ * reads a km/h or so and a machine creeping at 1 km/h is not travelling.
+ *
+ * Defined here, beside the query that writes the stored counts, because the
+ * history and the live read of today must count the same thing. Moving it makes
+ * the two disagree until the backfill is re-run.
+ */
+export const IDLE_SPEED_KMH = 2
 
 /**
  * Aggregate one fleet day of frames, per vehicle.
@@ -63,9 +78,9 @@ export interface ProbeDayFigures {
  * `orgId` narrows it for the live path, which only ever wants one org's units;
  * the job passes nothing and does the whole fleet in one pass.
  */
-export async function probeFiguresForDay(
+export async function vehicleFiguresForDay(
   dayStart: Date, dayEnd: Date, orgId?: string,
-): Promise<ProbeDayFigures[]> {
+): Promise<VehicleDayFigures[]> {
   // Narrowing to an org needs the join; the job wants every unit and should not
   // pay for one. Built as a fragment so the org id stays a bound parameter.
   const scope = orgId
@@ -76,6 +91,7 @@ export async function probeFiguresForDay(
   const rows = await prisma.$queryRaw<Array<{
     vehicle_id: string; pings: bigint; level_pings: bigint
     peak_ml: number | null; last_alive_at: Date | null; last_level_at: Date | null
+    engine_fixes: bigint; idle_fixes: bigint
   }>>`
     SELECT t.vehicle_id,
            count(*)               AS pings,
@@ -84,7 +100,11 @@ export async function probeFiguresForDay(
            -- ABOVE zero: a probe pinned at a flat zero is reporting and is also
            -- broken, and the report's DIED state depends on telling those apart.
            max(t.captured_at) FILTER (WHERE t.fuel_level_ml > 0)         AS last_alive_at,
-           max(t.captured_at) FILTER (WHERE t.fuel_level_ml IS NOT NULL) AS last_level_at
+           max(t.captured_at) FILTER (WHERE t.fuel_level_ml IS NOT NULL) AS last_level_at,
+           -- The idle ratio's two counts, from the same frames.
+           count(*) FILTER (WHERE t.engine_on = true) AS engine_fixes,
+           count(*) FILTER (WHERE t.engine_on = true
+                              AND coalesce(t.speed_kmh, 0) <= ${IDLE_SPEED_KMH}) AS idle_fixes
       FROM vehicle_telemetries t
       ${scope}
      WHERE t.captured_at >= ${dayStart}
@@ -98,6 +118,8 @@ export async function probeFiguresForDay(
     peakMl:      r.peak_ml,
     lastAliveAt: r.last_alive_at,
     lastLevelAt: r.last_level_at,
+    engineFixes: Number(r.engine_fixes),
+    idleFixes:   Number(r.idle_fixes),
   }))
 }
 
@@ -111,20 +133,21 @@ export async function probeFiguresForDay(
  * rather than doubling it, which is what makes the backfill safe to retry and
  * lets the job catch up a day it missed.
  */
-export async function recordProbeDailyStats(inDay: Date): Promise<{ day: string; written: number }> {
+export async function recordVehicleDailyStats(inDay: Date): Promise<{ day: string; written: number }> {
   const dayStart = fleetDayStart(inDay)
   const dayEnd   = new Date(dayStart.getTime() + 86_400_000)
   const day      = fleetDayKey(dayStart)
 
-  const figures = await probeFiguresForDay(dayStart, dayEnd)
+  const figures = await vehicleFiguresForDay(dayStart, dayEnd)
 
-  await prisma.probeDailyStat.deleteMany({ where: { day } })
+  await prisma.vehicleDailyStat.deleteMany({ where: { day } })
   if (figures.length > 0) {
-    await prisma.probeDailyStat.createMany({
+    await prisma.vehicleDailyStat.createMany({
       data: figures.map(f => ({
         vehicleId: f.vehicleId, day,
         pings: f.pings, levelPings: f.levelPings, peakMl: f.peakMl,
         lastAliveAt: f.lastAliveAt, lastLevelAt: f.lastLevelAt,
+        engineFixes: f.engineFixes, idleFixes: f.idleFixes,
       })),
       // A vehicle deleted between the aggregate and the write would otherwise
       // fail the whole day on a foreign key.
@@ -133,6 +156,6 @@ export async function recordProbeDailyStats(inDay: Date): Promise<{ day: string;
   }
 
   const out = { day: day.toISOString().slice(0, 10), written: figures.length }
-  logger.info(out, 'probe daily stats recorded')
+  logger.info(out, 'vehicle daily stats recorded')
   return out
 }

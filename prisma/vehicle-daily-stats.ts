@@ -1,16 +1,16 @@
 /**
- * Write the daily probe rollup rows — pings, level pings, peak level and the
- * last-alive timestamps, per vehicle per fleet day.
+ * Write the per-vehicle daily telemetry rollup — ping and level counts for the
+ * probe report, engine-on and stationary counts for fleet-state's idle ratio.
  *
  * The daily job (lib/queues/retention, 21:40 UTC) keeps this current. This is
- * for BACKFILLING, so the probe report has a full thirty-day window to read the
- * first time it runs instead of judging every unit on today alone.
+ * for BACKFILLING, so the probe report has a full thirty-day window and fleet-state a
+ * full week, instead of each judging every unit on today alone.
  *
  * Run ON THE BOX directly, not through an npm wrapper — those point
  * DOTENV_CONFIG_PATH at .env.example, whose DATABASE_URL is the dev SSH tunnel.
  *
- *   npx tsx prisma/probe-stats.ts              # yesterday
- *   npx tsx prisma/probe-stats.ts --days 30    # the last 30 complete days
+ *   npx tsx prisma/vehicle-daily-stats.ts              # yesterday
+ *   npx tsx prisma/vehicle-daily-stats.ts --days 30    # the last 30 complete days
  *
  * Safe to interrupt and re-run: each day is replaced wholesale, so a day already
  * written is simply rewritten with the same figures.
@@ -25,7 +25,7 @@
 
 import 'dotenv/config'
 import { prisma } from '../src/lib/prisma.js'
-import { recordProbeDailyStats } from '../src/modules/fuel/probe-stats.service.js'
+import { recordVehicleDailyStats } from '../src/modules/analytics/vehicle-daily-stats.service.js'
 import { fleetDayStart } from '../src/lib/provider-time.js'
 
 const argv = process.argv.slice(2)
@@ -36,7 +36,7 @@ const DAYS = i >= 0 && argv[i + 1] ? Number(argv[i + 1]) : 1
 const PAUSE_MS = 2_000
 
 async function main() {
-  console.log(`\n📊  recording probe daily stats for the last ${DAYS} complete fleet day(s)\n`)
+  console.log(`\n📊  recording vehicle daily stats for the last ${DAYS} complete fleet day(s)\n`)
 
   // Today is deliberately excluded: the day is still running, and the report
   // adds today live precisely because a stored partial day would be wrong.
@@ -47,13 +47,13 @@ async function main() {
   for (let d = DAYS; d >= 1; d--) {
     const inDay = new Date(todayStart.getTime() - (d - 1) * 86_400_000 - 1)
     const started = Date.now()
-    const out = await recordProbeDailyStats(inDay)
+    const out = await recordVehicleDailyStats(inDay)
     console.log(`  ${out.day}  ${String(out.written).padStart(4)} rows  ${((Date.now() - started) / 1000).toFixed(1)}s`)
     if (d > 1) await new Promise(r => setTimeout(r, PAUSE_MS))
   }
 
-  const total = await prisma.probeDailyStat.count()
-  console.log(`\n✓ ${total} rows in probe_daily_stats\n`)
+  const total = await prisma.vehicleDailyStat.count()
+  console.log(`\n✓ ${total} rows in vehicle_daily_stats\n`)
 }
 
 main()

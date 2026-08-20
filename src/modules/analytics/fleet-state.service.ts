@@ -63,17 +63,12 @@ import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 // two figures diverged by the session offset.
 import { coveredSince } from '../dispatches/dispatch.repository.js'
 import { machinePrefix } from '../fuel/fuel-theft-classifier.js'
+import { vehicleFiguresForDay, IDLE_SPEED_KMH } from './vehicle-daily-stats.service.js'
 
 /** How recently a unit must have reported to count as online. Two hours: the
  *  poll is quarter-hourly, so anything quieter than this has stopped, not
  *  skipped a beat. */
 export const ONLINE_WINDOW_MINUTES = 120
-
-/** Speed at or below which a running engine counts as idling rather than
- *  working. Two km/h — walking pace — because GPS jitter on a stationary
- *  machine reads a km/h or so and a machine creeping at 1 km/h is not
- *  travelling. */
-export const IDLE_SPEED_KMH = 2
 
 /** Longest gap between fixes that still counts as continuous running. Matches
  *  the rollup's own cap, so today's figure and the week's are the same measure
@@ -124,42 +119,6 @@ export interface FleetState {
   /** State by machine category, for the donut's breakdown. */
   byCategory: Array<{ category: string; working: number; idling: number; parked: number; offline: number }>
   units: FleetStateRow[]
-}
-
-/**
- * Engine-on fixes and stationary engine-on fixes, per vehicle, for one window.
- *
- * Exported because the daily rollup and the live read of today must count the
- * same thing. If IDLE_SPEED_KMH ever moves, both sides move with it — and the
- * stored history does not, which is why `backfillTrendFixes` exists to restate
- * it rather than leaving old rows counted under an old threshold.
- */
-export async function fixCountsForWindow(
-  from: Date, to: Date, orgId?: string,
-): Promise<Array<{ vehicleId: string; engineFixes: number; idleFixes: number }>> {
-  const scope = orgId
-    ? Prisma.sql`JOIN vehicles v ON v.id = t.vehicle_id
-                  AND v.is_active AND v.organisation_id = ${orgId}`
-    : Prisma.empty
-
-  const rows = await prisma.$queryRaw<Array<{
-    vehicle_id: string; engine_fixes: bigint; idle_fixes: bigint
-  }>>`
-    SELECT t.vehicle_id,
-           count(*)::bigint AS engine_fixes,
-           count(*) FILTER (WHERE coalesce(t.speed_kmh, 0) <= ${IDLE_SPEED_KMH})::bigint AS idle_fixes
-      FROM vehicle_telemetries t
-      ${scope}
-     WHERE t.captured_at >= ${from}
-       AND t.captured_at <  ${to}
-       AND t.engine_on = true
-     GROUP BY 1`
-
-  return rows.map(r => ({
-    vehicleId:   r.vehicle_id,
-    engineFixes: Number(r.engine_fixes),
-    idleFixes:   Number(r.idle_fixes),
-  }))
 }
 
 export async function fleetState(orgId: string): Promise<FleetState> {
@@ -252,10 +211,16 @@ export async function fleetState(orgId: string): Promise<FleetState> {
   //
   // The WEEK half used to scan a week of raw telemetry on every build: 4.95 s
   // and 2.1M buffers touched, the largest single cost in this service. Counts
-  // sum across days like everything else on fuel_daily_trends, so the week is
-  // read from the rollup and only today is counted live.
+  // sum across days, so the week is read from vehicle_daily_stats and only
+  // today is counted live.
+  //
+  // vehicle_daily_stats, NOT fuel_daily_trends. The first attempt put these
+  // counts on the fuel table and it covered 1,565 vehicle-days where telemetry
+  // covered 2,002 — recordFuelTrends skips a unit with no fuel level that day,
+  // so every unit with a dead probe drew its idle figure from whichever days
+  // its probe happened to report. MUFINDI: MTR 11 had three days of six.
   const [weekFixes, todayFixes] = await Promise.all([
-    prisma.fuelDailyTrend.groupBy({
+    prisma.vehicleDailyStat.groupBy({
       by:    ['vehicleId'],
       where: {
         day:     { gte: weekFromDay },
@@ -263,7 +228,7 @@ export async function fleetState(orgId: string): Promise<FleetState> {
       },
       _sum: { engineFixes: true, idleFixes: true },
     }),
-    fixCountsForWindow(today, new Date(today.getTime() + 86_400_000), orgId),
+    vehicleFiguresForDay(today, new Date(today.getTime() + 86_400_000), orgId),
   ])
 
   const weekByVehicle  = new Map(weekFixes.map(w => [w.vehicleId, w._sum]))
