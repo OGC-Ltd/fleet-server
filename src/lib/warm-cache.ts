@@ -23,7 +23,8 @@ const REFRESH_MS = 60_000
 interface Registered {
   name:    string
   keysFor: (orgId: string) => string[]
-  refresh: (key: string) => Promise<unknown>
+  /** Rebuild unless the entry is younger than the cache's own interval. */
+  refreshIfStale: (key: string) => Promise<unknown>
 }
 const registry: Registered[] = []
 
@@ -41,9 +42,22 @@ export function createWarmCache<T>(opts: {
   /** Entry cap for caches whose keys grow with user input (default 500) —
    *  oldest entries are evicted first. */
   maxEntries?: number
+  /**
+   * How old an entry may get before it is rebuilt, defaulting to the sweep
+   * interval.
+   *
+   * Raise it for a cache whose build is expensive relative to how fast its
+   * answer moves. `probe-report` costs ~36 s against the live fleet and
+   * describes faults that develop over days; refreshing that every 60 s would
+   * hold a throttled instance at half its capacity permanently, to publish an
+   * answer that had not changed. The sweep still VISITS the key every minute —
+   * it just declines to rebuild a fresh one.
+   */
+  refreshMs?: number
 }): WarmCache<T> {
   const store = new Map<string, { data: T; fetchedAt: number; refreshing: boolean }>()
   const maxEntries = opts.maxEntries ?? 500
+  const refreshMs  = opts.refreshMs ?? REFRESH_MS
 
   /**
    * One computation per key at a time, shared by everyone who asks for it.
@@ -98,7 +112,7 @@ export function createWarmCache<T>(opts: {
   const get = async (key: string): Promise<T> => {
     const entry = store.get(key)
     if (entry) {
-      if (Date.now() - entry.fetchedAt > REFRESH_MS && !entry.refreshing) {
+      if (Date.now() - entry.fetchedAt > refreshMs && !entry.refreshing) {
         entry.refreshing = true
         refresh(key).catch(err => {
           entry.refreshing = false
@@ -110,7 +124,19 @@ export function createWarmCache<T>(opts: {
     return refresh(key)
   }
 
-  if (opts.warmKeysFor) registry.push({ name: opts.name, keysFor: opts.warmKeysFor, refresh })
+  /**
+   * What the sweep calls. A key the sweep has already built recently is left
+   * alone, so a cache with a long `refreshMs` costs nothing on the sweeps in
+   * between rather than being rebuilt every minute by the warmer while `get`
+   * politely waits its turn.
+   */
+  const refreshIfStale = (key: string): Promise<unknown> => {
+    const entry = store.get(key)
+    if (entry && Date.now() - entry.fetchedAt <= refreshMs) return Promise.resolve(entry.data)
+    return refresh(key)
+  }
+
+  if (opts.warmKeysFor) registry.push({ name: opts.name, keysFor: opts.warmKeysFor, refreshIfStale })
   return { get }
 }
 
@@ -133,7 +159,7 @@ export function startCacheWarmer(): () => void {
         if (stopped) return
         await Promise.all(registry.flatMap(reg =>
           reg.keysFor(org.id).map(key =>
-            reg.refresh(key).catch(err =>
+            reg.refreshIfStale(key).catch(err =>
               logger.warn({ err, cache: reg.name, key }, 'warm-cache sweep refresh failed')),
           ),
         ))
