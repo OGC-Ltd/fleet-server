@@ -241,6 +241,13 @@ export interface FleetWeekSummary {
   /** Smallest and largest block worked, hectares — the "range". */
   smallestBlockHa: number | null
   largestBlockHa: number | null
+  /**
+   * The same three figures per fleet day, oldest first, so the summary cards
+   * can draw the sparkline the rest of the row draws. A stat tile without one
+   * reads as a different component from the four beside it, which is how a
+   * dashboard starts looking assembled rather than designed.
+   */
+  byDay: Array<{ day: string; hours: number; distanceKm: number; blocks: number }>
 }
 
 /**
@@ -304,6 +311,29 @@ export async function fleetWeekSummary(
      WHERE g.geom IS NOT NULL
      ORDER BY ha`
 
+  // Per day, for the sparklines. Same source and same window as the totals
+  // above, so a card's headline and its plot cannot disagree.
+  const daily = await prisma.$queryRaw<Array<{
+    day: Date; seconds: bigint; metres: bigint; unit_days: bigint
+  }>>`
+    SELECT t.day, coalesce(sum(t.engine_seconds), 0)::bigint AS seconds,
+           coalesce(sum(t.distance_m), 0)::bigint            AS metres,
+           count(*)::bigint                                  AS unit_days
+      FROM fuel_daily_trends t
+      JOIN vehicles v ON v.id = t.vehicle_id
+     WHERE v.organisation_id = ${orgId} AND v.is_active AND t.day >= ${from}::date
+     GROUP BY 1 ORDER BY 1`
+
+  const blocksPerDay = await prisma.$queryRaw<Array<{ day: Date; blocks: bigint }>>`
+    SELECT date_trunc('day', n.occurred_at)::date AS day,
+           count(DISTINCT split_part(n.feed_id, '-', 3))::bigint AS blocks
+      FROM notifications n
+     WHERE n.organisation_id = ${orgId}
+       AND n.alert_type = 'ZONE_ENTRY'
+       AND n.occurred_at >= ${from}
+     GROUP BY 1 ORDER BY 1`
+  const blocksByDay = new Map(blocksPerDay.map(b => [b.day.toISOString().slice(0, 10), Number(b.blocks)]))
+
   const unitDays = Number(work?.unit_days ?? 0)
   const seconds  = Number(work?.seconds ?? 0)
   const areas    = blocks.map(b => b.ha)
@@ -321,5 +351,18 @@ export async function fleetWeekSummary(
     blocksExtentHa:  Math.round(areas.reduce((a, b) => a + b, 0)),
     smallestBlockHa: areas.length ? areas[0]! : null,
     largestBlockHa:  areas.length ? areas[areas.length - 1]! : null,
+    byDay: daily.map((d) => {
+      const key = d.day.toISOString().slice(0, 10)
+      const dayUnitDays = Number(d.unit_days)
+      return {
+        day: key,
+        // Per unit-day again, so the plot is the same measure as the headline
+        // rather than a fleet total that swings with how many units reported.
+        hours:      dayUnitDays > 0
+          ? Math.round((Number(d.seconds) / 3600 / dayUnitDays) * 10) / 10 : 0,
+        distanceKm: Math.round(Number(d.metres) / 1000),
+        blocks:     blocksByDay.get(key) ?? 0,
+      }
+    }),
   }
 }
