@@ -281,6 +281,8 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
     },
   })
 
+  lap('registry')
+
   // How long the silent ones have been silent. Asked only of those units and
   // served by (vehicle_id, captured_at) as a backward index scan, so it is a
   // few dozen key lookups rather than a scan of the table.
@@ -294,6 +296,8 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
      GROUP BY 1`
   const lastSeenByVehicle = new Map(lastSeen.map(l => [l.vehicle_id, l.last_at]))
 
+  lap('lastSeen')
+
   const sensors = await prisma.vehicleSensor.findMany({
     where:  { type: FUEL_SENSOR_TYPE, vehicleId: { in: vehicles.map(v => v.id) } },
     select: {
@@ -306,6 +310,8 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
   // status sensor on the same parameter is described by the one that works.
   const sensorByVehicle = new Map<string, (typeof sensors)[number]>()
   for (const s of sensors) if (!sensorByVehicle.has(s.vehicleId)) sensorByVehicle.set(s.vehicleId, s)
+
+  lap('sensors')
 
   const out: ProbeReportRow[] = []
   // Over the REGISTRY, so a unit with no telemetry still produces a row. `r` is
@@ -385,7 +391,7 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
         Object.values(channels).some(c => c.state === 'NOT_REPORTING'),
     })
   }
-  lap('assemble')
+  lap('loop')
   logger.info({ orgId: opts.orgId ?? 'all', totalMs: Date.now() - t0, ms, units: out.length },
     'probe report built')
   return out
