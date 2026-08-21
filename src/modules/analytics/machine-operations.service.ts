@@ -433,22 +433,40 @@ async function computeFleetWeekSummary(
        AND t.day <= ${lastDay}
        ${vehicleSql(vehicleIds)}`
 
-  // Blocks a machine worked in, from the zone crossings already recorded, with
-  // each block's true area off its PostGIS geometry. The feed id encodes the
-  // zone — see lib/zone-presence, which builds `zn-<vehicle>-<zone>-i|o-<ms>`.
-  const blocks = await prisma.$queryRaw<Array<{ ha: number }>>`
-    WITH entered AS (
-      SELECT DISTINCT split_part(n.feed_id, '-', 3) AS zone_id
-        FROM notifications n
-       WHERE n.organisation_id = ${orgId}
-         AND n.alert_type = 'ZONE_ENTRY'
-         AND n.occurred_at >= ${from}
-         AND n.occurred_at < ${toInstant}
-         ${notificationVehicleSql(vehicleIds)})
+  /**
+   * Blocks a machine worked in, from the zone crossings already recorded — the
+   * per-day counts AND the distinct zones, from ONE scan of the notifications.
+   *
+   * It used to be two scans of the same rows over the same window: one
+   * collecting distinct zones for the areas, one grouping by day for the
+   * sparkline. That is the dominant cost of this whole build — the table is
+   * read from disk on an instance whose RAM is a fraction of the database, so
+   * the second pass is paid in full — and it doubled the moment the Analytics
+   * page started asking for its own window (21-31 days) rather than a fixed
+   * seven, which is what pushed this endpoint past its 60s query timeout.
+   *
+   * The zone still comes out of the feed id (lib/zone-presence builds
+   * `zn-<vehicle>-<zone>-i|o-<ms>`); the VEHICLE filter does not, because
+   * notifications carries an indexed vehicle_id — see notificationVehicleSql.
+   */
+  const entries = await prisma.$queryRaw<Array<{ day: Date; zone_id: string }>>`
+    SELECT date_trunc('day', n.occurred_at)::date AS day,
+           split_part(n.feed_id, '-', 3)          AS zone_id
+      FROM notifications n
+     WHERE n.organisation_id = ${orgId}
+       AND n.alert_type = 'ZONE_ENTRY'
+       AND n.occurred_at >= ${from}
+       AND n.occurred_at < ${toInstant}
+       ${notificationVehicleSql(vehicleIds)}
+     GROUP BY 1, 2`
+
+  const zoneIds = [...new Set(entries.map(e => e.zone_id))].filter(Boolean)
+  // Areas for exactly those zones. Small and indexed by primary key, so this
+  // is a lookup rather than a scan however long the window is.
+  const blocks = zoneIds.length === 0 ? [] : await prisma.$queryRaw<Array<{ ha: number }>>`
     SELECT round((ST_Area(g.geom::geography) / 10000)::numeric, 1)::float8 AS ha
-      FROM entered e
-      JOIN geofences g ON g.id = e.zone_id
-     WHERE g.geom IS NOT NULL
+      FROM geofences g
+     WHERE g.id = ANY(${zoneIds}::text[]) AND g.geom IS NOT NULL
      ORDER BY ha`
 
   // Per day, for the sparklines. Same source and same window as the totals
@@ -466,17 +484,12 @@ async function computeFleetWeekSummary(
        ${vehicleSql(vehicleIds)}
      GROUP BY 1 ORDER BY 1`
 
-  const blocksPerDay = await prisma.$queryRaw<Array<{ day: Date; blocks: bigint }>>`
-    SELECT date_trunc('day', n.occurred_at)::date AS day,
-           count(DISTINCT split_part(n.feed_id, '-', 3))::bigint AS blocks
-      FROM notifications n
-     WHERE n.organisation_id = ${orgId}
-       AND n.alert_type = 'ZONE_ENTRY'
-       AND n.occurred_at >= ${from}
-       AND n.occurred_at < ${toInstant}
-       ${notificationVehicleSql(vehicleIds)}
-     GROUP BY 1 ORDER BY 1`
-  const blocksByDay = new Map(blocksPerDay.map(b => [b.day.toISOString().slice(0, 10), Number(b.blocks)]))
+  // Folded from the single scan above rather than scanned again.
+  const blocksByDay = new Map<string, number>()
+  for (const e of entries) {
+    const key = e.day.toISOString().slice(0, 10)
+    blocksByDay.set(key, (blocksByDay.get(key) ?? 0) + 1)
+  }
 
   // Today, live. The rollup stops at yesterday — see the header. Skipped
   // entirely on a window that does not contain today: see `isLive`.
