@@ -14,6 +14,15 @@ export const speedingQuerySchema = analyticsRangeSchema.extend({
 export const deliveriesQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(365).default(30),
   to:   z.coerce.date().optional(),
+  // Vehicle-type filter, comma separated plate-prefix categories ("EX,CTR").
+  // A STRING rather than an array: it is resolved to vehicle ids by
+  // analytics/vehicle-filter, which owns the one definition of what a category
+  // is, and validating the members here would be a second list to keep in step
+  // with a vocabulary that differs per fleet.
+  //
+  // Absent means the whole fleet, which is NOT the same as an empty selection —
+  // see parseCategories.
+  categories: z.string().optional(),
 })
 
 // Fuel cost: the same trailing window as deliveries, plus the price to cost the

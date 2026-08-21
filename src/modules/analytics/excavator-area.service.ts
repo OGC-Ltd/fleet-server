@@ -37,6 +37,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
+import { vehicleSql } from './vehicle-filter.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 
 /**
@@ -91,7 +92,7 @@ export interface ExcavatorDay {
  * a full result.
  */
 export async function excavatorAreaByDay(
-  orgId: string, day?: Date,
+  orgId: string, day?: Date, vehicleIds: string[] | null = null,
 ): Promise<{ day: string; reachMetres: number; units: ExcavatorDay[]; totalM2: number }> {
   const start = day ?? new Date(fleetDayStart().getTime() - 24 * 3_600_000)
 
@@ -112,6 +113,7 @@ export async function excavatorAreaByDay(
       day:       fleetDayKey(new Date(start.getTime() + 1)),
       digAreaM2: { not: null },
       vehicle:   { organisationId: orgId, isActive: true },
+      ...(vehicleIds == null ? {} : { vehicleId: { in: vehicleIds } }),
     },
     select: {
       vehicleId: true, digAreaM2: true, digSeconds: true,
@@ -183,7 +185,16 @@ const areaCache = createWarmCache<Awaited<ReturnType<typeof excavatorAreaByDay>>
   },
 })
 
-export async function getExcavatorArea(orgId: string, day?: Date) {
+/**
+ * Filtered reads COMPUTE LIVE and never touch the warmer.
+ *
+ * The cache is keyed by org and day and holds the whole fleet's answer; adding
+ * a category selection to that key is an unbounded key space — the same reason
+ * an explicit `to` anchor already computes live in this module. The unfiltered
+ * path, which is what every visitor loads, is untouched and still warm.
+ */
+export async function getExcavatorArea(orgId: string, day?: Date, vehicleIds: string[] | null = null) {
+  if (vehicleIds != null) return excavatorAreaByDay(orgId, day, vehicleIds)
   return areaCache.get(`${orgId}|${day ? day.toISOString().slice(0, 10) : 'last'}`)
 }
 
@@ -205,8 +216,14 @@ export async function getExcavatorArea(orgId: string, day?: Date) {
  * window that reaches back past the rollup's own history those are very
  * different claims for a heatmap to make.
  */
+/**
+ * @param vehicleIds the Analytics page's vehicle-type filter, resolved to ids.
+ *   Null is unfiltered; an empty array is a category this fleet has none of and
+ *   correctly yields an empty series. `= ANY` rather than `IN` because Prisma
+ *   parameterises a JS array into a single Postgres array argument.
+ */
 export async function areaByDay(
-  orgId: string, days = 30, to?: Date,
+  orgId: string, days = 30, to?: Date, vehicleIds: string[] | null = null,
 ): Promise<{ days: Array<{ day: string; m2: number; km2: number; machines: number }>
              totalM2: number; measuredDays: number; windowDays: number }> {
   // Anchored, not rolling. The page is driven by a month picker, so the window
@@ -229,6 +246,7 @@ export async function areaByDay(
        AND s.dig_area_m2 IS NOT NULL
        AND s.day >= ${from}
        AND s.day <= ${lastDay}
+       ${vehicleSql(vehicleIds)}
      GROUP BY 1
      ORDER BY 1`
 
@@ -264,6 +282,9 @@ const dayCache = createWarmCache<Awaited<ReturnType<typeof areaByDay>>>({
   },
 })
 
-export async function getAreaByDay(orgId: string, days = 30, to?: Date) {
+export async function getAreaByDay(
+  orgId: string, days = 30, to?: Date, vehicleIds: string[] | null = null,
+) {
+  if (vehicleIds != null) return areaByDay(orgId, days, to, vehicleIds)
   return dayCache.get(`${orgId}|${days}|${to ? to.toISOString() : 'now'}`)
 }

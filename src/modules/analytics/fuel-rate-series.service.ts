@@ -41,6 +41,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
+import { vehicleSql } from './vehicle-filter.js'
 
 /**
  * Denominators below which a day's rate is arithmetic, not a measurement.
@@ -110,8 +111,10 @@ function statsOf(values: Array<{ day: string; v: number }>): RateStats {
   }
 }
 
+/** @param vehicleIds the vehicle-type filter, resolved to ids — see
+ *  analytics/vehicle-filter. Null is unfiltered. */
 export async function fuelRateByDay(
-  orgId: string, days = 30, to?: Date,
+  orgId: string, days = 30, to?: Date, vehicleIds: string[] | null = null,
 ): Promise<FuelRateSeries> {
   // Anchored the way every other windowed figure on this page is anchored:
   // today plus the days - 1 complete days behind it, in fleet days.
@@ -128,6 +131,7 @@ export async function fuelRateByDay(
         JOIN vehicles v ON v.id = t.vehicle_id
        WHERE v.organisation_id = ${orgId} AND v.is_active
          AND t.day >= ${fromDay} AND t.day <= ${lastDay}
+         ${vehicleSql(vehicleIds)}
        GROUP BY 1`,
     prisma.$queryRaw<Array<{ day: Date; m2: number }>>`
       SELECT s.day, sum(s.dig_area_m2)::float8 AS m2
@@ -136,6 +140,7 @@ export async function fuelRateByDay(
        WHERE v.organisation_id = ${orgId} AND v.is_active
          AND s.dig_area_m2 IS NOT NULL
          AND s.day >= ${fromDay} AND s.day <= ${lastDay}
+         ${vehicleSql(vehicleIds)}
        GROUP BY 1`,
   ])
 
@@ -192,6 +197,11 @@ const cache = createWarmCache<FuelRateSeries>({
   },
 })
 
-export async function getFuelRateSeries(orgId: string, days = 30, to?: Date) {
+/** Filtered reads compute live and never touch the warmer — see
+ *  getAreaByDay for why a filter may not enter a warm cache key. */
+export async function getFuelRateSeries(
+  orgId: string, days = 30, to?: Date, vehicleIds: string[] | null = null,
+) {
+  if (vehicleIds != null) return fuelRateByDay(orgId, days, to, vehicleIds)
   return cache.get(`${orgId}|${days}|${to ? to.toISOString() : 'now'}`)
 }

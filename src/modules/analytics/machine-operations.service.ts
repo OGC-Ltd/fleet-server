@@ -43,6 +43,7 @@ import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import { machinePrefix } from '../fuel/fuel-theft-classifier.js'
 // The SHARED distance measurement — see vehicle-brief on why not a second copy.
 import { coveredSince } from '../dispatches/dispatch.repository.js'
+import { vehicleSql, feedVehicleSql } from './vehicle-filter.js'
 
 /**
  * How long a unit must have been idle for its next movement to count as
@@ -371,8 +372,17 @@ export interface FleetWeekSummary {
  * one, and the range is carried beside it because "19 blocks between 2 and
  * 16,301 ha" is honest where a single total is not.
  */
+/**
+ * @param to    anchor the window on a day other than today — the Analytics
+ *   page's month picker and custom date range. Without it this card was the
+ *   ONE thing on that page that ignored the chosen window: it always reported
+ *   the trailing seven days, so paging back to July left a "Summary" headline
+ *   describing August sitting above July's charts.
+ * @param vehicleIds the vehicle-type filter, resolved to ids — see
+ *   analytics/vehicle-filter. Null is unfiltered.
+ */
 async function computeFleetWeekSummary(
-  orgId: string, days = 7,
+  orgId: string, days = 7, to?: Date, vehicleIds: string[] | null = null,
 ): Promise<FleetWeekSummary> {
   /**
    * The window is `days` FLEET DAYS ending today: today plus the days - 1
@@ -388,8 +398,25 @@ async function computeFleetWeekSummary(
    * fleetDayKey is the only place this conversion may happen — the same fix
    * fleet-state and fuel-trend both took, for the same reason.
    */
-  const from    = new Date(fleetDayStart().getTime() - (days - 1) * 24 * 3_600_000)
+  const anchorStart = fleetDayStart(to ?? new Date())
+  const from    = new Date(anchorStart.getTime() - (days - 1) * 24 * 3_600_000)
   const fromDay = fleetDayKey(from)
+  // The window's LAST day, and the instant just past it. Both queries below
+  // were open-ended (`>= fromDay` with no ceiling), which is the same thing as
+  // "ending today" only while the anchor IS today — on a past month it dragged
+  // every day since into the totals.
+  const lastDay = fleetDayKey(anchorStart)
+  const toInstant = new Date(anchorStart.getTime() + 24 * 3_600_000)
+
+  /**
+   * Is the window still running?
+   *
+   * The live blocks below integrate TODAY from the raw fixes, because the
+   * rollup stops at yesterday. A window anchored on a past month has no today
+   * in it, so adding the current day's engine seconds to July's totals would
+   * report hours that were run six weeks after the period the card names.
+   */
+  const isLive = fleetDayKey(anchorStart).getTime() === fleetDayKey(fleetDayStart()).getTime()
 
   const [work] = await prisma.$queryRaw<Array<{
     unit_days: bigint; units: bigint; seconds: bigint; metres: bigint
@@ -402,7 +429,9 @@ async function computeFleetWeekSummary(
       JOIN vehicles v ON v.id = t.vehicle_id
      WHERE v.organisation_id = ${orgId}
        AND v.is_active
-       AND t.day >= ${fromDay}`
+       AND t.day >= ${fromDay}
+       AND t.day <= ${lastDay}
+       ${vehicleSql(vehicleIds)}`
 
   // Blocks a machine worked in, from the zone crossings already recorded, with
   // each block's true area off its PostGIS geometry. The feed id encodes the
@@ -413,7 +442,9 @@ async function computeFleetWeekSummary(
         FROM notifications n
        WHERE n.organisation_id = ${orgId}
          AND n.alert_type = 'ZONE_ENTRY'
-         AND n.occurred_at >= ${from})
+         AND n.occurred_at >= ${from}
+         AND n.occurred_at < ${toInstant}
+         ${feedVehicleSql(vehicleIds)})
     SELECT round((ST_Area(g.geom::geography) / 10000)::numeric, 1)::float8 AS ha
       FROM entered e
       JOIN geofences g ON g.id = e.zone_id
@@ -430,7 +461,9 @@ async function computeFleetWeekSummary(
            count(*)::bigint                                  AS unit_days
       FROM fuel_daily_trends t
       JOIN vehicles v ON v.id = t.vehicle_id
-     WHERE v.organisation_id = ${orgId} AND v.is_active AND t.day >= ${fromDay}
+     WHERE v.organisation_id = ${orgId} AND v.is_active
+       AND t.day >= ${fromDay} AND t.day <= ${lastDay}
+       ${vehicleSql(vehicleIds)}
      GROUP BY 1 ORDER BY 1`
 
   const blocksPerDay = await prisma.$queryRaw<Array<{ day: Date; blocks: bigint }>>`
@@ -440,12 +473,16 @@ async function computeFleetWeekSummary(
      WHERE n.organisation_id = ${orgId}
        AND n.alert_type = 'ZONE_ENTRY'
        AND n.occurred_at >= ${from}
+       AND n.occurred_at < ${toInstant}
+       ${feedVehicleSql(vehicleIds)}
      GROUP BY 1 ORDER BY 1`
   const blocksByDay = new Map(blocksPerDay.map(b => [b.day.toISOString().slice(0, 10), Number(b.blocks)]))
 
-  // Today, live. The rollup stops at yesterday — see the header.
+  // Today, live. The rollup stops at yesterday — see the header. Skipped
+  // entirely on a window that does not contain today: see `isLive`.
   const today = fleetDayStart()
-  const [live] = await prisma.$queryRaw<Array<{ seconds: number; units: bigint }>>`
+  const [live] = isLive
+    ? await prisma.$queryRaw<Array<{ seconds: number; units: bigint }>>`
     WITH gaps AS (
       SELECT t.vehicle_id, t.engine_on,
              EXTRACT(EPOCH FROM (t.captured_at - lag(t.captured_at) OVER (
@@ -453,19 +490,26 @@ async function computeFleetWeekSummary(
         FROM vehicle_telemetries t
         JOIN vehicles v ON v.id = t.vehicle_id
        WHERE v.organisation_id = ${orgId} AND v.is_active
-         AND t.captured_at >= ${today})
+         AND t.captured_at >= ${today}
+         ${vehicleSql(vehicleIds)})
     SELECT coalesce(sum(least(gap, 900)) FILTER (WHERE engine_on AND gap > 0), 0)::float8 AS seconds,
            count(DISTINCT vehicle_id)::bigint AS units
       FROM gaps`
+    : [undefined]
   const liveSeconds  = Number(live?.seconds ?? 0)
   const liveUnits    = Number(live?.units ?? 0)
 
-  const liveDistance = await coveredSince(
-    (await prisma.vehicle.findMany({
-      where: { organisationId: orgId, isActive: true }, select: { id: true },
-    })).map(v => ({ vehicleId: v.id, since: today })),
-  )
-  const liveMetres = [...liveDistance.values()].reduce((a, r) => a + r.coveredM, 0)
+  const liveMetres = isLive
+    ? [...(await coveredSince(
+        (await prisma.vehicle.findMany({
+          where: {
+            organisationId: orgId, isActive: true,
+            ...(vehicleIds == null ? {} : { id: { in: vehicleIds } }),
+          },
+          select: { id: true },
+        })).map(v => ({ vehicleId: v.id, since: today })),
+      )).values()].reduce((a, r) => a + r.coveredM, 0)
+    : 0
 
   // Complete days only, for the mean — see the header.
   const unitDays = Number(work?.unit_days ?? 0)
@@ -550,6 +594,11 @@ const summaryCache = createWarmCache<Awaited<ReturnType<typeof computeFleetWeekS
   },
 })
 
+/** Does this request stay on the warm path? Only the whole fleet, ending today
+ *  — the shape every visitor loads. An anchor or a filter is an unbounded key
+ *  space and computes live, the same rule the rest of this module follows. */
+const isWarmable = (to?: Date, vehicleIds?: string[] | null) => to == null && vehicleIds == null
+
 export async function earlyStartsByCategory(orgId: string) {
   return startsCache.get(orgId)
 }
@@ -558,6 +607,9 @@ export async function operatingHoursByCategory(orgId: string, range: OperatingRa
   return hoursCache.get(`${orgId}|${range}`)
 }
 
-export async function fleetWeekSummary(orgId: string, days = 7) {
+export async function fleetWeekSummary(
+  orgId: string, days = 7, to?: Date, vehicleIds: string[] | null = null,
+) {
+  if (!isWarmable(to, vehicleIds)) return computeFleetWeekSummary(orgId, days, to, vehicleIds)
   return summaryCache.get(`${orgId}|${days}`)
 }

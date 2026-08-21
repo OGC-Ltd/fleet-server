@@ -27,6 +27,9 @@ router.get('/machine-starts',       ctrl.machineStarts)
 router.get('/machine-hours',        ctrl.machineHours)
 router.get('/machine-summary',      ctrl.machineSummary)
 router.get('/fleet-state',          ctrl.fleetStateHandler)
+// The vehicle-type filter's options — what categories this fleet actually has.
+// Unfiltered by design: it is the list the filter is chosen FROM.
+router.get('/vehicle-categories',   ctrl.vehicleCategories)
 router.get('/excavator-area',       ctrl.excavatorArea)
 router.get('/excavator-area-days',  ctrl.excavatorAreaByDay)
 router.get('/fuel-rate-days',       ctrl.fuelRateDays)
