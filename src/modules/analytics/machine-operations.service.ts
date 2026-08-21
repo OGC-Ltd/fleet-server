@@ -61,14 +61,50 @@ export const EXPECTED_HOURS_PER_DAY = 18
  *  before 04:00, so they must never be added together. */
 export const START_BUCKETS = [4, 5, 6] as const
 
+/** One machine's start, named, so a chart can say WHICH machine rather than
+ *  only how many. `at` is the fleet's own wall clock, already formatted —
+ *  a reader in London and a reader in Nairobi must see the same 04:37. */
+export interface StartedUnit {
+  plate: string
+  at:    string
+}
+
+/**
+ * The three DISCRETE windows the chart draws.
+ *
+ * These are not the before04/05/06 fields below. Those are cumulative — a
+ * machine that started at 03:00 is in all three — and a bar chart drawn from
+ * them counts the same machine up to three times while labelling it as having
+ * started in three different hours. Measured on KASULU 2026-08-21, EX came
+ * back 7 / 8 / 11 against 15 started, and the chart read that as "7 machines
+ * started between 04:00 and 05:00" when the true figure for that hour is 1.
+ *
+ * Each start lands in exactly one slot here, so the three may be added and the
+ * sum is the machines that started early.
+ */
+export interface StartSlots {
+  /** Started before 04:00 — the night end of the shift. */
+  pre04: number
+  /** Started within the 04:00 hour. */
+  h04:   number
+  /** Started within the 05:00 hour. */
+  h05:   number
+}
+
 export interface CategoryStarts {
   /** Plate prefix — EX, DZ, CTR, FT. The operator's own vocabulary. */
   category: string
   /** Units that genuinely started work in the window. */
   started:  number
+  /** CUMULATIVE counts, kept for callers that already read them. `before05`
+   *  includes everything before 04:00 — never add these together. */
   before04: number
   before05: number
   before06: number
+  /** The same starts as non-overlapping windows — what a bar chart needs. */
+  slots: StartSlots
+  /** Which machines, per slot, so each bar can name them. */
+  units: Record<keyof StartSlots, StartedUnit[]>
 }
 
 /**
@@ -114,6 +150,12 @@ async function computeEarlyStarts(
     timeZone: 'Africa/Nairobi', hour: '2-digit', hour12: false,
   })
   const hourOf = (d: Date): number => Number(hourFmt.format(d))
+  // The wall clock the yard runs on, formatted here rather than on the client
+  // for the reason `day` is: an instant rendered in the VIEWER's timezone shows
+  // a different start time to a reader in London than to one in Nairobi.
+  const clockFmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Nairobi', hour: '2-digit', minute: '2-digit', hour12: false,
+  })
 
   const byCat = new Map<string, CategoryStarts>()
   for (const r of rows) {
@@ -122,7 +164,11 @@ async function computeEarlyStarts(
     // worse than one with an honest "other".
     const category = machinePrefix(r.plate) ?? 'OTHER'
     if (!byCat.has(category)) {
-      byCat.set(category, { category, started: 0, before04: 0, before05: 0, before06: 0 })
+      byCat.set(category, {
+        category, started: 0, before04: 0, before05: 0, before06: 0,
+        slots: { pre04: 0, h04: 0, h05: 0 },
+        units: { pre04: [], h04: [], h05: [] },
+      })
     }
     const c = byCat.get(category)!
     const h = hourOf(r.started)
@@ -130,6 +176,21 @@ async function computeEarlyStarts(
     if (h < 4) c.before04++
     if (h < 5) c.before05++
     if (h < 6) c.before06++
+
+    // Exactly one slot per start — see StartSlots.
+    const slot: keyof StartSlots | null =
+      h < 4 ? 'pre04' : h === 4 ? 'h04' : h === 5 ? 'h05' : null
+    if (slot) {
+      c.slots[slot]++
+      c.units[slot].push({ plate: r.plate, at: clockFmt.format(r.started) })
+    }
+  }
+
+  // Earliest first inside each slot: the list is read as "who was out first".
+  for (const c of byCat.values()) {
+    for (const k of ['pre04', 'h04', 'h05'] as const) {
+      c.units[k].sort((a, b) => a.at.localeCompare(b.at))
+    }
   }
 
   return {
