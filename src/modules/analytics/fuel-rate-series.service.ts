@@ -1,23 +1,34 @@
 /**
  * What the fleet spends per unit of work, day by day.
  *
- * ## Two rates, because one denominator does not fit the yard
+ * ## One numerator, two denominators
  *
- * Litres per HECTARE for excavators, litres per KILOMETRE for the units whose
- * work is travel. That split is not a presentation choice — position freezes at
- * speed 0 on this telemetry, so a digging excavator reports about no distance
- * while burning eleven litres an hour, and the measured L/km for PLANT comes to
- * 7.361, which is the arithmetic saying the denominator is wrong rather than a
- * rate anyone can act on. Ground covered is the excavator's denominator;
- * distance is the lorry's.
+ * The numerator is EVERY litre the fleet burned that day — excavators, dozers,
+ * loaders, lorries, tankers, the lot. The denominators are the whole day's work
+ * measured two ways: all the ground covered, and all the distance driven. So
+ * the two views are not two populations, they are one day's fuel bill asked
+ * about twice — what a day of work cost per hectare, and what it cost per
+ * kilometre.
+ *
+ * An earlier cut of this split the numerator too, charging only excavator fuel
+ * against hectares and only travel fuel against kilometres. That answers a
+ * narrower question than the one asked, and it left the dozers and loaders —
+ * which burn real fuel over the same ground — out of the hectare figure
+ * entirely.
+ *
+ * Read the kilometre view knowing what is in it: plant that digs all day
+ * reports almost no distance while burning, because position freezes at speed 0
+ * on this telemetry. That fuel still lands in the numerator, so the kilometre
+ * figure is the fleet's cost per kilometre of driving DONE, not a lorry's
+ * consumption rate. The hectare view is the one to read on a digging day.
  *
  * ## Why a daily series rather than one number
  *
  * The per-machine figures on the fleet table answer "which machine is
  * expensive". This answers "is the yard getting better or worse", which a
  * single average cannot: measured over KASULU's last twelve days the hectare
- * rate ran between 63.7 and 128.8 L/ha, a twofold spread that averages away to
- * a number nobody would question.
+ * rate ran across a twofold spread that averages away to a number nobody would
+ * question.
  *
  * ## The annotations are computed, never authored
  *
@@ -30,15 +41,13 @@
 import { prisma } from '../../lib/prisma.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
-import { machinePrefix } from '../fuel/fuel-theft-classifier.js'
-import { TRAVEL_CATEGORIES } from './fleet-state.service.js'
 
 /**
  * Denominators below which a day's rate is arithmetic, not a measurement.
  *
  * The window's first day is usually thin — telemetry history starts mid-day, so
- * one excavator and a hectare of ground can survive into the series and produce
- * a rate three times the mean. Measured 2026-08-21, KASULU's 2026-07-27 came
+ * a hectare of ground can survive into the series and produce a rate several
+ * times the mean. Measured 2026-08-21, KASULU's 2026-07-27 came
  * back at 370.7 L/ha off 1.04 ha, against a 30-day mean of 102.7, and it would
  * have been the day the chart pointed at.
  *
@@ -50,13 +59,16 @@ const MIN_KM = 200
 
 export interface FuelRateDay {
   day: string
-  /** Litres per hectare worked, excavators. Null on a day nobody measured ground. */
+  /** The day's whole fuel bill over the whole day's ground. Null where nobody
+   *  measured enough ground to divide by. */
   litresPerHectare: number | null
-  /** Litres per kilometre, travel units only. */
+  /** The same fuel bill over the whole day's distance. */
   litresPerKm: number | null
-  /** The denominators, so a reader can see what a rate rests on. */
+  /** The denominators and the numerator, so a reader can see what a rate rests
+   *  on rather than having to trust the quotient. */
   hectares: number | null
   km: number | null
+  litres: number | null
 }
 
 /** Mean, spread, and the day worth asking about — all read off the series. */
@@ -108,16 +120,15 @@ export async function fuelRateByDay(
   const fromDay = fleetDayKey(new Date(fleetDayStart(anchor).getTime() - (days - 1) * 86_400_000))
 
   const [burn, area] = await Promise.all([
-    prisma.$queryRaw<Array<{
-      day: Date; plate: string; burn_ml: number; distance_m: number
-    }>>`
-      SELECT t.day, v.registration_plate AS plate,
-             coalesce(t.engine_burn_ml, 0)::float8 AS burn_ml,
-             coalesce(t.distance_m, 0)::float8     AS distance_m
+    prisma.$queryRaw<Array<{ day: Date; burn_ml: number; distance_m: number }>>`
+      SELECT t.day,
+             sum(coalesce(t.engine_burn_ml, 0))::float8 AS burn_ml,
+             sum(coalesce(t.distance_m, 0))::float8     AS distance_m
         FROM fuel_daily_trends t
         JOIN vehicles v ON v.id = t.vehicle_id
        WHERE v.organisation_id = ${orgId} AND v.is_active
-         AND t.day >= ${fromDay} AND t.day <= ${lastDay}`,
+         AND t.day >= ${fromDay} AND t.day <= ${lastDay}
+       GROUP BY 1`,
     prisma.$queryRaw<Array<{ day: Date; m2: number }>>`
       SELECT s.day, sum(s.dig_area_m2)::float8 AS m2
         FROM vehicle_daily_stats s
@@ -130,21 +141,15 @@ export async function fuelRateByDay(
 
   const hectaresByDay = new Map(area.map(a => [a.day.toISOString().slice(0, 10), a.m2 / 10_000]))
 
-  // Split the burn by what the machine's work IS, using the same category test
-  // the fleet table uses so the two cannot disagree about which units travel.
-  const acc = new Map<string, { exL: number; trL: number; trKm: number }>()
-  for (const b of burn) {
-    const key = b.day.toISOString().slice(0, 10)
-    const cur = acc.get(key) ?? { exL: 0, trL: 0, trKm: 0 }
-    const cat = machinePrefix(b.plate) ?? 'OTHER'
-    if (cat === 'EX') {
-      cur.exL += b.burn_ml / 1000
-    } else if (TRAVEL_CATEGORIES.has(cat)) {
-      cur.trL  += b.burn_ml / 1000
-      cur.trKm += b.distance_m / 1000
-    }
-    acc.set(key, cur)
-  }
+  // The whole fleet's day, undivided: every litre and every kilometre, whatever
+  // the machine was. Both queries already aggregate per day, so this is just a
+  // keyed lookup rather than a fold.
+  const acc = new Map<string, { litres: number; km: number }>(
+    burn.map(b => [
+      b.day.toISOString().slice(0, 10),
+      { litres: b.burn_ml / 1000, km: b.distance_m / 1000 },
+    ]),
+  )
 
   const keys = [...new Set([...acc.keys(), ...hectaresByDay.keys()])].sort()
   const out: FuelRateDay[] = keys.map((day) => {
@@ -155,12 +160,13 @@ export async function fuelRateByDay(
     // fleet worked for nothing.
     return {
       day,
-      litresPerHectare: a && ha != null && ha >= MIN_HECTARES && a.exL > 0
-        ? Math.round((a.exL / ha) * 10) / 10 : null,
-      litresPerKm: a && a.trKm >= MIN_KM && a.trL > 0
-        ? Math.round((a.trL / a.trKm) * 100) / 100 : null,
-      hectares:         ha == null ? null : Math.round(ha * 10) / 10,
-      km:               a && a.trKm > 0 ? Math.round(a.trKm) : null,
+      litresPerHectare: a && ha != null && ha >= MIN_HECTARES && a.litres > 0
+        ? Math.round((a.litres / ha) * 10) / 10 : null,
+      litresPerKm: a && a.km >= MIN_KM && a.litres > 0
+        ? Math.round((a.litres / a.km) * 100) / 100 : null,
+      hectares: ha == null ? null : Math.round(ha * 10) / 10,
+      km:       a && a.km > 0 ? Math.round(a.km) : null,
+      litres:   a && a.litres > 0 ? Math.round(a.litres) : null,
     }
   })
 
