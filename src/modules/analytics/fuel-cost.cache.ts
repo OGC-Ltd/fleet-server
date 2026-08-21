@@ -1,6 +1,7 @@
 // Warmed cache for the fuel ledger aggregate (analytics.repository's
 // fuelConsumption) — see lib/warm-cache.ts for the pattern, and
-// deliveries.cache.ts for the sibling this mirrors.
+// deliveries.cache.ts for the sibling this mirrors, including why anchored and
+// vehicle-filtered reads are cached here rather than computed on the request.
 //
 // Cached QUANTITIES only. Cost is applied per request in fuel-pricing.ts, so
 // `pricePerLitre` never enters the key and one warmed entry serves every caller
@@ -11,22 +12,27 @@
 
 import { createWarmCache } from '../../lib/warm-cache.js'
 import { fuelConsumption } from './analytics.repository.js'
+import { windowCacheKey, parseWindowCacheKey, vehicleIdsForCategories } from './vehicle-filter.js'
 
 /** The trailing windows the Analytics page can request. Matches deliveries. */
 export const FUEL_COST_WINDOWS_DAYS = [7, 30, 90]
 
 type FuelConsumptionPayload = Awaited<ReturnType<typeof fuelConsumption>>
 
-// Key format: `${orgId}:${days}`
 const cache = createWarmCache<FuelConsumptionPayload>({
   name: 'fuel-cost',
-  compute: (key) => {
-    const sep = key.lastIndexOf(':')
-    return fuelConsumption(key.slice(0, sep), { days: Number(key.slice(sep + 1)) })
+  maxEntries: 200,
+  compute: async (key) => {
+    const { orgId, days, to, categories } = parseWindowCacheKey(key)
+    return fuelConsumption(orgId, { days, to },
+      await vehicleIdsForCategories(orgId, categories))
   },
-  warmKeysFor: (orgId) => FUEL_COST_WINDOWS_DAYS.map(d => `${orgId}:${d}`),
+  warmKeysFor: (orgId) =>
+    FUEL_COST_WINDOWS_DAYS.map(d => windowCacheKey(orgId, d, undefined, null)),
 })
 
-export function getFuelConsumption(orgId: string, days: number): Promise<FuelConsumptionPayload> {
-  return cache.get(`${orgId}:${days}`)
+export function getFuelConsumption(
+  orgId: string, days: number, to?: Date, categories: string[] | null = null,
+): Promise<FuelConsumptionPayload> {
+  return cache.get(windowCacheKey(orgId, days, to, categories))
 }

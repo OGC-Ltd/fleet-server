@@ -43,7 +43,7 @@ import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import { machinePrefix } from '../fuel/fuel-theft-classifier.js'
 // The SHARED distance measurement — see vehicle-brief on why not a second copy.
 import { coveredSince } from '../dispatches/dispatch.repository.js'
-import { vehicleSql, feedVehicleSql } from './vehicle-filter.js'
+import { vehicleSql, notificationVehicleSql, windowCacheKey, parseWindowCacheKey, vehicleIdsForCategories } from './vehicle-filter.js'
 
 /**
  * How long a unit must have been idle for its next movement to count as
@@ -444,7 +444,7 @@ async function computeFleetWeekSummary(
          AND n.alert_type = 'ZONE_ENTRY'
          AND n.occurred_at >= ${from}
          AND n.occurred_at < ${toInstant}
-         ${feedVehicleSql(vehicleIds)})
+         ${notificationVehicleSql(vehicleIds)})
     SELECT round((ST_Area(g.geom::geography) / 10000)::numeric, 1)::float8 AS ha
       FROM entered e
       JOIN geofences g ON g.id = e.zone_id
@@ -474,7 +474,7 @@ async function computeFleetWeekSummary(
        AND n.alert_type = 'ZONE_ENTRY'
        AND n.occurred_at >= ${from}
        AND n.occurred_at < ${toInstant}
-       ${feedVehicleSql(vehicleIds)}
+       ${notificationVehicleSql(vehicleIds)}
      GROUP BY 1 ORDER BY 1`
   const blocksByDay = new Map(blocksPerDay.map(b => [b.day.toISOString().slice(0, 10), Number(b.blocks)]))
 
@@ -585,19 +585,28 @@ const hoursCache = createWarmCache<Awaited<ReturnType<typeof computeOperatingHou
   },
 })
 
+/**
+ * EVERY shape of this read is cached, filtered and anchored ones included.
+ *
+ * They used to compute live, which was the wrong call: this build costs tens of
+ * seconds against the fleet — it is behind a cache precisely because of that —
+ * so a filtered request was a thirty-to-sixty-second query on the request path
+ * and the page looked hung after every click. The key space being unbounded is
+ * real and is what `maxEntries` handles, by evicting the oldest.
+ *
+ * The warmer still declares only the plain seven-day key, so the background
+ * sweep never rebuilds somebody's ad-hoc selection.
+ */
 const summaryCache = createWarmCache<Awaited<ReturnType<typeof computeFleetWeekSummary>>>({
   name: 'machine-summary',
-  warmKeysFor: (orgId) => [`${orgId}|7`],
-  compute: (key) => {
-    const sep = key.lastIndexOf('|')
-    return computeFleetWeekSummary(key.slice(0, sep), Number(key.slice(sep + 1)))
+  maxEntries: 200,
+  warmKeysFor: (orgId) => [windowCacheKey(orgId, 7, undefined, null)],
+  compute: async (key) => {
+    const { orgId, days, to, categories } = parseWindowCacheKey(key)
+    return computeFleetWeekSummary(orgId, days, to,
+      await vehicleIdsForCategories(orgId, categories))
   },
 })
-
-/** Does this request stay on the warm path? Only the whole fleet, ending today
- *  — the shape every visitor loads. An anchor or a filter is an unbounded key
- *  space and computes live, the same rule the rest of this module follows. */
-const isWarmable = (to?: Date, vehicleIds?: string[] | null) => to == null && vehicleIds == null
 
 export async function earlyStartsByCategory(orgId: string) {
   return startsCache.get(orgId)
@@ -607,9 +616,10 @@ export async function operatingHoursByCategory(orgId: string, range: OperatingRa
   return hoursCache.get(`${orgId}|${range}`)
 }
 
+/** @param categories the vehicle-type selection; ids are resolved inside the
+ *  cache's compute so the key stays small and stable. */
 export async function fleetWeekSummary(
-  orgId: string, days = 7, to?: Date, vehicleIds: string[] | null = null,
+  orgId: string, days = 7, to?: Date, categories: string[] | null = null,
 ) {
-  if (!isWarmable(to, vehicleIds)) return computeFleetWeekSummary(orgId, days, to, vehicleIds)
-  return summaryCache.get(`${orgId}|${days}`)
+  return summaryCache.get(windowCacheKey(orgId, days, to, categories))
 }

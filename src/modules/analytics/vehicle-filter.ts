@@ -156,12 +156,62 @@ export const vehicleSql = (ids: string[] | null) =>
   ids == null ? Prisma.empty : Prisma.sql`AND v.id = ANY(${ids}::text[])`
 
 /**
- * The same filter where there is no `vehicles` row to join.
+ * The same filter on `notifications`, which has its own `vehicle_id` column.
  *
- * `notifications` carries the unit inside its feed id — lib/zone-presence
- * builds `zn-<vehicleId>-<zoneId>-<kind>-<ms>` — and a cuid contains no dashes,
- * so part 2 is exactly the vehicle id.
+ * This read `split_part(n.feed_id, '-', 2)` first — the unit IS encoded in the
+ * feed id, since lib/zone-presence builds `zn-<vehicleId>-<zoneId>-<kind>-<ms>`
+ * and a cuid contains no dashes. It was also the wrong column to use: a
+ * function of a column is not sargable, so every candidate row had to be read
+ * and string-split, and the table has an index on
+ * `(organisation_id, vehicle_id, occurred_at)` that covers exactly this
+ * predicate and could not be used. The plain column is both simpler and the
+ * one the planner can seek on.
  */
-export const feedVehicleSql = (ids: string[] | null) =>
-  ids == null ? Prisma.empty
-    : Prisma.sql`AND split_part(n.feed_id, '-', 2) = ANY(${ids}::text[])`
+export const notificationVehicleSql = (ids: string[] | null) =>
+  ids == null ? Prisma.empty : Prisma.sql`AND n.vehicle_id = ANY(${ids}::text[])`
+
+/* ───────────────────────────── cache keys ────────────────────────────────── */
+
+/**
+ * A selection, canonically. Sorted, so the same two categories picked in either
+ * order are one cache entry rather than two.
+ */
+export const categoriesKey = (categories: string[] | null): string =>
+  categories?.length ? [...categories].sort().join(',') : 'all'
+
+/**
+ * The cache key for one windowed, optionally filtered read.
+ *
+ * FILTERED AND ANCHORED READS ARE CACHED, which reverses the original decision
+ * here and is the whole point of this helper. They were computed live on the
+ * reasoning that a selection is an unbounded key space — true, but the wrong
+ * conclusion: these aggregates cost tens of seconds against the fleet, which is
+ * precisely why they were put behind a warm cache in the first place, and
+ * "unbounded" is what `maxEntries` on that cache already solves by evicting
+ * oldest-first. Computing them live made every filter click a fresh
+ * thirty-to-sixty-second query, so the page appeared to hang.
+ *
+ * The warmer still declares only the UNFILTERED, anchorless keys, so a
+ * background sweep never spends the box's budget rebuilding one operator's
+ * ad-hoc selection. Those keys enter on demand and age out.
+ *
+ * `|` separates because none of the parts can contain one: a cuid is
+ * alphanumeric, an ISO instant uses `-`/`:`/`.`, and a category is an
+ * upper-case plate prefix or the `__unprefixed` sentinel.
+ */
+export const windowCacheKey = (
+  orgId: string, days: number, to: Date | undefined, categories: string[] | null,
+): string => `${orgId}|${days}|${to ? to.toISOString() : 'now'}|${categoriesKey(categories)}`
+
+/** The inverse, for a cache's `compute`. */
+export function parseWindowCacheKey(key: string): {
+  orgId: string; days: number; to?: Date; categories: string[] | null
+} {
+  const [orgId = '', days = '0', anchor = 'now', cats = 'all'] = key.split('|')
+  return {
+    orgId,
+    days: Number(days),
+    to: anchor === 'now' ? undefined : new Date(anchor),
+    categories: cats === 'all' ? null : cats.split(','),
+  }
+}

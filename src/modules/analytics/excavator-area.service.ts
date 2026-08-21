@@ -37,7 +37,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
-import { vehicleSql } from './vehicle-filter.js'
+import { vehicleSql, windowCacheKey, parseWindowCacheKey, categoriesKey, vehicleIdsForCategories } from './vehicle-filter.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 
 /**
@@ -177,25 +177,23 @@ const AREA_REFRESH_MS = 60 * 60_000
 const areaCache = createWarmCache<Awaited<ReturnType<typeof excavatorAreaByDay>>>({
   name: 'excavator-area',
   refreshMs: AREA_REFRESH_MS,
-  warmKeysFor: (orgId) => [`${orgId}|last`],
-  compute: (key) => {
-    const sep = key.lastIndexOf('|')
-    const day = key.slice(sep + 1)
-    return excavatorAreaByDay(key.slice(0, sep), day === 'last' ? undefined : new Date(day))
+  maxEntries: 200,
+  // Key: `${orgId}|${day}|${cats}` — only the default day, whole fleet, is warmed.
+  warmKeysFor: (orgId) => [`${orgId}|last|all`],
+  compute: async (key) => {
+    const [orgId = '', day = 'last', cats = 'all'] = key.split('|')
+    return excavatorAreaByDay(orgId, day === 'last' ? undefined : new Date(day),
+      await vehicleIdsForCategories(orgId, cats === 'all' ? null : cats.split(',')))
   },
 })
 
-/**
- * Filtered reads COMPUTE LIVE and never touch the warmer.
- *
- * The cache is keyed by org and day and holds the whole fleet's answer; adding
- * a category selection to that key is an unbounded key space — the same reason
- * an explicit `to` anchor already computes live in this module. The unfiltered
- * path, which is what every visitor loads, is untouched and still warm.
- */
-export async function getExcavatorArea(orgId: string, day?: Date, vehicleIds: string[] | null = null) {
-  if (vehicleIds != null) return excavatorAreaByDay(orgId, day, vehicleIds)
-  return areaCache.get(`${orgId}|${day ? day.toISOString().slice(0, 10) : 'last'}`)
+/** Filtered reads are cached too — see the note on summaryCache in
+ *  machine-operations for why computing them live was the wrong call. */
+export async function getExcavatorArea(
+  orgId: string, day?: Date, categories: string[] | null = null,
+) {
+  return areaCache.get(
+    `${orgId}|${day ? day.toISOString().slice(0, 10) : 'last'}|${categoriesKey(categories)}`)
 }
 
 
@@ -272,19 +270,20 @@ export async function areaByDay(
 const dayCache = createWarmCache<Awaited<ReturnType<typeof areaByDay>>>({
   name: 'excavator-area-by-day',
   refreshMs: AREA_REFRESH_MS,
-  // Only the current month is warmed. A past month is immutable and asked for
-  // occasionally; warming every month anyone had ever paged to would keep the
-  // sweep rebuilding history nobody is looking at.
-  warmKeysFor: (orgId) => [`${orgId}|31|now`],
-  compute: (key) => {
-    const [orgId, days, anchor] = key.split('|')
-    return areaByDay(orgId, Number(days), anchor === 'now' ? undefined : new Date(anchor))
+  maxEntries: 200,
+  // Only the current month, whole fleet, is warmed. A past month is immutable
+  // and asked for occasionally; warming every month anyone had ever paged to
+  // would keep the sweep rebuilding history nobody is looking at, and the same
+  // goes for every category selection anyone had ever ticked.
+  warmKeysFor: (orgId) => [windowCacheKey(orgId, 31, undefined, null)],
+  compute: async (key) => {
+    const { orgId, days, to, categories } = parseWindowCacheKey(key)
+    return areaByDay(orgId, days, to, await vehicleIdsForCategories(orgId, categories))
   },
 })
 
 export async function getAreaByDay(
-  orgId: string, days = 30, to?: Date, vehicleIds: string[] | null = null,
+  orgId: string, days = 30, to?: Date, categories: string[] | null = null,
 ) {
-  if (vehicleIds != null) return areaByDay(orgId, days, to, vehicleIds)
-  return dayCache.get(`${orgId}|${days}|${to ? to.toISOString() : 'now'}`)
+  return dayCache.get(windowCacheKey(orgId, days, to, categories))
 }
