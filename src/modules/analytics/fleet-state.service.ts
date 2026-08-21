@@ -63,6 +63,7 @@ import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 // two figures diverged by the session offset.
 import { coveredSince } from '../dispatches/dispatch.repository.js'
 import { machinePrefix } from '../fuel/fuel-theft-classifier.js'
+import { getProbeReport } from '../fuel/probe-report.service.js'
 import { vehicleFiguresForDay, IDLE_SPEED_KMH } from './vehicle-daily-stats.service.js'
 
 /** How recently a unit must have reported to count as online. Two hours: the
@@ -134,6 +135,46 @@ export interface FleetStateRow {
    */
   areaWeekAvgKm2: number | null
   areaMonthAvgKm2: number | null
+
+  /**
+   * Fuel over the month, and the rates it supports.
+   *
+   * `fuelBurnL` is MODELLED — the vehicle's own derived rate times the seconds
+   * its engine ran. `fuelDropL` is MEASURED — the tank's opening minus its
+   * closing, summed. Both are carried because they answer different questions
+   * and the gap between them is where a leak or a siphon shows up.
+   */
+  fuelBurnL: number | null
+  fuelDropL: number | null
+  /** Litres per engine hour. The fleet's own consumption model is per-hour, so
+   *  this is the rate every category can be compared on. */
+  litresPerHour: number | null
+  /**
+   * Litres per kilometre — TRAVEL CATEGORIES ONLY, null on plant.
+   *
+   * Position freezes at speed 0 on this telemetry, so a working excavator
+   * reports about zero kilometres while burning eleven litres an hour. The
+   * measured L/km for PLANT is 7.361, which is not a rate anybody can use — it
+   * is the arithmetic saying the denominator is wrong. Same reason `idleHours`
+   * is null on plant: a number that is meaningless for a category is worse than
+   * an absent one, because it invites a comparison.
+   */
+  litresPerKm: number | null
+  /** Litres per hectare worked — excavators only, where ground was measured. */
+  litresPerHectare: number | null
+  /** Hectares the bucket covered over the window. */
+  hectares: number | null
+
+  /**
+   * What the unit's sensors are doing, from the probe report.
+   *
+   * `null` where the unit is not in the report at all. 'OK' means the fuel
+   * probe is reporting and calibrated; the rest name the fault so a fitter
+   * knows which trip to make — an uncalibrated sensor is a Wialon record
+   * somebody has to correct, and sending someone to the machine wastes the
+   * journey.
+   */
+  sensorHealth: 'OK' | 'DIED' | 'SILENT' | 'UNCALIBRATED' | 'NOT_FITTED' | 'TRACKER_SILENT' | 'UNKNOWN' | null
 }
 
 /**
@@ -179,6 +220,25 @@ export interface FleetState {
   monitoring: FleetMonitoring
 }
 
+/**
+ * One probe-report row reduced to the single thing a fleet table can show.
+ *
+ * Ordered by what an operator would act on first: a silent tracker is upstream
+ * of every other reading, a dead probe is a workshop job, an uncalibrated
+ * sensor is a data-entry job. NOT_FITTED is not a fault — nothing is broken
+ * about a machine that never had the hardware.
+ */
+function healthOf(r: { trackerSilent: boolean; fuelProbe: { state: string }; fuelSensor: { uncalibrated: boolean; fitted: boolean } }):
+  FleetStateRow['sensorHealth'] {
+  if (r.trackerSilent) return 'TRACKER_SILENT'
+  if (r.fuelProbe.state === 'DIED')    return 'DIED'
+  if (r.fuelProbe.state === 'SILENT')  return 'SILENT'
+  if (r.fuelSensor.uncalibrated)       return 'UNCALIBRATED'
+  if (!r.fuelSensor.fitted)            return 'NOT_FITTED'
+  if (r.fuelProbe.state === 'UNKNOWN') return 'UNKNOWN'
+  return 'OK'
+}
+
 export async function fleetState(orgId: string): Promise<FleetState> {
   const now      = new Date()
   const today    = fleetDayStart()
@@ -222,6 +282,7 @@ export async function fleetState(orgId: string): Promise<FleetState> {
     vehicle_id: string
     week_s: bigint; week_m: bigint; week_days: bigint
     month_s: bigint; month_m: bigint; month_days: bigint
+    burn_ml: bigint; drop_ml: bigint
   }>>`
     SELECT t.vehicle_id,
            coalesce(sum(t.engine_seconds) FILTER (WHERE t.day >= ${weekFromDay}), 0)::bigint AS week_s,
@@ -229,7 +290,14 @@ export async function fleetState(orgId: string): Promise<FleetState> {
            count(*) FILTER (WHERE t.day >= ${weekFromDay})::bigint AS week_days,
            coalesce(sum(t.engine_seconds), 0)::bigint AS month_s,
            coalesce(sum(t.distance_m), 0)::bigint     AS month_m,
-           count(*)::bigint                           AS month_days
+           count(*)::bigint                           AS month_days,
+           -- Fuel over the same window. engine_burn_ml is MODELLED — a
+           -- per-vehicle rate times the seconds the engine ran — and
+           -- consumed_ml is MEASURED, the tank's own opening minus its
+           -- closing. They answer different questions and both are carried,
+           -- because the gap between them is the interesting part.
+           coalesce(sum(t.engine_burn_ml), 0)::bigint AS burn_ml,
+           coalesce(sum(t.consumed_ml), 0)::bigint    AS drop_ml
       FROM fuel_daily_trends t
       JOIN vehicles v ON v.id = t.vehicle_id
      WHERE v.organisation_id = ${orgId} AND v.is_active
@@ -314,11 +382,14 @@ export async function fleetState(orgId: string): Promise<FleetState> {
   // days out of seven reports what it does on a working day, which is the
   // figure an operator compares against another machine.
   const areaRows = await prisma.$queryRaw<Array<{
-    vehicle_id: string; week_m2: number | null; month_m2: number | null
+    vehicle_id: string; week_m2: number | null; month_m2: number | null; total_m2: number | null
   }>>`
     SELECT s.vehicle_id,
            avg(s.dig_area_m2) FILTER (WHERE s.day >= ${weekFromDay})::float8  AS week_m2,
-           avg(s.dig_area_m2)::float8                                        AS month_m2
+           avg(s.dig_area_m2)::float8                                        AS month_m2,
+           -- The total, for litres-per-hectare. A mean per day cannot be
+           -- divided into a month of fuel.
+           sum(s.dig_area_m2)::float8                                        AS total_m2
       FROM vehicle_daily_stats s
       JOIN vehicles v ON v.id = s.vehicle_id
      WHERE v.organisation_id = ${orgId}
@@ -356,6 +427,20 @@ export async function fleetState(orgId: string): Promise<FleetState> {
     untracked:     Number(cover?.total ?? 0) - Number(cover?.tracked ?? 0),
   }
 
+  /**
+   * Sensor health, from the probe report rather than re-derived here.
+   *
+   * That report already decides what a probe is doing and, crucially, tells a
+   * dead probe apart from an uncalibrated one — a fitter's trip versus a Wialon
+   * record somebody has to correct. Building a second opinion here would be a
+   * second implementation of a verdict that can drift from the one the
+   * maintenance page shows for the same unit.
+   *
+   * It is warm-cached on a ten-minute refresh, so this costs a memory read.
+   */
+  const probe = await getProbeReport(orgId).catch(() => [])
+  const healthByVehicle = new Map(probe.map(r => [r.vehicleId, healthOf(r)]))
+
   const vehicles = await prisma.vehicle.findMany({
     where:  { organisationId: orgId, isActive: true },
     select: { id: true, registrationPlate: true },
@@ -369,6 +454,39 @@ export async function fleetState(orgId: string): Promise<FleetState> {
   /** Square metres to square kilometres, at the precision the card prints. */
   const km2 = (m2: number | null | undefined): number | null =>
     m2 == null ? null : Math.round((m2 / 1_000_000) * 10_000) / 10_000
+
+  /**
+   * The fuel block for one unit.
+   *
+   * Every rate is null rather than zero when its denominator is absent or
+   * meaningless. A zero would invite the comparison the whole point is to
+   * prevent — an excavator that "uses 0 L/km" reads as efficient when what it
+   * really means is that it does not travel.
+   */
+  const fuelFor = (
+    id: string,
+    r: { burn_ml: bigint; drop_ml: bigint; month_s: bigint; month_m: bigint } | undefined,
+    travels: boolean,
+    totalM2: number | null,
+  ) => {
+    const burnL  = r ? Number(r.burn_ml) / 1000 : 0
+    const dropL  = r ? Number(r.drop_ml) / 1000 : 0
+    const hrs    = r ? Number(r.month_s) / 3600 : 0
+    const km     = r ? Number(r.month_m) / 1000 : 0
+    const ha     = totalM2 == null ? 0 : totalM2 / 10_000
+    const round1 = (n: number) => Math.round(n * 10) / 10
+
+    return {
+      fuelBurnL: burnL > 0 ? Math.round(burnL) : null,
+      // A negative drop is a day that carried a refuel, not fuel appearing.
+      fuelDropL: dropL > 0 ? Math.round(dropL) : null,
+      litresPerHour: burnL > 0 && hrs > 0 ? round1(burnL / hrs) : null,
+      // Travel categories only — see the field's own note.
+      litresPerKm: travels && burnL > 0 && km > 0 ? round1(burnL / km) : null,
+      litresPerHectare: burnL > 0 && ha > 0 ? Math.round(burnL / ha) : null,
+      hectares: ha > 0 ? round1(ha) : null,
+    }
+  }
 
   const hours = (seconds: bigint | number | undefined): number =>
     Math.round((Number(seconds ?? 0) / 3600) * 10) / 10
@@ -415,6 +533,8 @@ export async function fleetState(orgId: string): Promise<FleetState> {
       // machine that dug nothing where the truth is that it does not dig.
       areaWeekAvgKm2:  km2(areaByVehicle.get(v.id)?.week_m2),
       areaMonthAvgKm2: km2(areaByVehicle.get(v.id)?.month_m2),
+      ...fuelFor(v.id, r, travels, areaByVehicle.get(v.id)?.total_m2 ?? null),
+      sensorHealth: healthByVehicle.get(v.id) ?? null,
     }
   })
 
