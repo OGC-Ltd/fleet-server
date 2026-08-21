@@ -59,6 +59,7 @@ import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
+import { measuredBurnRates } from '../fuel/fuel-burn-rate.service.js'
 // The SHARED distance measurement, not a fourth copy of it. vehicle-brief's own
 // comment explains why: a hand-copied twin bound its window differently and the
 // two figures diverged by the session offset.
@@ -147,9 +148,27 @@ export interface FleetStateRow {
    */
   fuelBurnL: number | null
   fuelDropL: number | null
-  /** Litres per engine hour. The fleet's own consumption model is per-hour, so
-   *  this is the rate every category can be compared on. */
+  /**
+   * Litres per engine hour, MODELLED.
+   *
+   * Kept, but do not render it as a consumption figure. It is engine_burn_ml
+   * over engine_seconds and engine_burn_ml is a rate times those same seconds,
+   * so it returns the rate the model was given — and 689 of 815 vehicles
+   * borrow that rate from their type median. Use `litresPerHourMeasured`.
+   */
   litresPerHour: number | null
+  /**
+   * Litres per engine hour, MEASURED from the tank — see fuel-burn-rate.
+   *
+   * Null where the machine has no defensible measurement: no probe, a probe
+   * reading outside its own tank, or too few clean days. Null is the honest
+   * answer and must never be filled in with a type median.
+   */
+  litresPerHourMeasured: number | null
+  /** The range of qualifying days behind that figure, and how many. */
+  measuredLoLPerHour: number | null
+  measuredHiLPerHour: number | null
+  measuredDays: number | null
   /**
    * Litres per kilometre — TRAVEL CATEGORIES ONLY, null on plant.
    *
@@ -305,6 +324,13 @@ export async function fleetState(orgId: string): Promise<FleetState> {
        AND t.day >= ${monthFromDay}
      GROUP BY 1`
   const rollupByVehicle = new Map(rollup.map(r => [r.vehicle_id, r]))
+
+  // The measured burn rates, over the same month window. A second query rather
+  // than a widening of the rollup above: it closes a fuel BALANCE across three
+  // tables and reduces per vehicle to a median, which does not fold into a
+  // per-vehicle sum. Measured at 58 ms against production, against a
+  // fleet-state build that was already several seconds.
+  const measured = await measuredBurnRates(orgId, 30)
 
   // ── today's engine seconds, integrated from the fixes ────────────────────
   //
@@ -470,6 +496,9 @@ export async function fleetState(orgId: string): Promise<FleetState> {
     travels: boolean,
     totalM2: number | null,
   ) => {
+    // The tank's own answer, where the tank has one. Absent for a machine
+    // whose probe cannot be trusted — see fuel-burn-rate on DZ 16.
+    const meas = measured.get(id)
     const burnL  = r ? Number(r.burn_ml) / 1000 : 0
     const dropL  = r ? Number(r.drop_ml) / 1000 : 0
     const hrs    = r ? Number(r.month_s) / 3600 : 0
@@ -482,6 +511,10 @@ export async function fleetState(orgId: string): Promise<FleetState> {
       // A negative drop is a day that carried a refuel, not fuel appearing.
       fuelDropL: dropL > 0 ? Math.round(dropL) : null,
       litresPerHour: burnL > 0 && hrs > 0 ? round1(burnL / hrs) : null,
+      litresPerHourMeasured: meas?.lPerHour   ?? null,
+      measuredLoLPerHour:    meas?.loLPerHour ?? null,
+      measuredHiLPerHour:    meas?.hiLPerHour ?? null,
+      measuredDays:          meas?.days       ?? null,
       // Travel categories only — see the field's own note.
       litresPerKm: travels && burnL > 0 && km > 0 ? round1(burnL / km) : null,
       litresPerHectare: burnL > 0 && ha > 0 ? Math.round(burnL / ha) : null,
