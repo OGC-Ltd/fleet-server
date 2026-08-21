@@ -1,27 +1,42 @@
 // Warmed cache for the deliveries dashboard aggregate (analytics.repository's
-// deliveriesAnalytics) — see lib/warm-cache.ts for the pattern. The fleettrack
-// Analytics page offers 7d / 30d / 90d ranges, so the warmer keeps all three
-// hot per org; any other window is cached on first use. Requests with an
-// explicit `to` anchor bypass this cache entirely (unbounded key space).
+// deliveriesAnalytics) — see lib/warm-cache.ts for the pattern.
+//
+// EVERY shape of the read is cached: the trailing windows the warmer keeps hot
+// per org, and also anchored (`to`) and vehicle-filtered ones, which enter on
+// demand and age out under `maxEntries`.
+//
+// Those two used to bypass the cache entirely, on the reasoning that their key
+// space is unbounded. The key space IS unbounded and that is exactly what an
+// entry cap with oldest-first eviction is for; bypassing put a multi-second
+// aggregate on the request path, so every click of the Analytics page's filter
+// waited on the database and the page appeared to hang.
 
 import { createWarmCache } from '../../lib/warm-cache.js'
 import { deliveriesAnalytics } from './analytics.repository.js'
+import { windowCacheKey, parseWindowCacheKey, vehicleIdsForCategories } from './vehicle-filter.js'
 
 /** The trailing windows the fleettrack Analytics page can request. */
 export const DELIVERY_WINDOWS_DAYS = [7, 30, 90]
 
 type DeliveriesPayload = Awaited<ReturnType<typeof deliveriesAnalytics>>
 
-// Key format: `${orgId}:${days}`
 const cache = createWarmCache<DeliveriesPayload>({
   name: 'deliveries',
-  compute: (key) => {
-    const sep = key.lastIndexOf(':')
-    return deliveriesAnalytics(key.slice(0, sep), { days: Number(key.slice(sep + 1)) })
+  maxEntries: 200,
+  compute: async (key) => {
+    const { orgId, days, to, categories } = parseWindowCacheKey(key)
+    return deliveriesAnalytics(orgId, { days, to },
+      await vehicleIdsForCategories(orgId, categories))
   },
-  warmKeysFor: (orgId) => DELIVERY_WINDOWS_DAYS.map(d => `${orgId}:${d}`),
+  // Only the plain trailing windows over the whole fleet are warmed — a sweep
+  // rebuilding one operator's ad-hoc selection would spend the box's budget on
+  // an answer nobody is waiting for.
+  warmKeysFor: (orgId) =>
+    DELIVERY_WINDOWS_DAYS.map(d => windowCacheKey(orgId, d, undefined, null)),
 })
 
-export function getDeliveriesAnalytics(orgId: string, days: number): Promise<DeliveriesPayload> {
-  return cache.get(`${orgId}:${days}`)
+export function getDeliveriesAnalytics(
+  orgId: string, days: number, to?: Date, categories: string[] | null = null,
+): Promise<DeliveriesPayload> {
+  return cache.get(windowCacheKey(orgId, days, to, categories))
 }

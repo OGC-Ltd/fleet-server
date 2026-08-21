@@ -11,7 +11,7 @@ import { getDeliveriesAnalytics } from './deliveries.cache.js'
 import { getFuelConsumption } from './fuel-cost.cache.js'
 import { priceFuelConsumption } from './fuel-pricing.js'
 import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery, FuelCostQuery } from './analytics.schema.js'
-import { vehicleIdsFromQuery, listCategories } from './vehicle-filter.js'
+import { vehicleIdsFromQuery, listCategories, parseCategories } from './vehicle-filter.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -25,14 +25,11 @@ export const overview: RequestHandler = async (req, res, next) => {
 export const deliveries: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as DeliveriesQuery
-    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), q.categories)
-    // Trailing windows serve from the warmed cache; an explicit `to` anchor
-    // or a vehicle-type filter is an unbounded key space, so it computes live
-    // like before.
-    const data = q.to || vehicleIds != null
-      ? await repo.deliveriesAnalytics(p(req, 'orgId'), q, vehicleIds)
-      : await getDeliveriesAnalytics(p(req, 'orgId'), q.days)
-    sendSuccess(res, data)
+    // Anchored and filtered reads go through the SAME cache, keyed by their
+    // window and selection — see deliveries.cache. They used to compute live,
+    // which put a multi-second aggregate on every filter click.
+    sendSuccess(res, await getDeliveriesAnalytics(
+      p(req, 'orgId'), q.days, q.to, parseCategories(q.categories)))
   } catch (err) { next(err) }
 }
 
@@ -55,12 +52,9 @@ export const fuelEfficiency: RequestHandler = async (req, res, next) => {
 export const fuelCost: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as FuelCostQuery
-    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), q.categories)
-    // Same split as `deliveries`: trailing windows serve from the warmed cache,
-    // an anchor or a vehicle filter is an unbounded key space so it computes live.
-    const data = q.to || vehicleIds != null
-      ? await repo.fuelConsumption(p(req, 'orgId'), q, vehicleIds)
-      : await getFuelConsumption(p(req, 'orgId'), q.days)
+    // Cached for every window and selection, same as `deliveries`.
+    const data = await getFuelConsumption(
+      p(req, 'orgId'), q.days, q.to, parseCategories(q.categories))
     sendSuccess(res, priceFuelConsumption(data, {
       pricePerLitre: q.pricePerLitre ?? env.FUEL_PRICE_PER_LITRE,
       currency:      env.FUEL_CURRENCY,
@@ -114,9 +108,9 @@ export const machineSummary: RequestHandler = async (req, res, next) => {
     // could not move.
     const toRaw = String(req.query['to'] ?? '')
     const to = toRaw ? new Date(toRaw) : undefined
-    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories'])
     sendSuccess(res, await fleetWeekSummary(p(req, 'orgId'), days,
-      to && !Number.isNaN(to.getTime()) ? to : undefined, vehicleIds))
+      to && !Number.isNaN(to.getTime()) ? to : undefined,
+      parseCategories(req.query['categories'])))
   } catch (err) { next(err) }
 }
 
@@ -134,8 +128,8 @@ export const excavatorArea: RequestHandler = async (req, res, next) => {
   try {
     const asked = String(req.query['day'] ?? '')
     const day = /^\d{4}-\d{2}-\d{2}$/.test(asked) ? new Date(`${asked}T00:00:00Z`) : undefined
-    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories'])
-    sendSuccess(res, await getExcavatorArea(p(req, 'orgId'), day, vehicleIds))
+    sendSuccess(res, await getExcavatorArea(p(req, 'orgId'), day,
+      parseCategories(req.query['categories'])))
   } catch (err) { next(err) }
 }
 
@@ -147,9 +141,9 @@ export const excavatorAreaByDay: RequestHandler = async (req, res, next) => {
     const days = Number.isFinite(asked) ? Math.min(90, Math.max(1, Math.trunc(asked))) : 30
     const toRaw = String(req.query['to'] ?? '')
     const to = toRaw ? new Date(toRaw) : undefined
-    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories'])
     sendSuccess(res, await getAreaByDay(p(req, 'orgId'), days,
-      to && !Number.isNaN(to.getTime()) ? to : undefined, vehicleIds))
+      to && !Number.isNaN(to.getTime()) ? to : undefined,
+      parseCategories(req.query['categories'])))
   } catch (err) { next(err) }
 }
 
@@ -160,9 +154,9 @@ export const fuelRateDays: RequestHandler = async (req, res, next) => {
     const days = Number.isFinite(asked) ? Math.min(90, Math.max(1, Math.trunc(asked))) : 30
     const toRaw = String(req.query['to'] ?? '')
     const to = toRaw ? new Date(toRaw) : undefined
-    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories'])
     sendSuccess(res, await getFuelRateSeries(p(req, 'orgId'), days,
-      to && !Number.isNaN(to.getTime()) ? to : undefined, vehicleIds))
+      to && !Number.isNaN(to.getTime()) ? to : undefined,
+      parseCategories(req.query['categories'])))
   } catch (err) { next(err) }
 }
 

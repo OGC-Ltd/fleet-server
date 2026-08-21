@@ -41,7 +41,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
-import { vehicleSql } from './vehicle-filter.js'
+import { vehicleSql, windowCacheKey, parseWindowCacheKey, vehicleIdsForCategories } from './vehicle-filter.js'
 
 /**
  * Denominators below which a day's rate is arithmetic, not a measurement.
@@ -190,18 +190,16 @@ export async function fuelRateByDay(
 const cache = createWarmCache<FuelRateSeries>({
   name: 'fuel-rate-series',
   refreshMs: 15 * 60_000,
-  warmKeysFor: (orgId) => [`${orgId}|30|now`],
-  compute: (key) => {
-    const [orgId, d, anchor] = key.split('|')
-    return fuelRateByDay(orgId!, Number(d), anchor === 'now' ? undefined : new Date(anchor!))
+  maxEntries: 200,
+  warmKeysFor: (orgId) => [windowCacheKey(orgId, 30, undefined, null)],
+  compute: async (key) => {
+    const { orgId, days, to, categories } = parseWindowCacheKey(key)
+    return fuelRateByDay(orgId, days, to, await vehicleIdsForCategories(orgId, categories))
   },
 })
 
-/** Filtered reads compute live and never touch the warmer — see
- *  getAreaByDay for why a filter may not enter a warm cache key. */
 export async function getFuelRateSeries(
-  orgId: string, days = 30, to?: Date, vehicleIds: string[] | null = null,
+  orgId: string, days = 30, to?: Date, categories: string[] | null = null,
 ) {
-  if (vehicleIds != null) return fuelRateByDay(orgId, days, to, vehicleIds)
-  return cache.get(`${orgId}|${days}|${to ? to.toISOString() : 'now'}`)
+  return cache.get(windowCacheKey(orgId, days, to, categories))
 }
