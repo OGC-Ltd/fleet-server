@@ -33,6 +33,21 @@ import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import { machinePrefix } from '../fuel/fuel-theft-classifier.js'
 import { TRAVEL_CATEGORIES } from './fleet-state.service.js'
 
+/**
+ * Denominators below which a day's rate is arithmetic, not a measurement.
+ *
+ * The window's first day is usually thin — telemetry history starts mid-day, so
+ * one excavator and a hectare of ground can survive into the series and produce
+ * a rate three times the mean. Measured 2026-08-21, KASULU's 2026-07-27 came
+ * back at 370.7 L/ha off 1.04 ha, against a 30-day mean of 102.7, and it would
+ * have been the day the chart pointed at.
+ *
+ * Same guard, and the same reason, as MIN_DIG_FIXES in excavator-area: a
+ * denominator too small to divide by is not a small number, it is no number.
+ */
+const MIN_HECTARES = 5
+const MIN_KM = 200
+
 export interface FuelRateDay {
   day: string
   /** Litres per hectare worked, excavators. Null on a day nobody measured ground. */
@@ -140,8 +155,10 @@ export async function fuelRateByDay(
     // fleet worked for nothing.
     return {
       day,
-      litresPerHectare: a && ha && ha > 0 && a.exL > 0 ? Math.round((a.exL / ha) * 10) / 10 : null,
-      litresPerKm:      a && a.trKm > 0 && a.trL > 0 ? Math.round((a.trL / a.trKm) * 100) / 100 : null,
+      litresPerHectare: a && ha != null && ha >= MIN_HECTARES && a.exL > 0
+        ? Math.round((a.exL / ha) * 10) / 10 : null,
+      litresPerKm: a && a.trKm >= MIN_KM && a.trL > 0
+        ? Math.round((a.trL / a.trKm) * 100) / 100 : null,
       hectares:         ha == null ? null : Math.round(ha * 10) / 10,
       km:               a && a.trKm > 0 ? Math.round(a.trKm) : null,
     }
