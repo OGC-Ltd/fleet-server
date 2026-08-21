@@ -259,12 +259,35 @@ function healthOf(r: { trackerSilent: boolean; fuelProbe: { state: string }; fue
   return 'OK'
 }
 
-export async function fleetState(orgId: string): Promise<FleetState> {
+/**
+ * @param window  the Analytics page's window, `{ days, to }`.
+ *
+ *   THE OUTER WINDOW IS THE CALLER'S. It was a fixed trailing 30 days, which
+ *   made every figure built on it — `fuelBurnL`, the per-unit month averages,
+ *   hectares, and the L/hr, L/km and L/ha rates derived from them — describe a
+ *   month whatever range the operator had chosen above the table. Picking a
+ *   fortnight and reading "Fuel L" gave the month's litres under the
+ *   fortnight's heading.
+ *
+ *   The TODAY and WEEK tiers stay fixed on purpose. They answer "what is this
+ *   machine doing now" and "how has its week gone", which are questions about
+ *   the fleet rather than about the chosen period, and the columns say so.
+ *
+ *   Defaults reproduce the old behaviour exactly, so a caller that passes
+ *   nothing still gets today, a trailing week and a trailing month.
+ */
+export async function fleetState(
+  orgId: string, window: { days?: number; to?: Date } = {},
+): Promise<FleetState> {
   const now      = new Date()
   const today    = fleetDayStart()
   const onlineAt = new Date(now.getTime() - ONLINE_WINDOW_MINUTES * 60_000)
   const weekFrom  = new Date(today.getTime() -  6 * 24 * 3_600_000)
-  const monthFrom = new Date(today.getTime() - 29 * 24 * 3_600_000)
+  // The window's own span and anchor, defaulting to the trailing 30 days this
+  // service used before it took one.
+  const windowDays = Math.max(1, Math.trunc(window.days ?? 30))
+  const windowEnd  = fleetDayStart(window.to ?? now)
+  const monthFrom  = new Date(windowEnd.getTime() - (windowDays - 1) * 24 * 3_600_000)
   // The same two boundaries as fuel_daily_trends files its rows under.
   //
   // The rollup query below compared `${weekFrom}::date` against a DATE column.
@@ -283,6 +306,23 @@ export async function fleetState(orgId: string): Promise<FleetState> {
   // same fix fuel-trend.service took on 2026-08-14, for the same reason.
   const weekFromDay  = fleetDayKey(weekFrom)
   const monthFromDay = fleetDayKey(monthFrom)
+  // The window's LAST day. Open-ended before, which is the same thing as
+  // "ending today" only while the anchor IS today — on a past range it dragged
+  // every day since into the totals.
+  const monthToDay   = fleetDayKey(windowEnd)
+  const todayKey     = fleetDayKey(today)
+  /**
+   * The rollup scans span BOTH tiers, and each tier is then picked out by its
+   * own FILTER.
+   *
+   * The week is a trailing seven days from TODAY and the window is whatever was
+   * chosen, so once the window can end in the past the two no longer nest.
+   * Bounding the scan by the window alone — which is what simply adding an
+   * upper bound would do — would have emptied the week columns for any past
+   * range, since none of the last seven days would be in the scan at all.
+   */
+  const scanFromDay = new Date(Math.min(weekFromDay.getTime(), monthFromDay.getTime()))
+  const scanToDay   = new Date(Math.max(todayKey.getTime(), monthToDay.getTime()))
 
   // ── the live state, from each unit's newest frame ────────────────────────
   const live = await prisma.$queryRaw<Array<{
@@ -305,23 +345,25 @@ export async function fleetState(orgId: string): Promise<FleetState> {
     burn_ml: bigint; drop_ml: bigint
   }>>`
     SELECT t.vehicle_id,
-           coalesce(sum(t.engine_seconds) FILTER (WHERE t.day >= ${weekFromDay}), 0)::bigint AS week_s,
-           coalesce(sum(t.distance_m)     FILTER (WHERE t.day >= ${weekFromDay}), 0)::bigint AS week_m,
-           count(*) FILTER (WHERE t.day >= ${weekFromDay})::bigint AS week_days,
-           coalesce(sum(t.engine_seconds), 0)::bigint AS month_s,
-           coalesce(sum(t.distance_m), 0)::bigint     AS month_m,
-           count(*)::bigint                           AS month_days,
+           coalesce(sum(t.engine_seconds) FILTER (WHERE t.day >= ${weekFromDay} AND t.day <= ${todayKey}), 0)::bigint AS week_s,
+           coalesce(sum(t.distance_m)     FILTER (WHERE t.day >= ${weekFromDay} AND t.day <= ${todayKey}), 0)::bigint AS week_m,
+           count(*) FILTER (WHERE t.day >= ${weekFromDay} AND t.day <= ${todayKey})::bigint AS week_days,
+           -- Still named month_* because that is what every reader of this
+           -- row calls the outer tier; it is now THE SELECTED WINDOW.
+           coalesce(sum(t.engine_seconds) FILTER (WHERE t.day >= ${monthFromDay} AND t.day <= ${monthToDay}), 0)::bigint AS month_s,
+           coalesce(sum(t.distance_m)     FILTER (WHERE t.day >= ${monthFromDay} AND t.day <= ${monthToDay}), 0)::bigint AS month_m,
+           count(*) FILTER (WHERE t.day >= ${monthFromDay} AND t.day <= ${monthToDay})::bigint AS month_days,
            -- Fuel over the same window. engine_burn_ml is MODELLED — a
            -- per-vehicle rate times the seconds the engine ran — and
            -- consumed_ml is MEASURED, the tank's own opening minus its
            -- closing. They answer different questions and both are carried,
            -- because the gap between them is the interesting part.
-           coalesce(sum(t.engine_burn_ml), 0)::bigint AS burn_ml,
-           coalesce(sum(t.consumed_ml), 0)::bigint    AS drop_ml
+           coalesce(sum(t.engine_burn_ml) FILTER (WHERE t.day >= ${monthFromDay} AND t.day <= ${monthToDay}), 0)::bigint AS burn_ml,
+           coalesce(sum(t.consumed_ml)    FILTER (WHERE t.day >= ${monthFromDay} AND t.day <= ${monthToDay}), 0)::bigint AS drop_ml
       FROM fuel_daily_trends t
       JOIN vehicles v ON v.id = t.vehicle_id
      WHERE v.organisation_id = ${orgId} AND v.is_active
-       AND t.day >= ${monthFromDay}
+       AND t.day >= ${scanFromDay} AND t.day <= ${scanToDay}
      GROUP BY 1`
   const rollupByVehicle = new Map(rollup.map(r => [r.vehicle_id, r]))
 
@@ -330,6 +372,12 @@ export async function fleetState(orgId: string): Promise<FleetState> {
   // tables and reduces per vehicle to a median, which does not fold into a
   // per-vehicle sum. Measured at 58 ms against production, against a
   // fleet-state build that was already several seconds.
+  // Deliberately NOT following the selected window. This is a per-vehicle
+  // CALIBRATION — what this machine is measured to burn per engine hour — not a
+  // total over a period, and it needs enough clean days behind it to mean
+  // anything. Narrowing it to a one-day range would return null for most of the
+  // fleet and a number built on a single day for the rest, which is worse than
+  // an honestly wider basis.
   const measured = await measuredBurnRates(orgId, 30)
 
   // ── today's engine seconds, integrated from the fixes ────────────────────
@@ -412,17 +460,17 @@ export async function fleetState(orgId: string): Promise<FleetState> {
     vehicle_id: string; week_m2: number | null; month_m2: number | null; total_m2: number | null
   }>>`
     SELECT s.vehicle_id,
-           avg(s.dig_area_m2) FILTER (WHERE s.day >= ${weekFromDay})::float8  AS week_m2,
-           avg(s.dig_area_m2)::float8                                        AS month_m2,
+           avg(s.dig_area_m2) FILTER (WHERE s.day >= ${weekFromDay} AND s.day <= ${todayKey})::float8 AS week_m2,
+           avg(s.dig_area_m2) FILTER (WHERE s.day >= ${monthFromDay} AND s.day <= ${monthToDay})::float8 AS month_m2,
            -- The total, for litres-per-hectare. A mean per day cannot be
-           -- divided into a month of fuel.
-           sum(s.dig_area_m2)::float8                                        AS total_m2
+           -- divided into a window of fuel, so this follows the window too.
+           sum(s.dig_area_m2) FILTER (WHERE s.day >= ${monthFromDay} AND s.day <= ${monthToDay})::float8 AS total_m2
       FROM vehicle_daily_stats s
       JOIN vehicles v ON v.id = s.vehicle_id
      WHERE v.organisation_id = ${orgId}
        AND v.is_active
        AND s.dig_area_m2 IS NOT NULL
-       AND s.day >= ${monthFromDay}
+       AND s.day >= ${scanFromDay} AND s.day <= ${scanToDay}
      GROUP BY 1`
   const areaByVehicle = new Map(areaRows.map(a => [a.vehicle_id, a]))
 
@@ -637,10 +685,28 @@ export async function fleetState(orgId: string): Promise<FleetState> {
  */
 const stateCache = createWarmCache<FleetState>({
   name: 'fleet-state',
-  warmKeysFor: (orgId) => [orgId],
-  compute: (orgId) => fleetState(orgId),
+  // Keys grow with the window the operator picks, so they are capped and age
+  // out oldest-first, exactly as the other windowed analytics caches are.
+  maxEntries: 200,
+  // Only the plain trailing month is warmed. The page's own default window is
+  // the current month TO DATE, which lengthens by a day every day and so would
+  // never match a warmed key anyway; at roughly a second a build that is a
+  // cost worth paying on first view rather than one to keep a sweep busy with.
+  warmKeysFor: (orgId) => [`${orgId}|30|now`],
+  compute: (key) => {
+    const [orgId = '', days = '30', anchor = 'now'] = key.split('|')
+    return fleetState(orgId, {
+      days: Number(days),
+      to: anchor === 'now' ? undefined : new Date(anchor),
+    })
+  },
 })
 
-export async function getFleetState(orgId: string): Promise<FleetState> {
-  return stateCache.get(orgId)
+/** @param window the Analytics page's `{ days, to }`; omitted is the trailing
+ *  month this service answered with before it took one. */
+export async function getFleetState(
+  orgId: string, window: { days?: number; to?: Date } = {},
+): Promise<FleetState> {
+  const days = Math.max(1, Math.trunc(window.days ?? 30))
+  return stateCache.get(`${orgId}|${days}|${window.to ? window.to.toISOString() : 'now'}`)
 }
