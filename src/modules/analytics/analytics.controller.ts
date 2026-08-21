@@ -2,6 +2,7 @@ import type { RequestHandler } from 'express'
 import { earlyStartsByCategory, operatingHoursByCategory, fleetWeekSummary } from './machine-operations.service.js'
 import { getFleetState } from './fleet-state.service.js'
 import { getExcavatorArea, getAreaByDay } from './excavator-area.service.js'
+import { getFuelRateSeries } from './fuel-rate-series.service.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { env } from '../../config/env.js'
 import * as repo from './analytics.repository.js'
@@ -134,6 +135,18 @@ export const excavatorAreaByDay: RequestHandler = async (req, res, next) => {
     const toRaw = String(req.query['to'] ?? '')
     const to = toRaw ? new Date(toRaw) : undefined
     sendSuccess(res, await getAreaByDay(p(req, 'orgId'), days,
+      to && !Number.isNaN(to.getTime()) ? to : undefined))
+  } catch (err) { next(err) }
+}
+
+/** Litres per hectare and per kilometre, day by day — see fuel-rate-series. */
+export const fuelRateDays: RequestHandler = async (req, res, next) => {
+  try {
+    const asked = Number(req.query['days'])
+    const days = Number.isFinite(asked) ? Math.min(90, Math.max(1, Math.trunc(asked))) : 30
+    const toRaw = String(req.query['to'] ?? '')
+    const to = toRaw ? new Date(toRaw) : undefined
+    sendSuccess(res, await getFuelRateSeries(p(req, 'orgId'), days,
       to && !Number.isNaN(to.getTime()) ? to : undefined))
   } catch (err) { next(err) }
 }
