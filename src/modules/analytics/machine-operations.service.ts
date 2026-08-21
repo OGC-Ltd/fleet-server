@@ -419,10 +419,14 @@ async function computeFleetWeekSummary(
   const isLive = fleetDayKey(anchorStart).getTime() === fleetDayKey(fleetDayStart()).getTime()
 
   const [work] = await prisma.$queryRaw<Array<{
-    unit_days: bigint; units: bigint; seconds: bigint; metres: bigint
+    unit_days: bigint; units: string[]; seconds: bigint; metres: bigint
   }>>`
     SELECT count(*)::bigint                                AS unit_days,
-           count(DISTINCT t.vehicle_id)::bigint            AS units,
+           -- The IDS, not a count. Today is not in this rollup and has to be
+           -- unioned in below; two counts cannot be added without
+           -- double-counting every machine that also worked earlier in the
+           -- window. At most a few hundred ids on any fleet here.
+           coalesce(array_agg(DISTINCT t.vehicle_id), '{}')::text[] AS units,
            coalesce(sum(t.engine_seconds), 0)::bigint      AS seconds,
            coalesce(sum(t.distance_m), 0)::bigint          AS metres
       FROM fuel_daily_trends t
@@ -495,7 +499,7 @@ async function computeFleetWeekSummary(
   // entirely on a window that does not contain today: see `isLive`.
   const today = fleetDayStart()
   const [live] = isLive
-    ? await prisma.$queryRaw<Array<{ seconds: number; units: bigint }>>`
+    ? await prisma.$queryRaw<Array<{ seconds: number; units: string[] }>>`
     WITH gaps AS (
       SELECT t.vehicle_id, t.engine_on,
              EXTRACT(EPOCH FROM (t.captured_at - lag(t.captured_at) OVER (
@@ -506,11 +510,15 @@ async function computeFleetWeekSummary(
          AND t.captured_at >= ${today}
          ${vehicleSql(vehicleIds)})
     SELECT coalesce(sum(least(gap, 900)) FILTER (WHERE engine_on AND gap > 0), 0)::float8 AS seconds,
-           count(DISTINCT vehicle_id)::bigint AS units
+           -- Units that actually RAN today, not units that merely reported. A
+           -- parked machine pings all day; counting those as a working
+           -- unit-day drags the mean toward zero, which is the shape of the
+           -- bug this whole block fixes.
+           coalesce(array_agg(DISTINCT vehicle_id) FILTER (WHERE engine_on AND gap > 0), '{}')::text[] AS units
       FROM gaps`
     : [undefined]
   const liveSeconds  = Number(live?.seconds ?? 0)
-  const liveUnits    = Number(live?.units ?? 0)
+  const liveUnitIds  = live?.units ?? []
 
   const liveMetres = isLive
     ? [...(await coveredSince(
@@ -524,9 +532,31 @@ async function computeFleetWeekSummary(
       )).values()].reduce((a, r) => a + r.coveredM, 0)
     : 0
 
-  // Complete days only, for the mean — see the header.
-  const unitDays = Number(work?.unit_days ?? 0)
-  const seconds  = Number(work?.seconds ?? 0)
+  /**
+   * TODAY IS A DAY.
+   *
+   * It used to be excluded from the mean and the unit count — only the rollup
+   * fed those, and the rollup records days that have ENDED. On any window that
+   * is just today, that made the card report 0.0 average hours over 0 units
+   * reporting while the totals beside it, which do include today, showed 23
+   * hours across 162 km. Three figures from two different definitions of the
+   * same window.
+   *
+   * The mean is per WORKING UNIT-DAY, so today contributes one unit-day for
+   * each machine whose engine actually ran — which is exactly the denominator
+   * the operator described: aggregate the hours, divide across the machines
+   * that worked, not across the yard.
+   *
+   * A running day is a partial one and the mean says so by being lower earlier
+   * in the day. That is the honest reading of "hours run so far, per machine
+   * that ran", and it climbs as the shift does.
+   */
+  const rollupUnitIds = work?.units ?? []
+  const unitDays = Number(work?.unit_days ?? 0) + liveUnitIds.length
+  const seconds  = Number(work?.seconds ?? 0) + liveSeconds
+  // Union, never a sum: a machine that worked yesterday AND today is one unit
+  // reporting, not two.
+  const unitsReporting = new Set([...rollupUnitIds, ...liveUnitIds]).size
   const areas    = blocks.map(b => b.ha)
 
   return {
@@ -535,18 +565,32 @@ async function computeFleetWeekSummary(
     // Per OBSERVED unit-day, for the reason operatingHoursByCategory gives:
     // dividing by calendar days reports a hard-working fleet as idle.
     avgHoursPerDay:  unitDays > 0 ? Math.round((seconds / 3600 / unitDays) * 10) / 10 : 0,
-    // Cumulative, so today belongs in it.
-    totalHours:      Math.round((seconds + liveSeconds) / 3600),
+    // `seconds` ALREADY carries the live day — adding it again here counted
+    // today twice, which is the other half of why these figures disagreed.
+    totalHours:      Math.round(seconds / 3600),
     /** Hours run since midnight, so the caller can say the card is live. */
     hoursToday:      Math.round((liveSeconds / 3600) * 10) / 10,
     distanceTodayKm: Math.round(liveMetres / 1000),
-    unitsReporting:  Number(work?.units ?? 0),
+    unitsReporting,
     totalDistanceKm: Math.round((Number(work?.metres ?? 0) + liveMetres) / 1000),
     blocksWorked:    areas.length,
     blocksExtentHa:  Math.round(areas.reduce((a, b) => a + b, 0)),
     smallestBlockHa: areas.length ? areas[0]! : null,
     largestBlockHa:  areas.length ? areas[areas.length - 1]! : null,
-    byDay: daily.map((d) => {
+    byDay: buildByDay(),
+  }
+
+  /**
+   * The daily series, with TODAY appended as its own running point.
+   *
+   * The rollup's newest row is always yesterday, so a window of just today
+   * produced an empty series and a sparkline with nothing in it — beneath a
+   * headline that did have figures. Today is drawn from the same live
+   * integration the totals use and on the same per-unit-day measure as every
+   * other point, so the plot and the headline stay one measure.
+   */
+  function buildByDay() {
+    const rows = daily.map((d) => {
       const key = d.day.toISOString().slice(0, 10)
       const dayUnitDays = Number(d.unit_days)
       return {
@@ -558,7 +602,20 @@ async function computeFleetWeekSummary(
         distanceKm: Math.round(Number(d.metres) / 1000),
         blocks:     blocksByDay.get(key) ?? 0,
       }
-    }),
+    })
+    if (!isLive) return rows
+    const todayKey = fleetDayKey(today).toISOString().slice(0, 10)
+    // Guard rather than assume: if the rollup ever does land today's row, the
+    // live point must not appear beside it.
+    if (rows.some(r => r.day === todayKey)) return rows
+    rows.push({
+      day: todayKey,
+      hours: liveUnitIds.length > 0
+        ? Math.round((liveSeconds / 3600 / liveUnitIds.length) * 10) / 10 : 0,
+      distanceKm: Math.round(liveMetres / 1000),
+      blocks: blocksByDay.get(todayKey) ?? 0,
+    })
+    return rows
   }
 }
 
