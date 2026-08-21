@@ -443,6 +443,16 @@ export interface DriverIncident {
   causeReason:     string | null
   causeConfidence: number | null
   attributedBy: 'record' | 'trip'
+  /**
+   * Whether this event counts toward the driver's case total.
+   *
+   * True only for SIPHON. Every other cause is either normal consumption, a
+   * measurement artefact, or unexplained — and unexplained is explicitly not
+   * theft. Events that do not count are still carried, because an operator
+   * looking at a driver wants to see what the unit did on their watch; they
+   * simply do not add to a number that can end an employment.
+   */
+  countsAgainstDriver: boolean
 }
 
 export interface DriverOverspeed {
@@ -461,6 +471,8 @@ export interface DriverDetail {
   totals: {
     trips: number; mileageKm: number; tonnes: number; hoursOnRoad: number
     fuelTheftCases: number; overspeedingCases: number; windowDays: number
+    /** Fuel events on the unit while they drove it, chargeable or not. */
+    fuelEventsSeen: number
   }
   heaviestLoad: { tonnes: number; date: string; route: string } | null
   byDay: { day: string; tonnes: number; mileageKm: number }[]
@@ -619,6 +631,20 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       causeReason:   th.causeReason ?? null,
       causeConfidence: th.causeConfidence ?? null,
       attributedBy: th.driverId ? 'record' : 'trip',
+      // Whether this event may be counted AGAINST the driver.
+      //
+      // Only a siphon may. The schema says so where the enum is declared:
+      // SIPHON is "the only cause that may be described as possible theft",
+      // UNEXPLAINED_BURN is "announced, but NEVER as theft", ENGINE_BURN is
+      // "not an incident", SLOSH is "the reading, not the tank".
+      //
+      // This is not pedantry about wording. conductStatus SUSPENDS a driver at
+      // two fuel-theft cases, and of the 133 events that fall inside a trip on
+      // SUKARI, not one is a siphon — they are 92 unadjudicated, 14
+      // indeterminate, 12 unexplained burn, 8 high burn, 4 engine burn and 3
+      // slosh. Counting those would suspend drivers for their engine using
+      // fuel.
+      countsAgainstDriver: th.drainCause === 'SIPHON',
     })
     theftsByDriver.set(driverId, arr)
   }
@@ -661,6 +687,8 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   for (const d of drivers) {
     const dTrips = tripsByDriver.get(d.id) ?? []
     const dThefts = theftsByDriver.get(d.id) ?? []
+    // Only the siphons count against them — see countsAgainstDriver.
+    const chargeable = dThefts.filter(i => i.countsAgainstDriver).length
     const lifetimeOverspeed = overspeedTripsByDriver.get(d.id)?.size ?? 0
     let lifetimeKm = 0, lifetimeKg = 0
     for (const t of dTrips) {
@@ -680,7 +708,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       mileageKm: lifetimeKm,
       tonnes: toTonnes(lifetimeKg),
       incentiveBonus: 0,
-      fuelTheftCases: dThefts.length,
+      fuelTheftCases: chargeable,
       overspeedingCases: lifetimeOverspeed,
       daysSinceLastTrip,
     })
@@ -689,7 +717,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     // ── Roster row: lifetime aggregates ──
     // Employment status escalated by lifetime conduct (see conductStatus) —
     // the roster badge and the detail header both use this derived value.
-    const status = conductStatus(d.status, dTrips.length, dThefts.length, lifetimeOverspeed)
+    const status = conductStatus(d.status, dTrips.length, chargeable, lifetimeOverspeed)
     roster.push({
       id:                d.id,
       fullName:          d.fullName,
@@ -698,7 +726,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       trips:             dTrips.length,
       tonnes:            toTonnes(lifetimeKg),
       mileageKm:         Math.round(lifetimeKm),
-      fuelTheftCases:    dThefts.length,
+      fuelTheftCases:    dThefts.filter(i => i.countsAgainstDriver).length,
       overspeedingCases: lifetimeOverspeed,
     })
 
@@ -757,7 +785,9 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
         mileageKm:         Math.round(totalKm),
         tonnes:            toTonnes(totalKg),
         hoursOnRoad:       Math.round(totalSeconds / 360) / 10, // seconds → hours, 1 dp
-        fuelTheftCases:    windowThefts.length,
+        fuelTheftCases:    windowThefts.filter(i => i.countsAgainstDriver).length,
+        /** Everything on the unit during their trips, chargeable or not. */
+        fuelEventsSeen:    windowThefts.length,
         overspeedingCases,
         windowDays:        days,
       },
