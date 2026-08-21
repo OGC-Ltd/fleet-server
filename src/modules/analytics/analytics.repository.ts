@@ -410,6 +410,41 @@ export interface DriverRosterRow {
   overspeedingCases: number
 }
 
+/**
+ * One fuel event pinned to a driver.
+ *
+ * `attributedBy` is on the record because the two routes are not equally
+ * certain: 'record' means the event itself named the driver, 'trip' means we
+ * inferred it from the trip running on that vehicle at that instant. Nothing
+ * currently writes the former, so every case today is inferred — and a card
+ * that shows a suspension-relevant count should be able to say so.
+ *
+ * `verdict` and `confirmed` travel with it rather than being reduced to a
+ * boolean here: whether an event may be called a theft is the adjudicator's
+ * decision, and re-deriving that vocabulary in a second place is a second
+ * implementation that can drift.
+ */
+export interface DriverIncident {
+  id:        string
+  at:        string
+  plate:     string | null
+  /** Litres the level fell by, where the adjudicator measured one. */
+  litres:    number | null
+  verdict:   string
+  confirmed: string | null
+  /** How long the fall lasted. A rate, not just a total. */
+  minutes:   number | null
+  attributedBy: 'record' | 'trip'
+}
+
+export interface DriverOverspeed {
+  id:    string
+  at:    string
+  plate: string | null
+  route: string | null
+  attributedBy: 'trip'
+}
+
 export interface DriverDetail {
   driver: {
     id: string; fullName: string; status: string; rating: number
@@ -421,6 +456,8 @@ export interface DriverDetail {
   }
   heaviestLoad: { tonnes: number; date: string; route: string } | null
   byDay: { day: string; tonnes: number; mileageKm: number }[]
+  /** Every case behind the two counts above, newest first. */
+  incidents: { thefts: DriverIncident[]; overspeeds: DriverOverspeed[] }
 }
 
 export interface DriversOverview {
@@ -489,13 +526,25 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     // anywhere: conductStatus can SUSPEND a driver on two fuel-theft cases, and
     // roughly half of the raw claims are fuel that never left the tank.
     // Suspending someone over a slope is the worst thing this data can do.
+    // Selected by ORGANISATION, not by driverId.
+    //
+    // `driverId` on this table is populated by nothing: measured 2026-08-21,
+    // all 1,256 of SUKARI's fuel-theft rows carry null, so filtering on it
+    // returned an empty set and every driver's fuel-theft count has been zero
+    // since the column was added. The driver is resolved below the way
+    // overspeeding already resolves it — from the trip that was running on that
+    // vehicle at that moment.
     prisma.fuelTheft.findMany({
       where:  {
-        driverId: { in: driverIds },
-        vehicle:  { organisationId: orgId },
-        verdict:  { notIn: NO_FUEL_LEFT },
+        vehicle: { organisationId: orgId },
+        verdict: { notIn: NO_FUEL_LEFT },
       },
-      select: { driverId: true, beganAt: true },
+      select: {
+        id: true, driverId: true, vehicleId: true, beganAt: true, endedAt: true,
+        stolenMl: true, verdict: true, confirmed: true,
+        vehicle: { select: { registrationPlate: true } },
+      },
+      orderBy: { beganAt: 'desc' },
     }),
     prisma.vehicleAlert.findMany({
       where:  { organisationId: orgId, type: 'overspeeding' },
@@ -515,11 +564,43 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     varr.push(t); tripsByVehicle.set(t.vehicleId, varr)
   }
 
-  const theftsByDriver = new Map<string, Date[]>()
+  /**
+   * Fuel events, pinned to whoever was driving the unit at the time.
+   *
+   * An explicit `driverId` wins where one exists; otherwise the driver is the
+   * one on the trip covering that instant on that vehicle — the same resolution
+   * overspeeding uses ten lines down, and the only one available, since nothing
+   * writes the column.
+   *
+   * An event nobody was driving for stays unattributed rather than being
+   * assigned to the vehicle's usual driver. Measured on SUKARI, 176 of 1,256
+   * events fall inside a trip; the other 1,080 happened with no trip running,
+   * and guessing an owner for those would put a suspension case on somebody who
+   * was not there.
+   */
+  const theftsByDriver = new Map<string, DriverIncident[]>()
   for (const th of thefts) {
-    if (!th.driverId) continue
-    const arr = theftsByDriver.get(th.driverId) ?? []
-    arr.push(th.beganAt); theftsByDriver.set(th.driverId, arr)
+    const driverId = th.driverId ?? (tripsByVehicle.get(th.vehicleId) ?? []).find(t =>
+      t.driverId && th.beganAt >= t.beganAt && (t.endedAt == null || th.beganAt <= t.endedAt),
+    )?.driverId
+    if (!driverId) continue
+
+    const arr = theftsByDriver.get(driverId) ?? []
+    arr.push({
+      id:        th.id,
+      at:        th.beganAt.toISOString(),
+      plate:     th.vehicle?.registrationPlate ?? null,
+      litres:    th.stolenMl == null ? null : Math.round((th.stolenMl / 1000) * 10) / 10,
+      verdict:   th.verdict,
+      confirmed: th.confirmed ?? null,
+      // Minutes the level was falling — 47 L over four hours and 47 L over four
+      // minutes are different events with the same headline.
+      minutes:   th.endedAt != null
+        ? Math.round((new Date(th.endedAt).getTime() - th.beganAt.getTime()) / 60_000)
+        : null,
+      attributedBy: th.driverId ? 'record' : 'trip',
+    })
+    theftsByDriver.set(driverId, arr)
   }
 
   // Lifetime overspeeding cases per driver: a case is a TRIP during which at
@@ -528,6 +609,10 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   // by trips and `cases / trips` reads as "share of trips oversped" (the
   // suspension policy's 30-per-100-trips line).
   const overspeedTripsByDriver = new Map<string, Set<TripRow>>()
+  const overspeedsByDriver = new Map<string, DriverOverspeed[]>()
+  const plateByVehicle = new Map(
+    thefts.map(t => [t.vehicleId, t.vehicle?.registrationPlate ?? null]),
+  )
   for (const a of alerts) {
     const hit = (tripsByVehicle.get(a.vehicleId) ?? []).find(t =>
       t.driverId && a.triggeredAt >= t.beganAt && (t.endedAt == null || a.triggeredAt <= t.endedAt),
@@ -535,6 +620,18 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     if (hit?.driverId) {
       const set = overspeedTripsByDriver.get(hit.driverId) ?? new Set<TripRow>()
       set.add(hit); overspeedTripsByDriver.set(hit.driverId, set)
+
+      // The alerts themselves, for the case list. One trip still counts once
+      // toward the rate above; this is the evidence behind that one.
+      const arr = overspeedsByDriver.get(hit.driverId) ?? []
+      arr.push({
+        id:        `${a.vehicleId}-${a.triggeredAt.getTime()}`,
+        at:        a.triggeredAt.toISOString(),
+        plate:     plateByVehicle.get(a.vehicleId) ?? null,
+        route:     hit.route?.name ?? null,
+        attributedBy: 'trip',
+      })
+      overspeedsByDriver.set(hit.driverId, arr)
     }
   }
 
@@ -589,6 +686,10 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     const to = dTrips.length ? dTrips[dTrips.length - 1].beganAt : new Date()
     const from = new Date(to.getTime() - days * 86_400_000)
     const windowTrips = dTrips.filter(t => t.beganAt >= from && t.beganAt <= to)
+    const windowThefts = dThefts.filter(i => {
+      const at = new Date(i.at)
+      return at >= from && at <= to
+    })
 
     let totalKm = 0, totalKg = 0, totalSeconds = 0
     const byDayMap = new Map<string, { tonnes: number; mileageKm: number }>()
@@ -636,9 +737,17 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
         mileageKm:         Math.round(totalKm),
         tonnes:            toTonnes(totalKg),
         hoursOnRoad:       Math.round(totalSeconds / 360) / 10, // seconds → hours, 1 dp
-        fuelTheftCases:    dThefts.filter(at => at >= from && at <= to).length,
+        fuelTheftCases:    windowThefts.length,
         overspeedingCases,
         windowDays:        days,
+      },
+      // The cases behind the two counts, newest first. Scoped to the same
+      // window the counts use, so a card cannot list five events under a
+      // headline of three.
+      incidents: {
+        thefts:     windowThefts,
+        overspeeds: (overspeedsByDriver.get(d.id) ?? [])
+          .filter(o => new Date(o.at) >= from && new Date(o.at) <= to),
       },
       heaviestLoad: heaviest && {
         tonnes: toTonnes(heaviest.kg),
