@@ -11,6 +11,7 @@ import { getDeliveriesAnalytics } from './deliveries.cache.js'
 import { getFuelConsumption } from './fuel-cost.cache.js'
 import { priceFuelConsumption } from './fuel-pricing.js'
 import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery, FuelCostQuery } from './analytics.schema.js'
+import { vehicleIdsFromQuery, listCategories } from './vehicle-filter.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -24,10 +25,12 @@ export const overview: RequestHandler = async (req, res, next) => {
 export const deliveries: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as DeliveriesQuery
+    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), q.categories)
     // Trailing windows serve from the warmed cache; an explicit `to` anchor
-    // is an unbounded key space, so it computes live like before.
-    const data = q.to
-      ? await repo.deliveriesAnalytics(p(req, 'orgId'), q)
+    // or a vehicle-type filter is an unbounded key space, so it computes live
+    // like before.
+    const data = q.to || vehicleIds != null
+      ? await repo.deliveriesAnalytics(p(req, 'orgId'), q, vehicleIds)
       : await getDeliveriesAnalytics(p(req, 'orgId'), q.days)
     sendSuccess(res, data)
   } catch (err) { next(err) }
@@ -52,10 +55,11 @@ export const fuelEfficiency: RequestHandler = async (req, res, next) => {
 export const fuelCost: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as FuelCostQuery
+    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), q.categories)
     // Same split as `deliveries`: trailing windows serve from the warmed cache,
-    // an explicit `to` anchor is an unbounded key space so it computes live.
-    const data = q.to
-      ? await repo.fuelConsumption(p(req, 'orgId'), q)
+    // an anchor or a vehicle filter is an unbounded key space so it computes live.
+    const data = q.to || vehicleIds != null
+      ? await repo.fuelConsumption(p(req, 'orgId'), q, vehicleIds)
       : await getFuelConsumption(p(req, 'orgId'), q.days)
     sendSuccess(res, priceFuelConsumption(data, {
       pricePerLitre: q.pricePerLitre ?? env.FUEL_PRICE_PER_LITRE,
@@ -104,7 +108,15 @@ export const machineHours: RequestHandler = async (req, res, next) => {
 export const machineSummary: RequestHandler = async (req, res, next) => {
   try {
     const days = Number(req.query['days']) || 7
-    sendSuccess(res, await fleetWeekSummary(p(req, 'orgId'), days))
+    // `to` anchors the window on a past month or a custom range. Without it
+    // this endpoint always answered for the trailing N days ending today, so
+    // the Analytics summary card was the one component the page's date picker
+    // could not move.
+    const toRaw = String(req.query['to'] ?? '')
+    const to = toRaw ? new Date(toRaw) : undefined
+    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories'])
+    sendSuccess(res, await fleetWeekSummary(p(req, 'orgId'), days,
+      to && !Number.isNaN(to.getTime()) ? to : undefined, vehicleIds))
   } catch (err) { next(err) }
 }
 
@@ -122,7 +134,8 @@ export const excavatorArea: RequestHandler = async (req, res, next) => {
   try {
     const asked = String(req.query['day'] ?? '')
     const day = /^\d{4}-\d{2}-\d{2}$/.test(asked) ? new Date(`${asked}T00:00:00Z`) : undefined
-    sendSuccess(res, await getExcavatorArea(p(req, 'orgId'), day))
+    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories'])
+    sendSuccess(res, await getExcavatorArea(p(req, 'orgId'), day, vehicleIds))
   } catch (err) { next(err) }
 }
 
@@ -134,8 +147,9 @@ export const excavatorAreaByDay: RequestHandler = async (req, res, next) => {
     const days = Number.isFinite(asked) ? Math.min(90, Math.max(1, Math.trunc(asked))) : 30
     const toRaw = String(req.query['to'] ?? '')
     const to = toRaw ? new Date(toRaw) : undefined
+    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories'])
     sendSuccess(res, await getAreaByDay(p(req, 'orgId'), days,
-      to && !Number.isNaN(to.getTime()) ? to : undefined))
+      to && !Number.isNaN(to.getTime()) ? to : undefined, vehicleIds))
   } catch (err) { next(err) }
 }
 
@@ -146,14 +160,16 @@ export const fuelRateDays: RequestHandler = async (req, res, next) => {
     const days = Number.isFinite(asked) ? Math.min(90, Math.max(1, Math.trunc(asked))) : 30
     const toRaw = String(req.query['to'] ?? '')
     const to = toRaw ? new Date(toRaw) : undefined
+    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories'])
     sendSuccess(res, await getFuelRateSeries(p(req, 'orgId'), days,
-      to && !Number.isNaN(to.getTime()) ? to : undefined))
+      to && !Number.isNaN(to.getTime()) ? to : undefined, vehicleIds))
   } catch (err) { next(err) }
 }
 
 export const operationsToday: RequestHandler = async (req, res, next) => {
   try {
-    const data = await repo.operationsToday(p(req, 'orgId'))
+    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories'])
+    const data = await repo.operationsToday(p(req, 'orgId'), vehicleIds)
     const pricePerLitre = env.FUEL_PRICE_PER_LITRE
     sendSuccess(res, {
       ...data,
@@ -208,5 +224,22 @@ export const driverAnalytics: RequestHandler = async (req, res, next) => {
     // who isn't currently assigned) falls back to the live per-driver query.
     const data = cached ?? await repo.driverAnalytics(p(req, 'orgId'), p(req, 'driverId'), q)
     sendSuccess(res, data)
+  } catch (err) { next(err) }
+}
+
+
+/**
+ * What vehicle categories this fleet HAS, for the Analytics filter control.
+ *
+ * Derived from the fleet's own plates rather than served from a list, because
+ * the vocabulary is per-fleet: KASULU's plates carry a machine family (EX, CTR,
+ * DZ) and SUKARI's are ordinary registrations that carry none. A fleet that
+ * comes back with a single category is telling the client to render no filter
+ * at all — see vehicle-filter for why that is the honest answer rather than a
+ * control with one meaningless option in it.
+ */
+export const vehicleCategories: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, { categories: await listCategories(p(req, 'orgId')) })
   } catch (err) { next(err) }
 }

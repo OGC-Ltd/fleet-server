@@ -47,7 +47,21 @@ const fleetDayKey = (d: Date) => fleetDayFmt.format(d)
  * products ferried, busiest days, depots served (most→least), timely vs
  * interrupted deliveries, and distance covered (with per-day/week/month means).
  */
-export async function deliveriesAnalytics(orgId: string, q: DeliveriesQuery) {
+/**
+ * @param vehicleIds when non-null, the only vehicles that count — the
+ *   Analytics page's vehicle-type filter, already resolved to ids by
+ *   analytics/vehicle-filter. An EMPTY array is a real answer (the operator
+ *   picked a category this fleet has none of) and must return zeroes, so the
+ *   test is `!= null` and never a truthiness check on `.length`.
+ */
+export async function deliveriesAnalytics(
+  orgId: string, q: DeliveriesQuery, vehicleIds: string[] | null = null,
+) {
+  // Applied to the anchor as well as to the rows. Anchoring to the fleet's
+  // newest trip while counting one category's trips would end the window on a
+  // day the chosen machines may not have worked, and the heatmap would open on
+  // trailing empty cells that belong to other vehicles.
+  const vehicleWhere = vehicleIds == null ? {} : { vehicleId: { in: vehicleIds } }
   // The window is exactly `q.days` CALENDAR days in the fleet's timezone, the
   // newest being the current day — 7d = today + the 6 days before it. The old
   // rolling `to − N×24h` timestamp range touched N+1 calendar dates (an "8
@@ -61,7 +75,7 @@ export async function deliveriesAnalytics(orgId: string, q: DeliveriesQuery) {
   let anchor = q.to ?? new Date()
   if (!q.to) {
     const latest = await prisma.trip.aggregate({
-      where: { vehicle: { organisationId: orgId } },
+      where: { vehicle: { organisationId: orgId }, ...vehicleWhere },
       _max:  { beganAt: true },
     })
     if (latest._max.beganAt && latest._max.beganAt > anchor) anchor = latest._max.beganAt
@@ -75,7 +89,7 @@ export async function deliveriesAnalytics(orgId: string, q: DeliveriesQuery) {
     fleetDayKey(new Date(from.getTime() + i * 86_400_000)))
 
   const trips = await prisma.trip.findMany({
-    where:  { vehicle: { organisationId: orgId }, beganAt: { gte: from, lte: to } },
+    where:  { vehicle: { organisationId: orgId }, ...vehicleWhere, beganAt: { gte: from, lte: to } },
     select: {
       beganAt: true, finalLocation: true, mileageKm: true,
       durationSeconds: true, avgSpeedKmh: true,
@@ -223,14 +237,18 @@ export async function fuelEfficiency(orgId: string, q: AnalyticsRange) {
  * way out, so the cached aggregate is shared by every caller whatever rate
  * they asked for.
  */
-export async function fuelConsumption(orgId: string, q: DeliveriesQuery) {
+/** @param vehicleIds see deliveriesAnalytics — same filter, same semantics. */
+export async function fuelConsumption(
+  orgId: string, q: DeliveriesQuery, vehicleIds: string[] | null = null,
+) {
+  const vehicleWhere = vehicleIds == null ? {} : { vehicleId: { in: vehicleIds } }
   // Window and anchoring follow deliveriesAnalytics exactly — same calendar
   // days in the fleet's timezone, same "later of now and the newest row"
   // anchor, so the two dashboards can never disagree about what "30 days" is.
   let anchor = q.to ?? new Date()
   if (!q.to) {
     const latest = await prisma.fuelFilling.aggregate({
-      where: { vehicle: { organisationId: orgId } },
+      where: { vehicle: { organisationId: orgId }, ...vehicleWhere },
       _max:  { filledAt: true },
     })
     if (latest._max.filledAt && latest._max.filledAt > anchor) anchor = latest._max.filledAt
@@ -244,7 +262,7 @@ export async function fuelConsumption(orgId: string, q: DeliveriesQuery) {
   const vehicleSelect = { select: { registrationPlate: true, name: true } }
   const [fillings, thefts] = await Promise.all([
     prisma.fuelFilling.findMany({
-      where:  { vehicle: { organisationId: orgId }, filledAt: { gte: from, lte: to } },
+      where:  { vehicle: { organisationId: orgId }, ...vehicleWhere, filledAt: { gte: from, lte: to } },
       select: { vehicleId: true, filledAt: true, filledMl: true, vehicle: vehicleSelect },
       orderBy: { filledAt: 'asc' },
     }),
@@ -256,6 +274,7 @@ export async function fuelConsumption(orgId: string, q: DeliveriesQuery) {
     prisma.fuelTheft.findMany({
       where:  {
         vehicle: { organisationId: orgId },
+        ...vehicleWhere,
         beganAt: { gte: from, lte: to },
         verdict: { notIn: NO_FUEL_LEFT },
       },
@@ -984,9 +1003,14 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
  *     be worth doing — but it is an inference, and it needs to be built and
  *     validated deliberately rather than smuggled in behind a count.
  */
-export async function operationsToday(orgId: string) {
+/** @param vehicleIds see deliveriesAnalytics — same filter, same semantics. */
+export async function operationsToday(orgId: string, vehicleIds: string[] | null = null) {
   const dayStart = fleetDayStart()
   const now = new Date()
+  // Two shapes of the same filter: `vehicleId` for rows that carry one, and an
+  // `id` predicate for the vehicle registry itself.
+  const vehicleWhere   = vehicleIds == null ? {} : { vehicleId: { in: vehicleIds } }
+  const registryWhere  = vehicleIds == null ? {} : { id: { in: vehicleIds } }
 
   const [fleet, fillings, tractorDispatches, truckDispatches, unresolvedDispatches] = await Promise.all([
     // Registry state, not connectivity. `isActive` is what the provider still
@@ -994,13 +1018,13 @@ export async function operationsToday(orgId: string) {
     // snapshot, which this query has no business reaching for.
     prisma.vehicle.groupBy({
       by:      ['vehicleType'],
-      where:   { organisationId: orgId, isActive: true },
+      where:   { organisationId: orgId, isActive: true, ...registryWhere },
       _count:  { _all: true },
     }),
     // Measured litres off the fuel probes, same ledger the month card reads —
     // just clamped to the day so it is a RUNNING total rather than a period one.
     prisma.fuelFilling.findMany({
-      where:  { vehicle: { organisationId: orgId }, filledAt: { gte: dayStart } },
+      where:  { vehicle: { organisationId: orgId }, ...vehicleWhere, filledAt: { gte: dayStart } },
       select: { filledMl: true, filledAt: true },
     }),
     // Tractors SIGNED OUT today — the yard's own record of leaving, which
@@ -1012,6 +1036,7 @@ export async function operationsToday(orgId: string) {
         organisationId: orgId,
         dispatchedAt:   { gte: dayStart },
         vehicle:        { vehicleType: 'TRACTOR' },
+        ...vehicleWhere,
       },
       select:  { id: true, plate: true, driverName: true, destination: true, dispatchedAt: true },
       orderBy: { dispatchedAt: 'asc' },
@@ -1021,6 +1046,7 @@ export async function operationsToday(orgId: string) {
         organisationId: orgId,
         dispatchedAt:   { gte: dayStart },
         vehicle:        { vehicleType: 'TRUCK' },
+        ...vehicleWhere,
       },
       select:  { plate: true, driverName: true, destination: true, dispatchedAt: true },
       orderBy: { dispatchedAt: 'desc' },
@@ -1028,7 +1054,11 @@ export async function operationsToday(orgId: string) {
     // Paperwork whose plate never resolved to our registry has NO vehicle row
     // and therefore no type — it cannot be counted as a truck or excluded as
     // one. Reported separately so the truck figure is not quietly short.
-    prisma.dispatch.count({
+    // Under a vehicle filter this is 0, not the fleet-wide figure: paperwork
+    // whose plate never resolved has no vehicle row and therefore no category,
+    // so it can neither be counted into the chosen one nor left standing as a
+    // fleet-wide caveat beside figures that are no longer fleet-wide.
+    vehicleIds != null ? Promise.resolve(0) : prisma.dispatch.count({
       where: { organisationId: orgId, dispatchedAt: { gte: dayStart }, vehicleId: null },
     }),
   ])
