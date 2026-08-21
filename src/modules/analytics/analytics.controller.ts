@@ -118,7 +118,21 @@ export const machineSummary: RequestHandler = async (req, res, next) => {
  *  the week and the month — see fleet-state.service. */
 export const fleetStateHandler: RequestHandler = async (req, res, next) => {
   try {
-    sendSuccess(res, await getFleetState(p(req, 'orgId')))
+    // Takes the page's window so the per-unit totals — fuel litres above all —
+    // describe the range the operator chose rather than a fixed month. The
+    // today and week columns stay fixed; see the service.
+    //
+    // No `categories`: this answers at per-unit grain, so the dash narrows it
+    // in the browser and the response stays one warm entry per window rather
+    // than one per selection.
+    const asked = Number(req.query['days'])
+    const days = Number.isFinite(asked) ? Math.min(366, Math.max(1, Math.trunc(asked))) : undefined
+    const toRaw = String(req.query['to'] ?? '')
+    const to = toRaw ? new Date(toRaw) : undefined
+    sendSuccess(res, await getFleetState(p(req, 'orgId'), {
+      days,
+      to: to && !Number.isNaN(to.getTime()) ? to : undefined,
+    }))
   } catch (err) { next(err) }
 }
 
