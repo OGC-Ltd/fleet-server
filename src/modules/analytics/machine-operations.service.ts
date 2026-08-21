@@ -313,7 +313,22 @@ export interface FleetWeekSummary {
 async function computeFleetWeekSummary(
   orgId: string, days = 7,
 ): Promise<FleetWeekSummary> {
-  const from = new Date(fleetDayStart().getTime() - (days - 1) * 24 * 3_600_000)
+  /**
+   * The window is `days` FLEET DAYS ending today: today plus the days - 1
+   * complete days behind it.
+   *
+   * `fromDay`, not `from`. The rollup is keyed by a DATE column and `from` is an
+   * instant — 21:00 UTC the evening the fleet day began — so comparing it with
+   * `${from}::date` in a UTC session yields the PREVIOUS calendar date and drags
+   * one extra day into the window. Measured 2026-08-21 with days=7, byDay came
+   * back 08-14 to 08-20: seven complete days, plus today folded into the totals
+   * below, which is eight days reported as seven.
+   *
+   * fleetDayKey is the only place this conversion may happen — the same fix
+   * fleet-state and fuel-trend both took, for the same reason.
+   */
+  const from    = new Date(fleetDayStart().getTime() - (days - 1) * 24 * 3_600_000)
+  const fromDay = fleetDayKey(from)
 
   const [work] = await prisma.$queryRaw<Array<{
     unit_days: bigint; units: bigint; seconds: bigint; metres: bigint
@@ -326,7 +341,7 @@ async function computeFleetWeekSummary(
       JOIN vehicles v ON v.id = t.vehicle_id
      WHERE v.organisation_id = ${orgId}
        AND v.is_active
-       AND t.day >= ${from}::date`
+       AND t.day >= ${fromDay}`
 
   // Blocks a machine worked in, from the zone crossings already recorded, with
   // each block's true area off its PostGIS geometry. The feed id encodes the
@@ -354,7 +369,7 @@ async function computeFleetWeekSummary(
            count(*)::bigint                                  AS unit_days
       FROM fuel_daily_trends t
       JOIN vehicles v ON v.id = t.vehicle_id
-     WHERE v.organisation_id = ${orgId} AND v.is_active AND t.day >= ${from}::date
+     WHERE v.organisation_id = ${orgId} AND v.is_active AND t.day >= ${fromDay}
      GROUP BY 1 ORDER BY 1`
 
   const blocksPerDay = await prisma.$queryRaw<Array<{ day: Date; blocks: bigint }>>`
