@@ -110,8 +110,8 @@ export interface FleetStateRow {
   /** Hours the engine ran today, and the mean per observed day over the week
    *  and the month. */
   hoursToday: number
-  hoursWeekAvg: number
-  hoursMonthAvg: number
+  hoursWeekAvg: number | null
+  hoursMonthAvg: number | null
   /**
    * Hours today the engine ran while the unit was stationary. Real for every
    * unit; it is only IDLE where travel is the work — see the header.
@@ -123,8 +123,8 @@ export interface FleetStateRow {
   idleHoursWeekAvg: number | null
   /** Ground covered today, and the mean per observed day. */
   distanceTodayKm: number
-  distanceWeekAvgKm: number
-  distanceMonthAvgKm: number
+  distanceWeekAvgKm: number | null
+  distanceMonthAvgKm: number | null
   /**
    * Ground WORKED, square kilometres, meaned per day the machine was measured.
    *
@@ -572,9 +572,22 @@ export async function fleetState(
 
   const hours = (seconds: bigint | number | undefined): number =>
     Math.round((Number(seconds ?? 0) / 3600) * 10) / 10
-  const perDay = (total: bigint | number | undefined, days: bigint | number | undefined): number => {
+  /**
+   * A mean per reporting day, or NULL when there were no reporting days.
+   *
+   * Null rather than zero, and that stopped being a nicety once the outer tier
+   * became the operator's window: pick today alone and the rollup has nothing
+   * for it — its newest row is always yesterday — so every window average
+   * would have printed a confident 0.0 across the whole fleet. No machine
+   * averaged zero hours that day; the day has simply not been rolled up.
+   *
+   * The same reasoning `fuelBurnL` and `hectares` beside it already used.
+   */
+  const perDay = (
+    total: bigint | number | undefined, days: bigint | number | undefined,
+  ): number | null => {
     const d = Number(days ?? 0)
-    return d > 0 ? Math.round((Number(total ?? 0) / d) * 10) / 10 : 0
+    return d > 0 ? Math.round((Number(total ?? 0) / d) * 10) / 10 : null
   }
 
   const units: FleetStateRow[] = vehicles.map((v) => {
