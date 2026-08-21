@@ -425,15 +425,23 @@ export interface DriverRosterRow {
  * implementation that can drift.
  */
 export interface DriverIncident {
-  id:        string
-  at:        string
-  plate:     string | null
-  /** Litres the level fell by, where the adjudicator measured one. */
-  litres:    number | null
-  verdict:   string
-  confirmed: string | null
+  id:      string
+  at:      string
+  plate:   string | null
+  /** Litres the level fell by. */
+  litres:  number
   /** How long the fall lasted. A rate, not just a total. */
-  minutes:   number | null
+  minutes: number
+  /** Tank level either side of the fall, litres — what to check the gauge against. */
+  fromL:   number | null
+  toL:     number | null
+  where:   string | null
+  /** The adjudicator's verdict and its reasoning, passed through unchanged. */
+  verdict:         string
+  verdictReason:   string | null
+  cause:           string | null
+  causeReason:     string | null
+  causeConfidence: number | null
   attributedBy: 'record' | 'trip'
 }
 
@@ -540,8 +548,12 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
         verdict: { notIn: NO_FUEL_LEFT },
       },
       select: {
-        id: true, driverId: true, vehicleId: true, beganAt: true, endedAt: true,
-        stolenMl: true, verdict: true, confirmed: true,
+        id: true, driverId: true, vehicleId: true,
+        beganAt: true, detectedAt: true,
+        stolenMl: true, initialFuelLevelMl: true, finalFuelLevelMl: true,
+        initialLocation: true,
+        verdict: true, verdictReason: true,
+        drainCause: true, causeConfidence: true, causeReason: true,
         vehicle: { select: { registrationPlate: true } },
       },
       orderBy: { beganAt: 'desc' },
@@ -587,17 +599,25 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
 
     const arr = theftsByDriver.get(driverId) ?? []
     arr.push({
-      id:        th.id,
-      at:        th.beganAt.toISOString(),
-      plate:     th.vehicle?.registrationPlate ?? null,
-      litres:    th.stolenMl == null ? null : Math.round((th.stolenMl / 1000) * 10) / 10,
-      verdict:   th.verdict,
-      confirmed: th.confirmed ?? null,
-      // Minutes the level was falling — 47 L over four hours and 47 L over four
-      // minutes are different events with the same headline.
-      minutes:   th.endedAt != null
-        ? Math.round((new Date(th.endedAt).getTime() - th.beganAt.getTime()) / 60_000)
-        : null,
+      id:       th.id,
+      at:       th.beganAt.toISOString(),
+      plate:    th.vehicle?.registrationPlate ?? null,
+      litres:   Math.round((th.stolenMl / 1000) * 10) / 10,
+      // Minutes the level was falling. 47 L over four hours and 47 L over four
+      // minutes are different events with the same headline, so the rate is
+      // carried rather than left to be inferred from a total.
+      minutes:  Math.round((th.detectedAt.getTime() - th.beganAt.getTime()) / 60_000),
+      fromL:    th.initialFuelLevelMl == null ? null : Math.round(th.initialFuelLevelMl / 100) / 10,
+      toL:      th.finalFuelLevelMl   == null ? null : Math.round(th.finalFuelLevelMl / 100) / 10,
+      where:    th.initialLocation ?? null,
+      // The adjudicator's own words, passed through. Whether an event may be
+      // called a theft is its decision; re-deriving that vocabulary here would
+      // be a second implementation of a rule that already exists.
+      verdict:       th.verdict,
+      verdictReason: th.verdictReason ?? null,
+      cause:         th.drainCause ?? null,
+      causeReason:   th.causeReason ?? null,
+      causeConfidence: th.causeConfidence ?? null,
       attributedBy: th.driverId ? 'record' : 'trip',
     })
     theftsByDriver.set(driverId, arr)
