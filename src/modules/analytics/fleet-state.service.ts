@@ -10,7 +10,8 @@
  * thing from working and a different thing again from being dark.
  *
  *   WORKING   engine on, moving
- *   IDLING    engine on, stationary
+ *   IDLING     engine on, not moving, on a unit whose work is travel
+ *   STATIONARY engine on, not moving, on plant — which is what digging is
  *   PARKED    reporting, engine off
  *   OFFLINE   no ping inside ONLINE_WINDOW_MINUTES
  *
@@ -86,7 +87,7 @@ export const ONLINE_WINDOW_MINUTES = 120
  *  rather than two that happen to share a unit. */
 export const MAX_GAP_SECONDS = 900
 
-export type UnitState = 'WORKING' | 'IDLING' | 'PARKED' | 'OFFLINE'
+export type UnitState = 'WORKING' | 'IDLING' | 'STATIONARY' | 'PARKED' | 'OFFLINE'
 
 /**
  * Categories whose work IS travel, so engine-on-and-stationary is genuinely
@@ -503,11 +504,31 @@ export async function fleetState(orgId: string): Promise<FleetState> {
     const category = machinePrefix(v.registrationPlate) ?? 'OTHER'
     const travels  = TRAVEL_CATEGORIES.has(category)
 
+    /**
+     * Engine on and not moving is IDLING on a lorry and STATIONARY on plant.
+     *
+     * The same reading, two different facts. A truck sitting with its engine
+     * running is burning fuel for nothing, which is what "idling" means and
+     * what somebody should be sent to stop. An excavator sitting with its
+     * engine running is DIGGING — it works from a fixed position and covers
+     * 0.55 km per engine hour against a road vehicle's 29.
+     *
+     * Calling both of them idle was reading a whole category as waste:
+     * KASULU's excavators show 6 stationary hours in a working day and every
+     * one of them was labelled Idling on the row while the Idle COLUMN beside
+     * it correctly read a dash. The column was fixed and the state was not.
+     *
+     * STATIONARY is a state of its own rather than being folded into WORKING,
+     * because the distinction is still worth seeing: a machine parked in a pit
+     * with the engine on and a machine tramming between faces are both working
+     * and an operator may want to tell them apart.
+     */
     const state: UnitState =
       l == null                                            ? 'OFFLINE'
       : !l.engine_on                                       ? 'PARKED'
       : (l.speed_kmh ?? 0) > IDLE_SPEED_KMH                ? 'WORKING'
-      :                                                      'IDLING'
+      : travels                                            ? 'IDLING'
+      :                                                      'STATIONARY'
 
     const todayHours = hours(todayRunByVehicle.get(v.id))
     const weekSecs   = Number(r?.week_s ?? 0)
@@ -538,7 +559,9 @@ export async function fleetState(orgId: string): Promise<FleetState> {
     }
   })
 
-  const counts: Record<UnitState, number> = { WORKING: 0, IDLING: 0, PARKED: 0, OFFLINE: 0 }
+  const counts: Record<UnitState, number> = {
+    WORKING: 0, IDLING: 0, STATIONARY: 0, PARKED: 0, OFFLINE: 0,
+  }
   const cats = new Map<string, { category: string; working: number; idling: number; parked: number; offline: number }>()
   for (const u of units) {
     counts[u.state]++
@@ -547,7 +570,7 @@ export async function fleetState(orgId: string): Promise<FleetState> {
     }
     const c = cats.get(u.category)!
     if (u.state === 'WORKING') c.working++
-    else if (u.state === 'IDLING') c.idling++
+    else if (u.state === 'IDLING' || u.state === 'STATIONARY') c.idling++
     else if (u.state === 'PARKED') c.parked++
     else c.offline++
   }
