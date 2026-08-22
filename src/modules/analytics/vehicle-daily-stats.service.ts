@@ -61,14 +61,14 @@ export interface VehicleDayFigures {
 
 /**
  * Speed at or below which a running engine counts as idling rather than
- * working. Two km/h — walking pace — because GPS jitter on a stationary machine
+ * working. Zero km/h — a stationary machine — because GPS jitter on a stationary machine
  * reads a km/h or so and a machine creeping at 1 km/h is not travelling.
  *
  * Defined here, beside the query that writes the stored counts, because the
  * history and the live read of today must count the same thing. Moving it makes
  * the two disagree until the backfill is re-run.
  */
-export const IDLE_SPEED_KMH = 2
+export const IDLE_SPEED_KMH = 0
 
 /**
  * Aggregate one fleet day of frames, per vehicle.
