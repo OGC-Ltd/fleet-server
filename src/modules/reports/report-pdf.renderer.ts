@@ -155,6 +155,30 @@ const F = { reg: 'Helvetica', bold: 'Helvetica-Bold' }
 const fmtDate = (d: Date) =>
   d.toLocaleString('en-KE', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Nairobi' })
 
+// ── State pill rendering ────────────────────────────────────────────────────
+
+const stateColors: Record<string, string> = {
+  WORKING: '#2fae7a',        // bright green
+  STATIONARY: '#8a6fd6',     // violet
+  IDLING: '#d97706',         // amber
+  PARKED: '#6d6c68',         // grey
+  OFFLINE: '#cf4a3d',        // red
+}
+
+function renderStatePill(doc: PDFKit.PDFDocument, state: string, x: number, y: number): void {
+  const color = stateColors[state] || '#6d6c68'
+  doc.circle(x + 2, y + 4, 3).fill(color)
+  const label = state.charAt(0) + state.slice(1).toLowerCase()
+  doc.font(F.reg).fontSize(8.8).fillColor(C.ink).text(label, x + 10, y, { lineBreak: false })
+}
+
+function renderStatusPill(doc: PDFKit.PDFDocument, status: string, x: number, y: number): void {
+  const isOp = status === 'Operational'
+  const color = isOp ? C.greenBright : C.red
+  doc.circle(x + 2, y + 4, 3).fill(color)
+  doc.font(F.reg).fontSize(8.8).fillColor(C.ink).text(status, x + 10, y, { lineBreak: false })
+}
+
 // ── renderer ─────────────────────────────────────────────────────────────────
 
 export async function renderReportPdf(data: ReportData): Promise<Buffer> {
@@ -725,9 +749,12 @@ function insightBand(doc: PDFKit.PDFDocument, insights: ReportInsight[], x: numb
   return h
 }
 
+// ── Table flow with pill support ───────────────────────────────────────────
+
 /** Draws a table's header + rows, adding new pages (and re-drawing the header) as needed.
  *  Tables sit flush on the page background (no card box) with zebra-striped rows, matching
- *  the "Fuel by day" / "Fleet state" log tables in the template. */
+ *  the "Fuel by day" / "Fleet state" log tables in the template.
+ *  Supports State and Status pills based on column labels. */
 function flowTable(doc: PDFKit.PDFDocument, pager: Pager, t: ReportTable, x: number, w: number) {
   const rowH = 25.5
   pager.ensure(PAD + 24 + 18 + rowH * Math.min(3, t.rows.length))
@@ -770,10 +797,19 @@ function flowTable(doc: PDFKit.PDFDocument, pager: Pager, t: ReportTable, x: num
     let cx = x + PAD + 14
     r.cells.forEach((cell, ci) => {
       const col = t.columns[ci]!
+      const isState = col.label === 'State'
+      const isStatus = col.label === 'Status'
       const last = ci === r.cells.length - 1
       const color = last && r.lastCellColor ? (r.lastCellColor === 'bad' ? C.red : C.green) : C.ink
-      doc.font(last && r.lastCellColor ? F.bold : F.reg).fontSize(8.8).fillColor(color)
-        .text(cell, cx, hy, { width: widths[ci]! - 8, align: col.align ?? 'left', lineBreak: false, ellipsis: true })
+
+      if (isState) {
+        renderStatePill(doc, cell, cx, hy)
+      } else if (isStatus) {
+        renderStatusPill(doc, cell, cx, hy)
+      } else {
+        doc.font(last && r.lastCellColor ? F.bold : F.reg).fontSize(8.8).fillColor(color)
+          .text(cell, cx, hy, { width: widths[ci]! - 8, align: col.align ?? 'left', lineBreak: false, ellipsis: true })
+      }
       cx += widths[ci]!
     })
     hy += rowH

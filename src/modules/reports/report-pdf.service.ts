@@ -1,18 +1,23 @@
-// Data assembly for the downloadable PDF reports (report-pdf.renderer.ts
-// draws them). One collector per report kind — Analytics, Drivers,
-// Maintenance — each reading the SAME warmed aggregates its dashboard page
-// renders, so the report always matches what's on screen. The "what stands
-// out" band is heuristic (deterministic, instant, works offline) — it cites
-// concrete numbers the way the template does.
+// report-pdf.service.ts – Data assembly for all report kinds
+// Includes analytics, drivers, maintenance, and plant.
 
 import { prisma } from '../../lib/prisma.js'
 import { getDeliveriesAnalytics } from '../analytics/deliveries.cache.js'
 import { getDriversOverview } from '../analytics/drivers-overview.cache.js'
 import { getFleetSnapshotCached } from '../telemetry/fleet-snapshot.cache.js'
 import { getMaintenanceHistoryCached, getOrgVehicleMaintenance } from '../telemetry/maintenance.cache.js'
+
+// ── plant‑specific data fetchers (using existing service/cache exports) ──
+import { getFleetState } from '../analytics/fleet-state.service.js'
+import { getAreaByDay } from '../analytics/excavator-area.service.js'
+import { fleetWeekSummary } from '../analytics/machine-operations.service.js'
+import { getFuelConsumption } from '../analytics/fuel-cost.cache.js'
+import { priceFuelConsumption } from '../analytics/fuel-pricing.js'
+
 import { renderReportPdf, type ReportData, type ReportBarRow, type ReportInsight } from './report-pdf.renderer.js'
 
-export const PDF_REPORT_KINDS = ['analytics', 'drivers', 'maintenance'] as const
+// ── UPDATED: include 'plant' ──────────────────────────────────────────────
+export const PDF_REPORT_KINDS = ['analytics', 'drivers', 'maintenance', 'plant'] as const
 export type PdfReportKind = (typeof PDF_REPORT_KINDS)[number]
 
 // Fuel-cost model — mirrors fleettrack's AnalyticsScreen constants exactly so
@@ -38,12 +43,13 @@ const REGION_BY_CODE: Record<string, string> = {
   KABRAS: 'Western · Kenya',
 }
 
-const fmt = (n: number, d = 0) =>
+const fmt = (n: number, d: number = 0) =>
   Number(n ?? 0).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d })
 
 const fmtDay = (day: string) =>
   new Date(`${day}T00:00:00Z`).toLocaleDateString('en-KE', { month: 'short', day: 'numeric', timeZone: 'UTC' })
 
+// ── main entry ─────────────────────────────────────────────────────────────
 export async function generateReportPdf(orgId: string, kind: PdfReportKind, days: number):
   Promise<{ buffer: Buffer; filename: string }> {
   const org = await prisma.organisation.findUnique({ where: { id: orgId }, select: { name: true, code: true } })
@@ -51,10 +57,16 @@ export async function generateReportPdf(orgId: string, kind: PdfReportKind, days
   const orgRegion = REGION_BY_CODE[org?.code ?? ''] ?? 'Kenya'
   const short = (org?.code ?? 'fleet').charAt(0) + (org?.code ?? 'fleet').slice(1).toLowerCase()
 
-  const data =
-    kind === 'analytics' ? await collectAnalytics(orgId, days) :
-    kind === 'drivers' ? await collectDrivers(orgId, days) :
-    await collectMaintenance(orgId, days)
+  let data: ReportData
+  if (kind === 'plant') {
+    data = await collectPlantAnalytics(orgId, days)
+  } else if (kind === 'analytics') {
+    data = await collectAnalytics(orgId, days)
+  } else if (kind === 'drivers') {
+    data = await collectDrivers(orgId, days)
+  } else {
+    data = await collectMaintenance(orgId, days)
+  }
 
   data.orgName = orgName
   data.orgRegion = orgRegion
@@ -69,8 +81,9 @@ async function collectAnalytics(orgId: string, days: number): Promise<ReportData
   return buildAnalyticsReport(await getDeliveriesAnalytics(orgId, days), days)
 }
 
-/** Pure — takes the deliveries aggregate, returns the drawable report. */
-export function buildAnalyticsReport(a: DeliveriesPayload, days: number): ReportData {
+type DeliveriesPayload = Awaited<ReturnType<typeof getDeliveriesAnalytics>>
+
+function buildAnalyticsReport(a: DeliveriesPayload, days: number): ReportData {
   const { totals, deliveries, distance, byDay } = a
   const timelyPct = deliveries.total > 0 ? Math.round((deliveries.timely / deliveries.total) * 100) : 0
 
@@ -96,7 +109,7 @@ export function buildAnalyticsReport(a: DeliveriesPayload, days: number): Report
 
   return {
     title: 'Fleet Analytics Report',
-    orgName: '', orgRegion: '', // filled by generateReportPdf
+    orgName: '', orgRegion: '',
     windowLabel: `Trailing ${days} days`,
     kpis: [
       { label: 'Deliveries', value: fmt(totals.trips), sub: `completed across ${totals.activeDays} active days` },
@@ -166,8 +179,6 @@ export function buildAnalyticsReport(a: DeliveriesPayload, days: number): Report
   }
 }
 
-type DeliveriesPayload = Awaited<ReturnType<typeof getDeliveriesAnalytics>>
-
 function analyticsInsights(a: DeliveriesPayload): ReportInsight[] {
   const { byDay, deliveries, totals } = a
   const out: ReportInsight[] = []
@@ -222,8 +233,7 @@ async function collectDrivers(orgId: string, days: number): Promise<ReportData> 
   return buildDriversReport(await getDriversOverview(orgId, days), days)
 }
 
-/** Pure — takes the drivers overview, returns the drawable report. */
-export function buildDriversReport(overview: Awaited<ReturnType<typeof getDriversOverview>>, days: number): ReportData {
+function buildDriversReport(overview: Awaited<ReturnType<typeof getDriversOverview>>, days: number): ReportData {
   const roster = overview.drivers
   const trips = roster.reduce((s, d) => s + d.trips, 0)
   const tonnes = roster.reduce((s, d) => s + d.tonnes, 0)
@@ -254,7 +264,6 @@ export function buildDriversReport(overview: Awaited<ReturnType<typeof getDriver
     bars: {
       title: 'Top drivers', note: 'tonnes · trips',
       rows: byTonnes.slice(0, 10).map(d => ({
-        // Helvetica has no star glyph — spell the rating out.
         label: d.fullName, note: `rated ${d.rating.toFixed(2)}`,
         value: fmt(d.tonnes, 1), valueNote: `t · ${d.trips}`,
         frac: d.tonnes / maxTonnes,
@@ -327,9 +336,7 @@ export function buildDriversReport(overview: Awaited<ReturnType<typeof getDriver
   }
 }
 
-type Roster = Awaited<ReturnType<typeof getDriversOverview>>['drivers']
-
-function driverInsights(roster: Roster, tonnes: number, overspeed: number, theft: number, avgRating: number): ReportInsight[] {
+function driverInsights(roster: any[], tonnes: number, overspeed: number, theft: number, avgRating: number): ReportInsight[] {
   const byTonnes = [...roster].sort((a, b) => b.tonnes - a.tonnes)
   const top3 = byTonnes.slice(0, 3)
   const share = tonnes ? Math.round((top3.reduce((s, d) => s + d.tonnes, 0) / tonnes) * 100) : 0
@@ -388,14 +395,13 @@ async function collectMaintenance(orgId: string, days: number): Promise<ReportDa
   return buildMaintenanceReport(snapshot, history, maint, days)
 }
 
-/** Pure — takes snapshot + history + workshop records, returns the drawable report. */
-export function buildMaintenanceReport(
-  snapshot: Awaited<ReturnType<typeof getFleetSnapshotCached>>,
-  history: HistoryRows,
-  maint: Awaited<ReturnType<typeof getOrgVehicleMaintenance>>,
+function buildMaintenanceReport(
+  snapshot: any[],
+  history: any[],
+  maint: any,
   days: number,
 ): ReportData {
-  const grades = snapshot.map(v => gradeVehicle(v as Parameters<typeof gradeVehicle>[0]))
+  const grades = snapshot.map(v => gradeVehicle(v))
   const count = (l: VehicleGrade['label']) => grades.filter(g => g.label === l).length
   const attention = count('Overdue') + count('Due Soon') + count('In Service')
   const healthy = grades.length - attention
@@ -408,7 +414,6 @@ export function buildMaintenanceReport(
   const services = Object.values(maint.services).flat().length
   const visits = Object.values(maint.visits).flat().length
 
-  // Vehicles nearest their next service, most urgent first.
   const nearest = grades.filter(g => g.kmRemaining != null)
     .sort((a, b) => (a.kmRemaining ?? 0) - (b.kmRemaining ?? 0))
 
@@ -505,11 +510,9 @@ export function buildMaintenanceReport(
   }
 }
 
-type HistoryRows = Awaited<ReturnType<typeof getMaintenanceHistoryCached>>
-
-function maintenanceInsights(grades: VehicleGrade[], nearest: VehicleGrade[], history: HistoryRows, distanceKm: number, fuelL: number): ReportInsight[] {
+function maintenanceInsights(grades: VehicleGrade[], nearest: VehicleGrade[], history: any[], distanceKm: number, fuelL: number): ReportInsight[] {
   const half = Math.max(1, Math.floor(history.length / 2))
-  const incidents = (rows: HistoryRows) => rows.reduce((s, h) => s + h.overspeedingCount + h.fuelInconsistencyCount, 0)
+  const incidents = (rows: any[]) => rows.reduce((s, h) => s + h.overspeedingCount + h.fuelInconsistencyCount, 0)
   const cur = incidents(history.slice(-half))
   const prev = incidents(history.slice(-2 * half, -half))
   const delta = prev > 0 ? Math.round(((cur - prev) / prev) * 100) : null
@@ -537,4 +540,167 @@ function maintenanceInsights(grades: VehicleGrade[], nearest: VehicleGrade[], hi
         : `No fuel-burn telemetry landed in this window.`,
     },
   ]
+}
+
+// ── Plant ───────────────────────────────────────────────────────────────────
+
+async function collectPlantAnalytics(orgId: string, days: number): Promise<ReportData> {
+  // Fetch the raw data using existing functions
+  const [machineWeek, areaDays, fuelRaw, fleetState] = await Promise.all([
+    // machine summary – we need to pass categories: [] for unfiltered (whole fleet)
+    fleetWeekSummary(orgId, days, undefined, null),
+    // area by day – same window
+    getAreaByDay(orgId, days, undefined, null),
+    // fuel cost raw (unpriced)
+    getFuelConsumption(orgId, days, undefined, null),
+    // fleet state – uses the same window
+    getFleetState(orgId, { days, to: undefined }),
+  ])
+
+  // Price the fuel data using the server's default price
+  const fuel = priceFuelConsumption(fuelRaw, {
+    pricePerLitre: 179.36, // or env.FUEL_PRICE_PER_LITRE
+    currency: 'KES',
+    source: 'configured',
+  })
+
+  return buildPlantReport(machineWeek, areaDays, fuel, fleetState, days)
+}
+
+function buildPlantReport(
+  machineWeek: any,
+  areaDays: any,
+  fuel: any,
+  fleetState: any,
+  days: number,
+): ReportData {
+  const totalUnits = fleetState?.units?.length ?? 0
+  const totalHours = machineWeek?.totalHours ?? 0
+  const totalDistance = machineWeek?.totalDistanceKm ?? 0
+  const totalArea = areaDays?.totalM2 ?? 0
+  const avgHoursPerDay = machineWeek?.avgHoursPerDay ?? 0
+  const unitsReporting = machineWeek?.unitsReporting ?? 0
+  const expectedHours = machineWeek?.expectedHoursPerDay ?? 18
+
+  const fuelTotals = fuel?.totals ?? { litresFilled: 0, litresLost: 0, cost: 0, fillings: 0, thefts: 0 }
+  const fuelByDay = fuel?.byDay ?? []
+  const areaByDay = areaDays?.days ?? []
+  const units = fleetState?.units ?? []
+  const sortedUnits = [...units].sort((a, b) => b.hoursToday - a.hoursToday)
+
+  const categories = fleetState?.byCategory ?? []
+  const catData = categories.map((c: any) => ({
+    label: c.category,
+    value: String(c.working + c.idling + c.parked + c.offline),
+    frac: (c.working + c.idling + c.parked + c.offline) / Math.max(1, totalUnits),
+    color: '#2fae7a',
+  }))
+
+  return {
+    title: 'Fleet Analytics Report',
+    orgName: '',
+    orgRegion: '',
+    windowLabel: `Trailing ${days} days`,
+    kpiLabel: 'SUMMARY',
+    kpis: [
+      { label: 'Units', value: String(totalUnits), sub: `${unitsReporting} reporting` },
+      { label: 'Hours run', value: fmt(totalHours, 1), sub: `avg ${fmt(avgHoursPerDay, 1)} h/day` },
+      { label: 'Distance', value: fmt(totalDistance), unit: 'km', sub: `total distance` },
+      { label: 'Area worked', value: fmt(totalArea / 1e6, 2), unit: 'km²', sub: `over ${days} days`, dark: true },
+    ],
+    kpiGroups: [],
+    bars: { title: '', rows: [] },
+    donut: {
+      title: 'Fleet composition by prefix',
+      data: {
+        centerValue: String(totalUnits),
+        centerLabel: 'units',
+        segments: catData,
+      },
+    },
+    panels: [
+      {
+        title: 'Fuel consumption',
+        bigs: [
+          { value: fmt(fuelTotals.litresFilled), unit: 'L', caption: 'filled' },
+          { value: fmt(fuelTotals.litresLost), unit: 'L', caption: 'lost' },
+          { value: fmt(fuelTotals.cost), unit: 'KES', caption: 'total cost' },
+        ],
+        rows: fuelByDay.slice(0, 10).map((d: any) => ({
+          label: fmtDay(d.day),
+          value: `${fmt(d.litresFilled)} L · ${fmt(d.litresLost)} L lost · KES ${fmt(d.cost)}`,
+        })),
+      },
+      {
+        title: 'Daily activity',
+        underline: true,
+        bigs: [
+          {
+            value: areaByDay.length ? fmt(areaByDay.reduce((sum: number, d: any) => sum + d.m2, 0) / 1e6, 2) : '0',
+            unit: 'km²',
+            caption: 'total',
+          },
+          {
+            value: areaByDay.length ? fmt(areaByDay.reduce((sum: number, d: any) => sum + d.m2, 0) / 1e6 / areaByDay.length, 2) : '0',
+            unit: 'km²',
+            caption: 'avg/day',
+          },
+          { value: String(Math.max(...areaByDay.map((d: any) => d.machines), 0)), caption: 'max machines' },
+        ],
+        rows: areaByDay.map((d: any) => ({
+          label: fmtDay(d.day),
+          value: `${fmt(d.m2 / 1e4, 1)} ha · ${fmt(d.m2 / 1e6, 3)} km² · ${d.machines} machines`,
+        })),
+      },
+    ],
+    daily: undefined,
+    categoryChart: undefined,
+    comboChart: undefined,
+    insights: [],
+    table: {
+      title: 'Fleet state — all units',
+      note: `${totalUnits} units`,
+      columns: [
+        { label: 'Unit', width: 0.13 },
+        { label: 'State', width: 0.08 },   // → pill (renderStatePill)
+        { label: 'Status', width: 0.08 },  // → pill (renderStatusPill)
+        { label: 'Hours', width: 0.06, align: 'right' },
+        { label: 'Wk avg', width: 0.06, align: 'right' },
+        { label: '22D avg', width: 0.06, align: 'right' },
+        { label: 'Stationary', width: 0.07, align: 'right' },
+        { label: 'Idle', width: 0.06, align: 'right' },
+        { label: 'Fuel L', width: 0.06, align: 'right' },
+        { label: 'Fuel L today', width: 0.07, align: 'right' },
+        { label: 'L/hr', width: 0.05, align: 'right' },
+        { label: 'Sensor', width: 0.08 },
+        { label: 'KM', width: 0.06, align: 'right' },
+        { label: 'KM wk', width: 0.06, align: 'right' },
+      ],
+      rows: sortedUnits.slice(0, 50).map((u: any) => {
+        const op = u.hoursToday != null && u.hoursToday > 0
+        const statusLabel = op ? 'Operational' : 'Non‑op'
+        return {
+          cells: [
+            u.plate,
+            u.state,
+            statusLabel,
+            fmt(u.hoursToday, 1),
+            u.hoursWeekAvg != null ? fmt(u.hoursWeekAvg, 1) : '—',
+            u.hoursMonthAvg != null ? fmt(u.hoursMonthAvg, 1) : '—',
+            fmt(u.stationaryHoursToday, 1),
+            u.idleHoursToday != null ? fmt(u.idleHoursToday, 1) : '—',
+            u.fuelBurnL != null ? fmt(u.fuelBurnL) : '—',
+            u.fuelToday != null ? fmt(u.fuelToday) : '—',
+            u.litresPerHour != null ? fmt(u.litresPerHour, 1) : '—',
+            u.sensorHealth || '—',
+            u.distanceKm != null ? fmt(u.distanceKm) : '—',
+            u.distanceWeekKm != null ? fmt(u.distanceWeekKm) : '—',
+          ],
+          alert: u.state === 'OFFLINE' || u.sensorHealth === 'TRACKER_SILENT',
+          lastCellColor: u.state === 'OFFLINE' ? 'bad' : 'good',
+        }
+      }),
+    },
+    extraTables: [],
+  }
 }
