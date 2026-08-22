@@ -57,6 +57,10 @@
  * Fuel for today follows the same rule: modelled burn is computed from today's
  * engine seconds and the vehicle's modelled litres‑per‑hour rate (the same rate
  * used in the rollup), so the figure updates live as the day progresses.
+ *
+ * When the user selects a window that includes today, the window‑based fuel
+ * totals (`fuelBurnL`, `litresPerHour`) are augmented with today's live data,
+ * so picking "today" shows cumulative fuel as the day unfolds.
  */
 
 import { Prisma } from '../../../generated/prisma/client.js'
@@ -604,6 +608,10 @@ export async function fleetState(
     return d > 0 ? Math.round((Number(total ?? 0) / d) * 10) / 10 : null
   }
 
+  // ─── DETERMINE IF THE WINDOW INCLUDES TODAY ──────────────────────────────
+  // We need this to add today's live data to the window totals.
+  const windowIncludesToday = monthFromDay <= todayKey && monthToDay >= todayKey;
+
   const units: FleetStateRow[] = vehicles.map((v) => {
     const l = liveByVehicle.get(v.id)
     const r = rollupByVehicle.get(v.id)
@@ -653,6 +661,33 @@ export async function fleetState(
       ? Math.round(todayHours * fuel.litresPerHour)
       : null
 
+    // ─── ADJUST WINDOW TOTALS IF TODAY IS INCLUDED ────────────────────
+    // When the selected window ends today, the rollup has no data for today,
+    // so we add today's live seconds and modelled burn to the window totals.
+    let windowFuelBurnL = fuel.fuelBurnL;
+    let windowLitresPerHour = fuel.litresPerHour;
+
+    if (windowIncludesToday && r) {
+      // Rollup data for this vehicle (could be zero if no history)
+      const rollupBurnL = Number(r.burn_ml) / 1000;
+      const rollupHours = Number(r.month_s) / 3600;
+      const todayBurnL = fuelToday ?? 0;
+
+      const totalBurnL = rollupBurnL + todayBurnL;
+      const totalHours = rollupHours + todayHours;
+
+      // Recompute litresPerHour for the window if totalHours > 0
+      if (totalHours > 0) {
+        const newLPH = totalBurnL / totalHours;
+        windowLitresPerHour = Math.round(newLPH * 10) / 10;
+      } else {
+        windowLitresPerHour = null;
+      }
+
+      // Update fuelBurnL (whole litres)
+      windowFuelBurnL = totalBurnL > 0 ? Math.round(totalBurnL) : null;
+    }
+
     return {
       vehicleId: v.id,
       plate:     v.registrationPlate,
@@ -672,8 +707,18 @@ export async function fleetState(
       // machine that dug nothing where the truth is that it does not dig.
       areaWeekAvgKm2:  km2(areaByVehicle.get(v.id)?.week_m2),
       areaMonthAvgKm2: km2(areaByVehicle.get(v.id)?.month_m2),
-      ...fuel,
-      fuelToday, // ← new field
+      // Use the adjusted window values
+      fuelBurnL: windowFuelBurnL,
+      fuelDropL: fuel.fuelDropL,
+      litresPerHour: windowLitresPerHour,
+      litresPerHourMeasured: fuel.litresPerHourMeasured,
+      measuredLoLPerHour: fuel.measuredLoLPerHour,
+      measuredHiLPerHour: fuel.measuredHiLPerHour,
+      measuredDays: fuel.measuredDays,
+      litresPerKm: fuel.litresPerKm,
+      litresPerHectare: fuel.litresPerHectare,
+      hectares: fuel.hectares,
+      fuelToday,
       sensorHealth: healthByVehicle.get(v.id) ?? null,
     }
   })
