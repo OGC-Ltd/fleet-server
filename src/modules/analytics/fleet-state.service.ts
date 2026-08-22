@@ -53,6 +53,10 @@
  * yesterday. Reading "today" from it returned 23.7 hours four hours into the
  * fleet day. So today is integrated live from the fixes, the same way the
  * rollup does it, and only the week and month averages come from the rollup.
+ *
+ * Fuel for today follows the same rule: modelled burn is computed from today's
+ * engine seconds and the vehicle's modelled litres‑per‑hour rate (the same rate
+ * used in the rollup), so the figure updates live as the day progresses.
  */
 
 import { Prisma } from '../../../generated/prisma/client.js'
@@ -184,6 +188,16 @@ export interface FleetStateRow {
   litresPerHectare: number | null
   /** Hectares the bucket covered over the window. */
   hectares: number | null
+
+  /**
+   * Fuel consumed today (cumulative modelled burn).
+   *
+   * Computed from today's engine seconds and the vehicle's modelled
+   * litres‑per‑hour rate (the same rate used in the rollup). Updates live as
+   * the day progresses, because today's hours are integrated from fixes.
+   * Null if either the rate or today's hours are unavailable.
+   */
+  fuelToday: number | null
 
   /**
    * What the unit's sensors are doing, from the probe report.
@@ -629,6 +643,16 @@ export async function fleetState(
     const idleShareToday = (i?.today_run ?? 0) > 0 ? i!.today_idle / i!.today_run : 0
     const idleShareWeek  = (i?.week_run  ?? 0) > 0 ? i!.week_idle  / i!.week_run  : 0
 
+    // ── Fuel block ──────────────────────────────────────────────────────
+    const fuel = fuelFor(v.id, r, travels, areaByVehicle.get(v.id)?.total_m2 ?? null)
+
+    // ─── COMPUTE FUEL TODAY ────────────────────────────────────────────
+    // Modelled burn = todayHours * litresPerHour (modelled rate).
+    // If either is null/zero, we set null – no misleading zero.
+    const fuelToday = (todayHours > 0 && fuel.litresPerHour != null)
+      ? Math.round(todayHours * fuel.litresPerHour)
+      : null
+
     return {
       vehicleId: v.id,
       plate:     v.registrationPlate,
@@ -648,7 +672,8 @@ export async function fleetState(
       // machine that dug nothing where the truth is that it does not dig.
       areaWeekAvgKm2:  km2(areaByVehicle.get(v.id)?.week_m2),
       areaMonthAvgKm2: km2(areaByVehicle.get(v.id)?.month_m2),
-      ...fuelFor(v.id, r, travels, areaByVehicle.get(v.id)?.total_m2 ?? null),
+      ...fuel,
+      fuelToday, // ← new field
       sensorHealth: healthByVehicle.get(v.id) ?? null,
     }
   })
