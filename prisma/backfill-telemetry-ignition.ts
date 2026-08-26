@@ -101,18 +101,33 @@ const n = (x: number | bigint) => Number(x).toLocaleString()
 
 // ── what is there to do ─────────────────────────────────────────────────────
 
-const [scope] = await prisma.$queryRaw<Array<{ todo: bigint; done: bigint }>>`
-  SELECT count(*) FILTER (WHERE ignition_source IS NULL)     AS todo,
-         count(*) FILTER (WHERE ignition_source IS NOT NULL) AS done
-    FROM vehicle_telemetries
-   WHERE captured_at >= ${cutoff}
+/**
+ * How much is left — counted with an early exit, because the obvious query is
+ * a trap.
+ *
+ * `count(*) FILTER (WHERE ignition_source IS NULL)` over the window has to scan
+ * every row in it. Measured on the live table once the pass was nearly finished:
+ * **19.6 seconds**, which is past the adapter's read timeout, so the script
+ * killed itself on its own progress report before touching a row. It is a
+ * DISPLAY figure and it must not be able to do that.
+ *
+ * `LIMIT` makes it cheap in both regimes: with a lot left it stops after
+ * COUNT_CAP and says "at least that many"; with little left it finds the few
+ * quickly and the count is exact. Either way it stops early.
+ */
+const COUNT_CAP = 250_000
+const [scope] = await prisma.$queryRaw<Array<{ todo: bigint }>>`
+  SELECT count(*) AS todo FROM (
+    SELECT 1 FROM vehicle_telemetries
+     WHERE ignition_source IS NULL AND captured_at >= ${cutoff}
+     LIMIT ${COUNT_CAP}
+  ) x
 `
-const todo = Number(scope?.todo ?? 0)
-const done = Number(scope?.done ?? 0)
+const todo    = Number(scope?.todo ?? 0)
+const capped  = todo >= COUNT_CAP
 
 console.log(`\n  window            last ${DAYS} days`)
-console.log(`  already processed ${n(done)}`)
-console.log(`  to process        ${n(todo)}`)
+console.log(`  to process        ${capped ? `at least ${n(todo)}` : n(todo)}`)
 console.log(`  batch / pause     ${n(BATCH)} rows / ${PAUSE_MS} ms`)
 console.log(`  mode              ${APPLY ? 'APPLY — writing' : 'DRY RUN — pass --apply to write'}\n`)
 
@@ -145,6 +160,64 @@ let processed = 0
 let batches   = 0
 const started = Date.now()
 
+/**
+ * Upper bound on the next batch's ids, and the difference between this
+ * finishing in an hour and not finishing at all.
+ *
+ * `ignition_source IS NULL` alone is CORRECT but not usable as the only
+ * predicate. EXPLAIN ANALYZE on the live table, 2026-08-26:
+ *
+ *     Limit
+ *       -> Gather Merge
+ *         -> Parallel Index Scan Backward using vehicle_telemetries_pkey
+ *              Filter: ((ignition_source IS NULL) AND (captured_at >= ...))
+ *
+ * It walks the primary key from the newest row down and FILTERS. On the first
+ * batch every row it touches matches, so it costs 15 ms. On the last batch it
+ * must step over every row this pass has already marked before it finds one it
+ * has not — 2.3 million of them — and the whole run becomes quadratic.
+ *
+ * So the frontier is carried in the process instead. `IS NULL` stays in the
+ * predicate, because that is what makes the pass resumable across runs and
+ * idempotent on re-run; `id < cursor` is what keeps each batch O(batch). One
+ * scan pays for the starting position, and after that every batch begins
+ * exactly where the previous one stopped.
+ *
+ * ## Where this still degrades, and the fix if it ever matters
+ *
+ * The cursor solves a DENSE frontier — a contiguous block of unprocessed rows
+ * moving downward, which is what a first pass over a window looks like. It does
+ * NOT solve a SPARSE remainder. Once the window is essentially done, the only
+ * unprocessed rows are the handful the live poll has inserted since the run
+ * started, sitting at the very top with two million processed rows beneath them.
+ * A batch then scans the whole table to find the next thousand and times out.
+ *
+ * Measured 2026-08-26: that is exactly what happened on the third run, with 892
+ * rows left, and it is not a real failure — there was no dense work remaining to
+ * find. But the script cannot tell those apart from the inside.
+ *
+ * The proper fix is a partial index, which this table already has a precedent
+ * for (`vehicle_telemetries_moving_idx`, in its own migration because Prisma
+ * cannot express one):
+ *
+ *     CREATE INDEX CONCURRENTLY vehicle_telemetries_unbackfilled_idx
+ *       ON vehicle_telemetries (id DESC) WHERE ignition_source IS NULL;
+ *
+ * It costs nothing to keep, because a partial index only holds the rows still
+ * matching — it shrinks to near-empty as the pass completes. Worth adding if a
+ * future window has to be backfilled; not worth prod DDL for a tail that the
+ * adapter is about to stop creating.
+ */
+let cursor: bigint
+{
+  const [top] = await prisma.$queryRaw<Array<{ hi: bigint | null }>>`
+    SELECT max(id) AS hi FROM vehicle_telemetries
+     WHERE ignition_source IS NULL AND captured_at >= ${cutoff}
+  `
+  if (top?.hi == null) { console.log('  Nothing to do.\n'); process.exit(0) }
+  cursor = BigInt(top.hi) + 1n
+}
+
 while (batches < MAX_BATCHES) {
   const t0 = Date.now()
 
@@ -154,10 +227,10 @@ while (batches < MAX_BATCHES) {
   // LEFT JOIN, not JOIN. A telemetry row whose raw payload is missing must
   // still be marked NONE — under an inner join it would be skipped, stay NULL,
   // and be re-selected by the next batch for ever.
-  const updated = await prisma.$executeRaw`
+  const rows = await prisma.$queryRaw<Array<{ id: bigint }>>`
     WITH batch AS (
       SELECT id FROM vehicle_telemetries
-       WHERE ignition_source IS NULL AND captured_at >= ${cutoff}
+       WHERE ignition_source IS NULL AND captured_at >= ${cutoff} AND id < ${cursor}
        ORDER BY id DESC
        LIMIT ${BATCH}
     )
@@ -172,19 +245,27 @@ while (batches < MAX_BATCHES) {
       FROM batch b
       LEFT JOIN vehicle_telemetry_raws r ON r.telemetry_id = b.id
      WHERE t.id = b.id
+    RETURNING t.id
   `
 
   const ms = Date.now() - t0
   batches++
+  const updated = rows.length
   processed += updated
 
   if (updated === 0) break
 
+  // The batch was taken id-DESC, so its lowest id is the new frontier. Strictly
+  // below it, so the rows just written cannot be re-selected.
+  for (const r of rows) { const id = BigInt(r.id); if (id < cursor) cursor = id }
+
   if (batches % 25 === 0 || updated < BATCH) {
     const rate = processed / Math.max(1, (Date.now() - started) / 1000)
-    const left = Math.max(0, todo - processed)
+    // `todo` is a floor when the count was capped, so "left" would be a lie the
+    // moment it hits zero. Say nothing rather than something wrong.
+    const left = capped ? '' : ` · ~${n(Math.max(0, todo - processed))} left`
     console.log(`  ${n(processed).padStart(11)} rows · batch ${batches} · ${ms} ms · ` +
-                `${Math.round(rate)}/s · ~${n(left)} left`)
+                `${Math.round(rate)}/s${left}`)
   }
 
   await sleep(PAUSE_MS)
@@ -192,23 +273,41 @@ while (batches < MAX_BATCHES) {
 
 // ── what it left behind ─────────────────────────────────────────────────────
 
-const [after] = await prisma.$queryRaw<Array<{
-  todo: bigint; sensor: bigint; none: bigint; meter: bigint
-}>>`
-  SELECT count(*) FILTER (WHERE ignition_source IS NULL)              AS todo,
-         count(*) FILTER (WHERE ignition_source = 'SENSOR')           AS sensor,
-         count(*) FILTER (WHERE ignition_source = 'NONE')             AS none,
-         count(*) FILTER (WHERE engine_hours_meter IS NOT NULL)       AS meter
-    FROM vehicle_telemetries
-   WHERE captured_at >= ${cutoff}
-`
+console.log(`\n  processed this run  ${n(processed)} rows in ${batches} batches, ` +
+            `${Math.round((Date.now() - started) / 1000)} s`)
+
+/**
+ * The coverage summary is a REPORT, and the rows are already committed. It scans
+ * the whole window — about 20 seconds once the window is full — so it is the one
+ * query here that can still trip a read timeout. Wrapped, because a summary that
+ * fails must not make a completed pass look like a failed one. That is exactly
+ * how the first resume read: the work landed, the report threw, and the stack
+ * trace buried every progress line.
+ */
+let after: { todo: bigint; sensor: bigint; none: bigint; meter: bigint } | undefined
+try {
+  ;[after] = await prisma.$queryRaw<Array<{
+    todo: bigint; sensor: bigint; none: bigint; meter: bigint
+  }>>`
+    SELECT count(*) FILTER (WHERE ignition_source IS NULL)        AS todo,
+           count(*) FILTER (WHERE ignition_source = 'SENSOR')     AS sensor,
+           count(*) FILTER (WHERE ignition_source = 'NONE')       AS none,
+           count(*) FILTER (WHERE engine_hours_meter IS NOT NULL) AS meter
+      FROM vehicle_telemetries
+     WHERE captured_at >= ${cutoff}
+  `
+} catch (err) {
+  console.log(`\n  The pass COMPLETED and its rows are written. The coverage summary`)
+  console.log(`  could not be read: ${(err as Error).message}`)
+  console.log(`  Re-run without --apply for the counts once the table settles.\n`)
+  process.exit(0)
+}
+
 const sensor = Number(after?.sensor ?? 0)
 const none   = Number(after?.none ?? 0)
 const seen   = sensor + none
 const pct    = (x: number) => seen ? `${((x / seen) * 100).toFixed(1)}%` : '—'
 
-console.log(`\n  processed this run  ${n(processed)} rows in ${batches} batches, ` +
-            `${Math.round((Date.now() - started) / 1000)} s`)
 console.log(`  still to process    ${n(after?.todo ?? 0)}`)
 console.log(`\n  of the rows now marked, in the last ${DAYS} days:`)
 console.log(`    ignition measured (SENSOR)  ${n(sensor).padStart(11)}  ${pct(sensor)}`)
