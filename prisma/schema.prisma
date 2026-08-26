@@ -55,6 +55,28 @@ enum FuelEventType {
 /// covered 1,938 of 2,571 rows, leaving the ledger unreadable. How sure we are
 /// now lives in verdictReason and in `isConfirmed` beside the verdict, not
 /// instead of it. See modules/fuel/fuel-adjudication.
+/// How a fix's engine state was established — see `VehicleTelemetry.ignitionKnown`.
+///
+/// Recorded per fix rather than per vehicle because a unit can change source
+/// mid-window: a tracker whose ignition line is rewired starts reporting SENSOR
+/// where it previously only had METER, and a rule replayed over that window must
+/// be able to see the change rather than average across it.
+enum IgnitionSource {
+  /// A genuine digital ignition line — the only source that needs no inference.
+  /// `readIgnition` accepts it only when the value is actually binary.
+  SENSOR
+  /// The cumulative engine-hours counter advanced between this fix and the last,
+  /// so the engine ran in between. A measurement, not a heuristic.
+  METER
+  /// External supply voltage, thresholded per unit against its own two modes
+  /// (alternator charging vs at rest). The weakest of the three; adopted only
+  /// where a unit's distribution is genuinely bimodal.
+  VOLTAGE
+  /// Nothing could establish it. `engineOn` on such a row is the speed fallback
+  /// and says only whether the vehicle moved.
+  NONE
+}
+
 enum FuelEventVerdict {
   PENDING        // too recent to judge — the level may still come back
   REFILL         // a filling explains it: fuel went IN, it did not leave
@@ -1180,6 +1202,29 @@ model VehicleTelemetry {
   // Motion & engine
   speedKmh   Float?  @map("speed_kmh")    // instantaneous GPS speed
   engineOn   Boolean @default(false) @map("engine_on") // digital I/O pin state
+
+  /// Was `engineOn` MEASURED, or inferred from movement?
+  ///
+  /// The adapter fills `engineOn` as `ignition ?? (speed > 0)`, so on a unit
+  /// whose ignition line reports nothing the column is a restatement of whether
+  /// the vehicle MOVED — and "engine off and stationary" becomes true of every
+  /// parked machine by construction. Any rule that reasons about the engine
+  /// must read THIS, never `engineOn` alone.
+  ///
+  /// NULL means unknown, not false: it is what a row written before this column
+  /// existed carries, and what an un-backfilled row carries. Test `IS TRUE`.
+  ignitionKnown  Boolean?        @map("ignition_known")
+  /// Where a known ignition state came from, so a method that is later
+  /// disproved can be withdrawn wholesale instead of being untangled.
+  ignitionSource IgnitionSource? @map("ignition_source")
+  /// The unit's own cumulative engine-hours counter at this fix (Wialon `cneh`).
+  ///
+  /// Present on ~96% of frames, and already the most trusted engine-time source
+  /// in the codebase — validated at 0 s error for `KTCC 959G` against 664 s and
+  /// 1,761 s for capped and uncapped gap integration. It was only ever persisted
+  /// as a DAILY rollup on `FuelDailyTrend`, so nothing could take a per-fix
+  /// delta from it.
+  engineHoursMeter Float?        @map("engine_hours_meter")
 
   // Fuel (FLS sensor reading)
   fuelLevelMl Int?   @map("fuel_level_ml") // calibrated tank level in millilitres
