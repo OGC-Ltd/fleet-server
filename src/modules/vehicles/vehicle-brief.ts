@@ -42,6 +42,7 @@ import { getOpenTripsCached } from '../dispatches/open-trips.cache.js'
 // the cache directly left both undefined, so every brief reported a null leg
 // and could not tell a dispatch driver from a standing assignment.
 import { getFleetSnapshot } from '../telemetry/telemetry.service.js'
+import { NO_FUEL_ARRIVED } from '../fuel/fuel-adjudication.js'
 
 /** How long one vehicle's brief stays fresh. */
 const CACHE_TTL_MS = 10 * 60_000
@@ -219,7 +220,8 @@ async function collectFacts(orgId: string, vehicleId: string): Promise<VehicleFa
       select: { registrationPlate: true, name: true },
     }),
     prisma.fuelFilling.findMany({
-      where:   { vehicleId, filledAt: { gte: dayStart } },
+      // Deliveries that never arrived are excluded — see NO_FUEL_ARRIVED.
+      where:   { vehicleId, filledAt: { gte: dayStart }, verdict: { notIn: NO_FUEL_ARRIVED } },
       orderBy: { filledAt: 'asc' },
       select:  { filledMl: true, location: true, filledAt: true },
     }),
