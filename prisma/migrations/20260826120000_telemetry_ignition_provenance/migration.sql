@@ -1,0 +1,72 @@
+-- Give `vehicle_telemetries` a measured engine state, and say where it came from.
+--
+-- ## Why
+--
+-- `engine_on` is NOT NULL DEFAULT false and the Wialon adapter fills it as
+-- `ignition ?? (speed_kmh > 0)`. So on a unit whose ignition line reports
+-- nothing, the column is a restatement of whether the vehicle MOVED, and
+-- "engine off and stationary" is true of every parked machine by construction.
+--
+-- The flag that distinguishes the two — `ignition_known` — has been computed on
+-- every fix since the Wialon adapter was written, and stored only inside
+-- `vehicle_telemetry_raws.payload` as JSON. That is why almost nothing consults
+-- it: two modules join the raws table to get it, and the rate derivation, the
+-- tank state, the daily rollup and fleet state all read `engine_on` directly and
+-- therefore cannot tell a measured ignition from a moving vehicle.
+--
+-- The same is true of the engine-hours counter. It is present on ~96% of frames
+-- (measured 2026-08-26) and is already the most trusted engine-time source in
+-- the codebase — 0 s error for `KTCC 959G` against 664 s and 1,761 s for capped
+-- and uncapped gap integration — but it was only ever persisted as a DAILY
+-- rollup on `fuel_daily_trends`, so nothing could take a per-fix delta from it.
+-- A counter that advances between two fixes is a measurement that the engine ran
+-- in between, and it is the one route to engine state on the units that have no
+-- usable ignition line at all.
+--
+-- ## What this migration does NOT do: backfill
+--
+-- Measured against production, 2026-08-26:
+--
+--     vehicle_telemetries      ~10,884,446 rows   4,358 MB
+--     vehicle_telemetry_raws   ~11,077,928 rows   8,571 MB
+--
+-- Nearly 13 GB across the pair, against an instance with roughly 1 GB of RAM,
+-- serving a live poll every two seconds. A single UPDATE ... FROM joining those
+-- two tables would hold a connection and locks for as long as it took and starve
+-- the poll — the same reasoning the retention sweep gives for batching its
+-- DELETEs, and it applies with more force here because the join is the expensive
+-- half.
+--
+-- Nor is there a shortcut in narrowing the window: 10,882,231 of the 10,884,446
+-- rows fall inside the last 30 days, so the table already holds about one month
+-- and "backfill 30 days" means "backfill everything". Seven days is 2,311,286
+-- rows, which is the tractable unit.
+--
+-- So the backfill is a SEPARATE, batched, resumable, throttled job, and this
+-- migration is the schema only. `ADD COLUMN` with no DEFAULT and no NOT NULL is
+-- a catalogue-only change on PostgreSQL 11+ — no table rewrite, no long lock —
+-- which is what makes it safe to run against 4.3 GB during working hours.
+--
+-- ## Reading the columns before the backfill has run
+--
+-- NULL means UNKNOWN, and never false. A row written before this migration, and
+-- a row the backfill has not reached, both carry NULL. Every consumer must test
+-- `ignition_known IS TRUE` — `= false` silently excludes the NULLs, and a bare
+-- truthiness test in application code will read NULL as "not known" only if the
+-- caller is careful, which is exactly the mistake `engine_on` already invites.
+--
+-- Nothing reads these columns yet. The adapter starts writing them in the same
+-- release; the consumers move over one at a time, each with its own measurement.
+
+-- CreateEnum
+CREATE TYPE "IgnitionSource" AS ENUM ('SENSOR', 'METER', 'VOLTAGE', 'NONE');
+
+-- AlterTable
+ALTER TABLE "vehicle_telemetries" ADD COLUMN "ignition_known"    BOOLEAN;
+ALTER TABLE "vehicle_telemetries" ADD COLUMN "ignition_source"   "IgnitionSource";
+ALTER TABLE "vehicle_telemetries" ADD COLUMN "engine_hours_meter" DOUBLE PRECISION;
+
+-- No index. The columns are read alongside `vehicle_id, captured_at`, which the
+-- existing composite index already serves, and a fourth index on a 4.3 GB table
+-- costs write throughput on every one of the ~373,000 fixes a day this table
+-- takes. Add one only if a measured query plan asks for it.
