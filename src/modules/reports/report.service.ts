@@ -2,6 +2,7 @@ import { NotFoundError } from '../../core/errors/errors.js'
 import * as repo from './report.repository.js'
 import { prisma } from '../../lib/prisma.js'
 import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery } from './report.schema.js'
+import { NO_FUEL_ARRIVED } from '../fuel/fuel-adjudication.js'
 
 // ── Reporting Periods ─────────────────────────────────────────────────────────
 
@@ -48,7 +49,13 @@ export async function refreshSummaries(orgId: string, periodId: string) {
 
   const fuelTotals = await prisma.fuelFilling.groupBy({
     by: ['vehicleId'],
-    where: { reportingPeriodId: periodId, vehicle: { organisationId: orgId } },
+    where: {
+      reportingPeriodId: periodId, vehicle: { organisationId: orgId },
+      // Deliveries that never arrived are excluded — see NO_FUEL_ARRIVED. A
+      // period report is the figure someone reconciles against a fuel invoice,
+      // so an up-swing the probe imagined must not appear as litres delivered.
+      verdict: { notIn: NO_FUEL_ARRIVED },
+    },
     _sum: { filledMl: true },
   })
 
