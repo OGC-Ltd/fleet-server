@@ -42,6 +42,7 @@ import {
   resolveOrgFuelSources, findFuelCandidates, listVehicleSlice, syncVehicleFuelEvents,
 } from '../../modules/fuel/fuel-sync.service.js'
 import { adjudicatePendingDrains } from '../../modules/fuel/fuel-adjudication.service.js'
+import { adjudicateFillings } from '../../modules/fuel/fuel-filling-adjudication.service.js'
 
 export const FUEL_QUEUE = 'fuel'
 const SYNC_JOB = 'fuel:sync'
@@ -178,6 +179,10 @@ export interface FuelSyncResult {
   settled:    number
   /** Ledger rows deleted because the provider has retracted them. */
   removed:    number
+  /** Fillings whose hold window elapsed and were given a verdict this cycle. */
+  fillingsJudged:  number
+  /** Of those, the ones where no fuel arrived — an up-swing, not a delivery. */
+  fillingsPhantom: number
   /** Drains whose settle window elapsed and were given a verdict this cycle. */
   adjudicated:   number
   /** Of those, the ones whose fuel came back — never announced as a loss. */
@@ -223,7 +228,9 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   const startedAt = Date.now()
   const result: FuelSyncResult = {
     candidates: 0, fillings: 0, thefts: 0, published: 0, deduped: 0,
-    corrected: 0, settled: 0, removed: 0, adjudicated: 0, redistributed: 0,
+    corrected: 0, settled: 0, removed: 0,
+    fillingsJudged: 0, fillingsPhantom: 0,
+    adjudicated: 0, redistributed: 0,
     adjudicationFailed: false, adjudicationFailStreak: 0,
     failed: 0, ms: 0,
   }
@@ -320,6 +327,47 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   // our own database, so it must not hold a provider session open, and it must
   // still run on a cycle where every report failed.
   if (env.FUEL_ADJUDICATION_ENABLED) {
+    // ── fillings first, and the ORDER is the whole point ──
+    //
+    // `adjudicateDrain` takes a filling in its window as real and cuts the
+    // recovery window at it, excluding only fillings already judged
+    // REDISTRIBUTION (see the `verdict: { not: 'REDISTRIBUTION' }` filter in
+    // fuel-adjudication.service). A PENDING filling still counts, deliberately:
+    // unjudged is not disproved.
+    //
+    // That was safe only if fillings were judged at least as often as drains,
+    // and they were not. Drains run on FUEL_SYNC_CRON (quarter-hourly); the
+    // filling sweep was a daily repeatable at 04:05 on the maintenance queue.
+    // So a filling recorded at 10:00 stayed PENDING for eighteen hours, and
+    // every drain judged in between had its evidence cut short by a "delivery"
+    // nobody had checked — on an oscillating probe, by the up-swing of the very
+    // noise the drain was. That manufactures DRAIN verdicts out of undulation,
+    // which is the one failure this module exists to prevent.
+    //
+    // retention.ts already said so — "judging fillings first is what stops a
+    // phantom one truncating a drain's evidence" — while scheduling the two
+    // 288 cycles apart. This puts them on one clock, in that order.
+    //
+    // Ripeness is unchanged: FILL_SETTLE_MINUTES + FILL_HOLD_MINUTES = 60, so a
+    // filling becomes judgeable an hour after the pump stops. Running quarter-
+    // hourly does not judge anything sooner than its own evidence allows; it
+    // just stops the verdict waiting until morning for a cycle to come round.
+    try {
+      const fills = await adjudicateFillings({ apply: true })
+      // Rows that actually got a verdict this cycle: not the ones still inside
+      // their hold window, and not the ones the re-judge guard left alone.
+      result.fillingsJudged  = fills.examined - fills.stillPending - fills.kept
+      result.fillingsPhantom = fills.redistribution
+    } catch (err) {
+      // Not fatal to the cycle. Drains are still judged below — exactly as they
+      // were when this pass ran once a day — because judging them against a
+      // stale filling ledger is what happens today and is better than judging
+      // nothing. But it is logged at ERROR, because every drain in this cycle
+      // is now reading fillings this pass failed to refresh.
+      logger.error({ err },
+        'Fuel filling adjudication failed — drains this cycle may be truncated by unjudged fillings')
+    }
+
     try {
       // The same KIND of age gate the sync uses — a backlog being worked
       // through must not narrate weeks of history onto the live feed — but a
@@ -368,6 +416,7 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   const log = result.adjudicationFailed
            || result.published > 0 || result.fillings > 0 || result.thefts > 0
            || result.corrected > 0 || result.removed > 0 || result.adjudicated > 0
+           || result.fillingsJudged > 0
     ? logger.info.bind(logger)
     : logger.debug.bind(logger)
   log(result, 'Fuel sync cycle complete')
