@@ -39,6 +39,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { arrivalRadiusM, YARD_RADIUS_M, type Point } from '../../lib/dispatch-trip.js'
+import { PLAUSIBLE_KMH } from '../../lib/fix-plausibility.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 
 const OPEN_STATUSES = ['DISPATCHED', 'OVERDUE']
@@ -377,6 +378,17 @@ export async function coveredSince(
   firstLat: number | null; firstLng: number | null
   /** Earliest fix in the window reporting a non-zero speed, or null. */
   firstMovingAt: Date | null
+  /**
+   * Metres REJECTED as physically impossible — hops clearing the jitter floor
+   * but implying over PLAUSIBLE_KMH. Not included in `coveredM`.
+   *
+   * Carried so the filter is auditable from its callers rather than being a
+   * silent subtraction. On a healthy unit this is near zero; a unit where it
+   * dominates has a tracker fault, not a driving pattern, and measured
+   * 2026-08-27 that describes most of SUKARI — the worst fifteen units ran
+   * 67-91% impossible.
+   */
+  implausibleM: number
 }>> {
   if (pairs.length === 0) return new Map()
 
@@ -420,14 +432,15 @@ export async function coveredSince(
   const floor = safe.reduce((min, p) => (p.since < min ? p.since : min), safe[0]!.since)
 
   const rows = await prisma.$queryRawUnsafe<{
-    vehicle_id: string; covered_m: number; fix_count: bigint; first_fix: Date; last_fix: Date
+    vehicle_id: string; covered_m: number; implausible_m: number; fix_count: bigint; first_fix: Date; last_fix: Date
     first_lat: number | null; first_lng: number | null; first_moving: Date | null
   }[]>(`
     WITH bounds(vehicle_id, since) AS (VALUES ${sinceCase}),
     fixes AS (
       SELECT t.vehicle_id, t.captured_at, t.lat, t.lng, t.speed_kmh,
              LAG(t.lat) OVER w AS prev_lat,
-             LAG(t.lng) OVER w AS prev_lng
+             LAG(t.lng) OVER w AS prev_lng,
+             LAG(t.captured_at) OVER w AS prev_at
         FROM vehicle_telemetries t
         JOIN bounds b ON b.vehicle_id = t.vehicle_id
        WHERE t.captured_at >= b.since
@@ -447,11 +460,37 @@ export async function coveredSince(
                  cos(radians(prev_lat)) * cos(radians(lat)) *
                  power(sin(radians(lng - prev_lng) / 2), 2)
                ))
-             END AS hop_m
+             END AS hop_m,
+             EXTRACT(EPOCH FROM (captured_at - prev_at)) AS dt
         FROM fixes
     )
     SELECT vehicle_id,
-           COALESCE(SUM(CASE WHEN hop_m >= ${MIN_SPACING_M} THEN hop_m ELSE 0 END), 0) AS covered_m,
+           -- A hop the vehicle could not physically have made is not distance.
+           --
+           -- The jitter floor below drops hops too SHORT to be travel; nothing
+           -- dropped ones too LONG, and a teleport is by definition a long hop,
+           -- so bad fixes were over-represented in metres by exactly the amount
+           -- that makes them dangerous. Measured 2026-08-27 over 24 h: 34.76% of
+           -- SUKARI's summed distance and 1.95% of KASULU's came from hops
+           -- implying over 120 km/h, while NO fix in the fleet ever REPORTS a
+           -- speed above 116. The device does not claim to be moving that fast,
+           -- so it is the position that is wrong.
+           --
+           -- An implied SPEED rather than a flat ceiling, for the reason
+           -- lib/fix-plausibility gives: a stale fix an hour old is legitimately
+           -- far away and a fresh one 900 m out is not, so the test has to scale
+           -- with the gap. NULLIF guards a zero gap, whose implied speed is
+           -- infinite and which is therefore excluded — as it should be.
+           COALESCE(SUM(CASE WHEN hop_m >= ${MIN_SPACING_M}
+                              AND (hop_m / NULLIF(dt, 0)) * 3.6 <= ${PLAUSIBLE_KMH}
+                             THEN hop_m ELSE 0 END), 0) AS covered_m,
+           -- Reported, not silently dropped. A filter that removes a third of a
+           -- fleet's distance has to be visible, both to justify itself and so a
+           -- unit whose share climbs is recognised as a tracker fault rather
+           -- than a vehicle that stopped working.
+           COALESCE(SUM(CASE WHEN hop_m >= ${MIN_SPACING_M}
+                              AND NOT ((hop_m / NULLIF(dt, 0)) * 3.6 <= ${PLAUSIBLE_KMH})
+                             THEN hop_m ELSE 0 END), 0) AS implausible_m,
            COUNT(*)      AS fix_count,
            MIN(captured_at) AS first_fix,
            MAX(captured_at) AS last_fix,
@@ -470,7 +509,8 @@ export async function coveredSince(
   `, vehicleIds)
 
   return new Map(rows.map(r => [r.vehicle_id, {
-    coveredM:   Math.round(Number(r.covered_m)),
+    coveredM:     Math.round(Number(r.covered_m)),
+    implausibleM: Math.round(Number(r.implausible_m)),
     fixCount:   Number(r.fix_count),
     firstFixAt: r.first_fix,
     lastFixAt:  r.last_fix,
