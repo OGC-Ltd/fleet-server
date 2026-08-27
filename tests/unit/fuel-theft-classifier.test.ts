@@ -525,12 +525,24 @@ describe('the consumption basis — which denominator judges this machine', () =
     expect(resolveBasis('KASULU', { plate: 'MUFINDI: GEN 01', vehicleType: 'GENERATOR' })).toBe('HOURS')
   })
 
-  it('sends EVERY tractor to distance, including one that barely travels', () => {
-    // The operator's call. Measured 7-day medians put TRACTOR at 6.08 km per
-    // engine-hour against LORRY's 7.81, so distance describes most of them —
-    // but p10 is 1.24 and this rule covers those too.
-    expect(resolveBasis('SUKARI', { plate: 'KTCC 117D', vehicleType: 'TRACTOR' })).toBe('DISTANCE')
-    expect(resolveBasis('KASULU', { plate: 'MUFINDI: CTR 02', vehicleType: 'TRACTOR' })).toBe('DISTANCE')
+  it('sends EVERY tractor to hours, because their work is done standing still', () => {
+    // Measured 2026-08-26: of 339 tractor drains over 15 L, 273 (80.5%) covered
+    // less than 0.5 km during the fall. On a distance basis each scores ~100%
+    // unexplained and announces — about nine a day against ~5/day fleet-wide.
+    // KTCB 295U is four of the top eight, and is the vehicle ROAD_MIN_KM_PER_L
+    // was written to protect.
+    expect(resolveBasis('SUKARI', { plate: 'KTCC 117D', vehicleType: 'TRACTOR' })).toBe('HOURS')
+    expect(resolveBasis('KASULU', { plate: 'MUFINDI: CTR 02', vehicleType: 'TRACTOR' })).toBe('HOURS')
+    expect(resolveBasis('SUKARI', { plate: 'KTCB 295U', vehicleType: 'TRACTOR' })).toBe('HOURS')
+  })
+
+  it('the rule is not "it travels" but "its work IS travelling"', () => {
+    // A tractor travels between jobs and works stationary; a truck's work is the
+    // kilometres. Median km per engine-hour is 6.08 for tractors against 7.81
+    // for lorries — close enough that travel alone cannot separate them, which
+    // is why the type decides.
+    expect(resolveBasis('SUKARI', { plate: 'KTCC 117D', vehicleType: 'TRACTOR' })).toBe('HOURS')
+    expect(resolveBasis('KASULU', { plate: 'MUFINDI - FTT 01', vehicleType: 'LORRY' })).toBe('DISTANCE')
   })
 
   it('lets the machine CLASS override a type that would mislead', () => {
