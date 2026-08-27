@@ -39,7 +39,8 @@
  * are still stored for every machine, and both sit beside `consumedMl`, which
  * is what the tank actually did.
  *
- * See docs/fuel-consumption-rates.md, whose §7 states the superseded rule.
+ * See docs/fuel-consumption-rates.md §1, which states the superseded rule and
+ * now carries the correction beside it.
  *
  * ## Nothing here judges anything
  *

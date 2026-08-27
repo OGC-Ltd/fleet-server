@@ -9,6 +9,41 @@ detector that consumes them is built on something audited rather than assumed.
 
 ---
 
+## Status, 2026-08-27 — read this before §1
+
+This is a **dated measurement record**, not a description of current behaviour.
+The numbers below were correctly measured on 2026-08-11 and are preserved as
+they were taken. Four of its conclusions have since been superseded, and one of
+them was reversed outright:
+
+| § | what it says | now |
+| --- | --- | --- |
+| 1 | "engine hours is the primary basis for **every type**" | **reversed.** Road vehicles are judged per kilometre — see below |
+| 5 | 3 days of history, forced by RAM | 7 days. The ceiling was a 60 s client timeout, not memory |
+| 6 | the derivation SQL | no longer what ships — it has no plausibility cap at all |
+| 7 | what step 4 needs | items 1 and 2 are built |
+
+The sentence at the end of §1 is the one to be careful with, because a doc
+outranks code in apparent authority and this one is wrong in a way that reads
+as settled. **Its evidence is entirely about plant** — 215 of 310 units, 58.3%
+engine-on, 1.5 km/h, 7.361 L/km — and it was generalised onto the 95 road units
+it never measured, where distance is the natural denominator and a stationary
+truck's whole burn presents as unexplained.
+
+The rule now lives in `resolveBasis` (`modules/fuel/fuel-theft-classifier`) and
+is recorded per machine on `vehicle_fuel_rates.primary_basis`:
+
+- **hours** — excavators, dozers, loaders, graders, generators, and tractors.
+  A tractor works the field at 0 km/h, so §1's argument holds for it exactly.
+- **distance** — trucks, lorries, buses, saloons, company vehicles. `applicableBasis`
+  sends one back to hours for a fall during which it did not travel, because an
+  idling truck is burning rather than driving.
+
+Do not restore hours-for-everything from §1 without re-reading that measurement's
+scope.
+
+---
+
 ## 1. Why engine hours and not distance
 
 The obvious model, `expected = baseline − km × L_per_km`, fails on most of this
@@ -35,6 +70,12 @@ can use — it is the arithmetic telling you the denominator is wrong.
 
 **So engine hours is the primary basis for every type.** Distance is kept only
 as a secondary check on road vehicles, where the two agree.
+
+> **Superseded 2026-08-27 — see Status above.** Everything preceding this line
+> is sound and still governs plant, generators and tractors. The concluding
+> sentence is not: every figure supporting it was measured on machines that burn
+> while stationary, and the 95 road units in the table above were swept in
+> without being measured. They are now judged per kilometre.
 
 ## 2. Method
 
@@ -106,6 +147,15 @@ code (`EX`, `DZ`, `WL`, `BH`, `COMP`) should tighten it.
   ≥3 runs. A 30-day window is what per-vehicle rates should actually be built
   on; this window was kept short because the instance has ~1 GB of RAM and the
   window functions here sort the full fuel-carrying telemetry set.
+
+  > **Corrected 2026-08-27.** Now 7 days, and the reason given here was wrong.
+  > Timed against production: 3 days 21.5 s, 7 days 31.0 s, 14 days 53.5 s,
+  > 21 days 57.1 s, 30 days times out. Nothing swapped and nothing failed on
+  > memory — what 30 days hits is `query_timeout: 60_000` in `lib/prisma`, a
+  > client-side guard shared with the API and SSE paths. Seven leaves the
+  > largest safe margin under it while taking most of the gain: vehicles
+  > clearing MIN_RUNS went 154 → 198. 14 and 21 both run, with 11% and 5%
+  > headroom, and `--days` is there for deliberate wider passes.
 - **Load is not modelled.** A loaded haul and an empty return are one rate here.
   That is a real part of the 2–4× within-type spread and it is not noise.
 - **Idle is not separated from work.** `engine_on` covers both, and an excavator
@@ -115,6 +165,14 @@ code (`EX`, `DZ`, `WL`, `BH`, `COMP`) should tighten it.
   against nothing.
 
 ## 6. Derivation SQL
+
+> **This is the 2026-08-11 query, kept so the numbers above can be reproduced.
+> It is no longer what ships.** `deriveFuelRates` in
+> `modules/fuel/fuel-rate.service` has since gained a plausibility cap on the
+> implied rate — this version bounds a run's DROP but not its RATE, so a
+> 20-minute run falling 100 L implies 300 L/h and passes every filter here.
+> That cap is per machine class as of 2026-08-27. The window is also 7 days
+> rather than 3, and the query records which denominator each rate is in.
 
 ```sql
 with s as (
@@ -155,11 +213,22 @@ from clean c group by 1 having count(*) >= 3 order by 2 desc;
 
 ## 7. What step 4 needs from this
 
-1. Persist per-vehicle rates — a table keyed by vehicle with `lPerHour`,
-   `lPerKm`, `runs`, `derivedAt`, refreshed on a schedule rather than computed
-   on the request path.
-2. Fall back **per org and vehicle_type**, never fleet-wide, and only where a
-   vehicle has too few runs of its own.
+1. ~~Persist per-vehicle rates~~ — **built.** `vehicle_fuel_rates`, refreshed
+   weekly by `RATE_JOB`. It carries `primaryBasis` as well, so a row says which
+   of its two figures is the machine's real one.
+2. ~~Fall back per org and vehicle_type~~ — **built.** `resolveRates`, with
+   `MIN_GROUP_CONTRIBUTORS` on top: a group of one or two machines wearing a
+   type's name is dropped rather than served weakly.
 3. Size the tolerance off the per-vehicle spread in §4, not off a single global
    percentage. A tractor whose own rate is known to ±30% cannot support a
    ±10% theft threshold.
+
+   **Still open, and now the binding constraint.** `ANNOUNCE_MULTIPLE` remains
+   an alert-volume choice rather than an accuracy one, because there is no
+   labelled event set to tune against — median excess measures flat at 29–31 L
+   from 1.5× to 50×, so no value on that axis buys better targeting. The same
+   gap blocks two later decisions: whether the measured tank balance should
+   outrank the derived rate in `resolveBand` (it agrees with a machine's own
+   rate only 52% of the time within 1.5×), and whether the 16 SUKARI
+   announcements retired by the consumption-basis change were true or false.
+   Ground truth is the prerequisite for all three.
