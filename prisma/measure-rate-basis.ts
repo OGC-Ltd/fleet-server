@@ -50,7 +50,7 @@ const vehicles = await prisma.vehicle.findMany({
   },
 })
 const rates = await prisma.vehicleFuelRate.findMany({
-  select: { vehicleId: true, lPerHour: true, lPerKm: true, runs: true },
+  select: { vehicleId: true, lPerHour: true, lPerKm: true, runs: true, primaryBasis: true },
 })
 const rateOf = new Map(rates.map(r => [r.vehicleId, r]))
 
@@ -125,6 +125,34 @@ for (const [key, t] of distTypes) {
   console.log(`      ${padR(key, 26)}${padL(String(t.vehicles), 6)} veh` +
               `${padL(String(t.ownRate), 6)} own${padL(String(t.usableKm), 6)} usable km/L`)
 }
+
+// ── stored basis vs what resolveBasis says today ────────────────────────────
+//
+// The column is written by the weekly derivation and read by nobody yet, so it
+// can drift from the rule without anything failing. Drift is not automatically
+// a fault -- a vehicle reclassified in Wialon SHOULD disagree until the next
+// derivation -- but it has to be visible, because a stale basis on a column
+// that later feeds `resolveBand` would be a wrong judgement with no symptom.
+let agree = 0, differ = 0, unset = 0
+const drifted: string[] = []
+for (const v of vehicles) {
+  const r = rateOf.get(v.id)
+  if (r == null) continue
+  const now = resolveBasis(orgCode.get(v.organisationId) ?? '', {
+    plate: v.registrationPlate,
+    vehicleType: v.vehicleType,
+    tankCapacityLitres: v.tankCapacityLitres,
+  })
+  if (r.primaryBasis == null) { unset++; continue }
+  if (r.primaryBasis === now) { agree++; continue }
+  differ++
+  drifted.push(`      ${padR(v.registrationPlate, 20)}stored ${padR(r.primaryBasis, 10)}rule says ${now}`)
+}
+console.log(`\n    stored primary_basis over ${rates.length} rate rows`)
+console.log(`      agrees with the rule   ${padL(String(agree), 6)}`)
+console.log(`      disagrees              ${padL(String(differ), 6)}`)
+console.log(`      not yet set            ${padL(String(unset), 6)}   (machines idle since the last derivation)`)
+for (const d of drifted) console.log(d)
 
 console.log(`\n    the DISTANCE machines that would actually be judged per km:`)
 if (usableList.length === 0) console.log('      (none)')
