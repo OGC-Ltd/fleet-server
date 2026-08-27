@@ -33,7 +33,7 @@ import { prisma } from './prisma.js'
 import { logger } from './logger.js'
 import { getOrCreatePeriodFor } from './reporting-period.js'
 import { haversineM } from './dispatch-trip.js'
-import { PLAUSIBLE_KMH } from './fix-plausibility.js'
+import { PLAUSIBLE_KMH, JITTER_FLOOR_M as SHARED_JITTER_FLOOR_M } from './fix-plausibility.js'
 
 /**
  * Consecutive fixes closer than this are treated as the vehicle standing still.
@@ -43,7 +43,10 @@ import { PLAUSIBLE_KMH } from './fix-plausibility.js'
  * never driven. 20 m is comfortably above the jitter and well below the distance
  * covered between two fixes at any speed worth recording.
  */
-const JITTER_FLOOR_M = 20
+// Was defined here at 20 m; now the fleet's single floor, shared with
+// coveredSince and the daily trend so "has not moved" means one thing.
+// Re-exported under the old name so this file reads unchanged below.
+const JITTER_FLOOR_M = SHARED_JITTER_FLOOR_M
 
 /**
  * Consecutive fixes further apart than this are a coverage gap, not a leg.

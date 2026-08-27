@@ -39,7 +39,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { arrivalRadiusM, YARD_RADIUS_M, type Point } from '../../lib/dispatch-trip.js'
-import { PLAUSIBLE_KMH } from '../../lib/fix-plausibility.js'
+import { PLAUSIBLE_KMH, JITTER_FLOOR_M } from '../../lib/fix-plausibility.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 
 const OPEN_STATUSES = ['DISPATCHED', 'OVERDUE']
@@ -47,8 +47,15 @@ const OPEN_STATUSES = ['DISPATCHED', 'OVERDUE']
 /** Minimum completed trips before a destination's median is worth quoting. */
 export const MIN_DURATION_SAMPLES = 5
 
-/** Fixes closer together than this are dwell, not travel — see the track endpoint. */
-const MIN_SPACING_M = 15
+/**
+ * Fixes closer together than this are dwell, not travel.
+ *
+ * Was 15 m here against `measureKm`'s 20 m and no floor at all on the daily
+ * trend. Now the fleet's shared floor — measured 2026-08-27, the difference
+ * between 15 and 20 is 1.52% of KASULU's distance and 1.98% of SUKARI's, which
+ * was never worth three answers. See JITTER_FLOOR_M.
+ */
+const MIN_SPACING_M = JITTER_FLOOR_M
 
 export interface ActiveDispatch {
   externalId:   string

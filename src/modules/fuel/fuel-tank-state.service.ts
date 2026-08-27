@@ -12,6 +12,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
+import { PLAUSIBLE_KMH, JITTER_FLOOR_M } from '../../lib/fix-plausibility.js'
 import {
   closingLevel, deriveTankState, resolveEngineSeconds, dayEngineSeconds,
   CLOSE_WINDOW_MINUTES,
@@ -445,9 +446,10 @@ export async function computeFleetTankState(orgId: string, asOf: Date): Promise<
        WHERE v.organisation_id = ${orgId}
          AND t.captured_at >= ${dayStart} AND t.captured_at <= ${asOf}
     ), pos AS (
-      SELECT vehicle_id, lat, lng,
-             lag(lat) OVER w AS plat,
-             lag(lng) OVER w AS plng
+      SELECT vehicle_id, lat, lng, captured_at,
+             lag(lat)         OVER w AS plat,
+             lag(lng)         OVER w AS plng,
+             lag(captured_at) OVER w AS pat
         FROM base
        WHERE lat IS NOT NULL AND lng IS NOT NULL
       WINDOW w AS (PARTITION BY vehicle_id ORDER BY captured_at)
@@ -457,12 +459,27 @@ export async function computeFleetTankState(orgId: string, asOf: Date): Promise<
                power(sin(radians(lat - plat) / 2), 2)
                + cos(radians(plat)) * cos(radians(lat))
                  * power(sin(radians(lng - plng) / 2), 2)
-             )) AS metres
-        FROM pos WHERE plat IS NOT NULL
+             )) AS metres,
+             extract(epoch FROM (captured_at - pat)) AS dt
+        FROM pos WHERE plat IS NOT NULL AND pat IS NOT NULL
     ), dist AS (
+      -- Guarded from BOTH ends since 2026-08-27. This was the least protected
+      -- of the fleet's three distance definitions: a flat 10 km hop ceiling and
+      -- no jitter floor at all, so a parked machine's satellite wander
+      -- accumulated into its daily distance and every teleport counted in full.
+      --
+      -- Measured over 24 h against the same fixes, this column as it stood
+      -- overstated by 6.80% on KASULU and 35.00% on SUKARI — 3-5 points of
+      -- jitter and, on SUKARI, 31.94% of physically impossible hops.
+      --
+      -- Both faults pushed distance UP, and this column is a DENOMINATOR: an
+      -- inflated one deflates litres-per-kilometre, which makes a real loss look
+      -- explained by driving. It fails toward silence.
       SELECT vehicle_id, sum(metres) AS metres
         FROM hop
        WHERE metres < ${MAX_HOP_KM * 1000}
+         AND metres >= ${JITTER_FLOOR_M}
+         AND (metres / nullif(dt, 0)) * 3.6 <= ${PLAUSIBLE_KMH}
        GROUP BY vehicle_id
     ), gap AS (
       -- engine_on and speed_kmh are carried through so the aggregate below can
