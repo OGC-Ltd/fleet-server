@@ -1,5 +1,9 @@
 /**
- * Derive each vehicle's litres-per-engine-hour from its own telemetry.
+ * Derive each vehicle's fuel rate from its own telemetry.
+ *
+ * Both figures are derived for every machine — litres per engine-hour and per
+ * kilometre — and `primary_basis` records which one is really its rate. See
+ * `resolveBasis`; plant and tractors take hours, road vehicles take kilometres.
  *
  * Dry run by default — derives, prints, stores nothing. The method, the measured
  * values and the caveats are in `docs/fuel-consumption-rates.md`; the rule is in
@@ -21,7 +25,7 @@
 
 import 'dotenv/config'
 import { prisma } from '../src/lib/prisma.js'
-import { deriveFuelRates, RATE_WINDOW_DAYS } from '../src/modules/fuel/fuel-rate.service.js'
+import { deriveFuelRates, MAX_PLAUSIBLE_L_PER_HOUR, RATE_WINDOW_DAYS } from '../src/modules/fuel/fuel-rate.service.js'
 import { MIN_RUNS } from '../src/modules/fuel/fuel-rate.js'
 
 const argv  = process.argv.slice(2)
@@ -39,8 +43,12 @@ async function main() {
 
   console.log(`  ${out.derived} vehicles produced a rate`)
   console.log(`  ${out.usable} of them cleared ${MIN_RUNS} runs — the rest fall back to their org+type median`)
+  console.log(`  ${out.distanceBasis} of them are judged per KILOMETRE, ${out.derived - out.distanceBasis} per engine-hour`)
   console.log(`  ${out.stored} rows stored`)
-  if (out.pruned > 0) console.log(`  ${out.pruned} stale rows pruned as implausible`)
+  if (out.pruned > 0) {
+    console.log(`  ${out.pruned} stale rows ${APPLY ? 'pruned' : 'WOULD be pruned'} as implausible` +
+                ` (over ${MAX_PLAUSIBLE_L_PER_HOUR} L/h)`)
+  }
   if (!APPLY) console.log('\n  Dry run — nothing stored. Re-run with --apply\n')
   else console.log()
 }
