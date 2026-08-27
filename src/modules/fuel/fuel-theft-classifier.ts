@@ -1147,7 +1147,16 @@ export function classifyDrain(
     if (unexplainedL > ROAD_MIN_UNEXPLAINED_L) {
       return {
         cause: 'UNEXPLAINED_BURN',
-        reason: ev.distanceKm < 0.5 ? 'drop-while-stationary' : 'drop-exceeds-distance',
+        // Always `drop-exceeds-distance` now. This used to pick
+        // `drop-while-stationary` below 0.5 km, but the gate above requires
+        // OPEN_ROAD_MIN_KM (1.0), so that arm became unreachable the moment
+        // the basis change landed — measured 2026-08-27: twelve stored events
+        // moved OFF the reason and nothing moved onto it.
+        //
+        // The slug stays in ANNOUNCED. `announces` keys on the reason string
+        // and rows judged under the old rule still carry it, so dropping it
+        // there would retroactively silence events that did announce.
+        reason: 'drop-exceeds-distance',
         impliedLph,
         // Graded on the SHARE of the drop that driving fails to explain, not
         // on its size: 40 unexplained litres out of 45 is a different claim
