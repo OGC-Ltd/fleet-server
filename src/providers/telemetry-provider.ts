@@ -28,6 +28,29 @@ export interface VehicleTelemetryFrame {
   // ── Motion ────────────────────────────────────────────────────────────────
   speedKmh:          number | null
   engineOn:          boolean
+  /**
+   * Was `engineOn` MEASURED, or inferred from speed?
+   *
+   * Required, not optional, because the difference decides what may be claimed.
+   * An adapter with no ignition line falls back to `speed > 0`, which makes
+   * "engine on" and "moving" the same signal and cannot see idling at all — so
+   * a digging excavator and a parked one are indistinguishable, which is the
+   * single limit capping SIPHON. A provider must therefore say which it is
+   * rather than inherit a default that flatters it.
+   */
+  ignitionKnown:     boolean
+  /**
+   * The unit's cumulative engine-hours counter at this fix, in HOURS — an
+   * absolute odometer-like reading, not a duration. Null where the unit has no
+   * counter.
+   *
+   * Persisted per fix rather than only as the daily rollup on FuelDailyTrend,
+   * because `dayEngineSeconds` reads its two endpoints and derives a day's
+   * engine time exactly where integration over-counts. Note the counter ticks
+   * about every five minutes, so it is a good measure of a day and a poor one
+   * of a twenty-minute run — see fuel-rate.service.
+   */
+  engineHoursMeter:  number | null
 
   // ── Fuel / FLS sensor ─────────────────────────────────────────────────────
   fuelLevelMl:       number | null
