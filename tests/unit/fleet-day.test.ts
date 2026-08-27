@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { fleetDayStart } from '../../src/lib/provider-time.js'
+import { fleetDayStart, fleetDayKey } from '../../src/lib/provider-time.js'
 
 describe('fleetDayStart', () => {
   it('is 21:00 UTC the previous day — local midnight', () => {
@@ -40,5 +40,55 @@ describe('fleetDayStart', () => {
     const start = fleetDayStart(new Date('2026-08-03T09:00:00Z'))
     expect(start.getTime() % 3_600_000).toBe(0)
     expect(start.toISOString().endsWith('T21:00:00.000Z')).toBe(true)
+  })
+})
+
+/**
+ * `fleetDayKey` had NO tests until 2026-08-28, and it is the half of the pair
+ * whose off-by-one actually shipped: `fleetDayStart` returns the INSTANT EAT
+ * midnight falls on, which in UTC is 21:00 the previous evening, so labelling a
+ * day from that instant's UTC date names the day before it. It went unnoticed
+ * because every row was shifted uniformly and nothing disagreed with anything
+ * else.
+ *
+ * Every case below is one where taking `fleetDayStart`'s calendar components
+ * would give the wrong answer.
+ */
+describe('fleetDayKey', () => {
+  it('names the day the fleet is IN, not the UTC date the day opened on', () => {
+    // Midday EAT on the 3rd. fleetDayStart is 2026-08-02T21:00Z, whose UTC date
+    // is the 2nd — the exact trap this function exists to avoid.
+    expect(fleetDayKey(new Date('2026-08-03T09:00:00Z')).toISOString())
+      .toBe('2026-08-03T00:00:00.000Z')
+  })
+
+  it('holds the label steady across UTC midnight', () => {
+    // 23:59 and 00:01 UTC are 02:59 and 03:01 EAT — the same working morning,
+    // and a naive ::date would split them across two labels.
+    expect(fleetDayKey(new Date('2026-08-02T23:59:00Z')).toISOString())
+      .toBe(fleetDayKey(new Date('2026-08-03T00:01:00Z')).toISOString())
+  })
+
+  it('rolls at 21:00 UTC, where the fleet day actually turns', () => {
+    expect(fleetDayKey(new Date('2026-08-02T20:59:00Z')).toISOString())
+      .toBe('2026-08-02T00:00:00.000Z')
+    expect(fleetDayKey(new Date('2026-08-02T21:01:00Z')).toISOString())
+      .toBe('2026-08-03T00:00:00.000Z')
+  })
+
+  it('returns UTC midnight, which is what a @db.Date column stores', () => {
+    const key = fleetDayKey(new Date('2026-08-03T09:00:00Z'))
+    expect(key.getUTCHours()).toBe(0)
+    expect(key.getUTCMinutes()).toBe(0)
+    expect(key.getUTCSeconds()).toBe(0)
+    expect(key.getUTCMilliseconds()).toBe(0)
+  })
+
+  it('is exactly one day ahead of itself across the boundary', () => {
+    // The pair has to stay consistent: a key and the start of the same day must
+    // describe the same 24 hours, or a rollup and its label drift apart.
+    const at = new Date('2026-08-03T09:00:00Z')
+    const start = fleetDayStart(at)
+    expect(fleetDayKey(at).getTime() - start.getTime()).toBe(3 * 3_600_000)
   })
 })

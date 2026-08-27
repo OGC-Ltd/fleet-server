@@ -726,15 +726,29 @@ export async function fleetState(
   const counts: Record<UnitState, number> = {
     WORKING: 0, IDLING: 0, STATIONARY: 0, PARKED: 0, OFFLINE: 0,
   }
-  const cats = new Map<string, { category: string; working: number; idling: number; parked: number; offline: number }>()
+  // STATIONARY is its own column here, as it already is in `counts`.
+  //
+  // It used to be folded into `idling`, which undid at category level exactly
+  // what the row-level state machine was changed to fix: a digging excavator is
+  // STATIONARY, not idling, because its work does not involve moving. Rolling
+  // the two together told an operator that every machine working in place was
+  // burning fuel for nothing — the reading the split exists to prevent — and it
+  // disagreed with the top-level counts on the same response.
+  const cats = new Map<string, {
+    category: string; working: number; idling: number
+    stationary: number; parked: number; offline: number
+  }>()
   for (const u of units) {
     counts[u.state]++
     if (!cats.has(u.category)) {
-      cats.set(u.category, { category: u.category, working: 0, idling: 0, parked: 0, offline: 0 })
+      cats.set(u.category, {
+        category: u.category, working: 0, idling: 0, stationary: 0, parked: 0, offline: 0,
+      })
     }
     const c = cats.get(u.category)!
     if (u.state === 'WORKING') c.working++
-    else if (u.state === 'IDLING' || u.state === 'STATIONARY') c.idling++
+    else if (u.state === 'IDLING') c.idling++
+    else if (u.state === 'STATIONARY') c.stationary++
     else if (u.state === 'PARKED') c.parked++
     else c.offline++
   }
@@ -744,7 +758,9 @@ export async function fleetState(
     monitoring,
     // Most units first — a category of two should not head the breakdown.
     byCategory: [...cats.values()]
-      .sort((a, b) => (b.working + b.idling + b.parked + b.offline) - (a.working + a.idling + a.parked + a.offline)),
+      .sort((a, b) =>
+        (b.working + b.idling + b.stationary + b.parked + b.offline) -
+        (a.working + a.idling + a.stationary + a.parked + a.offline)),
     units: units.sort((a, b) => b.hoursToday - a.hoursToday),
   }
 }
