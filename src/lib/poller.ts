@@ -224,6 +224,8 @@ class TelemetryPoller {
           accuracyM:     frame.accuracyM ?? undefined,
           speedKmh:      frame.speedKmh ?? undefined,
           engineOn:      frame.engineOn,
+          ignitionKnown: frame.ignitionKnown,
+          engineHoursMeter: frame.engineHoursMeter ?? undefined,
           fuelLevelMl:   frame.fuelLevelMl ?? undefined,
           fuelUsedMl:    frame.fuelUsedMl ?? undefined,
           cargoWeightKg: frame.cargoWeightKg ?? undefined,

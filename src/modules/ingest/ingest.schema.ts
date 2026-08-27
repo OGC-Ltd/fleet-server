@@ -12,6 +12,10 @@ export const telemetryPayloadSchema = z.object({
   accuracyM:      z.number().nonnegative().optional(),
   speedKmh:       z.number().nonnegative().optional(),
   engineOn:       z.boolean().optional(),
+  /** Was engineOn measured, or inferred from speed? Absent is treated as unknown. */
+  ignitionKnown:  z.boolean().optional(),
+  /** Cumulative engine-hours counter at this fix, in hours — absolute, not a delta. */
+  engineHoursMeter: z.number().nonnegative().optional(),
   fuelLevelMl:    z.number().int().nonnegative().optional(),
   fuelUsedMl:     z.number().int().optional(),
   cargoWeightKg:  z.number().nonnegative().optional(),

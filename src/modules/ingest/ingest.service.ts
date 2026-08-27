@@ -12,6 +12,33 @@ import { NotFoundError } from '../../core/errors/errors.js'
 // can't pile up unbounded connections against the pool.
 const rawPayloadLimit = createLimiter(4)
 
+/**
+ * The three ignition-provenance columns for one frame.
+ *
+ * `ignitionSource` is DERIVED here rather than accepted from the caller, and
+ * only ever SENSOR or NONE. The enum carries METER and VOLTAGE because both
+ * were candidate routes; both were then measured and rejected — the counter
+ * ticks every ~5 minutes against ~26 s fixes, and voltage is read live and
+ * never persisted, so 0 of 200,000 payloads carry it. Letting a caller name a
+ * source we cannot honour would put a value in the column that no measurement
+ * stands behind.
+ */
+export function ignitionColumns(dto: TelemetryPayload): {
+  ignitionKnown: boolean
+  ignitionSource: 'SENSOR' | 'NONE'
+  engineHoursMeter: number | null
+} {
+  const known = dto.ignitionKnown
+    ?? Boolean((dto.rawPayload as { ignition_known?: boolean } | undefined)?.ignition_known)
+  const meter = dto.engineHoursMeter
+    ?? (dto.rawPayload as { engine_hours?: number } | undefined)?.engine_hours
+  return {
+    ignitionKnown:    known,
+    ignitionSource:   known ? 'SENSOR' : 'NONE',
+    engineHoursMeter: typeof meter === 'number' && Number.isFinite(meter) ? meter : null,
+  }
+}
+
 export async function processTelemetry(
   orgId: string,
   dto: TelemetryPayload,
@@ -59,6 +86,20 @@ export async function processTelemetry(
       accuracyM:     dto.accuracyM,
       speedKmh:      dto.speedKmh,
       engineOn:      dto.engineOn ?? false,
+      // Ignition provenance, persisted per fix.
+      //
+      // These columns were added and backfilled on 2026-08-26 but never wired
+      // to ingest, so they became a seven-day island of history that would have
+      // aged out with retention: measured 2026-08-27, ~95% populated three to
+      // seven days back and 0% on the most recent day.
+      //
+      // `ignitionKnown` falls back to the raw payload because that is where the
+      // Wialon adapter has always stamped it, and it is the same expression the
+      // backfill read — so a row written today and a row filled in from history
+      // mean the same thing. The explicit DTO field is preferred over it: the
+      // raw payload is documented as diagnostic and written fire-and-forget,
+      // which is not a foundation for a column a theft verdict rests on.
+      ...ignitionColumns(dto),
       fuelLevelMl:   dto.fuelLevelMl,
       fuelUsedMl:    dto.fuelUsedMl,
       cargoWeightKg: dto.cargoWeightKg,

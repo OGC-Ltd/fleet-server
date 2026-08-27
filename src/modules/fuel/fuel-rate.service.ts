@@ -1,5 +1,5 @@
 /**
- * Derive and store each vehicle's litres-per-engine-hour.
+ * Derive and store each vehicle's fuel rate, in the denominator that suits it.
  *
  * The rule is in `fuel-rate.ts` and is pure; this is the plumbing. It implements
  * `docs/fuel-consumption-rates.md` §7.1 — *"persist per-vehicle rates, a table
@@ -18,6 +18,27 @@
  * `fuel_thefts` row — a drain must never calibrate the expectation it will
  * later be compared against.
  *
+ * ## The run's denominator is wall clock, and the counter does not beat it
+ *
+ * A run's hours are the span between its first and last reading. `fuel-tank-
+ * state`'s `dayEngineSeconds` shows the engine-hours COUNTER beating gap
+ * integration over a whole day — 0 s error against the operator's own figure
+ * for `KTCC 959G`, against 664 s and 1,761 s — so the counter is the obvious
+ * candidate here too. Measured over real runs on 2026-08-27, it is not:
+ *
+ * - it reaches only **58.2%** of qualifying runs
+ * - the median run reads **4.6% SHORT** against wall clock, p10 −19.6%
+ * - only **45%** of runs agree within 5%
+ * - on **1.8%** the counter does not move at all, which would price the run at
+ *   infinite litres per hour
+ *
+ * The cause is cadence, not accuracy: the counter ticks about every five
+ * minutes while fixes arrive every ~26 s, so across a twenty-minute run its
+ * resolution is a quarter of the quantity being divided. It is an excellent
+ * measurement of a day and a poor one of a run, and the difference is the
+ * length of the window rather than anything about the sensor. See
+ * `prisma/measure-rate-window.ts`.
+ *
  * ## Why this is not on the request path, and not nightly either
  *
  * It sorts the whole fuel-carrying telemetry window per vehicle. The instance
@@ -31,22 +52,48 @@
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { MIN_RUNS, resolveRates, type RateGroup, type ResolvedRate, type VehicleRate } from './fuel-rate.js'
+import { resolveBasis } from './fuel-theft-classifier.js'
 
 /**
  * Days of telemetry the derivation reads.
  *
- * THREE, because three is the only window this has been shown to survive on
- * this instance — `fuel-consumption-rates.md` §5 records it, and records that
- * thirty days is what per-vehicle rates should properly be built on. Widening
- * it is a deliberate act with someone watching the box, not a default: the
- * window functions here sort the full fuel-carrying set, on a t3.micro that is
- * already swapping beside a 1 GB RDS.
+ * SEVEN since 2026-08-27. It was three, on the belief that three was the only
+ * window this instance could survive — "a t3.micro that is already swapping
+ * beside a 1 GB RDS". Timed against production, that belief was wrong about
+ * both the limit and its cause:
  *
- * At three days, coverage is 21 of 27 KASULU PLANT and 48 of 76 SUKARI
- * tractors at MIN_RUNS. The rest fall back to their type median, which is
- * exactly what the fallback exists for.
+ * | window | wall clock | vehicles rated | clearing MIN_RUNS |
+ * | --- | --- | --- | --- |
+ * | 3 | 21.5 s | 190 | 154 |
+ * | **7** | **31.0 s** | **214** | **198** |
+ * | 14 | 53.5 s | 241 | 225 |
+ * | 21 | 57.1 s | 255 | 235 |
+ * | 30 | — | timeout | — |
+ *
+ * Nothing swapped and nothing failed on memory. What 30 days hits is
+ * `query_timeout: 60_000` in lib/prisma — a deliberate client-side guard shared
+ * with the API and SSE paths, there to reject queries on connections the pooler
+ * dropped. So the ceiling is a timeout the application chose, not a machine
+ * that cannot do the work, and the fix for a wider window is to give this batch
+ * job its own budget rather than to raise a guard the request path needs.
+ *
+ * Seven rather than fourteen or twenty-one, which both ran: 14 leaves 11% of
+ * headroom under that 60 s guard and 21 leaves 5%, measured over an SSH tunnel
+ * on an otherwise quiet afternoon. A weekly job that trips the timeout does not
+ * fail loudly — it simply stops refreshing rates — and 7 takes the larger half
+ * of the available gain (154 → 198 usable, +29%) for half the risk.
+ *
+ * Why it matters more than it used to: on 2026-08-27 `MUFINDI: LMV 17` moved
+ * 15.15 → 23.26 km/L between two derivations two days apart, six runs down to
+ * three. At three days a rate is a sample of one working week's Tuesday. Since
+ * `primary_basis` now names these figures as a machine's real rate, and 3.6
+ * will feed them to `resolveBand`, a baseline that swings 53% cannot carry a
+ * verdict.
+ *
+ * `--days` remains for deliberate wider runs; 14 and 21 are both measured to
+ * work with someone watching.
  */
-export const RATE_WINDOW_DAYS = 3
+export const RATE_WINDOW_DAYS = 7
 
 /** Longest gap that can sit inside one run, in seconds. Beyond it the run cuts. */
 const MAX_RUN_GAP_SECONDS = 900
@@ -99,8 +146,20 @@ export interface RateDerivationOutcome {
   /** Of those, the ones clearing MIN_RUNS — the rates that will actually be used. */
   usable:     number
   stored:     number
-  /** Stored rows deleted for exceeding MAX_PLAUSIBLE_L_PER_HOUR. See below. */
+  /**
+   * Stored rows deleted for exceeding MAX_PLAUSIBLE_L_PER_HOUR — see below.
+   * On a dry run this is what WOULD be deleted, not zero.
+   */
   pruned:     number
+  /**
+   * Of the derived rates, how many belong to a machine judged per kilometre.
+   *
+   * Reported because it is the one number that says whether the basis split is
+   * reaching anything: measured 2026-08-27, 55 of 207 DISTANCE machines have a
+   * rate of their own, so a fall in this figure means road vehicles are quietly
+   * losing their denominator rather than the fleet having changed shape.
+   */
+  distanceBasis: number
 }
 
 /**
@@ -181,14 +240,51 @@ export async function deriveFuelRates(
     // division by zero; there is nothing to store for it.
     .filter(r => r.lPerHour != null && Number.isFinite(r.lPerHour))
 
+  // Which denominator each derived rate is really in.
+  //
+  // Resolved HERE rather than at read time so a stored row says what it is: the
+  // query above computes both figures for every machine indiscriminately, and
+  // without this the table cannot distinguish a truck's 0.4 l_per_km — its real
+  // rate — from an excavator's 7.361, which is the arithmetic of a machine that
+  // does not travel. `resolveBasis` is the one place that decision is made; see
+  // its note on why the vehicle's TYPE outranks its inferred class.
+  //
+  // Cheap: 822 vehicles against ~225 rates, one query, no per-vehicle round
+  // trip. The org code comes along because `resolveBasis` keys plate patterns
+  // per operator.
+  const basisOf = new Map<string, 'HOURS' | 'DISTANCE'>()
+  if (derived.length > 0) {
+    const orgs = await prisma.organisation.findMany({ select: { id: true, code: true } })
+    const codeOf = new Map(orgs.map(o => [o.id, o.code]))
+    const vehicles = await prisma.vehicle.findMany({
+      where:  { id: { in: derived.map(r => r.vehicleId) } },
+      select: {
+        id: true, registrationPlate: true, vehicleType: true,
+        tankCapacityLitres: true, organisationId: true,
+      },
+    })
+    for (const v of vehicles) {
+      basisOf.set(v.id, resolveBasis(codeOf.get(v.organisationId) ?? '', {
+        plate: v.registrationPlate,
+        vehicleType: v.vehicleType,
+        tankCapacityLitres: v.tankCapacityLitres,
+      }))
+    }
+  }
+
   let stored = 0
   if (apply) {
     const derivedAt = new Date()
     for (const r of derived) {
+      // Absent rather than guessed: a vehicle the lookup missed keeps a null
+      // basis, which reads as "not yet resolved". Writing HOURS for it would be
+      // the same over-generalisation this column exists to record the end of.
+      const primaryBasis = basisOf.get(r.vehicleId) ?? null
+      const fields = { lPerHour: r.lPerHour, lPerKm: r.lPerKm, primaryBasis, runs: r.runs, windowDays: days, derivedAt }
       await prisma.vehicleFuelRate.upsert({
         where:  { vehicleId: r.vehicleId },
-        create: { vehicleId: r.vehicleId, lPerHour: r.lPerHour, lPerKm: r.lPerKm, runs: r.runs, windowDays: days, derivedAt },
-        update: { lPerHour: r.lPerHour, lPerKm: r.lPerKm, runs: r.runs, windowDays: days, derivedAt },
+        create: { vehicleId: r.vehicleId, ...fields },
+        update: fields,
       })
       stored++
     }
@@ -206,16 +302,17 @@ export async function deriveFuelRates(
   // Idleness is why rows are kept rather than truncated each run, and that is
   // still right. But no window and no idleness can make an impossible rate
   // correct, so this one class is pruned explicitly.
-  let pruned = 0
-  if (apply) {
-    const { count } = await prisma.vehicleFuelRate.deleteMany({
-      where: { lPerHour: { gt: MAX_PLAUSIBLE_L_PER_HOUR } },
-    })
-    pruned = count
-  }
+  // Counted on a dry run, deleted on a real one. Reporting 0 either way made
+  // the dry run silent about the one destructive thing this function does,
+  // which is precisely what a caller runs it to find out.
+  const impossible = { lPerHour: { gt: MAX_PLAUSIBLE_L_PER_HOUR } }
+  const pruned = apply
+    ? (await prisma.vehicleFuelRate.deleteMany({ where: impossible })).count
+    : await prisma.vehicleFuelRate.count({ where: impossible })
 
   const usable = derived.filter(r => r.runs >= MIN_RUNS).length
-  const out: RateDerivationOutcome = { windowDays: days, derived: derived.length, usable, stored, pruned }
+  const distanceBasis = derived.filter(r => basisOf.get(r.vehicleId) === 'DISTANCE').length
+  const out: RateDerivationOutcome = { windowDays: days, derived: derived.length, usable, stored, pruned, distanceBasis }
   logger.info(out, 'Fuel consumption rates derived')
   return out
 }
@@ -233,7 +330,20 @@ export async function deriveFuelRates(
 export async function getOrgFuelRates(orgId: string): Promise<Map<string, ResolvedRate>> {
   const [rates, vehicles] = await Promise.all([
     prisma.vehicleFuelRate.findMany({ select: { vehicleId: true, lPerHour: true, lPerKm: true, runs: true } }),
+    // Active vehicles only.
+    //
+    // The derivation deliberately KEEPS a rate row for a machine that produced
+    // no runs this window, so a decommissioned vehicle carries its last measured
+    // rate indefinitely — and without this filter it goes on voting in its
+    // type's median forever, describing a fleet that no longer includes it.
+    //
+    // Measured 2026-08-27, the skew is currently nil: 7 of 822 vehicles are
+    // inactive and none of them holds a rate row. This is therefore a guard on
+    // a latent fault rather than a fix for a live one, and it is worth having
+    // for the same reason MAX_PLAUSIBLE_L_PER_HOUR's prune is — the day a rated
+    // machine is retired, nothing else would notice.
     prisma.vehicle.findMany({
+      where:  { isActive: true },
       select: { id: true, organisationId: true, vehicleType: true },
     }),
   ])

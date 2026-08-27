@@ -42,6 +42,8 @@
  * because the provider saw something and we cannot show otherwise.
  */
 
+import type { FuelEventVerdict } from '../../../generated/prisma/client.js'
+
 /** How much of the observed drop must return before it is not a loss. */
 export const RECOVERY_THRESHOLD = 0.6
 
@@ -191,6 +193,43 @@ export type Verdict =
   /** The probe failed, not the tank. Not a fuel event at all. */
   | 'SENSOR_FAULT'
 
+/**
+ * Which verdicts mean no fuel LEFT the tank, so a drain row must not be counted
+ * as consumption or loss.
+ *
+ * A DRAIN counts whether or not it is confirmed: we subtract what we can
+ * DISPROVE, not what we merely doubt, so a drain the telemetry could not check
+ * still counts because the provider saw a fall and we cannot show otherwise.
+ * That is why `confirmed` is not consulted — it is about our certainty, not
+ * about whether the fuel went.
+ */
+export const NO_FUEL_LEFT: FuelEventVerdict[] = ['REDISTRIBUTION', 'REFILL', 'SENSOR_FAULT']
+
+/**
+ * The same question asked of the OTHER ledger: which claimed deliveries never
+ * actually arrived, so a filling row must not be counted as fuel in.
+ *
+ * **Not the same list, and it cannot be shared.** On a drain row
+ * `REDISTRIBUTION` means the fuel came back so none was lost; on a filling row
+ * it means the tank is no fuller than before, so none was gained. `REFILL` is
+ * the exact inverse — it disqualifies a drain and qualifies a filling. One
+ * constant used for both would be right in one place and backwards in the
+ * other, which is why these are two names rather than one.
+ *
+ * Measured 2026-08-11: 307 of 5,794 filling rows are REDISTRIBUTION, claiming
+ * 13,075 L that never arrived while those tanks collectively FELL 3,689 L —
+ * Wialon logging the up-swings of an oscillating probe as deliveries.
+ *
+ * PENDING deliberately still counts, matching the drain side: unjudged is not
+ * disproved. Since filling adjudication moved onto the quarter-hourly cycle
+ * (lib/queues/fuel-events) a row is only PENDING for about an hour, so that no
+ * longer means most of a day.
+ *
+ * Both live here, beside the `Verdict` they interpret, so a consumer cannot
+ * quietly grow a second copy that drifts from this one.
+ */
+export const NO_FUEL_ARRIVED: FuelEventVerdict[] = ['REDISTRIBUTION']
+
 export interface Adjudication {
   verdict:     Verdict
   /** Millilitres of the observed drop that returned, when measurable. */
@@ -250,8 +289,23 @@ export function lerp(x: number, x0: number, x1: number, y0: number, y1: number):
   return y0 + t * (y1 - y0)
 }
 
-/** The reasons that mean we watched the level ourselves and saw the outcome. */
-const CONFIRMED_REASONS: ReadonlySet<string> = new Set(['level-stayed-down', 'level-recovered'])
+/**
+ * The reasons that mean we watched the level ourselves and saw the outcome.
+ *
+ * Spans BOTH ledgers. `level-rose` is produced only by
+ * `fuel-filling-adjudication`, and it belongs here for exactly the reason the
+ * other two do: our own series showed the level move and stay moved. It was
+ * missing, which made `isConfirmed('level-rose')` return false for a filling
+ * this module had already marked `confirmed: true` — a disagreement waiting for
+ * its first caller, since the only one today asks about drains.
+ *
+ * The sets cannot collide: a drain row can never carry `level-rose`, and a
+ * filling row can never carry the other two.
+ */
+const CONFIRMED_REASONS: ReadonlySet<string> = new Set([
+  'level-stayed-down', 'level-recovered',   // drains
+  'level-rose',                             // fillings
+])
 
 /** Did our own telemetry corroborate this, or are we relaying the claim? */
 export const isConfirmed = (reason: string): boolean => CONFIRMED_REASONS.has(reason)

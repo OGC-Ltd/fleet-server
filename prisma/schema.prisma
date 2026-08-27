@@ -55,6 +55,48 @@ enum FuelEventType {
 /// covered 1,938 of 2,571 rows, leaving the ledger unreadable. How sure we are
 /// now lives in verdictReason and in `isConfirmed` beside the verdict, not
 /// instead of it. See modules/fuel/fuel-adjudication.
+/// How a fix's engine state was established — see `VehicleTelemetry.ignitionKnown`.
+///
+/// Recorded per fix rather than per vehicle because a unit can change source
+/// mid-window: a tracker whose ignition line is rewired starts reporting SENSOR
+/// where it previously only had METER, and a rule replayed over that window must
+/// be able to see the change rather than average across it.
+enum IgnitionSource {
+  /// A genuine digital ignition line — the only source that needs no inference.
+  /// `readIgnition` accepts it only when the value is actually binary.
+  SENSOR
+  /// The cumulative engine-hours counter advanced between this fix and the last,
+  /// so the engine ran in between. A measurement, not a heuristic.
+  METER
+  /// External supply voltage, thresholded per unit against its own two modes
+  /// (alternator charging vs at rest). The weakest of the three; adopted only
+  /// where a unit's distribution is genuinely bimodal.
+  VOLTAGE
+  /// Nothing could establish it. `engineOn` on such a row is the speed fallback
+  /// and says only whether the vehicle moved.
+  NONE
+}
+
+/// The denominator a machine's fuel use is measured against.
+///
+/// Mirrors `ConsumptionBasis` in modules/fuel/fuel-theft-classifier, which is
+/// where `resolveBasis` decides it; this enum only records the decision so a
+/// stored rate says which of its two figures is the real one. The rule, from
+/// the operator: machines whose work IS travelling are judged per kilometre,
+/// machines that burn while stationary are judged per engine-hour.
+enum ConsumptionBasis {
+  /// Litres per engine-hour. Excavators, dozers, loaders, graders, generators,
+  /// and tractors — a tractor works the field at 0 km/h and would score its
+  /// whole burn as unexplained on a distance denominator.
+  HOURS
+  /// Litres per kilometre, held internally as km/L. Trucks, lorries, trailers,
+  /// buses, saloons and company vehicles. Note this is the basis of the MACHINE;
+  /// `applicableBasis` still sends a road vehicle that did not travel back to
+  /// HOURS for the fall being judged, because an idling truck is burning, not
+  /// driving.
+  DISTANCE
+}
+
 enum FuelEventVerdict {
   PENDING        // too recent to judge — the level may still come back
   REFILL         // a filling explains it: fuel went IN, it did not leave
@@ -980,16 +1022,53 @@ model FuelDailyTrend {
 model VehicleFuelRate {
   id         String   @id @default(cuid())
   vehicleId  String   @unique @map("vehicle_id")
-  /// Litres per engine-hour. The primary basis for every vehicle type.
+  /// Litres per engine-hour. Always derived, and the figure a judgement uses
+  /// whenever `primaryBasis` is HOURS — or when a DISTANCE machine is judged on
+  /// a fall during which it did not travel. Never null: the derivation cannot
+  /// produce a run without engine time.
   lPerHour   Float    @map("l_per_hour")
-  /// Litres per kilometre — the secondary check on ROAD vehicles only.
-  /// Meaningless on plant, which measured 7.361 L/km at 1.5 km/h.
+  /// Litres per kilometre. The PRIMARY figure where `primaryBasis` is DISTANCE,
+  /// not the garnish this comment used to call it.
+  ///
+  /// Still meaningless on plant, which measured 7.361 L/km at 1.5 km/h, and
+  /// still null for anything the window gave no distance. `resolveBand` inverts
+  /// it to km/L and discards the result below ROAD_MIN_KM_PER_L, so a machine
+  /// that crawls gets no distance baseline however road-like its type.
+  ///
+  /// Measured 2026-08-27: 52 of the 55 DISTANCE machines holding their own rate
+  /// clear that floor, at 1.5-15.2 km/L. The binding constraint is not the
+  /// floor, it is rate coverage — only 55 of 207 DISTANCE machines have a rate
+  /// of their own at all, which is RATE_WINDOW_DAYS' three-day window.
   lPerKm     Float?   @map("l_per_km")
+  /// Which of the two figures above is this machine's real one, per
+  /// `resolveBasis`. Null on rows derived before 2026-08-27; the weekly
+  /// derivation fills it in. Nothing infers a default from null — a missing
+  /// basis means "not yet resolved", and HOURS is a claim, not a fallback.
+  primaryBasis ConsumptionBasis? @map("primary_basis")
   /// Qualifying runs behind the figure. Below MIN_RUNS it is not used.
   runs       Int
   /// Days of telemetry the derivation read, so a rate carries its own window.
   windowDays Int      @map("window_days")
   derivedAt  DateTime @map("derived_at")
+
+  /// The tank-balance measurement from `fuel-burn-rate.service`, which closes
+  /// `burn = (opening - closing) + refills - drains` over 30 fleet-days and is
+  /// display-only today. Persisted here so `resolveBand` can prefer it over the
+  /// weaker three-day derivation — see the plan's 3.6 precedence.
+  ///
+  /// UNPOPULATED until the measured pipeline is wired to write them. A reader
+  /// must treat null as "not measured" and fall through, never as zero.
+  measuredLPerHour   Float?    @map("measured_l_per_hour")
+  /// The range the qualifying days span, mirroring MeasuredBurnRate's lo/hi.
+  measuredLoLPerHour Float?    @map("measured_lo_l_per_hour")
+  measuredHiLPerHour Float?    @map("measured_hi_l_per_hour")
+  /// The distance sibling of the balance above — awaits the plausibility filter
+  /// on `coveredSince`, without which inflated km deflate L/km and hide loss.
+  measuredLPerKm     Float?    @map("measured_l_per_km")
+  /// Qualifying DAYS behind the measured figures, against `runs` for the
+  /// derived ones. Different denominators, deliberately not sharing a column.
+  measuredDays       Int?      @map("measured_days")
+  measuredAt         DateTime? @map("measured_at")
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id])
 
@@ -1180,6 +1259,29 @@ model VehicleTelemetry {
   // Motion & engine
   speedKmh   Float?  @map("speed_kmh")    // instantaneous GPS speed
   engineOn   Boolean @default(false) @map("engine_on") // digital I/O pin state
+
+  /// Was `engineOn` MEASURED, or inferred from movement?
+  ///
+  /// The adapter fills `engineOn` as `ignition ?? (speed > 0)`, so on a unit
+  /// whose ignition line reports nothing the column is a restatement of whether
+  /// the vehicle MOVED — and "engine off and stationary" becomes true of every
+  /// parked machine by construction. Any rule that reasons about the engine
+  /// must read THIS, never `engineOn` alone.
+  ///
+  /// NULL means unknown, not false: it is what a row written before this column
+  /// existed carries, and what an un-backfilled row carries. Test `IS TRUE`.
+  ignitionKnown  Boolean?        @map("ignition_known")
+  /// Where a known ignition state came from, so a method that is later
+  /// disproved can be withdrawn wholesale instead of being untangled.
+  ignitionSource IgnitionSource? @map("ignition_source")
+  /// The unit's own cumulative engine-hours counter at this fix (Wialon `cneh`).
+  ///
+  /// Present on ~96% of frames, and already the most trusted engine-time source
+  /// in the codebase — validated at 0 s error for `KTCC 959G` against 664 s and
+  /// 1,761 s for capped and uncapped gap integration. It was only ever persisted
+  /// as a DAILY rollup on `FuelDailyTrend`, so nothing could take a per-fix
+  /// delta from it.
+  engineHoursMeter Float?        @map("engine_hours_meter")
 
   // Fuel (FLS sensor reading)
   fuelLevelMl Int?   @map("fuel_level_ml") // calibrated tank level in millilitres
