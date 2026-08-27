@@ -1045,6 +1045,29 @@ model VehicleFuelRate {
   /// derivation fills it in. Nothing infers a default from null — a missing
   /// basis means "not yet resolved", and HOURS is a claim, not a fallback.
   primaryBasis ConsumptionBasis? @map("primary_basis")
+  /// Litres per engine-hour with the machine RUNNING BUT DOING NOTHING —
+  /// stationary, engine on, and not having moved a half-metre grid cell.
+  ///
+  /// Split out because blending it with working burn is a large part of the
+  /// 2-4x within-type spread. Measured 2026-08-27 over 7 days, working burn is
+  /// 1.85x idle across all HOURS machines, and per class: TRACTOR_MEDIUM 7.22x
+  /// (0.8 vs 6.1), TRACTOR_SMALL 2.75x, EXCAVATOR_LARGE 2.33x (6.7 vs 15.7).
+  ///
+  /// Null wherever the window gave too few runs of that kind — a machine that
+  /// never idled has no idle rate, and inventing one from its working figure
+  /// would be the fabrication these columns exist to end. Only meaningful for
+  /// HOURS machines; a road vehicle's idling is measured the same way but its
+  /// primary basis is distance.
+  idleLPerHour Float?  @map("idle_l_per_hour")
+  /// Litres per engine-hour while MOVING, or stationary and changing position —
+  /// digging, slewing, loading. See idleLPerHour for the split's evidence.
+  workLPerHour Float?  @map("work_l_per_hour")
+  /// Qualifying runs behind each split figure, so a thin one is visible rather
+  /// than merely present. Counted separately because a machine can have plenty
+  /// of one kind and almost none of the other — 73 idle runs against 708
+  /// working on TRACTOR_MEDIUM.
+  idleRuns     Int?    @map("idle_runs")
+  workRuns     Int?    @map("work_runs")
   /// Qualifying runs behind the figure. Below MIN_RUNS it is not used.
   runs       Int
   /// Days of telemetry the derivation read, so a rate carries its own window.

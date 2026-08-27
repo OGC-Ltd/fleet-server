@@ -45,6 +45,7 @@ async function main() {
   console.log(`  ${out.derived} vehicles produced a rate`)
   console.log(`  ${out.usable} of them cleared ${MIN_RUNS} runs — the rest fall back to their org+type median`)
   console.log(`  ${out.distanceBasis} of them are judged per KILOMETRE, ${out.derived - out.distanceBasis} per engine-hour`)
+  console.log(`  ${out.withIdleRate} have a separate IDLE rate · ${out.withWorkRate} a separate WORKING rate`)
   console.log(`  ${out.stored} rows stored`)
   if (out.pruned > 0) {
     console.log(`  ${out.pruned} stale rows ${APPLY ? 'pruned' : 'WOULD be pruned'} as implausible` +

@@ -99,6 +99,33 @@ export const RATE_WINDOW_DAYS = 7
 const MAX_RUN_GAP_SECONDS = 900
 
 /**
+ * The half-metre grid the dig detector uses, in degrees.
+ *
+ * Kept in step with `SNAP_DEGREES` in analytics/vehicle-daily-stats: "the
+ * machine has not moved" has to mean the same thing in both places, or an
+ * excavator would be idle to one and digging to the other on the same minute.
+ */
+const SNAP_DEGREES = 0.000005
+
+/** Below this a machine counts as stationary, matching the dig detector. */
+const STILL_KMH = 1
+
+/**
+ * How one-sided a run must be to describe idling, or working.
+ *
+ * Runs are classified by their DOMINANT state rather than segmented at every
+ * transition. Segmenting fragments a working day into hundreds of pieces far
+ * too short to carry a fuel measurement — the derivation needs 20 minutes and
+ * ten readings — while a run that is 80% one thing is fairly described by it.
+ *
+ * A run between the two thresholds is MIXED and contributes to neither figure.
+ * That is the point: it is not evidence about idling or about working, and
+ * admitting it to both would re-blend precisely what this separates.
+ */
+const IDLE_RUN_SHARE = 0.8
+const WORK_RUN_SHARE = 0.2
+
+/**
  * Litres per hour above which a figure is not a machine burning fuel.
  *
  * The derivation bounds a run's DROP — 0.3 L to 200 L — but bounding a drop is
@@ -160,6 +187,17 @@ export interface RateDerivationOutcome {
    * losing their denominator rather than the fleet having changed shape.
    */
   distanceBasis: number
+  /**
+   * Of the derived rates, how many earned a SEPARATE idle or working figure —
+   * MIN_RUNS of that kind, not merely one run.
+   *
+   * Reported because the split's whole value is that the two differ (1.85x
+   * overall, 7.22x on TRACTOR_MEDIUM), and a figure nothing has is worth
+   * nothing. A collapse here means runs stopped being one-sided enough to
+   * classify, which is a telemetry change rather than a fleet one.
+   */
+  withIdleRate: number
+  withWorkRate: number
 }
 
 /**
@@ -203,6 +241,8 @@ export async function deriveFuelRates(
 
   const rows = await prisma.$queryRaw<Array<{
     vehicle_id: string; runs: bigint; l_per_hour: number; l_per_km: number | null
+    idle_l_per_hour: number | null; work_l_per_hour: number | null
+    idle_runs: bigint; work_runs: bigint
   }>>`
     WITH caps AS (
       -- One plausibility ceiling per vehicle, from its class band. Bound as
@@ -214,6 +254,16 @@ export async function deriveFuelRates(
     ), s AS (
       SELECT x.vehicle_id, x.captured_at, x.fuel_level_ml, x.engine_on,
              COALESCE(x.speed_kmh, 0) AS spd,
+             -- Has the machine moved a half-metre grid cell? The dig detector's
+             -- own grid (vehicle-daily-stats' SNAP_DEGREES), so "stationary but
+             -- working" means the same thing in both places rather than being
+             -- decided twice. Expressed arithmetically rather than through
+             -- ST_SnapToGrid: identical rule, no geometry constructed per fix,
+             -- and this runs over the whole fuel-carrying window.
+             floor(x.lat / ${SNAP_DEGREES})                 AS cell_y,
+             floor(x.lng / ${SNAP_DEGREES})                 AS cell_x,
+             lag(floor(x.lat / ${SNAP_DEGREES})) OVER w     AS prev_cell_y,
+             lag(floor(x.lng / ${SNAP_DEGREES})) OVER w     AS prev_cell_x,
              lag(x.captured_at) OVER w AS prev_at,
              lag(x.engine_on)   OVER w AS prev_on
         FROM vehicle_telemetries x
@@ -235,10 +285,20 @@ export async function deriveFuelRates(
              extract(epoch FROM (max(captured_at) - min(captured_at))) / 3600.0 AS hours,
              sum(CASE WHEN dt BETWEEN 1 AND ${MAX_RUN_GAP_SECONDS} THEN spd * dt / 3600.0 ELSE 0 END) AS km,
              (array_agg(fuel_level_ml ORDER BY captured_at))[1]      AS l0,
-             (array_agg(fuel_level_ml ORDER BY captured_at DESC))[1] AS l1
+             (array_agg(fuel_level_ml ORDER BY captured_at DESC))[1] AS l1,
+             -- Seconds the machine ran while stationary AND in the same grid
+             -- cell as the previous fix: running, and doing nothing observable.
+             sum(CASE WHEN dt BETWEEN 1 AND ${MAX_RUN_GAP_SECONDS}
+                       AND spd < ${STILL_KMH}
+                       AND prev_cell_y IS NOT NULL
+                       AND cell_y = prev_cell_y AND cell_x = prev_cell_x
+                      THEN dt ELSE 0 END) AS idle_s,
+             sum(CASE WHEN dt BETWEEN 1 AND ${MAX_RUN_GAP_SECONDS} THEN dt ELSE 0 END) AS total_s
         FROM b GROUP BY 1, 2
     ), clean AS (
-      SELECT r.*, (r.l0 - r.l1) / 1000.0 AS litres FROM runs r
+      SELECT r.*, (r.l0 - r.l1) / 1000.0 AS litres,
+             r.idle_s / nullif(r.total_s, 0) AS idle_share
+        FROM runs r
        LEFT JOIN caps ON caps.vehicle_id = r.vehicle_id
        WHERE r.eng AND r.n >= 10 AND r.hours >= 0.33
          AND r.l0 > r.l1 AND (r.l0 - r.l1) BETWEEN 300 AND 200000
@@ -258,7 +318,19 @@ export async function deriveFuelRates(
     )
     SELECT c.vehicle_id, count(*) AS runs,
            round((sum(c.litres) / nullif(sum(c.hours), 0))::numeric, 2)::float8 AS l_per_hour,
-           round((sum(c.litres) / nullif(sum(c.km),    0))::numeric, 3)::float8 AS l_per_km
+           round((sum(c.litres) / nullif(sum(c.km),    0))::numeric, 3)::float8 AS l_per_km,
+           -- The same ratio, over the runs that were overwhelmingly one thing.
+           -- A run between the two thresholds is MIXED and contributes to
+           -- neither: it is not evidence about idling or about working, and
+           -- letting it into both would blend exactly what this separates.
+           round((sum(c.litres) FILTER (WHERE c.idle_share >= ${IDLE_RUN_SHARE})
+                  / nullif(sum(c.hours) FILTER (WHERE c.idle_share >= ${IDLE_RUN_SHARE}), 0))::numeric, 2)::float8
+             AS idle_l_per_hour,
+           round((sum(c.litres) FILTER (WHERE c.idle_share <= ${WORK_RUN_SHARE})
+                  / nullif(sum(c.hours) FILTER (WHERE c.idle_share <= ${WORK_RUN_SHARE}), 0))::numeric, 2)::float8
+             AS work_l_per_hour,
+           count(*) FILTER (WHERE c.idle_share >= ${IDLE_RUN_SHARE}) AS idle_runs,
+           count(*) FILTER (WHERE c.idle_share <= ${WORK_RUN_SHARE}) AS work_runs
       FROM clean c
       LEFT JOIN caps ON caps.vehicle_id = c.vehicle_id
      GROUP BY 1, caps.max_lph
@@ -278,6 +350,14 @@ export async function deriveFuelRates(
       runs:      Number(r.runs),
       lPerHour:  r.l_per_hour,
       lPerKm:    r.l_per_km,
+      // Absent below MIN_RUNS rather than thin-and-present. The same bar the
+      // blended rate clears, for the same reason: a rate off one or two runs is
+      // one shift's load and one probe's afternoon, and here it would be handed
+      // to a judgement as "what this machine burns doing nothing".
+      idleLPerHour: Number(r.idle_runs) >= MIN_RUNS ? r.idle_l_per_hour : null,
+      workLPerHour: Number(r.work_runs) >= MIN_RUNS ? r.work_l_per_hour : null,
+      idleRuns:     Number(r.idle_runs),
+      workRuns:     Number(r.work_runs),
     }))
     // A run with no measurable hours produces a null rate rather than a
     // division by zero; there is nothing to store for it.
@@ -299,7 +379,12 @@ export async function deriveFuelRates(
       // basis, which reads as "not yet resolved". Writing HOURS for it would be
       // the same over-generalisation this column exists to record the end of.
       const primaryBasis = basisOf.get(r.vehicleId) ?? null
-      const fields = { lPerHour: r.lPerHour, lPerKm: r.lPerKm, primaryBasis, runs: r.runs, windowDays: days, derivedAt }
+      const fields = {
+        lPerHour: r.lPerHour, lPerKm: r.lPerKm, primaryBasis,
+        idleLPerHour: r.idleLPerHour, workLPerHour: r.workLPerHour,
+        idleRuns: r.idleRuns, workRuns: r.workRuns,
+        runs: r.runs, windowDays: days, derivedAt,
+      }
       await prisma.vehicleFuelRate.upsert({
         where:  { vehicleId: r.vehicleId },
         create: { vehicleId: r.vehicleId, ...fields },
@@ -347,7 +432,12 @@ export async function deriveFuelRates(
 
   const usable = derived.filter(r => r.runs >= MIN_RUNS).length
   const distanceBasis = derived.filter(r => basisOf.get(r.vehicleId) === 'DISTANCE').length
-  const out: RateDerivationOutcome = { windowDays: days, derived: derived.length, usable, stored, pruned, distanceBasis }
+  const withIdleRate  = derived.filter(r => r.idleLPerHour != null).length
+  const withWorkRate  = derived.filter(r => r.workLPerHour != null).length
+  const out: RateDerivationOutcome = {
+    windowDays: days, derived: derived.length, usable, stored, pruned,
+    distanceBasis, withIdleRate, withWorkRate,
+  }
   logger.info(out, 'Fuel consumption rates derived')
   return out
 }
