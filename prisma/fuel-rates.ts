@@ -57,6 +57,7 @@ async function main() {
   if (APPLY) {
     const m = await persistMeasuredBurnRates()
     console.log(`\n  measured balance: ${m.measured} vehicles · ${m.stored} written` +
+                ` · ${m.withKm} also carry a measured L/km` +
                 `${m.orphaned > 0 ? ` · ${m.orphaned} had no rate row to attach to` : ''}`)
   }
 
