@@ -917,15 +917,34 @@ model VehicleDailyStat {
   /// ratio idleFixes/engineFixes is exact whatever the interval does, and
   /// fuel_daily_trends.engineSeconds supplies the scale.
   idleFixes   Int?     @map("idle_fixes")
-  /// Ground the machine's bucket could have reached that day, square metres.
+  /// Ground the machine worked that day, square metres — an UPPER BOUND, never
+  /// a survey.
   ///
-  /// Excavators only — null everywhere else, and null on an excavator whose day
-  /// was too thin to draw. Stored rather than computed on demand because the
-  /// geometry cannot be done inside an API request: measured 2026-08-20, one
-  /// machine's day took 19 s to read and union, and there are nineteen of them.
+  /// Two machine families, two geometries, one column, because both answer the
+  /// same question:
+  ///
+  /// - **Excavators** — a union of 8 m discs around distinct snapped positions.
+  ///   The arm sweeps around a body that stays put, so the body is what to
+  ///   buffer.
+  /// - **Dozers** (since 2026-08-28) — a union of 1.5 m buffers along the
+  ///   SEGMENTS between consecutive fixes. A dozer travels, so at ~10 m between
+  ///   fixes the point method would give disconnected discs with holes between
+  ///   them. See analytics/dozer-area.service.
+  ///
+  /// Null everywhere else, and null on a machine whose day was too thin to
+  /// draw. Stored rather than computed on demand because the geometry cannot be
+  /// done inside an API request: measured 2026-08-20, one excavator's day took
+  /// 19 s to read and union, and there are nineteen of them.
+  ///
+  /// Neither figure has been validated against a block of known extent, and
+  /// neither can tell working ground from ground merely crossed — a dozer
+  /// tramming between cuts is counted as if it were cutting. `MUFINDI: DZ 09`
+  /// measured 4.24 ha per engine hour against a 3 m blade's theoretical 0.38,
+  /// which is what that looks like.
   digAreaM2   Int?     @map("dig_area_m2")
-  /// Seconds that machine spent digging over that ground — the denominator of
-  /// the m2-per-hour rate, integrated the same way engineSeconds is.
+  /// Seconds the machine spent over that ground — the denominator of the
+  /// m2-per-hour rate, integrated the same way engineSeconds is. Digging for an
+  /// excavator; for a dozer, the time inside the segments that were counted.
   digSeconds  Int?     @map("dig_seconds")
   computedAt  DateTime @default(now()) @map("computed_at")
 
