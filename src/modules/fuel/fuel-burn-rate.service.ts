@@ -65,6 +65,7 @@
  */
 
 import { prisma } from '../../lib/prisma.js'
+import { logger } from '../../lib/logger.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 
 /** A rate needs a denominator; below an hour the division is noise. */
@@ -167,4 +168,87 @@ export async function measuredBurnRates(
     hiLPerHour: r1(r.hi),
     days:       Number(r.days),
   }]))
+}
+
+export interface MeasuredPersistOutcome {
+  /** Vehicles the balance produced a figure for, across every org. */
+  measured: number
+  /** Of those, the ones written onto an existing rate row. */
+  stored:   number
+  /** Measured figures with no rate row to attach to — see below. */
+  orphaned: number
+}
+
+/**
+ * Persist the measured rates onto `vehicle_fuel_rates.measured_*`.
+ *
+ * ## Stored, and deliberately NOT judged on
+ *
+ * The plan's 3.6 proposed this measurement outrank the run-based derivation in
+ * `resolveBand`. Measured against production on 2026-08-27, that is not
+ * supported, and the numbers are worth keeping next to the code that would have
+ * done it:
+ *
+ * | derived source | n | measured/derived p50 | within 1.5x | within 3x |
+ * | --- | --- | --- | --- | --- |
+ * | the machine's OWN rate | 58 | 0.77x | 51.7% | 96.6% |
+ * | a TYPE MEDIAN | 36 | 0.43x | 19.4% | 61.1% |
+ *
+ * Against a machine's own derived rate the two agree about as well as two
+ * honest methods can, with a systematic ~23% gap and no evidence which side of
+ * it is right — the balance discounts turbulence and is conservative by
+ * construction, while the derivation drops every run containing a refill and so
+ * samples light-load work. Swapping which one judges would tighten expectations
+ * by roughly a quarter and raise alert volume, on a coin toss.
+ *
+ * Against a type median the disagreement is wild (p50 0.43x) and the median is
+ * plainly the weaker claim — but replacing 13.3 L/h with 2.4 would tighten
+ * those bands four-fold, and with no labelled events there is nothing to say
+ * whether that produces fewer false alerts or vastly more. And the coverage
+ * argument fails outright: exactly ONE machine with no band today would gain
+ * one.
+ *
+ * So the figures are stored, shown, and left out of the judgement until Stage 4
+ * can say which is right. Storing a measurement costs nothing; acting on one
+ * that disagrees with the incumbent 60% of the time is how a detector loses an
+ * operator's trust.
+ *
+ * ## Why this only ever UPDATES
+ *
+ * `vehicle_fuel_rates.l_per_hour` is NOT NULL, so a row cannot exist for a
+ * machine the run-based derivation never rated — and inventing an l_per_hour to
+ * hang a measurement on would be fabricating the very number this column exists
+ * to second-guess. Measured figures with nowhere to go are counted and
+ * reported rather than forced in; at last count that is one machine.
+ */
+export async function persistMeasuredBurnRates(days = 30): Promise<MeasuredPersistOutcome> {
+  const orgs = await prisma.organisation.findMany({ select: { id: true } })
+  const measuredAt = new Date()
+  const out: MeasuredPersistOutcome = { measured: 0, stored: 0, orphaned: 0 }
+
+  for (const org of orgs) {
+    for (const [vehicleId, m] of await measuredBurnRates(org.id, days)) {
+      out.measured++
+      // updateMany, not update: a vehicle with no derived rate has no row, and
+      // that is an expected outcome here rather than an error to throw on.
+      const { count } = await prisma.vehicleFuelRate.updateMany({
+        where: { vehicleId },
+        data: {
+          measuredLPerHour:   m.lPerHour,
+          measuredLoLPerHour: m.loLPerHour,
+          measuredHiLPerHour: m.hiLPerHour,
+          measuredDays:       m.days,
+          measuredAt,
+          // measured_l_per_km stays null: its derivation needs the plausibility
+          // filter on `coveredSince`, without which inflated kilometres deflate
+          // L/km and hide loss. See the plan's 3.4.
+        },
+      })
+      if (count > 0) out.stored++
+      else out.orphaned++
+    }
+  }
+
+  logger.info(out, 'Measured burn rates persisted')
+  return out
 }

@@ -45,6 +45,7 @@ import { sweepProbeHealth } from '../../modules/fuel/fuel-probe-health.service.j
 import { recordFuelTrendsWithCatchUp } from '../../modules/fuel/fuel-trend.service.js'
 import { recordVehicleDailyStats } from '../../modules/analytics/vehicle-daily-stats.service.js'
 import { deriveFuelRates } from '../../modules/fuel/fuel-rate.service.js'
+import { persistMeasuredBurnRates } from '../../modules/fuel/fuel-burn-rate.service.js'
 
 export const RETENTION_QUEUE = 'maintenance'
 const PRUNE_JOB = 'notifications:prune'
@@ -368,7 +369,14 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     // it.
     if (job.name === TREND_JOB) return recordFuelTrendsWithCatchUp(lastCompleteFleetDay())
     if (job.name === STATS_JOB) return recordVehicleDailyStats(lastCompleteFleetDay())
-    if (job.name === RATE_JOB) return deriveFuelRates({ apply: true })
+    // Both figures refresh together, so a row never carries a fresh derivation
+    // beside a stale balance. The measured half only ever updates rows the
+    // derivation created, so it must run second.
+    if (job.name === RATE_JOB) {
+      const derived = await deriveFuelRates({ apply: true })
+      await persistMeasuredBurnRates()
+      return derived
+    }
     if (job.name === SENSOR_JOB) return syncSensorInventory()
     if (job.name === PROBE_JOB) return sweepProbeHealth({ notify: true })
     if (job.name !== PRUNE_JOB) return
