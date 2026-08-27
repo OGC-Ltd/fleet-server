@@ -18,6 +18,27 @@
  * `fuel_thefts` row — a drain must never calibrate the expectation it will
  * later be compared against.
  *
+ * ## The run's denominator is wall clock, and the counter does not beat it
+ *
+ * A run's hours are the span between its first and last reading. `fuel-tank-
+ * state`'s `dayEngineSeconds` shows the engine-hours COUNTER beating gap
+ * integration over a whole day — 0 s error against the operator's own figure
+ * for `KTCC 959G`, against 664 s and 1,761 s — so the counter is the obvious
+ * candidate here too. Measured over real runs on 2026-08-27, it is not:
+ *
+ * - it reaches only **58.2%** of qualifying runs
+ * - the median run reads **4.6% SHORT** against wall clock, p10 −19.6%
+ * - only **45%** of runs agree within 5%
+ * - on **1.8%** the counter does not move at all, which would price the run at
+ *   infinite litres per hour
+ *
+ * The cause is cadence, not accuracy: the counter ticks about every five
+ * minutes while fixes arrive every ~26 s, so across a twenty-minute run its
+ * resolution is a quarter of the quantity being divided. It is an excellent
+ * measurement of a day and a poor one of a run, and the difference is the
+ * length of the window rather than anything about the sensor. See
+ * `prisma/measure-rate-window.ts`.
+ *
  * ## Why this is not on the request path, and not nightly either
  *
  * It sorts the whole fuel-carrying telemetry window per vehicle. The instance
@@ -36,18 +57,43 @@ import { resolveBasis } from './fuel-theft-classifier.js'
 /**
  * Days of telemetry the derivation reads.
  *
- * THREE, because three is the only window this has been shown to survive on
- * this instance — `fuel-consumption-rates.md` §5 records it, and records that
- * thirty days is what per-vehicle rates should properly be built on. Widening
- * it is a deliberate act with someone watching the box, not a default: the
- * window functions here sort the full fuel-carrying set, on a t3.micro that is
- * already swapping beside a 1 GB RDS.
+ * SEVEN since 2026-08-27. It was three, on the belief that three was the only
+ * window this instance could survive — "a t3.micro that is already swapping
+ * beside a 1 GB RDS". Timed against production, that belief was wrong about
+ * both the limit and its cause:
  *
- * At three days, coverage is 21 of 27 KASULU PLANT and 48 of 76 SUKARI
- * tractors at MIN_RUNS. The rest fall back to their type median, which is
- * exactly what the fallback exists for.
+ * | window | wall clock | vehicles rated | clearing MIN_RUNS |
+ * | --- | --- | --- | --- |
+ * | 3 | 21.5 s | 190 | 154 |
+ * | **7** | **31.0 s** | **214** | **198** |
+ * | 14 | 53.5 s | 241 | 225 |
+ * | 21 | 57.1 s | 255 | 235 |
+ * | 30 | — | timeout | — |
+ *
+ * Nothing swapped and nothing failed on memory. What 30 days hits is
+ * `query_timeout: 60_000` in lib/prisma — a deliberate client-side guard shared
+ * with the API and SSE paths, there to reject queries on connections the pooler
+ * dropped. So the ceiling is a timeout the application chose, not a machine
+ * that cannot do the work, and the fix for a wider window is to give this batch
+ * job its own budget rather than to raise a guard the request path needs.
+ *
+ * Seven rather than fourteen or twenty-one, which both ran: 14 leaves 11% of
+ * headroom under that 60 s guard and 21 leaves 5%, measured over an SSH tunnel
+ * on an otherwise quiet afternoon. A weekly job that trips the timeout does not
+ * fail loudly — it simply stops refreshing rates — and 7 takes the larger half
+ * of the available gain (154 → 198 usable, +29%) for half the risk.
+ *
+ * Why it matters more than it used to: on 2026-08-27 `MUFINDI: LMV 17` moved
+ * 15.15 → 23.26 km/L between two derivations two days apart, six runs down to
+ * three. At three days a rate is a sample of one working week's Tuesday. Since
+ * `primary_basis` now names these figures as a machine's real rate, and 3.6
+ * will feed them to `resolveBand`, a baseline that swings 53% cannot carry a
+ * verdict.
+ *
+ * `--days` remains for deliberate wider runs; 14 and 21 are both measured to
+ * work with someone watching.
  */
-export const RATE_WINDOW_DAYS = 3
+export const RATE_WINDOW_DAYS = 7
 
 /** Longest gap that can sit inside one run, in seconds. Beyond it the run cuts. */
 const MAX_RUN_GAP_SECONDS = 900
@@ -284,7 +330,20 @@ export async function deriveFuelRates(
 export async function getOrgFuelRates(orgId: string): Promise<Map<string, ResolvedRate>> {
   const [rates, vehicles] = await Promise.all([
     prisma.vehicleFuelRate.findMany({ select: { vehicleId: true, lPerHour: true, lPerKm: true, runs: true } }),
+    // Active vehicles only.
+    //
+    // The derivation deliberately KEEPS a rate row for a machine that produced
+    // no runs this window, so a decommissioned vehicle carries its last measured
+    // rate indefinitely — and without this filter it goes on voting in its
+    // type's median forever, describing a fleet that no longer includes it.
+    //
+    // Measured 2026-08-27, the skew is currently nil: 7 of 822 vehicles are
+    // inactive and none of them holds a rate row. This is therefore a guard on
+    // a latent fault rather than a fix for a live one, and it is worth having
+    // for the same reason MAX_PLAUSIBLE_L_PER_HOUR's prune is — the day a rated
+    // machine is retired, nothing else would notice.
     prisma.vehicle.findMany({
+      where:  { isActive: true },
       select: { id: true, organisationId: true, vehicleType: true },
     }),
   ])
