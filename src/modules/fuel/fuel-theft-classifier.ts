@@ -479,6 +479,107 @@ export const TYPE_CLASS: ReadonlyMap<string, MachineClass> = new Map([
   ['SUKARI:TRACTOR', 'TRACTOR_MEDIUM'],
 ])
 
+/**
+ * Which denominator a machine's fuel should be judged against.
+ *
+ * `DISTANCE` is the DEFAULT (operator, 2026-08-26). Most of this fleet moves,
+ * and for anything that moves, litres per kilometre is the figure an operator
+ * reconciles against. `HOURS` is the exception, reserved for machines that do
+ * their work without travelling — an excavator slewing in place, a generator
+ * that never moves at all — where a distance denominator is not merely
+ * imprecise but zero.
+ *
+ * `docs/fuel-consumption-rates.md` concluded the opposite ("engine hours is the
+ * primary basis for every type"), and it over-generalised: all of its evidence
+ * is plant, where it is right, and it was applied to the 95 road units where it
+ * is not.
+ *
+ * ## Why declared TYPE and not measured travel
+ *
+ * The plan proposed splitting on measured km/L against `ROAD_MIN_KM_PER_L`.
+ * Measured 2026-08-26 over 221 vehicles, that no longer works: the docstring's
+ * "p25 is 0.07 and p75 is 2.05, with nothing in between" has become p25 1.05,
+ * p50 1.70, p75 2.70, and **141 of 221 vehicles now sit inside the gap the
+ * threshold was placed in**. Worse, the band mixes categories — `MUFINDI - FTT
+ * 01` (LORRY) at 0.84 km/L and `KCX 796S` (TRUCK) at 0.88 would both be sent to
+ * an hours basis.
+ *
+ * km per ENGINE-HOUR is the better measure, because it describes travel without
+ * being contaminated by thirst, and it orders the fleet exactly as physics
+ * would (7-day medians, 2026-08-26):
+ *
+ *     PLANT 0.82 · TRACTOR 6.08 · LORRY 7.81 · TRUCK 12.19 · SALOON 22.16
+ *
+ * But its histogram is continuous — 45, 21, 15, 20, 17, 28, 51, 29, 17, 14, 5
+ * across the bands — so there is no empty region to put a threshold in either.
+ * What separates cleanly is the TYPE, not any number derived from it, which is
+ * why this reads the type and uses measurement only as the evidence behind the
+ * mapping rather than as the rule.
+ */
+export type ConsumptionBasis = 'HOURS' | 'DISTANCE'
+
+/**
+ * The types that work without travelling. Everything else, including every
+ * tractor, takes the distance basis.
+ *
+ * TRACTOR is deliberately absent and it is the one judgement call here. They
+ * travel like light lorries in the median (6.08 km/engine-hour against LORRY's
+ * 7.81), so distance describes most of them well — but their p10 is 1.24, and a
+ * tractor working a field at that rate will show almost no distance to explain
+ * its burn. That is the `KTCB 295U` shape, and on a distance basis those
+ * machines score near-100% unexplained by construction. The operator's call is
+ * that distance is nonetheless the default; `ROAD_MIN_DROP_L` and
+ * `ROAD_MIN_UNEXPLAINED_L` remain the floors that stop it announcing on noise.
+ */
+const HOURS_TYPES: ReadonlySet<string> = new Set(['PLANT', 'GENERATOR'])
+
+/**
+ * Types that state, positively, what the machine IS. Anything in here settles
+ * the basis on its own and the class table is not consulted.
+ */
+const KNOWN_TYPES: ReadonlySet<string> = new Set([
+  'PLANT', 'GENERATOR', 'TRACTOR', 'TRUCK', 'LORRY', 'SALOON', 'BUS', 'COMPANY_VEHICLE',
+])
+
+/**
+ * Classes that mean plant, used ONLY where the type says nothing.
+ *
+ * This exists for the machines whose class is the only description of them: a
+ * generator reaches `GENERATOR` through `MACHINE_CLASS` while carrying
+ * `vehicleType = 'UNSPECIFIED'`, and without this it would take the distance
+ * default and be judged on kilometres it never covers.
+ *
+ * It must NOT outrank a stated type, and a test is what proves why.
+ * `MUFINDI: CTR 02` is a cane TRACTOR, and `MACHINE_CLASS` maps `KASULU:CTR` to
+ * `EXCAVATOR_LARGE` — deliberately, because the operator said "EX AND CTR can
+ * use the same band". That mapping is a statement about what the machine BURNS,
+ * not about what it is. Consulted first it sent a tractor to an hours basis, in
+ * direct contradiction of the instruction that every tractor takes distance.
+ *
+ * So: type answers "what is it", class answers "what does it burn", and only
+ * the first decides the denominator.
+ */
+const HOURS_CLASSES: ReadonlySet<MachineClass> = new Set<MachineClass>([
+  'GENERATOR',
+  'EXCAVATOR_MINI', 'EXCAVATOR_MEDIUM', 'EXCAVATOR_LARGE',
+  'DOZER_CAT_D6', 'DOZER_CAT_D7', 'DOZER_CAT_D8T', 'DOZER_CAT_D9',
+  'DOZER_CAT_D10', 'DOZER_CAT_D11',
+  'DOZER_KOMATSU_D85', 'DOZER_KOMATSU_D155A',
+])
+
+/**
+ * Resolve the basis for one machine. A stated type wins; the class is the
+ * fallback for machines the type does not describe; distance is the default.
+ */
+export function resolveBasis(orgCode: string, m: MachineIdentity): ConsumptionBasis {
+  const type = m.vehicleType?.toUpperCase()
+  if (type && KNOWN_TYPES.has(type)) return HOURS_TYPES.has(type) ? 'HOURS' : 'DISTANCE'
+
+  const cls = resolveClass(orgCode, m)
+  if (cls != null && HOURS_CLASSES.has(cls)) return 'HOURS'
+  return 'DISTANCE'
+}
+
 /** `ORG:PREFIX`, the key `MACHINE_CLASS` is written in. */
 export const classKey = (orgCode: string, plate: string): string =>
   `${orgCode.toUpperCase()}:${machinePrefix(plate)}`

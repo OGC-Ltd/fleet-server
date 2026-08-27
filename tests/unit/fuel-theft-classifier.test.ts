@@ -15,7 +15,7 @@ import {
   ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS,
   ANNOUNCE_MULTIPLE, MAX_PLAUSIBLE_REMOVAL_LPH, SIPHON_MIN_DROP_ML,
   DERIVED_BAND_SPREAD, MACHINE_CLASS, CLASS_BANDS, CLASS_CEILING_LPH, machinePrefix,
-  resolveClass, CLASS_BY_TANK, TYPE_CLASS,
+  resolveClass, CLASS_BY_TANK, TYPE_CLASS, resolveBasis,
   type DropEvidence, type BurnBand, type DrainCause,
 } from '../../src/modules/fuel/fuel-theft-classifier.js'
 import { probeSwings, probeOverreads, MAX_FILL_RATIO, type ProbeProfile } from '../../src/modules/fuel/fuel-adjudication.js'
@@ -508,5 +508,44 @@ describe('resolveBand', () => {
   it('is null when nothing is known, so the caller must not judge', () => {
     expect(resolveBand('KASULU', 'MUFINDI: DZ 14', null)).toBeNull()
     expect(resolveBand('KASULU', 'MUFINDI: DZ 14', { lPerHour: 0, basis: 'type' })).toBeNull()
+  })
+})
+
+describe('the consumption basis — which denominator judges this machine', () => {
+  // DISTANCE is the default (operator, 2026-08-26). HOURS is the exception,
+  // for machines that work without travelling.
+  it('sends road vehicles to distance', () => {
+    for (const t of ['TRUCK', 'LORRY', 'SALOON', 'BUS', 'COMPANY_VEHICLE']) {
+      expect(resolveBasis('SUKARI', { plate: 'KDL 207X', vehicleType: t })).toBe('DISTANCE')
+    }
+  })
+
+  it('sends plant and generators to hours', () => {
+    expect(resolveBasis('KASULU', { plate: 'MUFINDI: GR 04', vehicleType: 'PLANT' })).toBe('HOURS')
+    expect(resolveBasis('KASULU', { plate: 'MUFINDI: GEN 01', vehicleType: 'GENERATOR' })).toBe('HOURS')
+  })
+
+  it('sends EVERY tractor to distance, including one that barely travels', () => {
+    // The operator's call. Measured 7-day medians put TRACTOR at 6.08 km per
+    // engine-hour against LORRY's 7.81, so distance describes most of them —
+    // but p10 is 1.24 and this rule covers those too.
+    expect(resolveBasis('SUKARI', { plate: 'KTCC 117D', vehicleType: 'TRACTOR' })).toBe('DISTANCE')
+    expect(resolveBasis('KASULU', { plate: 'MUFINDI: CTR 02', vehicleType: 'TRACTOR' })).toBe('DISTANCE')
+  })
+
+  it('lets the machine CLASS override a type that would mislead', () => {
+    // A generator reaches its class through MACHINE_CLASS while carrying
+    // vehicleType UNSPECIFIED. Without the class check it would take the
+    // default and be judged on kilometres it never covers.
+    expect(resolveClass('KASULU', { plate: 'MUFINDI - DG 13' })).toBe('GENERATOR')
+    expect(resolveBasis('KASULU', { plate: 'MUFINDI - DG 13', vehicleType: 'UNSPECIFIED' })).toBe('HOURS')
+  })
+
+  it('an excavator is hours whatever its type says', () => {
+    expect(resolveBasis('KASULU', { plate: 'MUFINDI: EX 20', vehicleType: 'UNSPECIFIED' })).toBe('HOURS')
+  })
+
+  it('defaults to distance when nothing is known', () => {
+    expect(resolveBasis('SUKARI', { plate: 'KTCC 999Z' })).toBe('DISTANCE')
   })
 })
