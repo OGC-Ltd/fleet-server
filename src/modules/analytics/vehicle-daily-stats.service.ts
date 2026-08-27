@@ -43,6 +43,7 @@ import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import { REACH_METRES, DIG_SPEED_KMH, MAX_GAP_SECONDS, MIN_DIG_FIXES, SNAP_DEGREES } from './excavator-area.service.js'
+import { dozerDay } from './dozer-area.service.js'
 import { logger } from '../../lib/logger.js'
 
 /** What one day's aggregate looks like, before it is stored or added to. */
@@ -231,6 +232,34 @@ export async function recordVehicleDailyStats(inDay: Date): Promise<{ day: strin
     } catch (err) {
       // One machine's geometry failing must not cost the whole day's rollup.
       logger.warn({ err, vehicleId: v.id }, 'excavator area failed for one unit')
+    }
+  }
+
+  // Dozers, into the SAME columns and by a different geometry.
+  //
+  // Both answer "ground this machine worked today, as an upper bound", which is
+  // what the column holds; the excavator's is a union of discs around a machine
+  // that slews in place and the dozer's a union of swaths along one that
+  // travels. See dozer-area.service for why the point method cannot serve both.
+  //
+  // Sequential for the same reason as above: each call unions a day of geometry
+  // on an instance with ~1 GB of RAM.
+  const dozers = await prisma.vehicle.findMany({
+    where:  { isActive: true, registrationPlate: { contains: 'DZ ' } },
+    select: { id: true },
+  })
+
+  for (const v of dozers) {
+    try {
+      const pushed = await dozerDay(v.id, dayStart, dayEnd)
+      if (!pushed) continue
+      await prisma.vehicleDailyStat.updateMany({
+        where: { vehicleId: v.id, day },
+        data:  { digAreaM2: pushed.areaM2, digSeconds: pushed.workedSeconds },
+      })
+      withArea++
+    } catch (err) {
+      logger.warn({ err, vehicleId: v.id }, 'dozer area failed for one unit')
     }
   }
 
