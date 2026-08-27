@@ -77,6 +77,26 @@ enum IgnitionSource {
   NONE
 }
 
+/// The denominator a machine's fuel use is measured against.
+///
+/// Mirrors `ConsumptionBasis` in modules/fuel/fuel-theft-classifier, which is
+/// where `resolveBasis` decides it; this enum only records the decision so a
+/// stored rate says which of its two figures is the real one. The rule, from
+/// the operator: machines whose work IS travelling are judged per kilometre,
+/// machines that burn while stationary are judged per engine-hour.
+enum ConsumptionBasis {
+  /// Litres per engine-hour. Excavators, dozers, loaders, graders, generators,
+  /// and tractors — a tractor works the field at 0 km/h and would score its
+  /// whole burn as unexplained on a distance denominator.
+  HOURS
+  /// Litres per kilometre, held internally as km/L. Trucks, lorries, trailers,
+  /// buses, saloons and company vehicles. Note this is the basis of the MACHINE;
+  /// `applicableBasis` still sends a road vehicle that did not travel back to
+  /// HOURS for the fall being judged, because an idling truck is burning, not
+  /// driving.
+  DISTANCE
+}
+
 enum FuelEventVerdict {
   PENDING        // too recent to judge — the level may still come back
   REFILL         // a filling explains it: fuel went IN, it did not leave
@@ -1002,16 +1022,53 @@ model FuelDailyTrend {
 model VehicleFuelRate {
   id         String   @id @default(cuid())
   vehicleId  String   @unique @map("vehicle_id")
-  /// Litres per engine-hour. The primary basis for every vehicle type.
+  /// Litres per engine-hour. Always derived, and the figure a judgement uses
+  /// whenever `primaryBasis` is HOURS — or when a DISTANCE machine is judged on
+  /// a fall during which it did not travel. Never null: the derivation cannot
+  /// produce a run without engine time.
   lPerHour   Float    @map("l_per_hour")
-  /// Litres per kilometre — the secondary check on ROAD vehicles only.
-  /// Meaningless on plant, which measured 7.361 L/km at 1.5 km/h.
+  /// Litres per kilometre. The PRIMARY figure where `primaryBasis` is DISTANCE,
+  /// not the garnish this comment used to call it.
+  ///
+  /// Still meaningless on plant, which measured 7.361 L/km at 1.5 km/h, and
+  /// still null for anything the window gave no distance. `resolveBand` inverts
+  /// it to km/L and discards the result below ROAD_MIN_KM_PER_L, so a machine
+  /// that crawls gets no distance baseline however road-like its type.
+  ///
+  /// Measured 2026-08-27: 52 of the 55 DISTANCE machines holding their own rate
+  /// clear that floor, at 1.5-15.2 km/L. The binding constraint is not the
+  /// floor, it is rate coverage — only 55 of 207 DISTANCE machines have a rate
+  /// of their own at all, which is RATE_WINDOW_DAYS' three-day window.
   lPerKm     Float?   @map("l_per_km")
+  /// Which of the two figures above is this machine's real one, per
+  /// `resolveBasis`. Null on rows derived before 2026-08-27; the weekly
+  /// derivation fills it in. Nothing infers a default from null — a missing
+  /// basis means "not yet resolved", and HOURS is a claim, not a fallback.
+  primaryBasis ConsumptionBasis? @map("primary_basis")
   /// Qualifying runs behind the figure. Below MIN_RUNS it is not used.
   runs       Int
   /// Days of telemetry the derivation read, so a rate carries its own window.
   windowDays Int      @map("window_days")
   derivedAt  DateTime @map("derived_at")
+
+  /// The tank-balance measurement from `fuel-burn-rate.service`, which closes
+  /// `burn = (opening - closing) + refills - drains` over 30 fleet-days and is
+  /// display-only today. Persisted here so `resolveBand` can prefer it over the
+  /// weaker three-day derivation — see the plan's 3.6 precedence.
+  ///
+  /// UNPOPULATED until the measured pipeline is wired to write them. A reader
+  /// must treat null as "not measured" and fall through, never as zero.
+  measuredLPerHour   Float?    @map("measured_l_per_hour")
+  /// The range the qualifying days span, mirroring MeasuredBurnRate's lo/hi.
+  measuredLoLPerHour Float?    @map("measured_lo_l_per_hour")
+  measuredHiLPerHour Float?    @map("measured_hi_l_per_hour")
+  /// The distance sibling of the balance above — awaits the plausibility filter
+  /// on `coveredSince`, without which inflated km deflate L/km and hide loss.
+  measuredLPerKm     Float?    @map("measured_l_per_km")
+  /// Qualifying DAYS behind the measured figures, against `runs` for the
+  /// derived ones. Different denominators, deliberately not sharing a column.
+  measuredDays       Int?      @map("measured_days")
+  measuredAt         DateTime? @map("measured_at")
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id])
 

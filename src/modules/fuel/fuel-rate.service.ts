@@ -1,5 +1,5 @@
 /**
- * Derive and store each vehicle's litres-per-engine-hour.
+ * Derive and store each vehicle's fuel rate, in the denominator that suits it.
  *
  * The rule is in `fuel-rate.ts` and is pure; this is the plumbing. It implements
  * `docs/fuel-consumption-rates.md` §7.1 — *"persist per-vehicle rates, a table
@@ -31,6 +31,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { MIN_RUNS, resolveRates, type RateGroup, type ResolvedRate, type VehicleRate } from './fuel-rate.js'
+import { resolveBasis } from './fuel-theft-classifier.js'
 
 /**
  * Days of telemetry the derivation reads.
@@ -101,6 +102,15 @@ export interface RateDerivationOutcome {
   stored:     number
   /** Stored rows deleted for exceeding MAX_PLAUSIBLE_L_PER_HOUR. See below. */
   pruned:     number
+  /**
+   * Of the derived rates, how many belong to a machine judged per kilometre.
+   *
+   * Reported because it is the one number that says whether the basis split is
+   * reaching anything: measured 2026-08-27, 55 of 207 DISTANCE machines have a
+   * rate of their own, so a fall in this figure means road vehicles are quietly
+   * losing their denominator rather than the fleet having changed shape.
+   */
+  distanceBasis: number
 }
 
 /**
@@ -181,14 +191,51 @@ export async function deriveFuelRates(
     // division by zero; there is nothing to store for it.
     .filter(r => r.lPerHour != null && Number.isFinite(r.lPerHour))
 
+  // Which denominator each derived rate is really in.
+  //
+  // Resolved HERE rather than at read time so a stored row says what it is: the
+  // query above computes both figures for every machine indiscriminately, and
+  // without this the table cannot distinguish a truck's 0.4 l_per_km — its real
+  // rate — from an excavator's 7.361, which is the arithmetic of a machine that
+  // does not travel. `resolveBasis` is the one place that decision is made; see
+  // its note on why the vehicle's TYPE outranks its inferred class.
+  //
+  // Cheap: 822 vehicles against ~225 rates, one query, no per-vehicle round
+  // trip. The org code comes along because `resolveBasis` keys plate patterns
+  // per operator.
+  const basisOf = new Map<string, 'HOURS' | 'DISTANCE'>()
+  if (derived.length > 0) {
+    const orgs = await prisma.organisation.findMany({ select: { id: true, code: true } })
+    const codeOf = new Map(orgs.map(o => [o.id, o.code]))
+    const vehicles = await prisma.vehicle.findMany({
+      where:  { id: { in: derived.map(r => r.vehicleId) } },
+      select: {
+        id: true, registrationPlate: true, vehicleType: true,
+        tankCapacityLitres: true, organisationId: true,
+      },
+    })
+    for (const v of vehicles) {
+      basisOf.set(v.id, resolveBasis(codeOf.get(v.organisationId) ?? '', {
+        plate: v.registrationPlate,
+        vehicleType: v.vehicleType,
+        tankCapacityLitres: v.tankCapacityLitres,
+      }))
+    }
+  }
+
   let stored = 0
   if (apply) {
     const derivedAt = new Date()
     for (const r of derived) {
+      // Absent rather than guessed: a vehicle the lookup missed keeps a null
+      // basis, which reads as "not yet resolved". Writing HOURS for it would be
+      // the same over-generalisation this column exists to record the end of.
+      const primaryBasis = basisOf.get(r.vehicleId) ?? null
+      const fields = { lPerHour: r.lPerHour, lPerKm: r.lPerKm, primaryBasis, runs: r.runs, windowDays: days, derivedAt }
       await prisma.vehicleFuelRate.upsert({
         where:  { vehicleId: r.vehicleId },
-        create: { vehicleId: r.vehicleId, lPerHour: r.lPerHour, lPerKm: r.lPerKm, runs: r.runs, windowDays: days, derivedAt },
-        update: { lPerHour: r.lPerHour, lPerKm: r.lPerKm, runs: r.runs, windowDays: days, derivedAt },
+        create: { vehicleId: r.vehicleId, ...fields },
+        update: fields,
       })
       stored++
     }
@@ -215,7 +262,8 @@ export async function deriveFuelRates(
   }
 
   const usable = derived.filter(r => r.runs >= MIN_RUNS).length
-  const out: RateDerivationOutcome = { windowDays: days, derived: derived.length, usable, stored, pruned }
+  const distanceBasis = derived.filter(r => basisOf.get(r.vehicleId) === 'DISTANCE').length
+  const out: RateDerivationOutcome = { windowDays: days, derived: derived.length, usable, stored, pruned, distanceBasis }
   logger.info(out, 'Fuel consumption rates derived')
   return out
 }
