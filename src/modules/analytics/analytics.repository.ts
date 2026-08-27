@@ -4,23 +4,13 @@ import { fleetDayStart } from '../../lib/provider-time.js'
 import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics.schema.js'
 import { calculateDriverRating } from './driver-rating.js'
 import type { FuelEventVerdict } from '../../../generated/prisma/client.js'
+import { NO_FUEL_LEFT, NO_FUEL_ARRIVED } from '../fuel/fuel-adjudication.js'
 
-/**
- * Verdicts where no fuel left the tank, and which therefore do not count.
- *
- * REDISTRIBUTION: our own level series showed the fuel come back with no
- *                 filling to explain it, so it never left the tank.
- * REFILL:         a filling explains the movement — fuel went IN.
- * SENSOR_FAULT:   the probe failed, not the tank — a dead FLS reports a full
- *                 tank draining to nothing (see modules/fuel/fuel-adjudication).
- *
- * A DRAIN counts whether or not it is confirmed. We subtract what we can
- * DISPROVE, not what we merely doubt — so a drain the telemetry could not check
- * still counts, because the provider saw a fall and we cannot show otherwise.
- * That is why `confirmed` is not consulted here: it is about our certainty, not
- * about whether the fuel went.
- */
-const NO_FUEL_LEFT: FuelEventVerdict[] = ['REDISTRIBUTION', 'REFILL', 'SENSOR_FAULT']
+// `NO_FUEL_LEFT` (drains) and `NO_FUEL_ARRIVED` (fillings) are imported rather
+// than declared here. They interpret a `Verdict`, so they live beside it in
+// modules/fuel/fuel-adjudication — and they are a matched pair that must not be
+// confused for each other, which is easier to see where both are defined
+// together than where one sits in analytics and the other in a report.
 
 // A delivery counts as "interrupted"/delayed when it took materially longer than
 // its moving time (distance ÷ average speed) implies — i.e. it spent a lot of
@@ -261,8 +251,14 @@ export async function fuelConsumption(
 
   const vehicleSelect = { select: { registrationPlate: true, name: true } }
   const [fillings, thefts] = await Promise.all([
+    // Deliveries that never arrived are excluded — see NO_FUEL_ARRIVED.
     prisma.fuelFilling.findMany({
-      where:  { vehicle: { organisationId: orgId }, ...vehicleWhere, filledAt: { gte: from, lte: to } },
+      where:  {
+        vehicle: { organisationId: orgId },
+        ...vehicleWhere,
+        filledAt: { gte: from, lte: to },
+        verdict: { notIn: NO_FUEL_ARRIVED },
+      },
       select: { vehicleId: true, filledAt: true, filledMl: true, vehicle: vehicleSelect },
       orderBy: { filledAt: 'asc' },
     }),
@@ -1024,7 +1020,11 @@ export async function operationsToday(orgId: string, vehicleIds: string[] | null
     // Measured litres off the fuel probes, same ledger the month card reads —
     // just clamped to the day so it is a RUNNING total rather than a period one.
     prisma.fuelFilling.findMany({
-      where:  { vehicle: { organisationId: orgId }, ...vehicleWhere, filledAt: { gte: dayStart } },
+      where:  {
+        vehicle: { organisationId: orgId }, ...vehicleWhere, filledAt: { gte: dayStart },
+        // Deliveries that never arrived are excluded — see NO_FUEL_ARRIVED.
+        verdict: { notIn: NO_FUEL_ARRIVED },
+      },
       select: { filledMl: true, filledAt: true },
     }),
     // Tractors SIGNED OUT today — the yard's own record of leaving, which

@@ -21,10 +21,25 @@
  * - The measured L/km for PLANT is **7.361** — not a rate anyone can use, but
  *   the arithmetic saying the denominator is wrong.
  *
- * So the two expectations are not redundant and neither replaces the other:
- * engine hours is the primary basis for every type, distance is the secondary
- * check on road vehicles, where the two agree. Both sit beside `consumedMl`,
- * which is what the tank actually did.
+ * So the two expectations are not redundant and neither replaces the other.
+ *
+ * ## Corrected 2026-08-27: hours is not primary for every type
+ *
+ * This module used to conclude "engine hours is the primary basis for every
+ * type, distance is the secondary check on road vehicles". The evidence above
+ * is sound and the conclusion over-reached it: every figure cited — 215 of 310
+ * units, 58.3% engine-on, 1.5 km/h, 7.361 L/km — is about PLANT, and it was
+ * generalised onto the 95 road units, where distance is the natural
+ * denominator and a stationary truck's whole burn presents as unexplained.
+ *
+ * `resolveBasis` in fuel-theft-classifier now decides per machine, and the
+ * choice is recorded on `vehicle_fuel_rates.primary_basis`. Plant, generators
+ * and tractors keep hours for exactly the reasons set out above; trucks,
+ * lorries, buses, saloons and company vehicles take kilometres. Both figures
+ * are still stored for every machine, and both sit beside `consumedMl`, which
+ * is what the tank actually did.
+ *
+ * See docs/fuel-consumption-rates.md, whose §7 states the superseded rule.
  *
  * ## Nothing here judges anything
  *
@@ -85,11 +100,16 @@ const UNGROUPABLE_TYPES = new Set(['UNSPECIFIED', 'UNKNOWN', 'OTHER', ''])
 /** A per-vehicle rate as derived and stored. */
 export interface VehicleRate {
   vehicleId: string
-  /** Litres per engine-hour. The primary basis. */
+  /** Litres per engine-hour. Primary where the machine's basis is HOURS. */
   lPerHour:  number
   /**
-   * Litres per kilometre, kept beside it as the secondary check on road
-   * vehicles. Meaningless on plant — see the module note — and not used here.
+   * Litres per kilometre. Primary where the machine's basis is DISTANCE — see
+   * the module note's 2026-08-27 correction — and meaningless on plant.
+   *
+   * Not used by `resolveRates`, which pools an HOURS median only: a type median
+   * over kilometres would pool machines that travel differently, so a road
+   * vehicle without its own figure gets no distance baseline rather than a
+   * borrowed one. `getBandInputs` carries the vehicle's own value alongside.
    */
   lPerKm:    number | null
   /** Qualifying runs the rate was averaged over. Below MIN_RUNS it is a hint. */

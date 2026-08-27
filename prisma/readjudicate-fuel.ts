@@ -43,6 +43,7 @@ import 'dotenv/config'
 import { prisma } from '../src/lib/prisma.js'
 import { isConfirmed, isUncheckable, OBSERVED_DROP_MIN_RATIO, RECOVERY_THRESHOLD } from '../src/modules/fuel/fuel-adjudication.js'
 import { judgeDrain } from '../src/modules/fuel/fuel-adjudication.service.js'
+import { announces } from '../src/modules/fuel/fuel-theft-classifier.js'
 
 const argv  = process.argv.slice(2)
 const APPLY = argv.includes('--apply')
@@ -78,6 +79,7 @@ async function main() {
       select: {
         id: true, vehicleId: true, beganAt: true, detectedAt: true, stolenMl: true,
         verdict: true, verdictReason: true, recoveredMl: true,
+        drainCause: true, causeReason: true,
         vehicle: { select: { registrationPlate: true } },
       },
       orderBy: { beganAt: 'desc' },
@@ -87,10 +89,26 @@ async function main() {
 
     const changes: string[] = []
     const matrix: Record<string, number> = {}
-    let mlBackIntoLoss = 0, mlWrittenOff = 0, kept = 0
+    // The CAUSE is a separate judgement layered on the verdict, and a rule change
+    // can move it without touching the verdict at all — which the verdict matrix
+    // below cannot show, because it skips rows whose verdict is unchanged. Kept
+    // in its own matrix so the two questions stay separable.
+    const causeMatrix: Record<string, number> = {}
+    let announcedBefore = 0, announcedAfter = 0
+    let mlBackIntoLoss = 0, mlWrittenOff = 0, kept = 0, examined = 0
+
+    // Progress. This pass is round-trip bound -- one telemetry window per drain
+    // -- so a 30-day run is hours, and until now it printed nothing at all until
+    // the end. A run you cannot see the inside of is a run you cannot decide to
+    // abandon, which is exactly what happened on 2026-08-26.
+    const startedAt = Date.now()
 
     for (const t of rows) {
-      grandExamined++
+      grandExamined++; examined++
+      if (examined % 100 === 0) {
+        const rate = examined / Math.max(1, (Date.now() - startedAt) / 1000)
+        console.log(`    ...${examined}/${rows.length} judged, ${rate.toFixed(1)}/s`)
+      }
 
       // The SAME evidence the live sweep reads — one function, called by both,
       // so the two cannot drift into disagreeing about the same drain.
@@ -118,6 +136,20 @@ async function main() {
       const to   = label(next.verdict, next.reason)
       const key  = `${from} → ${to}`
       matrix[key] = (matrix[key] ?? 0) + 1
+
+      // Cause, counted for EVERY examined row — including the ones the verdict
+      // matrix is about to skip. `judgeDrain` returns a null cause whenever the
+      // verdict is not DRAIN, so "—" here means "no cause was owed", not "no
+      // cause was found". Announceability is counted off the same pair, since
+      // that is the only number an operator actually experiences.
+      const causeOf = (c: string | null, r: string | null) =>
+        c == null ? '—' : `${c}${r ? `/${r}` : ''}`
+      const cFrom = causeOf(t.drainCause, t.causeReason)
+      const cTo   = causeOf(next.cause?.cause ?? null, next.cause?.reason ?? null)
+      causeMatrix[`${cFrom} → ${cTo}`] = (causeMatrix[`${cFrom} → ${cTo}`] ?? 0) + 1
+      if (t.drainCause != null && announces({ cause: t.drainCause, reason: t.causeReason ?? '' })) announcedBefore++
+      if (next.cause != null && announces(next.cause)) announcedAfter++
+
       if (from === to) continue
 
       // Volume that starts counting as drained, and volume that stops. Both
@@ -148,6 +180,14 @@ async function main() {
       console.log(`     ${String(n).padStart(4)}  ${k}${k.split(' → ')[0] === k.split(' → ')[1] ? '  (unchanged)' : ''}`)
     }
     if (kept > 0) console.log(`     ${String(kept).padStart(4)}  kept — no telemetry to re-judge on, verdict left as it was`)
+
+    const causeMoved = Object.entries(causeMatrix)
+      .filter(([k]) => k.split(' → ')[0] !== k.split(' → ')[1])
+      .sort((a, b) => b[1] - a[1])
+    console.log(`\n     cause — ${causeMoved.reduce((s, [, n]) => s + n, 0)} of ${examined} move`)
+    for (const [k, n] of causeMoved) console.log(`     ${String(n).padStart(4)}  ${k}`)
+    console.log(`     announceable: ${announcedBefore} → ${announcedAfter}` +
+                ` (${announcedAfter - announcedBefore >= 0 ? '+' : ''}${announcedAfter - announcedBefore})`)
     if (changes.length) {
       console.log(`\n     changed:`)
       for (const c of changes) console.log(c)
