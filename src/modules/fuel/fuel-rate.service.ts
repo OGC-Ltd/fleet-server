@@ -100,7 +100,10 @@ export interface RateDerivationOutcome {
   /** Of those, the ones clearing MIN_RUNS — the rates that will actually be used. */
   usable:     number
   stored:     number
-  /** Stored rows deleted for exceeding MAX_PLAUSIBLE_L_PER_HOUR. See below. */
+  /**
+   * Stored rows deleted for exceeding MAX_PLAUSIBLE_L_PER_HOUR — see below.
+   * On a dry run this is what WOULD be deleted, not zero.
+   */
   pruned:     number
   /**
    * Of the derived rates, how many belong to a machine judged per kilometre.
@@ -253,13 +256,13 @@ export async function deriveFuelRates(
   // Idleness is why rows are kept rather than truncated each run, and that is
   // still right. But no window and no idleness can make an impossible rate
   // correct, so this one class is pruned explicitly.
-  let pruned = 0
-  if (apply) {
-    const { count } = await prisma.vehicleFuelRate.deleteMany({
-      where: { lPerHour: { gt: MAX_PLAUSIBLE_L_PER_HOUR } },
-    })
-    pruned = count
-  }
+  // Counted on a dry run, deleted on a real one. Reporting 0 either way made
+  // the dry run silent about the one destructive thing this function does,
+  // which is precisely what a caller runs it to find out.
+  const impossible = { lPerHour: { gt: MAX_PLAUSIBLE_L_PER_HOUR } }
+  const pruned = apply
+    ? (await prisma.vehicleFuelRate.deleteMany({ where: impossible })).count
+    : await prisma.vehicleFuelRate.count({ where: impossible })
 
   const usable = derived.filter(r => r.runs >= MIN_RUNS).length
   const distanceBasis = derived.filter(r => basisOf.get(r.vehicleId) === 'DISTANCE').length
