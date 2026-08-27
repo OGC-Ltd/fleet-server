@@ -701,6 +701,46 @@ export function resolveClass(orgCode: string, m: MachineIdentity): MachineClass 
   return null
 }
 
+/**
+ * The highest litres-per-hour a DERIVATION may believe for this machine.
+ *
+ * Distinct from `CLASS_CEILING_LPH`, and the distinction matters. That is an
+ * ANNOUNCE ceiling — "a human said this machine should never burn more than
+ * this, so tell someone". Using it here would invert it: a generator's ceiling
+ * of 120 would admit `MUFINDI - DG 12`'s 110.3 L/h as the machine's own
+ * expected rate, and a burn the operator set that number to CATCH would become
+ * the baseline it is measured against.
+ *
+ * So the cap is the class band's upper edge — what the operator says the
+ * machine actually burns — with `floor` as a lower bound it can never go below.
+ * That makes this strictly LOOSENING: no machine loses a rate it has today, and
+ * only the heavy classes gain headroom. Tightening the small classes to their
+ * band tops would be a much larger change, stripping rates from machines that
+ * currently have them and moving them onto type medians, and nothing has
+ * measured what that would do.
+ *
+ * Measured over 14 days on 2026-08-27, four vehicles exceeded the flat 40 and
+ * this resolves each one the way the evidence points:
+ *
+ * | machine | class | L/h | runs | outcome |
+ * | --- | --- | --- | --- | --- |
+ * | `MUFINDI: CTR 23` | `DOZER_CAT_D10` (43-71) | 40.6 | 60 | admitted — the fix |
+ * | `MUFINDI - DG 12` | `GENERATOR` (35-95) | 110.3 | 9 | still excluded |
+ * | `MUFINDI: DZ 09` | `DOZER_CAT_D8T` (25-40) | 45.6 | 2 | still excluded |
+ * | `KHMA 449U` | unclassed | 60.8 | 1 | still excluded |
+ *
+ * DG 12 is the machine the flat cap was introduced for — it derived 109.89 L/h
+ * off probe noise on a 1,696 L tank — and it stays excluded, because 110 is
+ * above what the operator says a generator burns even though it is under the
+ * announce ceiling. That is the case that shows why the two numbers must not be
+ * the same number.
+ */
+export function derivationCapLph(orgCode: string, m: MachineIdentity, floor: number): number {
+  const cls = resolveClass(orgCode, m)
+  const band = cls != null ? CLASS_BANDS.get(cls) : undefined
+  return Math.max(band?.highLph ?? 0, floor)
+}
+
 export function resolveBand(
   orgCode: string,
   machine: string | MachineIdentity,

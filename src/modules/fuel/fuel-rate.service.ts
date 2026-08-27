@@ -52,7 +52,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { MIN_RUNS, resolveRates, type RateGroup, type ResolvedRate, type VehicleRate } from './fuel-rate.js'
-import { resolveBasis } from './fuel-theft-classifier.js'
+import { resolveBasis, derivationCapLph } from './fuel-theft-classifier.js'
 
 /**
  * Days of telemetry the derivation reads.
@@ -174,10 +174,44 @@ export interface RateDerivationOutcome {
 export async function deriveFuelRates(
   { days = RATE_WINDOW_DAYS, apply }: RateDerivationOptions,
 ): Promise<RateDerivationOutcome> {
+  // Machine identity FIRST, because the plausibility cap is now per class and
+  // the query needs it. Both the basis and the cap come off the same load, so
+  // this is one extra query for the whole fleet rather than one per vehicle.
+  const orgs   = await prisma.organisation.findMany({ select: { id: true, code: true } })
+  const codeOf = new Map(orgs.map(o => [o.id, o.code]))
+  const fleet  = await prisma.vehicle.findMany({
+    select: {
+      id: true, registrationPlate: true, vehicleType: true,
+      tankCapacityLitres: true, organisationId: true,
+    },
+  })
+
+  const basisOf = new Map<string, 'HOURS' | 'DISTANCE'>()
+  const capIds: string[] = []
+  const capLph: number[] = []
+  for (const v of fleet) {
+    const code = codeOf.get(v.organisationId) ?? ''
+    const m = {
+      plate: v.registrationPlate,
+      vehicleType: v.vehicleType,
+      tankCapacityLitres: v.tankCapacityLitres,
+    }
+    basisOf.set(v.id, resolveBasis(code, m))
+    capIds.push(v.id)
+    capLph.push(derivationCapLph(code, m, MAX_PLAUSIBLE_L_PER_HOUR))
+  }
+
   const rows = await prisma.$queryRaw<Array<{
     vehicle_id: string; runs: bigint; l_per_hour: number; l_per_km: number | null
   }>>`
-    WITH s AS (
+    WITH caps AS (
+      -- One plausibility ceiling per vehicle, from its class band. Bound as
+      -- arrays rather than interpolated: this is the only place the derivation
+      -- takes a per-vehicle value, and a VALUES list built by string
+      -- concatenation is the shape that has to be audited every time it is read.
+      SELECT * FROM unnest(${capIds}::text[], ${capLph}::double precision[])
+        AS t(vehicle_id, max_lph)
+    ), s AS (
       SELECT x.vehicle_id, x.captured_at, x.fuel_level_ml, x.engine_on,
              COALESCE(x.speed_kmh, 0) AS spd,
              lag(x.captured_at) OVER w AS prev_at,
@@ -205,12 +239,18 @@ export async function deriveFuelRates(
         FROM b GROUP BY 1, 2
     ), clean AS (
       SELECT r.*, (r.l0 - r.l1) / 1000.0 AS litres FROM runs r
+       LEFT JOIN caps ON caps.vehicle_id = r.vehicle_id
        WHERE r.eng AND r.n >= 10 AND r.hours >= 0.33
          AND r.l0 > r.l1 AND (r.l0 - r.l1) BETWEEN 300 AND 200000
          -- Bound the implied RATE, not only the drop. r.hours >= 0.33 above
          -- makes the division safe. See MAX_PLAUSIBLE_L_PER_HOUR: a 20-minute
          -- run falling 100 L implies 300 L/h and cleared every other filter.
-         AND ((r.l0 - r.l1) / 1000.0) / r.hours <= ${MAX_PLAUSIBLE_L_PER_HOUR}
+         --
+         -- Per class since 2026-08-27 — see derivationCapLph. COALESCE to the
+         -- flat floor so a vehicle missing from the caps CTE is bounded exactly
+         -- as before rather than escaping the test altogether.
+         AND ((r.l0 - r.l1) / 1000.0) / r.hours
+               <= COALESCE(caps.max_lph, ${MAX_PLAUSIBLE_L_PER_HOUR})
          AND NOT EXISTS (SELECT 1 FROM fuel_fillings f
                           WHERE f.vehicle_id = r.vehicle_id AND f.filled_at BETWEEN r.t0 AND r.t1)
          AND NOT EXISTS (SELECT 1 FROM fuel_thefts t
@@ -219,14 +259,17 @@ export async function deriveFuelRates(
     SELECT c.vehicle_id, count(*) AS runs,
            round((sum(c.litres) / nullif(sum(c.hours), 0))::numeric, 2)::float8 AS l_per_hour,
            round((sum(c.litres) / nullif(sum(c.km),    0))::numeric, 3)::float8 AS l_per_km
-      FROM clean c GROUP BY 1
+      FROM clean c
+      LEFT JOIN caps ON caps.vehicle_id = c.vehicle_id
+     GROUP BY 1, caps.max_lph
      HAVING sum(c.hours) > 0
         -- Backstop: a vehicle whose every run is individually plausible can
         -- still aggregate to something that is not. Excluding it here is
         -- deliberate — no rate at all beats a wrong one, because the fallback
         -- below it (its type's median) is built from machines that were
         -- measured properly.
-        AND sum(c.litres) / sum(c.hours) <= ${MAX_PLAUSIBLE_L_PER_HOUR}
+        AND sum(c.litres) / sum(c.hours)
+              <= COALESCE(caps.max_lph, ${MAX_PLAUSIBLE_L_PER_HOUR})
      ORDER BY 2 DESC`
 
   const derived = rows
@@ -240,37 +283,13 @@ export async function deriveFuelRates(
     // division by zero; there is nothing to store for it.
     .filter(r => r.lPerHour != null && Number.isFinite(r.lPerHour))
 
-  // Which denominator each derived rate is really in.
-  //
-  // Resolved HERE rather than at read time so a stored row says what it is: the
-  // query above computes both figures for every machine indiscriminately, and
-  // without this the table cannot distinguish a truck's 0.4 l_per_km — its real
-  // rate — from an excavator's 7.361, which is the arithmetic of a machine that
-  // does not travel. `resolveBasis` is the one place that decision is made; see
-  // its note on why the vehicle's TYPE outranks its inferred class.
-  //
-  // Cheap: 822 vehicles against ~225 rates, one query, no per-vehicle round
-  // trip. The org code comes along because `resolveBasis` keys plate patterns
-  // per operator.
-  const basisOf = new Map<string, 'HOURS' | 'DISTANCE'>()
-  if (derived.length > 0) {
-    const orgs = await prisma.organisation.findMany({ select: { id: true, code: true } })
-    const codeOf = new Map(orgs.map(o => [o.id, o.code]))
-    const vehicles = await prisma.vehicle.findMany({
-      where:  { id: { in: derived.map(r => r.vehicleId) } },
-      select: {
-        id: true, registrationPlate: true, vehicleType: true,
-        tankCapacityLitres: true, organisationId: true,
-      },
-    })
-    for (const v of vehicles) {
-      basisOf.set(v.id, resolveBasis(codeOf.get(v.organisationId) ?? '', {
-        plate: v.registrationPlate,
-        vehicleType: v.vehicleType,
-        tankCapacityLitres: v.tankCapacityLitres,
-      }))
-    }
-  }
+  // `basisOf` was resolved above, alongside the caps — the query needs the class
+  // anyway, so one fleet load answers both questions. Which denominator a rate
+  // is in has to be recorded rather than inferred at read time: the query
+  // computes both figures for every machine indiscriminately, and without this
+  // the table cannot distinguish a truck's 0.4 l_per_km — its real rate — from
+  // an excavator's 7.361, which is the arithmetic of a machine that does not
+  // travel.
 
   let stored = 0
   if (apply) {
@@ -305,10 +324,26 @@ export async function deriveFuelRates(
   // Counted on a dry run, deleted on a real one. Reporting 0 either way made
   // the dry run silent about the one destructive thing this function does,
   // which is precisely what a caller runs it to find out.
-  const impossible = { lPerHour: { gt: MAX_PLAUSIBLE_L_PER_HOUR } }
-  const pruned = apply
-    ? (await prisma.vehicleFuelRate.deleteMany({ where: impossible })).count
-    : await prisma.vehicleFuelRate.count({ where: impossible })
+  // Per class since 2026-08-27. A flat `lPerHour > 40` here was the third and
+  // most absolute of the three enforcements: even if a heavy machine's rate had
+  // survived the two above, this deleted it on the next run, so no rate over 40
+  // could persist under any circumstances. Comparing each stored row against its
+  // OWN class cap is what makes the loosening above actually reach the table.
+  const capFor = (vehicleId: string) => {
+    const i = capIds.indexOf(vehicleId)
+    return i >= 0 ? capLph[i]! : MAX_PLAUSIBLE_L_PER_HOUR
+  }
+  const stale = (await prisma.vehicleFuelRate.findMany({
+    where:  { lPerHour: { gt: MAX_PLAUSIBLE_L_PER_HOUR } },
+    select: { vehicleId: true, lPerHour: true },
+  })).filter(r => r.lPerHour > capFor(r.vehicleId))
+
+  let pruned = stale.length
+  if (apply && stale.length > 0) {
+    pruned = (await prisma.vehicleFuelRate.deleteMany({
+      where: { vehicleId: { in: stale.map(r => r.vehicleId) } },
+    })).count
+  }
 
   const usable = derived.filter(r => r.runs >= MIN_RUNS).length
   const distanceBasis = derived.filter(r => basisOf.get(r.vehicleId) === 'DISTANCE').length
