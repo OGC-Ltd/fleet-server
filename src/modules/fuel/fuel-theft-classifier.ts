@@ -482,12 +482,12 @@ export const TYPE_CLASS: ReadonlyMap<string, MachineClass> = new Map([
 /**
  * Which denominator a machine's fuel should be judged against.
  *
- * `DISTANCE` is the DEFAULT (operator, 2026-08-26). Most of this fleet moves,
- * and for anything that moves, litres per kilometre is the figure an operator
- * reconciles against. `HOURS` is the exception, reserved for machines that do
- * their work without travelling — an excavator slewing in place, a generator
- * that never moves at all — where a distance denominator is not merely
- * imprecise but zero.
+ * `DISTANCE` — litres per kilometre — is the DEFAULT (operator, 2026-08-26).
+ * For anything whose work IS travelling, L/km is the figure an operator
+ * reconciles against. `HOURS` is the exception, for machines that do their work
+ * without travelling — an excavator slewing in place, a generator that never
+ * moves, a tractor standing in a field — where a distance denominator is not
+ * merely imprecise but zero.
  *
  * `docs/fuel-consumption-rates.md` concluded the opposite ("engine hours is the
  * primary basis for every type"), and it over-generalised: all of its evidence
@@ -519,19 +519,50 @@ export const TYPE_CLASS: ReadonlyMap<string, MachineClass> = new Map([
 export type ConsumptionBasis = 'HOURS' | 'DISTANCE'
 
 /**
- * The types that work without travelling. Everything else, including every
- * tractor, takes the distance basis.
+ * The types that work without travelling: judged, and reported, in litres per
+ * engine-hour. Everything else is judged and reported in **litres per
+ * kilometre** — `L/km`, the unit `vehicle_fuel_rates.l_per_km` already stores,
+ * not litres per 100 km.
  *
- * TRACTOR is deliberately absent and it is the one judgement call here. They
- * travel like light lorries in the median (6.08 km/engine-hour against LORRY's
- * 7.81), so distance describes most of them well — but their p10 is 1.24, and a
- * tractor working a field at that rate will show almost no distance to explain
- * its burn. That is the `KTCB 295U` shape, and on a distance basis those
- * machines score near-100% unexplained by construction. The operator's call is
- * that distance is nonetheless the default; `ROAD_MIN_DROP_L` and
- * `ROAD_MIN_UNEXPLAINED_L` remain the floors that stop it announcing on noise.
+ * The basis governs BOTH reporting and adjudication (operator, 2026-08-26).
+ * They are not separable here: a figure an operator reconciles against and the
+ * figure a drain is judged against have to be the same one, or the alert and
+ * the report disagree about the same machine.
+ *
+ * ## TRACTOR is here, and it was briefly not
+ *
+ * Tractors were moved to DISTANCE on 2026-08-26 and moved back the same day.
+ * Measured over 30 days, drains over 15 L, share that covered less than 0.5 km
+ * during the fall:
+ *
+ *     TRACTOR          273 of 339   80.5%
+ *     TRUCK             76 of  85   89.4%
+ *     COMPANY_VEHICLE   66 of  73   90.4%
+ *
+ * Read those three lines together, because the obvious reading of the first one
+ * alone is wrong. Drains happen at rest almost everywhere — a truck is MORE
+ * likely to be standing still during one than a tractor is. "Tractors drain
+ * while stationary" is therefore not the discriminator, and any rule built on
+ * that number as though it were distinctive would be built on a coincidence.
+ *
+ * What separates them is what standing still MEANS. A tractor at 0 km/h is
+ * working, and the fuel is going into the job; a truck at 0 km/h is not, and
+ * fuel leaving then is the very signature worth announcing. So the same
+ * observation is ordinary on one machine and suspicious on the other, and only
+ * the type says which.
+ *
+ * On a distance basis the tractor cases score ~100% unexplained by
+ * construction, land on `drop-while-stationary`, and announce — about nine a
+ * day against the ~5/day the whole fleet produces now. The names settle it:
+ * `KTCB 295U` is four of the top eight, and is the very vehicle
+ * `ROAD_MIN_KM_PER_L` was written to protect, while `MUFINDI: OPTIM - CTR 23`
+ * tops the list at 1,160 L across 0.00 km.
+ *
+ * So the rule is not "things that travel take distance" but "things whose WORK
+ * is travelling take distance". A tractor travels between jobs and works
+ * standing still; a truck's work IS the kilometres.
  */
-const HOURS_TYPES: ReadonlySet<string> = new Set(['PLANT', 'GENERATOR'])
+const HOURS_TYPES: ReadonlySet<string> = new Set(['PLANT', 'GENERATOR', 'TRACTOR'])
 
 /**
  * Types that state, positively, what the machine IS. Anything in here settles
