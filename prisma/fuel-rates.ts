@@ -27,6 +27,7 @@ import 'dotenv/config'
 import { prisma } from '../src/lib/prisma.js'
 import { deriveFuelRates, MAX_PLAUSIBLE_L_PER_HOUR, RATE_WINDOW_DAYS } from '../src/modules/fuel/fuel-rate.service.js'
 import { MIN_RUNS } from '../src/modules/fuel/fuel-rate.js'
+import { persistMeasuredBurnRates } from '../src/modules/fuel/fuel-burn-rate.service.js'
 
 const argv  = process.argv.slice(2)
 const APPLY = argv.includes('--apply')
@@ -49,6 +50,15 @@ async function main() {
     console.log(`  ${out.pruned} stale rows ${APPLY ? 'pruned' : 'WOULD be pruned'} as implausible` +
                 ` (over ${MAX_PLAUSIBLE_L_PER_HOUR} L/h)`)
   }
+  // The weekly RATE_JOB does both, so this does too — a CLI that refreshed
+  // only half would leave a fresh derivation beside a stale balance and make
+  // the two disagree for reasons nobody could reconstruct later.
+  if (APPLY) {
+    const m = await persistMeasuredBurnRates()
+    console.log(`\n  measured balance: ${m.measured} vehicles · ${m.stored} written` +
+                `${m.orphaned > 0 ? ` · ${m.orphaned} had no rate row to attach to` : ''}`)
+  }
+
   if (!APPLY) console.log('\n  Dry run — nothing stored. Re-run with --apply\n')
   else console.log()
 }
