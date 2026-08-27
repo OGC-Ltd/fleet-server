@@ -314,6 +314,40 @@ export function readIgnition(
     // heuristic and lib/movement-state collapses to 'resting' rather than
     // claiming an idle it cannot support. Fixing this properly is a Wialon
     // configuration job — those sensors need binding to a real ignition input.
+    //
+    // ## And none of it can be evaluated after the fact
+    //
+    // `params` is `u.lmsg.p`, read live and never stored. `toFrame` persists
+    // `pos` (the POSITION), odometer, engine hours and `ignition_known`, and
+    // nothing else — so `pwr_ext`, `io_9` and `io_239` exist for the duration of
+    // this function call and are then gone. Measured 2026-08-26: of the newest
+    // 200,000 raw payloads, all `source: wialon`, ZERO contain any of the three,
+    // and zero carry a voltage of any kind. (`batteryVoltageV` appears in the
+    // payload SHAPE, but it belongs to another provider's frames and is absent
+    // on every Wialon row.)
+    //
+    // That matters because the two obvious ways to recover ignition on the units
+    // this rejects both need history that does not exist:
+    //
+    //   · supply VOLTAGE — on a 24 V system, alternator charging (~28 V) against
+    //     rest (~24-25 V) should be bimodal per unit, and the trough would be the
+    //     threshold. There is no stored voltage to look for a trough in.
+    //   · `io_9` — values 0, 43, 86, 87, 130, 172, 174, never 1. Whether any bit
+    //     or threshold tracks engine state is answerable only against a sample,
+    //     and there is no sample.
+    //
+    // So neither can be measured today, let alone shipped. The enabling step is
+    // small — persist the handful of params this function already reads — but it
+    // starts a clock rather than answering a question: a per-unit bimodality test
+    // needs days of accumulation before it means anything.
+    //
+    // The engine-hours meter is NOT the way round this. Measured the same day
+    // over units that do have a genuine line, a per-fix meter delta agrees with
+    // the sensor 24.7% of the time (the counter updates every ~5 minutes while
+    // fixes arrive every ~26 s), and per 10-minute window it proves "the engine
+    // never ran" correctly only 74.5% of the time — good enough for a rate,
+    // nowhere near good enough to license a theft verdict. See
+    // prisma/measure-meter-ignition.ts.
     if (n !== 0 && n !== 1) continue
     return n === 1
   }
