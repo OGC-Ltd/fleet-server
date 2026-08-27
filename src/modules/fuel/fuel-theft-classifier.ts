@@ -611,6 +611,29 @@ export function resolveBasis(orgCode: string, m: MachineIdentity): ConsumptionBa
   return 'DISTANCE'
 }
 
+/**
+ * Which basis applies to ONE event, as opposed to the machine in general.
+ *
+ * `resolveBasis` answers "what is this machine"; this answers "what was it doing
+ * while the fuel left". A truck on the open road is judged per kilometre; the
+ * same truck idling in a yard is judged per hour, because that is the denominator
+ * that describes what it was actually doing (operator, 2026-08-26).
+ *
+ * An HOURS machine never switches — an excavator that tracks 2 km across a site
+ * has not become a haulier, and its kilometres explain none of its burn.
+ */
+export function applicableBasis(
+  machine: ConsumptionBasis,
+  distanceKm: number | null,
+): ConsumptionBasis {
+  if (machine === 'HOURS') return 'HOURS'
+  // Null is not zero: no reading carried a speed, so we cannot say it stood
+  // still. Absent evidence falls to hours rather than asserting a distance of 0
+  // and calling the whole drop unexplained.
+  if (distanceKm == null) return 'HOURS'
+  return distanceKm >= OPEN_ROAD_MIN_KM ? 'DISTANCE' : 'HOURS'
+}
+
 /** `ORG:PREFIX`, the key `MACHINE_CLASS` is written in. */
 export const classKey = (orgCode: string, plate: string): string =>
   `${orgCode.toUpperCase()}:${machinePrefix(plate)}`
@@ -809,6 +832,41 @@ export const ROAD_MIN_UNEXPLAINED_L = 5
  */
 export const ROAD_MIN_KM_PER_L = 1.5
 
+/**
+ * Kilometres a road vehicle must have covered DURING THE FALL before it is
+ * judged on distance rather than on hours.
+ *
+ * Operator, 2026-08-26: *"Commercial trucks measure fuel consumption by distance
+ * when traveling on the open road, but switch to time (per hour) when idling or
+ * operating specialized equipment."*
+ *
+ * So the basis is not purely a property of the MACHINE, it is a property of what
+ * the machine was DOING. `resolveBasis` says which denominator a truck uses when
+ * it is working as a truck; this says whether it was.
+ *
+ * That distinction is what the data was asking for. Of 232 drains over 15 L on
+ * distance-basis vehicles in 30 days, the kilometres covered during the fall
+ * are:
+ *
+ *     p10-p80  0.000      p90  0.014      p95  1.275
+ *
+ * Four fifths moved no measurable distance at all, and there is nothing between
+ * 0.014 and 1.275 — a genuinely empty band, unlike the km/L gap that closed.
+ * A threshold of 1 km sits inside it, so the figure is not finely balanced:
+ * anything from 0.05 to 1.2 selects the same 15-16 events.
+ *
+ * Judging those 216 stationary drains on distance would score each ~100%
+ * unexplained by construction and announce it — 7.7/day against the ~5/day the
+ * whole fleet produces now. Judging them on L/h instead asks the question that
+ * fits: a parked truck burning fuel is either idling, which its own hourly rate
+ * explains, or losing it, which the rate does not. Neither reading is available
+ * from a distance denominator when the distance is zero.
+ *
+ * The 16 that DO travel are kept, and they are the cases worth having:
+ * `KDL 207X` 78.2 L over 11.5 km, `KBV 714U` five times over 1.3-7.0 km.
+ */
+export const OPEN_ROAD_MIN_KM = 1.0
+
 export const CLASS_CEILING_LPH: ReadonlyMap<MachineClass, number> = new Map([
   ['EXCAVATOR_MINI',   20],
   ['EXCAVATOR_MEDIUM', 20],
@@ -958,6 +1016,16 @@ export function classifyDrain(
   ev: DropEvidence,
   band: BurnBand | null,
   profile: ProbeProfile | null,
+  /**
+   * The machine's own basis — see `resolveBasis`.
+   *
+   * Optional for callers that have no vehicle to hand, but NOT a no-op when
+   * omitted: the distance branch requires OPEN_ROAD_MIN_KM either way, so a
+   * stationary drop stops being `drop-while-stationary` regardless. What the
+   * argument adds is the ability to stand the burn branch aside for a vehicle
+   * that genuinely travelled.
+   */
+  machineBasis?: ConsumptionBasis,
 ): CauseJudgement {
   const none = { impliedLph: null }
 
@@ -993,8 +1061,15 @@ export function classifyDrain(
     return { cause: 'SLOSH', reason: 'rate-not-physical', confidence: 0.8, impliedLph }
   }
 
-  // 4. THE PRIMARY RULE.
-  if (impliedLph != null) {
+  // 4. THE PRIMARY RULE — unless this event belongs to the other denominator.
+  //
+  // A truck on the open road is judged per kilometre; the same truck idling in a
+  // yard is judged per hour (operator, 2026-08-26). `applicableBasis` decides
+  // which of those this fall was, so the burn branch stands aside only for a
+  // road vehicle that demonstrably travelled — see OPEN_ROAD_MIN_KM.
+  const travelling = machineBasis != null
+    && applicableBasis(machineBasis, ev.distanceKm) === 'DISTANCE'
+  if (impliedLph != null && !travelling) {
     // The operator's absolute ceiling takes precedence where one exists. It is
     // checked BEFORE the multiple because it is the stricter statement: a class
     // with a ceiling has had someone say "above this, go and look", and a ratio
@@ -1058,7 +1133,15 @@ export function classifyDrain(
   // INDETERMINATE at gate 1. Without those two this rule alone would call
   // every parked probe swing a theft, which is the failure this project
   // exists to remove.
-  if (band.kmPerL != null && ev.distanceKm != null && dropL >= ROAD_MIN_DROP_L) {
+  //
+  // Gated on having MOVED, which is what makes a distance denominator mean
+  // anything. Without it, four fifths of these events carry 0.000 km, score
+  // ~100% unexplained by construction, and announce — 7.7/day against the ~5/day
+  // the whole fleet produces. Those events are not silenced: they fall to the
+  // burn branch above, where an idling truck is measured against its own hourly
+  // rate, which is the question that actually fits them.
+  if (band.kmPerL != null && ev.distanceKm != null && dropL >= ROAD_MIN_DROP_L
+      && ev.distanceKm >= OPEN_ROAD_MIN_KM) {
     const explainedL   = ev.distanceKm / band.kmPerL
     const unexplainedL = dropL - explainedL
     if (unexplainedL > ROAD_MIN_UNEXPLAINED_L) {

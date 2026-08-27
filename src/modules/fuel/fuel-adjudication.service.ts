@@ -29,7 +29,7 @@ import {
 } from './fuel-adjudication.js'
 import { measureFall, type FallSample } from './fuel-drop-shape.js'
 import {
-  classifyDrain, resolveBand, announces, mayUseTheftWording, type CauseJudgement,
+  classifyDrain, resolveBand, resolveBasis, announces, mayUseTheftWording, type CauseJudgement,
   ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS,
 } from './fuel-theft-classifier.js'
 import { resolveRates, MIN_RUNS, type ResolvedRate } from './fuel-rate.js'
@@ -327,7 +327,11 @@ export async function judgeDrain(
   const band = resolveBand(orgCode, { plate, vehicleType, tankCapacityLitres },
     rate == null ? null : { lPerHour: rate.lPerHour, basis: rate.basis, lPerKm })
   const profile = await getProbeProfile(drain.vehicleId, now)
-  return { ...gated, cause: classifyDrain(measured.evidence, band, profile) }
+  // Which denominator this machine is judged in, and — inside classifyDrain —
+  // whether THIS fall belongs to it. A truck on the open road is judged per
+  // kilometre; the same truck idling is judged per hour.
+  const basis = resolveBasis(orgCode, { plate, vehicleType, tankCapacityLitres })
+  return { ...gated, cause: classifyDrain(measured.evidence, band, profile, basis) }
 }
 
 /**

@@ -15,7 +15,7 @@ import {
   ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS,
   ANNOUNCE_MULTIPLE, MAX_PLAUSIBLE_REMOVAL_LPH, SIPHON_MIN_DROP_ML,
   DERIVED_BAND_SPREAD, MACHINE_CLASS, CLASS_BANDS, CLASS_CEILING_LPH, machinePrefix,
-  resolveClass, CLASS_BY_TANK, TYPE_CLASS, resolveBasis,
+  resolveClass, CLASS_BY_TANK, TYPE_CLASS, resolveBasis, applicableBasis, OPEN_ROAD_MIN_KM,
   type DropEvidence, type BurnBand, type DrainCause,
 } from '../../src/modules/fuel/fuel-theft-classifier.js'
 import { probeSwings, probeOverreads, MAX_FILL_RATIO, type ProbeProfile } from '../../src/modules/fuel/fuel-adjudication.js'
@@ -156,11 +156,20 @@ describe('road vehicles — distance explains part of the drop', () => {
     expect(classifyDrain(drove(22, 60), ROAD, STEADY).cause).toBe('ENGINE_BURN')
   })
 
-  it('treats a stationary drop as wholly unexplained', () => {
-    // The operator's idling case: nothing driven, so nothing explained.
-    const j = classifyDrain(drove(25.6, 0), ROAD, STEADY)
-    expect(j.cause).toBe('UNEXPLAINED_BURN')
-    expect(j.reason).toBe('drop-while-stationary')
+  it('no longer calls a stationary drop wholly unexplained', () => {
+    // CHANGED 2026-08-26. This used to be the operator's idling case: nothing
+    // driven, so nothing explained, announce. Measured, that rule fired on four
+    // fifths of all road drains — 0.000 km is the p10 THROUGH p80 of the
+    // population — so it was not selecting idling theft, it was selecting
+    // "parked", which is what nearly every drain is.
+    //
+    // A stationary truck now takes the hours denominator instead, per the
+    // operator's own framing: trucks measure by distance on the open road and
+    // switch to per-hour when idling. This fixture has no engine time and no
+    // ignition evidence, so the honest answer is that we cannot say.
+    const j = classifyDrain(drove(25.6, 0), ROAD, STEADY, 'DISTANCE')
+    expect(j.reason).not.toBe('drop-while-stationary')
+    expect(j.cause).toBe('INDETERMINATE')
   })
 
   it('ignores drops below the operator floor', () => {
@@ -370,7 +379,11 @@ describe('what reaches an operator', () => {
       moved: km > 0, stepFraction: 0.2, kT: 0.1, decayResidual: 0.02, samples: 40, distanceKm: km,
     })
     expect(announces(classifyDrain(ev(95, 50), road, STEADY))).toBe(true)   // beyond the distance
-    expect(announces(classifyDrain(ev(25.6, 0), road, STEADY))).toBe(true)  // stationary
+    // CHANGED 2026-08-26: a stationary drop is no longer announced on the
+    // distance rule. It has no distance to be unexplained by, and saying so was
+    // 7.7 alerts a day against a fleet total of ~5. It falls to the burn rule,
+    // which this fixture gives no engine time to answer with.
+    expect(announces(classifyDrain(ev(25.6, 0), road, STEADY))).toBe(false) // stationary
     expect(announces(classifyDrain(ev(22, 60), road, STEADY))).toBe(false)  // explained
   })
 
@@ -559,5 +572,51 @@ describe('the consumption basis — which denominator judges this machine', () =
 
   it('defaults to distance when nothing is known', () => {
     expect(resolveBasis('SUKARI', { plate: 'KTCC 999Z' })).toBe('DISTANCE')
+  })
+})
+
+describe('a truck switches denominator with what it is DOING', () => {
+  // Operator, 2026-08-26: "Commercial trucks measure fuel consumption by
+  // distance when traveling on the open road, but switch to time (per hour)
+  // when idling or operating specialized equipment."
+  it('judges a travelling road vehicle on distance', () => {
+    expect(applicableBasis('DISTANCE', 12)).toBe('DISTANCE')
+    expect(applicableBasis('DISTANCE', OPEN_ROAD_MIN_KM)).toBe('DISTANCE')
+  })
+
+  it('judges the same vehicle on hours once it stops', () => {
+    // 4/5 of distance-basis drains carry 0.000 km. Judged on distance each one
+    // scores ~100% unexplained by construction; judged on hours it is asked the
+    // question that fits — is this more than it burns while idling.
+    expect(applicableBasis('DISTANCE', 0)).toBe('HOURS')
+    expect(applicableBasis('DISTANCE', 0.014)).toBe('HOURS')
+  })
+
+  it('treats no speed reading as unknown, not as standing still', () => {
+    // Null is not zero. Asserting a distance of 0 would call the whole drop
+    // unexplained on the strength of having measured nothing.
+    expect(applicableBasis('DISTANCE', null)).toBe('HOURS')
+  })
+
+  it('never switches an hours machine, however far it tracks', () => {
+    // An excavator that tracks 2 km across a site has not become a haulier.
+    expect(applicableBasis('HOURS', 2)).toBe('HOURS')
+    expect(applicableBasis('HOURS', 50)).toBe('HOURS')
+  })
+
+  it('a stationary road drain reaches the burn rule, not the distance rule', () => {
+    const band: BurnBand = { lowLph: 5, highLph: 10, source: 'vehicle', kmPerL: 3 }
+    // 40 L over 2 engine-hours = 20 L/h, twice the band's upper edge, no travel.
+    const ev: DropEvidence = { ...running(20, 2), distanceKm: 0 }
+    const j = classifyDrain(ev, band, STEADY, 'DISTANCE')
+    expect(j.reason).not.toBe('drop-while-stationary')
+    expect(j.reason).toMatch(/^burn-/)
+  })
+
+  it('...and a travelling one still reaches the distance rule', () => {
+    const band: BurnBand = { lowLph: 5, highLph: 10, source: 'vehicle', kmPerL: 3 }
+    const ev: DropEvidence = { ...running(20, 2), distanceKm: 12 }
+    const j = classifyDrain(ev, band, STEADY, 'DISTANCE')
+    expect(j.reason).toBe('drop-exceeds-distance')
   })
 })
