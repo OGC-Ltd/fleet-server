@@ -652,11 +652,11 @@ describe('which causes mean the fuel never left', () => {
     expect([...CAUSE_NO_FUEL_LEFT].sort()).toEqual(['SETTLING', 'SLOSH'])
   })
 
-  it('does NOT exclude engine burn — that fuel really did leave', () => {
-    // 17,104 L over 30 days. The engine burned it doing its job, so it is not a
-    // reading artifact and this list must not pretend it is. Whether ordinary
-    // consumption belongs in a figure LABELLED "lost" is a separate question,
-    // and a bigger one than the 3,571 L of slosh this list removes.
+  it('does NOT exclude engine burn — operator, 2026-08-28', () => {
+    // "Do not remove engine burn, it is part of fuel drain." The figure counts
+    // fuel that LEFT THE TANK, not fuel that was taken, and the engine burning
+    // it is still it leaving. 17,104 L over 30 days — five times the slosh this
+    // list does remove, which is why it was asked rather than assumed.
     expect(CAUSE_NO_FUEL_LEFT).not.toContain('ENGINE_BURN')
   })
 
