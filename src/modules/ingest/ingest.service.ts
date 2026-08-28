@@ -103,6 +103,18 @@ export async function processTelemetry(
       fuelLevelMl:   dto.fuelLevelMl,
       fuelUsedMl:    dto.fuelUsedMl,
       cargoWeightKg: dto.cargoWeightKg,
+
+      // Written in the SAME change that adds the columns. `ignition_known` and
+      // `ignition_source` were added, backfilled, and left unwired for seven
+      // days — see the note above — and the fix for that is not to repeat it.
+      //
+      // `?? null` rather than leaving them undefined: an absent key would let
+      // Prisma omit the column on insert, which is indistinguishable from a
+      // write that failed. Null says the unit reported nothing.
+      cameraFitted:     dto.cameraFitted ?? null,
+      cameraStreamUrl:  dto.cameraStreamUrl ?? null,
+      cameraRecording:  dto.cameraRecording ?? null,
+      cameraSignalLost: dto.cameraSignalLost ?? null,
     },
     update: {},   // on conflict do nothing — first write wins
     select: { id: true, vehicleId: true, capturedAt: true, speedKmh: true,

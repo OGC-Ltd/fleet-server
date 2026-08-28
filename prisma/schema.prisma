@@ -1433,6 +1433,29 @@ model VehicleTelemetry {
   // Cargo weight (load-cell sensor — NULL if vehicle not fitted)
   cargoWeightKg Float? @map("cargo_weight_kg")
 
+  /// ── On-board camera / MDVR ───────────────────────────────────────────────
+  /// NULL on essentially every row, and that is expected rather than a gap:
+  /// one unit of 1,496 in this Wialon account reports a recorder at all
+  /// (`VS Menengai CAMERA - KCS 078M`), measured 2026-08-29.
+  ///
+  /// Per-fix rather than on Vehicle because all four change over time — a
+  /// recorder can lose signal, fill its disk, or have its stream expire — and
+  /// the fleet snapshot already reads the latest fix for exactly this kind of
+  /// state (see the LATERAL join in telemetry.repository).
+  ///
+  /// True when the unit's own diagnostics say a recorder is fitted.
+  cameraFitted     Boolean? @map("camera_fitted")
+  /// Browser-openable stream URL, when one has arrived AND parsed as http(s).
+  /// Never a guess: an rtsp:// or opaque value is dropped upstream rather than
+  /// written here, so a non-null value is always something a client can open.
+  /// See readCamera in providers/wialon/wialon.sensors.
+  cameraStreamUrl  String?  @map("camera_stream_url")
+  /// The recorder was recording at this fix.
+  cameraRecording  Boolean? @map("camera_recording")
+  /// A channel had lost video signal — the difference between "no feed because
+  /// nothing is fitted" and "no feed because the lens is dead".
+  cameraSignalLost Boolean? @map("camera_signal_lost")
+
   vehicle Vehicle  @relation(fields: [vehicleId], references: [id])
 
   @@unique([deviceId, capturedAt])    // idempotent ingest
