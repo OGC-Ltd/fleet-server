@@ -94,5 +94,35 @@ export function priceFuelConsumption(data: FuelConsumption, { pricePerLitre, cur
       fillings:          v.fillings,
       thefts:            v.thefts,
     })),
+
+    /**
+     * The individual drains behind `totals.litresLost`, newest first.
+     *
+     * Priced here like every other level, so the report's table and the
+     * "Litres lost" figure above it are the same litres at the same rate.
+     *
+     * This function REBUILDS the payload field by field rather than spreading
+     * the aggregate, which is deliberate — a client only ever sees what is
+     * named here — but it means a new field on the repository reaches nobody
+     * until it is named here too. `drains` was added upstream and silently
+     * dropped at this line, and nothing failed: the endpoint kept returning a
+     * valid payload with the key simply absent, and the report rendered no
+     * table rather than an error.
+     */
+    drains: data.drains.map(d => ({
+      id:                d.id,
+      vehicleId:         d.vehicleId,
+      registrationPlate: d.registrationPlate,
+      name:              d.name,
+      beganAt:           d.beganAt,
+      litres:            litres(d.stolenMl),
+      cost:              cost(d.stolenMl, pricePerLitre),
+      location:          d.location,
+      cause:             d.cause,
+      causeReason:       d.causeReason,
+      verdict:           d.verdict,
+      // Null on rows judged before 2026-08-28 — never back-computed.
+      fallSeconds:       d.fallSeconds,
+    })),
   }
 }
