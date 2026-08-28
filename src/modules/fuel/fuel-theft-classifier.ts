@@ -110,11 +110,12 @@ export type DrainCause =
  * "litres lost" figure of 217,608 L. Not the largest error in that number, but
  * the one that is provably not fuel at all.
  *
- * `ENGINE_BURN` is deliberately NOT here. That fuel did leave — the engine
- * burned it doing its job — so excluding it from a fuel-movement figure would
- * be a different claim from the one this list makes. Whether ordinary
- * consumption belongs in something LABELLED "lost" is a separate question, and
- * a larger one: it is 17,104 L over the same window.
+ * `ENGINE_BURN` is NOT here, by the operator's decision on 2026-08-28: engine
+ * burn is part of the fuel drain. That fuel did leave the tank — the engine
+ * burned it doing its job — and this figure counts fuel that left, not fuel
+ * that was taken. It is 17,104 L over the same window, five times the slosh
+ * this list removes, so the question was put and answered rather than settled
+ * by widening a filter.
  *
  * And `INDETERMINATE` is not here either, nor an unjudged null, for the reason
  * `NO_FUEL_LEFT` gives: we remove what we can DISPROVE, not what we merely
