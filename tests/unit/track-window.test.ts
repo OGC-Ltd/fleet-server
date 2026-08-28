@@ -38,6 +38,29 @@ const q = (over: Partial<TrackQuery> = {}): TrackQuery =>
 
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000)
 
+/**
+ * A window `h` hours wide ending now, from ONE read of the clock.
+ *
+ * The pattern this replaces — `{ from: hoursAgo(h), to: new Date() }` — reads
+ * the clock TWICE, so the window is h hours plus however long those two calls
+ * were apart: normally zero, and occasionally a millisecond when the process is
+ * descheduled between them.
+ *
+ * Harmless well inside the limits, and fatal on exactly one: the 30-day case
+ * below asks for the MAXIMUM, the guard rejects strictly above it, and a single
+ * millisecond turns a legal window into `Track window may not exceed 30 days
+ * (asked for 30)`. It failed roughly one run in twenty, always that one test,
+ * and only under load — which is what made it look like a flake in the harness
+ * rather than a bug in the fixture.
+ *
+ * The guard is right: exactly 30 days is allowed. The fixture was asking for
+ * slightly more than it claimed.
+ */
+const windowOf = (h: number) => {
+  const to = new Date()
+  return { from: new Date(to.getTime() - h * 3_600_000), to }
+}
+
 const FULL_TRACK = {
   resolution: 'full' as const,
   sampleBucketSec: null, samples: null,
@@ -53,7 +76,7 @@ beforeEach(() => {
 
 describe('track window governance', () => {
   it('reads every fix for a short window', async () => {
-    const res = await getVehicleTrack(VEH, ORG, q({ from: hoursAgo(12), to: new Date() }))
+    const res = await getVehicleTrack(VEH, ORG, q(windowOf(12)))
 
     expect(res.resolution).toBe('full')
     expect(findTrack).toHaveBeenCalled()
@@ -71,7 +94,7 @@ describe('track window governance', () => {
   it('switches to sampling past the full-fidelity ceiling', async () => {
     vi.mocked(findSampledFixes).mockResolvedValue({ rows: [], bucketSec: 1728 })
 
-    const res = await getVehicleTrack(VEH, ORG, q({ from: hoursAgo(24 * 30), to: new Date() }))
+    const res = await getVehicleTrack(VEH, ORG, q(windowOf(24 * 30)))
 
     expect(findSampledFixes).toHaveBeenCalled()
     expect(findTrack).not.toHaveBeenCalled()
@@ -86,7 +109,7 @@ describe('track window governance', () => {
       bucketSec: 600,
     })
 
-    const res = await getVehicleTrack(VEH, ORG, q({ from: hoursAgo(24 * 7), to: new Date() }))
+    const res = await getVehicleTrack(VEH, ORG, q(windowOf(24 * 7)))
 
     // A client plotting `fixes` as "pings in this window" must not be handed a
     // number that means something else.
@@ -97,7 +120,7 @@ describe('track window governance', () => {
 
   it('refuses a window longer than the maximum instead of clamping it', async () => {
     await expect(
-      getVehicleTrack(VEH, ORG, q({ from: hoursAgo(24 * 45), to: new Date() })),
+      getVehicleTrack(VEH, ORG, q(windowOf(24 * 45))),
     ).rejects.toThrow(/may not exceed 30 days/)
 
     expect(findSampledFixes).not.toHaveBeenCalled()
@@ -113,7 +136,7 @@ describe('track window governance', () => {
     vi.mocked(findSampledFixes).mockResolvedValue(null)
 
     await expect(
-      getVehicleTrack(VEH, ORG, q({ from: hoursAgo(24 * 20), to: new Date() })),
+      getVehicleTrack(VEH, ORG, q(windowOf(24 * 20))),
     ).rejects.toMatchObject({ statusCode: 503 })
   })
 
@@ -121,7 +144,7 @@ describe('track window governance', () => {
     vi.mocked(vehicleExistsInOrg).mockResolvedValue(false)
 
     await expect(
-      getVehicleTrack(VEH, ORG, q({ from: hoursAgo(24 * 10), to: new Date() })),
+      getVehicleTrack(VEH, ORG, q(windowOf(24 * 10))),
     ).rejects.toMatchObject({ statusCode: 404 })
   })
 
@@ -138,7 +161,7 @@ describe('track window governance', () => {
       bucketSec: 600,
     })
 
-    const res = await getVehicleTrack(VEH, ORG, q({ from: hoursAgo(24 * 5), to: new Date() }))
+    const res = await getVehicleTrack(VEH, ORG, q(windowOf(24 * 5)))
 
     expect(res.points).toHaveLength(2)
     expect(res.points[1]).toMatchObject({ t: 9000, gapBefore: true })
@@ -147,7 +170,7 @@ describe('track window governance', () => {
 
 describe('zone timeline', () => {
   it('is not fetched unless asked for, and reads as null rather than empty', async () => {
-    const res = await getVehicleTrack(VEH, ORG, q({ from: hoursAgo(12), to: new Date() }))
+    const res = await getVehicleTrack(VEH, ORG, q(windowOf(12)))
 
     expect(findZoneTimeline).not.toHaveBeenCalled()
     // Not `{ visits: [] }` — "nobody asked" and "visited nowhere" are different
@@ -166,7 +189,7 @@ describe('zone timeline', () => {
       ],
     })
 
-    const res = await getVehicleTrack(VEH, ORG, q({ from: hoursAgo(12), to: new Date(), zones: true }))
+    const res = await getVehicleTrack(VEH, ORG, q({ ...windowOf(12), zones: true }))
 
     expect(res.zones?.visits).toEqual([
       { zoneId: 'z1', name: 'FARM #215', type: 'POLYGON', enforced: true,
@@ -188,7 +211,7 @@ describe('zone timeline', () => {
       ],
     })
 
-    const res = await getVehicleTrack(VEH, ORG, q({ from: hoursAgo(12), to: new Date(), zones: true }))
+    const res = await getVehicleTrack(VEH, ORG, q({ ...windowOf(12), zones: true }))
 
     expect(res.zones?.visits?.[0]).toMatchObject({ name: 'Wet land2', enforced: false })
   })
@@ -196,7 +219,7 @@ describe('zone timeline', () => {
   it('still returns the track when the timeline times out', async () => {
     vi.mocked(findZoneTimeline).mockResolvedValue(null)
 
-    const res = await getVehicleTrack(VEH, ORG, q({ from: hoursAgo(12), to: new Date(), zones: true }))
+    const res = await getVehicleTrack(VEH, ORG, q({ ...windowOf(12), zones: true }))
 
     // The line is the thing the caller came for; the enrichment failing must
     // not take it down with it — but it must say so rather than look empty.

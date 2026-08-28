@@ -16,6 +16,7 @@ import {
   ANNOUNCE_MULTIPLE, MAX_PLAUSIBLE_REMOVAL_LPH, SIPHON_MIN_DROP_ML,
   DERIVED_BAND_SPREAD, MACHINE_CLASS, CLASS_BANDS, CLASS_CEILING_LPH, machinePrefix,
   resolveClass, CLASS_BY_TANK, TYPE_CLASS, resolveBasis, applicableBasis, OPEN_ROAD_MIN_KM,
+  CAUSE_NO_FUEL_LEFT,
   type DropEvidence, type BurnBand, type DrainCause,
 } from '../../src/modules/fuel/fuel-theft-classifier.js'
 import { probeSwings, probeOverreads, MAX_FILL_RATIO, type ProbeProfile } from '../../src/modules/fuel/fuel-adjudication.js'
@@ -640,5 +641,39 @@ describe('a truck switches denominator with what it is DOING', () => {
     const ev: DropEvidence = { ...running(20, 2), distanceKm: 12 }
     const j = classifyDrain(ev, band, STEADY, 'DISTANCE')
     expect(j.reason).toBe('drop-exceeds-distance')
+  })
+})
+
+describe('which causes mean the fuel never left', () => {
+  // The verdict answers "was this a real drop"; the CAUSE answers "was it fuel".
+  // A row can be judged DRAIN — the level fell and stayed down — and still be a
+  // reading rather than a loss once the shape of the fall is examined.
+  it('excludes the two where the tank is unchanged afterwards', () => {
+    expect([...CAUSE_NO_FUEL_LEFT].sort()).toEqual(['SETTLING', 'SLOSH'])
+  })
+
+  it('does NOT exclude engine burn — operator, 2026-08-28', () => {
+    // "Do not remove engine burn, it is part of fuel drain." The figure counts
+    // fuel that LEFT THE TANK, not fuel that was taken, and the engine burning
+    // it is still it leaving. 17,104 L over 30 days — five times the slosh this
+    // list does remove, which is why it was asked rather than assumed.
+    expect(CAUSE_NO_FUEL_LEFT).not.toContain('ENGINE_BURN')
+  })
+
+  it('does NOT exclude what it merely could not explain', () => {
+    // The governing rule of the whole module: remove what you can DISPROVE, not
+    // what you doubt. Together these are 88% of the litres, and dropping them
+    // because nobody could attribute them would be inventing an answer.
+    expect(CAUSE_NO_FUEL_LEFT).not.toContain('INDETERMINATE')
+    expect(CAUSE_NO_FUEL_LEFT).not.toContain('SIPHON')
+    expect(CAUSE_NO_FUEL_LEFT).not.toContain('UNEXPLAINED_BURN')
+    expect(CAUSE_NO_FUEL_LEFT).not.toContain('HIGH_BURN')
+  })
+
+  it('names causes the classifier can actually produce', () => {
+    // A typo here removes nothing and reports success. Both must be reachable
+    // outputs of classifyDrain, not strings that merely look like causes.
+    expect(causeOf(parked(40, 5))).toBe('SLOSH')                                  // 480 L/h
+    expect(causeOf(parked(40, 60, { kT: 3, decayResidual: 0.01 }))).toBe('SETTLING')
   })
 })

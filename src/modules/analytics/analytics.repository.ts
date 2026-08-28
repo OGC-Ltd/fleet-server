@@ -8,7 +8,7 @@ import { NO_FUEL_LEFT, NO_FUEL_ARRIVED } from '../fuel/fuel-adjudication.js'
 // The one implementation of "was an operator actually told about this". Read
 // here rather than re-derived on the client: a second copy of that rule would
 // drift from the alerts it is supposed to describe.
-import { announces } from '../fuel/fuel-theft-classifier.js'
+import { announces, CAUSE_NO_FUEL_LEFT } from '../fuel/fuel-theft-classifier.js'
 
 // `NO_FUEL_LEFT` (drains) and `NO_FUEL_ARRIVED` (fillings) are imported rather
 // than declared here. They interpret a `Verdict`, so they live beside it in
@@ -277,6 +277,20 @@ export async function fuelConsumption(
         ...vehicleWhere,
         beganAt: { gte: from, lte: to },
         verdict: { notIn: NO_FUEL_LEFT },
+        // ...and, one level down, the falls whose SHAPE says no fuel left even
+        // though the verdict is DRAIN — slosh and settling. See
+        // CAUSE_NO_FUEL_LEFT.
+        //
+        // Written as an explicit OR because `notIn` compiles to SQL `NOT IN`,
+        // and `NULL NOT IN (...)` is NULL, not true — so the plain form would
+        // have silently dropped every UNJUDGED drain. That is 1,585 rows and
+        // 119,731 L, 55% of the figure, removed by a filter meant to take out
+        // 54 rows. Absent a cause is not the same as having a disqualifying
+        // one, and the query has to say so.
+        OR: [
+          { drainCause: null },
+          { drainCause: { notIn: [...CAUSE_NO_FUEL_LEFT] } },
+        ],
       },
       // Wider than the totals need, because the same rows are now returned
       // individually as `drains` — see the note there on why this is the query
