@@ -57,10 +57,18 @@ describe('asOfFromQuery', () => {
     const y = eat.getUTCFullYear()
     const m = String(eat.getUTCMonth() + 1).padStart(2, '0')
     const d = String(eat.getUTCDate()).padStart(2, '0')
-    const asOf = asOfFromQuery(`${y}-${m}-${d}`)
+    const asOf  = asOfFromQuery(`${y}-${m}-${d}`)
+    const after = Date.now()
+
+    // If the fleet day turned over between reading the clock and asking, the
+    // date built above is YESTERDAY's, and the answer is correctly that day's
+    // end — which is before `before`. Asserting the live-column property then
+    // would fail on a correct result, once per day, at EAT midnight.
+    if (fleetDayKey(new Date(before)).getTime() !== fleetDayKey(new Date(after)).getTime()) return
+
     // Pinning today to its midnight would freeze the live column.
     expect(asOf.getTime()).toBeGreaterThanOrEqual(before)
-    expect(asOf.getTime()).toBeLessThanOrEqual(Date.now())
+    expect(asOf.getTime()).toBeLessThanOrEqual(after)
   })
 
   it('files a fleet day under the date a person would write on the sheet', () => {
@@ -107,9 +115,19 @@ describe('asOfFromQuery', () => {
 
   it('falls back to now on a missing or malformed date', () => {
     // This drives a table; a bad query string must not blank it.
+    //
+    // Bounded by instants taken either side of the call rather than by a
+    // tolerance against `Date.now()`. The tolerance version — within 5 s — was
+    // not testing anything the bracket does not, and it could FAIL on a busy
+    // machine: the assertion is only true while the process is not descheduled
+    // for longer than the window, so a parallel build could break a test about
+    // parsing a query string. A bracket is exact and cannot be starved.
     for (const bad of [undefined, null, '', 'yesterday', '2026-8-13', 42]) {
-      const asOf = asOfFromQuery(bad)
-      expect(Math.abs(asOf.getTime() - Date.now())).toBeLessThan(5_000)
+      const before = Date.now()
+      const asOf   = asOfFromQuery(bad)
+      const after  = Date.now()
+      expect(asOf.getTime()).toBeGreaterThanOrEqual(before)
+      expect(asOf.getTime()).toBeLessThanOrEqual(after)
     }
   })
 })
