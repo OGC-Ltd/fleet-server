@@ -33,6 +33,7 @@ import { prisma } from './prisma.js'
 import { logger } from './logger.js'
 import { getOrCreatePeriodFor } from './reporting-period.js'
 import { haversineM } from './dispatch-trip.js'
+import { PLAUSIBLE_KMH, JITTER_FLOOR_M as SHARED_JITTER_FLOOR_M } from './fix-plausibility.js'
 
 /**
  * Consecutive fixes closer than this are treated as the vehicle standing still.
@@ -42,7 +43,10 @@ import { haversineM } from './dispatch-trip.js'
  * never driven. 20 m is comfortably above the jitter and well below the distance
  * covered between two fixes at any speed worth recording.
  */
-const JITTER_FLOOR_M = 20
+// Was defined here at 20 m; now the fleet's single floor, shared with
+// coveredSince and the daily trend so "has not moved" means one thing.
+// Re-exported under the old name so this file reads unchanged below.
+const JITTER_FLOOR_M = SHARED_JITTER_FLOOR_M
 
 /**
  * Consecutive fixes further apart than this are a coverage gap, not a leg.
@@ -91,15 +95,36 @@ export function movingAvgSpeedKmh(fixes: readonly Fix[]): number | null {
   return Math.round((moving.reduce((a, b) => a + b, 0) / moving.length) * 10) / 10
 }
 
-/** Distance actually driven across a run of fixes, in km. */
+/**
+ * Distance actually driven across a run of fixes, in km.
+ *
+ * Three tests, and the third was added on 2026-08-27 because the first two do
+ * not catch a teleport. `TELEPORT_CEILING_M` is flat, so a 2 km jump between
+ * fixes 30 s apart — 240 km/h — passes it, and 34.76% of SUKARI's summed
+ * distance came from hops implying over 120 km/h. The implied SPEED is the test
+ * that scales with the gap, which is what a flat ceiling cannot do.
+ *
+ * The ceiling stays alongside it rather than being replaced: it answers a
+ * different question. A vehicle that vanishes into a dead zone for an hour and
+ * reappears 40 km away has an implausible-speed reading of only 40 km/h, which
+ * this test passes and the ceiling correctly rejects — the straight line
+ * between the two is not road it drove.
+ */
 export function measureKm(fixes: readonly Fix[]): number {
   let m = 0
   for (let i = 1; i < fixes.length; i++) {
+    const prev = fixes[i - 1]!, cur = fixes[i]!
     const step = haversineM(
-      { lat: fixes[i - 1]!.lat, lng: fixes[i - 1]!.lng },
-      { lat: fixes[i]!.lat,     lng: fixes[i]!.lng },
+      { lat: prev.lat, lng: prev.lng },
+      { lat: cur.lat,  lng: cur.lng },
     )
     if (step < JITTER_FLOOR_M || step > TELEPORT_CEILING_M) continue
+    // Zero or reversed gaps imply infinite speed and are dropped with the rest.
+    // Devices buffer through coverage gaps and dump a backlog out of order, so
+    // this is not rare, and charging a backlog's whole distance to one instant
+    // is exactly the inflation being removed.
+    const dtS = (cur.capturedAt.getTime() - prev.capturedAt.getTime()) / 1000
+    if (dtS <= 0 || (step / dtS) * 3.6 > PLAUSIBLE_KMH) continue
     m += step
   }
   return Math.round(m) / 1000

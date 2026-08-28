@@ -72,7 +72,7 @@ import { measuredBurnRates } from '../fuel/fuel-burn-rate.service.js'
 // comment explains why: a hand-copied twin bound its window differently and the
 // two figures diverged by the session offset.
 import { coveredSince } from '../dispatches/dispatch.repository.js'
-import { machinePrefix } from '../fuel/fuel-theft-classifier.js'
+import { machinePrefix, resolveBasis, type MachineIdentity } from '../fuel/fuel-theft-classifier.js'
 import { getProbeReport } from '../fuel/probe-report.service.js'
 import { vehicleFiguresForDay, IDLE_SPEED_KMH } from './vehicle-daily-stats.service.js'
 
@@ -99,14 +99,44 @@ export const MAX_GAP_SECONDS = 900
 export type UnitState = 'WORKING' | 'IDLING' | 'STATIONARY' | 'PARKED' | 'OFFLINE'
 
 /**
- * Categories whose work IS travel, so engine-on-and-stationary is genuinely
- * idle rather than the job.
+ * Does this machine's work CONSIST of travelling?
  *
- * Excavators, dozers, crawlers, wheel loaders and graders are absent on
- * purpose: they work in place. Measured over a week, EX covers 0.55 km per
- * engine hour against LMV's 29 — the gap is the whole distinction.
+ * Where it does, engine-on-and-stationary is genuinely idle and worth a figure.
+ * Where it does not — an excavator digging, a cane tractor working a row — the
+ * same reading IS the job, and calling it idle reads a whole category as waste.
+ *
+ * Delegates to `resolveBasis`, the classifier's answer to that same question in
+ * those same words: "things whose WORK is travelling take distance". This was a
+ * second, independent list of plate prefixes until 2026-08-28, and the two had
+ * drifted in both directions at once. Km per engine hour over 30 days:
+ *
+ *   KASULU  BUS 29.1 · LMV 26.2 · HFT 24.1 · FTT 10.3 · FT 10.0 · DB 8.2
+ *           MTR 5.9 · GR 4.9 · CTR 4.4 · BH 2.6 · WL 2.5 · DZ 1.5 · EX 0.5
+ *
+ * - `MTR` was IN the list and is a TRACTOR. Twenty machines that work a field
+ *   standing still were reported Idling for every hour of it — precisely the
+ *   reading the STATIONARY state exists to prevent, made one level above it.
+ * - `HFT` — at 24.1 the most road-going code in the fleet after the buses — was
+ *   OUT, along with `DB`, `WB` and `SPY`. Real lorries and trucks carried no
+ *   idle hours and no litres per kilometre at all.
+ * - `TRK` matched no active plate in either organisation.
+ * - Every SUKARI road vehicle was out of it. SUKARI plates are ordinary
+ *   registrations — `KDL`, `KCX` — with no equipment code in them, so a list of
+ *   KASULU prefixes could not match one by construction: 110 trucks and company
+ *   vehicles, that organisation's entire road fleet, silently null.
+ *
+ * The prefix is not reliably the machine in the first place. `MUFINDI: OPTIM -
+ * CM 01` yields `OPTIM`, a SITE, and those 24 units split 5 distance / 19 hours
+ * once their stated type is read instead of their plate.
+ *
+ * `CTR` stays on hours, which is the question this was opened to settle. At 4.4
+ * km per engine hour a cane tractor sits between the graders and the backhoes,
+ * nowhere near the buses, and `resolveBasis` already carries the long-form
+ * reasoning — including the day tractors were moved to distance and moved back.
  */
-export const TRAVEL_CATEGORIES = new Set(['LMV', 'FT', 'FTT', 'MTR', 'BUS', 'TRK'])
+function travelsForWork(orgCode: string, m: MachineIdentity): boolean {
+  return resolveBasis(orgCode, m) === 'DISTANCE'
+}
 
 export interface FleetStateRow {
   vehicleId: string
@@ -125,8 +155,9 @@ export interface FleetStateRow {
    * unit; it is only IDLE where travel is the work — see the header.
    */
   stationaryHoursToday: number
-  /** The same, only where it means idle. Null for plant, whose work is
-   *  stationary and which would otherwise read as 95% idle. */
+  /** The same, only where it means idle — see `travelsForWork`. Null for plant
+   *  and tractors, whose work is stationary and which would otherwise read as
+   *  95% idle. */
   idleHoursToday: number | null
   idleHoursWeekAvg: number | null
   /** Ground covered today, and the mean per observed day. */
@@ -178,7 +209,7 @@ export interface FleetStateRow {
   measuredHiLPerHour: number | null
   measuredDays: number | null
   /**
-   * Litres per kilometre — TRAVEL CATEGORIES ONLY, null on plant.
+   * Litres per kilometre — machines whose work is travel only, null on plant.
    *
    * Position freezes at speed 0 on this telemetry, so a working excavator
    * reports about zero kilometres while burning eleven litres an hour. The
@@ -534,9 +565,15 @@ export async function fleetState(
   const probe = await getProbeReport(orgId).catch(() => [])
   const healthByVehicle = new Map(probe.map(r => [r.vehicleId, healthOf(r)]))
 
+  // Type and tank come along because the basis is resolved per MACHINE now, not
+  // per plate prefix — see `travelsForWork`. Both are already on the row; the
+  // org code is the key `MACHINE_CLASS` is written in.
   const vehicles = await prisma.vehicle.findMany({
     where:  { organisationId: orgId, isActive: true },
-    select: { id: true, registrationPlate: true },
+    select: {
+      id: true, registrationPlate: true, vehicleType: true, tankCapacityLitres: true,
+      organisation: { select: { code: true } },
+    },
   })
 
   // Today's ground covered, from the one shared implementation.
@@ -617,8 +654,14 @@ export async function fleetState(
     const r = rollupByVehicle.get(v.id)
     const i = idleByVehicle.get(v.id)
 
+    // The prefix still LABELS the row — it is the operator's own vocabulary and
+    // what the category breakdown groups by. It no longer DECIDES anything.
     const category = machinePrefix(v.registrationPlate) ?? 'OTHER'
-    const travels  = TRAVEL_CATEGORIES.has(category)
+    const travels  = travelsForWork(v.organisation?.code ?? '', {
+      plate:              v.registrationPlate,
+      vehicleType:        v.vehicleType,
+      tankCapacityLitres: v.tankCapacityLitres,
+    })
 
     /**
      * Engine on and not moving is IDLING on a lorry and STATIONARY on plant.
@@ -628,6 +671,11 @@ export async function fleetState(
      * what somebody should be sent to stop. An excavator sitting with its
      * engine running is DIGGING — it works from a fixed position and covers
      * 0.55 km per engine hour against a road vehicle's 29.
+     *
+     * Which side a machine falls on is `travelsForWork`, not its plate. Tractors
+     * are on the excavator's side: a cane tractor working a row is doing its job
+     * standing still, and twenty of KASULU's read Idling for every hour of it
+     * while the prefix list decided this.
      *
      * Calling both of them idle was reading a whole category as waste:
      * KASULU's excavators show 6 stationary hours in a working day and every
@@ -726,15 +774,29 @@ export async function fleetState(
   const counts: Record<UnitState, number> = {
     WORKING: 0, IDLING: 0, STATIONARY: 0, PARKED: 0, OFFLINE: 0,
   }
-  const cats = new Map<string, { category: string; working: number; idling: number; parked: number; offline: number }>()
+  // STATIONARY is its own column here, as it already is in `counts`.
+  //
+  // It used to be folded into `idling`, which undid at category level exactly
+  // what the row-level state machine was changed to fix: a digging excavator is
+  // STATIONARY, not idling, because its work does not involve moving. Rolling
+  // the two together told an operator that every machine working in place was
+  // burning fuel for nothing — the reading the split exists to prevent — and it
+  // disagreed with the top-level counts on the same response.
+  const cats = new Map<string, {
+    category: string; working: number; idling: number
+    stationary: number; parked: number; offline: number
+  }>()
   for (const u of units) {
     counts[u.state]++
     if (!cats.has(u.category)) {
-      cats.set(u.category, { category: u.category, working: 0, idling: 0, parked: 0, offline: 0 })
+      cats.set(u.category, {
+        category: u.category, working: 0, idling: 0, stationary: 0, parked: 0, offline: 0,
+      })
     }
     const c = cats.get(u.category)!
     if (u.state === 'WORKING') c.working++
-    else if (u.state === 'IDLING' || u.state === 'STATIONARY') c.idling++
+    else if (u.state === 'IDLING') c.idling++
+    else if (u.state === 'STATIONARY') c.stationary++
     else if (u.state === 'PARKED') c.parked++
     else c.offline++
   }
@@ -744,7 +806,9 @@ export async function fleetState(
     monitoring,
     // Most units first — a category of two should not head the breakdown.
     byCategory: [...cats.values()]
-      .sort((a, b) => (b.working + b.idling + b.parked + b.offline) - (a.working + a.idling + a.parked + a.offline)),
+      .sort((a, b) =>
+        (b.working + b.idling + b.stationary + b.parked + b.offline) -
+        (a.working + a.idling + a.stationary + a.parked + a.offline)),
     units: units.sort((a, b) => b.hoursToday - a.hoursToday),
   }
 }

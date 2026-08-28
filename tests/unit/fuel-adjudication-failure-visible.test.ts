@@ -17,7 +17,8 @@ import type { FuelSyncResult } from '../../src/lib/queues/fuel-events.js'
 
 const clean = (): FuelSyncResult => ({
   candidates: 0, fillings: 0, thefts: 0, published: 0, deduped: 0, corrected: 0,
-  settled: 0, removed: 0, adjudicated: 0, redistributed: 0,
+  settled: 0, removed: 0, fillingsJudged: 0, fillingsPhantom: 0,
+  adjudicated: 0, redistributed: 0,
   adjudicationFailed: false, adjudicationFailStreak: 0, failed: 0, ms: 12,
 })
 

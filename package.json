@@ -17,7 +17,7 @@
   "scripts": {
     "dev": "cross-env DOTENV_CONFIG_PATH=.env.example tsx watch src/index.ts",
     "start": "node dist/src/index.js",
-    "build": "tsc",
+    "build": "prisma generate --config prisma.config.ts && tsc",
     "generate": "prisma generate --config prisma.config.ts",
     "migrate": "prisma migrate deploy --config prisma.config.ts",
     "postinstall": "prisma generate --config prisma.config.ts",
@@ -49,7 +49,8 @@
     "build:trips": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/build-trips.ts",
     "fuel:adjudicate": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/adjudicate-fuel.ts",
     "sim:fuel": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/simulate-fuel-theft.ts",
-    "fuel:health": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/fuel-health.ts"
+    "fuel:health": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/fuel-health.ts",
+    "backfill:ignition": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/backfill-telemetry-ignition.ts"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",

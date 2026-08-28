@@ -79,6 +79,11 @@ export function normaliseCtSnapshot(
     accuracyM:          raw.gps_accuracy_m,
     speedKmh:           raw.speed_kmh,
     engineOn:           raw.engine_on === 1,
+    // `engine_on` is a channel this provider reports directly, so the state is
+    // measured rather than inferred from speed. No engine-hours counter is
+    // exposed in the snapshot; null says so instead of implying zero.
+    ignitionKnown:      true,
+    engineHoursMeter:   null,
     fuelLevelMl,
     fuelUsedMl:         raw.fuel_used_ml,
     cargoWeightKg:      raw.cargo_weight_kg,
