@@ -26,14 +26,27 @@
  *   registers as a fresh start.
  *
  * So a start is the first working ping that follows a SUSTAINED stand-down —
- * STANDDOWN_MINUTES with no work at all. That is robust to the flicker, and it
- * is honest about overnight running: a unit that never stood down has no start
- * today, and is reported as such rather than credited with a midnight one.
+ * STANDDOWN_MINUTES with no work at all. That is robust to the flicker.
  *
  * Validated against a complete day (2026-08-19): 125 units started, peaking at
  * 06:00–08:00 with 21, 23 and 20 — the actual shift change — and 21 before
  * 04:00. It also discriminates, which the broken versions did not: 7 of 14 FT
  * started before 04:00 against 1 of 24 EX.
+ *
+ * ## But the chart asks who WORKED early, not who started (operator, 2026-08-28)
+ *
+ * Those are different questions and only the second one has a stand-down in it.
+ * A machine that ran straight through midnight has no start — it continued —
+ * and under a start-only rule it appeared nowhere at all. Which meant the
+ * earliest machines on site were precisely the ones the chart could not show.
+ *
+ * Measured on 2026-08-26: 57 units were working before 04:00, 31 of them plant,
+ * and the earliest read 00:00 EAT exactly because they never stopped.
+ *
+ * So the buckets are now cut on the first WORKING ping of the fleet day, and
+ * every machine that worked appears. The start/continued distinction is not
+ * lost — it rides on each unit as `continued` and is counted per category — it
+ * has simply stopped deciding who is allowed into the chart.
  */
 
 import { Prisma } from '../../../generated/prisma/client.js'
@@ -68,6 +81,17 @@ export const START_BUCKETS = [4, 5, 6] as const
 export interface StartedUnit {
   plate: string
   at:    string
+  /**
+   * Was it already running at the day's first instant, rather than starting
+   * inside it?
+   *
+   * The distinction the old start-only rule protected, kept per unit instead of
+   * used to filter the whole chart. "Working at 00:04, continued from last
+   * night" and "started at 03:40" are both worth seeing and are not the same
+   * fact; hiding the first because it is not a start is what made the earliest
+   * machines on site invisible.
+   */
+  continued: boolean
 }
 
 /**
@@ -95,9 +119,14 @@ export interface StartSlots {
 export interface CategoryStarts {
   /** Plate prefix — EX, DZ, CTR, FT. The operator's own vocabulary. */
   category: string
-  /** Units that genuinely started work in the window. */
+  /** Units that were WORKING at any point in the day — the chart's population. */
+  worked:   number
+  /** Of those, the ones that genuinely started after a sustained stand-down. */
   started:  number
-  /** CUMULATIVE counts, kept for callers that already read them. `before05`
+  /** ...and the ones already running when the day opened. `worked` is the sum
+   *  of these two. A high count here is a night shift, not an early start. */
+  continuedOvernight: number
+  /** CUMULATIVE counts of machines first WORKING before each hour. `before05`
    *  includes everything before 04:00 — never add these together. */
   before04: number
   before05: number
@@ -117,10 +146,12 @@ export interface CategoryStarts {
  */
 async function computeEarlyStarts(
   orgId: string, day: Date = fleetDayStart(),
-): Promise<{ day: string; categories: CategoryStarts[]; totalStarted: number }> {
+): Promise<{ day: string; categories: CategoryStarts[]; totalWorked: number }> {
   const dayEnd = new Date(day.getTime() + 24 * 3_600_000)
 
-  const rows = await prisma.$queryRaw<Array<{ plate: string; started: Date }>>`
+  const rows = await prisma.$queryRaw<Array<{
+    plate: string; first_work: Date; started_at: Date | null
+  }>>`
     WITH working AS (
       SELECT t.vehicle_id,
              v.registration_plate AS plate,
@@ -136,13 +167,22 @@ async function computeEarlyStarts(
          AND t.captured_at >= ${day}::timestamp - interval '12 hours'
          AND t.captured_at <  ${dayEnd}
          AND (t.engine_on = true OR coalesce(t.speed_kmh, 0) > 0)
+    ),
+    in_day AS (
+      SELECT * FROM working
+       WHERE captured_at >= ${day} AND captured_at < ${dayEnd}
     )
-    SELECT plate, min(captured_at) AS started
-      FROM working
-     WHERE captured_at >= ${day}
-       AND captured_at <  ${dayEnd}
-       AND (prev_work IS NULL
-            OR captured_at - prev_work >= ${`${STANDDOWN_MINUTES} minutes`}::interval)
+    SELECT plate,
+           -- When the machine was FIRST working today, whether or not that was
+           -- a start. This is the column the chart buckets on.
+           min(captured_at) AS first_work,
+           -- When it first started after a sustained stand-down. NULL for a
+           -- machine that ran straight through and never stood down at all.
+           min(captured_at) FILTER (
+             WHERE prev_work IS NULL
+                OR captured_at - prev_work >= ${`${STANDDOWN_MINUTES} minutes`}::interval
+           ) AS started_at
+      FROM in_day
      GROUP BY 1`
 
   // The hour in the FLEET's own timezone. A start at 03:30 EAT is 00:30 UTC,
@@ -166,24 +206,40 @@ async function computeEarlyStarts(
     const category = machinePrefix(r.plate) ?? 'OTHER'
     if (!byCat.has(category)) {
       byCat.set(category, {
-        category, started: 0, before04: 0, before05: 0, before06: 0,
+        category, worked: 0, started: 0, continuedOvernight: 0,
+        before04: 0, before05: 0, before06: 0,
         slots: { pre04: 0, h04: 0, h05: 0 },
         units: { pre04: [], h04: [], h05: [] },
       })
     }
     const c = byCat.get(category)!
-    const h = hourOf(r.started)
-    c.started++
+    // Bucketed on when the machine was first WORKING, not on when it started.
+    //
+    // A machine that ran through midnight has no start — it continued — and
+    // under the old rule it appeared nowhere, which is how the earliest
+    // machines on site came to be the ones the chart could not show. Measured
+    // on 2026-08-26: 57 units were working before 04:00, 31 of them plant, and
+    // the earliest read 00:00 EAT exactly because they never stopped.
+    const h = hourOf(r.first_work)
+    // Already running at the first instant of the day, rather than having
+    // started inside it. Kept per unit so the distinction the old rule
+    // protected survives — it is a real difference, it was just the wrong
+    // thing to filter the whole chart by.
+    const continued = r.started_at == null || r.started_at.getTime() > r.first_work.getTime()
+
+    c.worked++
+    if (!continued) c.started++
+    if (continued) c.continuedOvernight++
     if (h < 4) c.before04++
     if (h < 5) c.before05++
     if (h < 6) c.before06++
 
-    // Exactly one slot per start — see StartSlots.
+    // Exactly one slot per machine — see StartSlots.
     const slot: keyof StartSlots | null =
       h < 4 ? 'pre04' : h === 4 ? 'h04' : h === 5 ? 'h05' : null
     if (slot) {
       c.slots[slot]++
-      c.units[slot].push({ plate: r.plate, at: clockFmt.format(r.started) })
+      c.units[slot].push({ plate: r.plate, at: clockFmt.format(r.first_work), continued })
     }
   }
 
@@ -210,8 +266,8 @@ async function computeEarlyStarts(
   // telemetry repository all send fleetDayKey sliced to ten characters.
     day: fleetDayKey(new Date(day.getTime() + 1)).toISOString().slice(0, 10),
     // Busiest first: a category with two units should not head a chart.
-    categories: [...byCat.values()].sort((a, b) => b.started - a.started),
-    totalStarted: rows.length,
+    categories: [...byCat.values()].sort((a, b) => b.worked - a.worked),
+    totalWorked: rows.length,
   }
 }
 
