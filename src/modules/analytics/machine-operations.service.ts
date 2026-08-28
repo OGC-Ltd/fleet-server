@@ -246,7 +246,7 @@ export interface CategoryHours {
    * `byCategory` stopped making in this same commit range. Naming it honestly
    * is the least this can do until the count itself is fixed.
    *
-   * For TRAVEL_CATEGORIES — machines whose work IS travel — stationary time
+   * For machines whose work IS travel — `resolveBasis` DISTANCE — stationary time
    * genuinely is idle time, and the figure can be read that way. For plant it
    * cannot. Separating the two needs the position-change test that
    * `fuel-rate.service` already applies on the half-metre grid; doing it here

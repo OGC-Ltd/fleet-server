@@ -573,6 +573,28 @@ describe('the consumption basis — which denominator judges this machine', () =
   it('defaults to distance when nothing is known', () => {
     expect(resolveBasis('SUKARI', { plate: 'KTCC 999Z' })).toBe('DISTANCE')
   })
+
+  it('answers for the four cases the retired prefix list got wrong', () => {
+    // `fleet-state` kept its own list of "categories whose work IS travel" —
+    // LMV, FT, FTT, MTR, BUS, TRK — and asked it instead of asking here. It was
+    // wrong in both directions at once, so this pins each case rather than the
+    // deletion.
+    //
+    // IN the list and shouldn't have been. A motor tractor works a field
+    // standing still; twenty of KASULU's read Idling for every hour of it.
+    expect(resolveBasis('KASULU', { plate: 'MUFINDI: MTR 07', vehicleType: 'TRACTOR' })).toBe('HOURS')
+    // OUT of it and shouldn't have been. 24.1 km per engine hour — the most
+    // road-going code in the fleet after the buses — and no idle figure at all.
+    expect(resolveBasis('KASULU', { plate: 'MUFINDI - HFT 02', vehicleType: 'LORRY' })).toBe('DISTANCE')
+    // Out of it BY CONSTRUCTION. SUKARI plates carry no equipment code, so a
+    // list of KASULU prefixes could never match that organisation's 110 road
+    // vehicles. The stated type matches them all.
+    expect(resolveBasis('SUKARI', { plate: 'KDL 431T', vehicleType: 'TRUCK' })).toBe('DISTANCE')
+    // The prefix is not even reliably the machine: `OPTIM` is a SITE, and those
+    // 24 units split once their type is read instead of their plate.
+    expect(resolveBasis('KASULU', { plate: 'MUFINDI: OPTIM - CM 01', vehicleType: 'PLANT' })).toBe('HOURS')
+    expect(resolveBasis('KASULU', { plate: 'MUFINDI: OPTIM - FT 09', vehicleType: 'TRUCK' })).toBe('DISTANCE')
+  })
 })
 
 describe('a truck switches denominator with what it is DOING', () => {
