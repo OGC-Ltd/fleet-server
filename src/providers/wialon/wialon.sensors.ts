@@ -37,6 +37,121 @@ const FUEL_SENSOR_TYPE = 'fuel level'
  * Teltonika ignition input.
  */
 const IGNITION_SENSOR_TYPE = 'engine operation'
+
+/* ─────────────────────────── camera / MDVR ──────────────────────────────── */
+
+/**
+ * Wialon's own sensor types for a camera channel. Present in the documentation;
+ * NOT present on this account — the one camera unit declares its video sensor
+ * as `custom`, which is why the detection below cannot rely on type alone.
+ */
+const CAMERA_SENSOR_TYPES = new Set(['camera', 'image', 'video'])
+
+/**
+ * Parameters an MDVR reports about ITSELF rather than about the vehicle.
+ *
+ * Measured on the one camera unit in this account, 2026-08-29:
+ * `recording_status 7`, `hd15_status 1`, `hd15_size 59488`, `video_loss 0`,
+ * `video_blind 0`. A unit reporting these has a recorder fitted whatever its
+ * sensors are called, so they are the reliable capability signal — the Video_URL
+ * sensor is a configuration someone added by hand and another integrator may
+ * name differently or omit.
+ */
+const MDVR_PARAMS = ['recording_status', 'video_loss', 'video_blind', 'hd15_status']
+
+/** Sensor name or parameter that plausibly carries a media URL. */
+const VIDEO_URL_HINT = /video.?(url|uri|link)|stream.?(url|uri)/i
+
+export interface CameraState {
+  /** A recorder is fitted, on the evidence of the unit's own diagnostics. */
+  hasCamera: boolean
+  /** Parameter the account's Video_URL sensor is bound to, when one exists. */
+  urlParam: string | null
+  /** The URL itself, when the parameter has actually arrived and looks usable. */
+  streamUrl: string | null
+  /** Recorder health, for a UI that has to explain a black screen. */
+  recording: boolean | null
+  signalLost: boolean | null
+}
+
+/**
+ * What this unit's on-board recorder is doing, and how to reach it.
+ *
+ * ## Written against a real unit, but NOT against a real URL
+ *
+ * `VS Menengai CAMERA - KCS 078M` (Wialon id 28628615) is the only camera in
+ * this account. Everything about the recorder below is read from parameters it
+ * genuinely sends. The URL is the exception: it declares a custom sensor named
+ * `Video_URL` bound to `video_uri`, and that parameter appeared in **0 of 1,707
+ * messages over seven days**. So the extraction path is built, and it has never
+ * had a value to extract.
+ *
+ * That uncertainty is why the parameter NAME is read from the sensor definition
+ * rather than hardcoded to `video_uri`. `Video_URL` is a hand-made custom
+ * sensor on one account; the next integrator may bind a differently-named
+ * parameter, and following the sensor's own `p` costs nothing and survives that.
+ *
+ * ## And why an unrecognised value is dropped, not passed on
+ *
+ * Nobody knows whether `video_uri` will hold an absolute URL, a path, a token,
+ * or a list of channels — it has never arrived. So the value is only reported
+ * as `streamUrl` when it parses as an http(s) URL. Anything else leaves
+ * `streamUrl` null while `hasCamera` stays true, which renders as "camera
+ * fitted, no stream available" rather than as a broken `<video src>`. A guess
+ * that reaches the client as a stream URL is a black rectangle nobody can
+ * diagnose; a null is a sentence.
+ */
+export function readCamera(
+  sensors: Record<string, WialonSensor> | undefined,
+  params: Record<string, unknown> | undefined,
+): CameraState {
+  const none: CameraState = {
+    hasCamera: false, urlParam: null, streamUrl: null,
+    recording: null, signalLost: null,
+  }
+
+  const hasMdvrParams = params != null && MDVR_PARAMS.some(k => k in params)
+  const typedSensor = sensors != null && Object.values(sensors)
+    .some(s => CAMERA_SENSOR_TYPES.has(String(s?.t ?? '').toLowerCase()))
+
+  // The sensor whose job is to carry the URL, by name or by the parameter it
+  // reads. Either is enough — the account names it `Video_URL` and binds it to
+  // `video_uri`, and matching on both means neither convention is required.
+  const urlSensor = sensors == null ? undefined : Object.values(sensors).find(
+    s => VIDEO_URL_HINT.test(String(s?.n ?? '')) || VIDEO_URL_HINT.test(String(s?.p ?? '')),
+  )
+
+  if (!hasMdvrParams && !typedSensor && !urlSensor) return none
+
+  const urlParam = urlSensor?.p ?? null
+  const raw = urlParam && params ? params[urlParam] : undefined
+  const str = raw == null ? '' : String(raw).trim()
+
+  let streamUrl: string | null = null
+  if (str) {
+    try {
+      const u = new URL(str)
+      // http(s) only. A `file:` or `rtsp:` value is real information but not
+      // something a browser <video> can open, and handing one to the client
+      // would produce exactly the undiagnosable black rectangle above.
+      if (u.protocol === 'http:' || u.protocol === 'https:') streamUrl = u.toString()
+    } catch { /* not a URL — leave null, see the note above */ }
+  }
+
+  // `recording_status` is a bitfield on this hardware and read as
+  // "any channel recording". Truthy-vs-zero is all that can be claimed without
+  // a second unit to compare bit meanings against.
+  const rec = params?.['recording_status']
+  const loss = params?.['video_loss']
+
+  return {
+    hasCamera: true,
+    urlParam,
+    streamUrl,
+    recording:  rec == null ? null : Number(rec) > 0,
+    signalLost: loss == null ? null : Number(loss) > 0,
+  }
+}
 /** "…Qty (450L)" / "…Level (254 L)" → 450 / 254. */
 const CAPACITY_IN_NAME = /\((\d+(?:\.\d+)?)\s*L\)/i
 

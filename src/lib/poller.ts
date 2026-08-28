@@ -229,6 +229,15 @@ class TelemetryPoller {
           fuelLevelMl:   frame.fuelLevelMl ?? undefined,
           fuelUsedMl:    frame.fuelUsedMl ?? undefined,
           cargoWeightKg: frame.cargoWeightKg ?? undefined,
+
+          // Camera, where the unit has one. `undefined` rather than null on the
+          // 1,495 units without a recorder, so the optional fields simply do
+          // not appear in the payload — ingest turns them into explicit nulls
+          // at the column.
+          cameraFitted:     frame.flags?.camera?.hasCamera ?? undefined,
+          cameraStreamUrl:  frame.flags?.camera?.streamUrl ?? undefined,
+          cameraRecording:  frame.flags?.camera?.recording ?? undefined,
+          cameraSignalLost: frame.flags?.camera?.signalLost ?? undefined,
           rawPayload: {
             ...frame.rawPayload,
             batteryVoltageV:    frame.batteryVoltageV,

@@ -3,6 +3,7 @@ import { Prisma } from '../../../generated/prisma/client.js'
 import { ALERT_SOURCE } from '../../lib/alerts.js'
 import { logger } from '../../lib/logger.js'
 import type { TelemetryListQuery, TrackQuery } from './telemetry.schema.js'
+import { PLAYBACK_SCAN_CAP } from './telemetry.schema.js'
 
 export async function findPings(vehicleId: string, orgId: string, q: TelemetryListQuery) {
   // Verify vehicle belongs to org before returning data
@@ -197,6 +198,82 @@ export async function findTrack(vehicleId: string, orgId: string, q: TrackQuery)
     engineOffSinceMs,                        // key last turned off, or null if it is on
     engineOffRunsPastWindow,                 // ...and it was already off when the window opened
   }
+}
+
+/** One replayed fix. `spd`/`hdg` are what make the marker move believably. */
+export interface PlaybackPoint {
+  t: number
+  lat: number
+  lng: number
+  /** km/h at the fix. 100% populated on this fleet; null-safe regardless. */
+  spd: number | null
+  /** Compass bearing 0-360. Also 100% populated. */
+  hdg: number | null
+  /** Ignition at the fix — an idling unit and a moving one look alike without it. */
+  eng: boolean
+  gapBefore?: true
+}
+
+/**
+ * Every positioned fix for one vehicle across one window, with motion.
+ *
+ * The extra two columns over `findTrack` are the whole reason this exists.
+ * `heading_deg` and `speed_kmh` are populated on 100% of 2,288,187 fixes
+ * measured over 7 days, so a playback marker can point the right way and read
+ * out a speed without any ingestion work — the track endpoint simply never
+ * selected them, because a static polyline has no use for either.
+ *
+ * Returned RAW and unsimplified. Thinning is a separate, pure step
+ * (lib/simplify-path) so it can be tested against fabricated shapes rather than
+ * against whatever the database happens to hold, and so `toleranceM=0` can
+ * return exactly what was read.
+ */
+export async function findPlaybackFixes(
+  vehicleId: string, orgId: string, from: Date, to: Date,
+) {
+  if (!(await vehicleExistsInOrg(vehicleId, orgId))) return null
+
+  // ASCENDING here, unlike findTrack. That endpoint reads newest-first so a
+  // truncated scan keeps the RECENT end; a playback day is bounded at both
+  // ends, and if one has to be lost it must be the late one — a replay that
+  // starts at 06:00 and stops early is readable, one that begins mid-morning
+  // with no explanation is not.
+  const rows = await prisma.vehicleTelemetry.findMany({
+    where: { vehicleId, capturedAt: { gte: from, lt: to } },
+    orderBy: { capturedAt: 'asc' },
+    take: PLAYBACK_SCAN_CAP + 1,
+    select: {
+      capturedAt: true, lat: true, lng: true,
+      speedKmh: true, headingDeg: true, engineOn: true,
+    },
+  })
+
+  const truncated = rows.length > PLAYBACK_SCAN_CAP
+  if (truncated) rows.pop()
+
+  const fixes = rows.length
+  const points: PlaybackPoint[] = []
+
+  // `gapBefore` is decided against every POSITIONED row, kept or not — the same
+  // rule findTrack uses and for the same reason: a silence is a fact about the
+  // data, and measuring it after thinning would turn every collapsed dwell into
+  // a fake reporting hole.
+  let prevFixT: number | null = null
+  let holeBefore = false
+  for (const r of rows) {
+    if (r.lat == null || r.lng == null || !Number.isFinite(r.lat) || !Number.isFinite(r.lng)) continue
+    const t = r.capturedAt.getTime()
+    if (prevFixT != null && t - prevFixT > TRACK_HOLE_MS) holeBefore = true
+    prevFixT = t
+    points.push({
+      t, lat: r.lat, lng: r.lng,
+      spd: r.speedKmh, hdg: r.headingDeg, eng: r.engineOn,
+      ...(holeBefore ? { gapBefore: true as const } : {}),
+    })
+    holeBefore = false
+  }
+
+  return { points, fixes, truncated }
 }
 
 // ───────────────────────── long windows & zone timeline ────────────────────
@@ -681,6 +758,10 @@ export async function findFleetSnapshot(orgId: string) {
     odometer_km: number | null; engine_hours: number | null; maintenance: unknown; phase: string | null
     last_moved_at: Date | null
     fuel_probe_fault: boolean | null
+    camera_fitted: boolean | null
+    camera_stream_url: string | null
+    camera_recording: boolean | null
+    camera_signal_lost: boolean | null
   }
   const pings = await prisma.$queryRaw<PingRow[]>`
     SELECT p.* FROM unnest(ARRAY[${Prisma.join(vehicleIds)}]::text[]) AS v(id)
@@ -689,6 +770,11 @@ export async function findFleetSnapshot(orgId: string) {
         t.vehicle_id,
         t.lat, t.lng, t.heading_deg, t.speed_kmh, t.engine_on,
         t.fuel_level_ml, t.fuel_used_ml, t.cargo_weight_kg, t.captured_at,
+        -- On-board recorder. Real COLUMNS, not a flags-blob extraction like
+        -- fuel_probe_fault below: a stream URL is read on every snapshot for
+        -- any unit that has one, and digging it out of JSON on each row is
+        -- work the column type already does.
+        t.camera_fitted, t.camera_stream_url, t.camera_recording, t.camera_signal_lost,
         r.payload->'_sim'->'leg' AS leg,
         r.payload->'_sim'->>'cargoDesc' AS cargo_desc,
         (r.payload->>'odometer_km')::float AS odometer_km,
@@ -842,6 +928,15 @@ export async function findFleetSnapshot(orgId: string) {
         // which leave fuelLevelMl null, and only one of which is a job for
         // the workshop.
         fuelProbeFault: ping?.fuel_probe_fault ?? false,
+
+        // On-board recorder. `hasCamera` defaults FALSE (no recorder is the
+        // overwhelming norm — one unit of 1,496), but the rest stay NULL: a
+        // false `recording` would claim the recorder was checked and idle, and
+        // for a unit with no camera nothing was checked at all.
+        hasCamera:        ping?.camera_fitted ?? false,
+        cameraStreamUrl:  ping?.camera_stream_url ?? null,
+        cameraRecording:  ping?.camera_recording ?? null,
+        cameraSignalLost: ping?.camera_signal_lost ?? null,
         fuelUsedMl:     ping?.fuel_used_ml ?? null,
         cargoWeightKg:  ping?.cargo_weight_kg ?? null,
         cargoDesc:      ping?.cargo_desc ?? null,

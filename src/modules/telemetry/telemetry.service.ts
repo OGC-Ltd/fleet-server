@@ -1,11 +1,13 @@
 import {
   findPings, findTrack, findLatest, findActiveAlerts, findAlertHistoryCounts,
   findSampledFixes, findZoneTimeline, vehicleExistsInOrg, metresBetween,
+  findPlaybackFixes,
   type TrackPoint,
 } from './telemetry.repository.js'
+import { simplifyPath } from '../../lib/simplify-path.js'
 import { getMaintenanceHistoryCached, getOrgVehicleMaintenance } from './maintenance.cache.js'
 import { getFleetSnapshotCached } from './fleet-snapshot.cache.js'
-import type { TelemetryListQuery, TrackQuery } from './telemetry.schema.js'
+import type { TelemetryListQuery, TrackQuery, PlaybackQuery } from './telemetry.schema.js'
 import { TRACK_MAX_WINDOW_DAYS, TRACK_FULL_FIDELITY_HOURS } from './telemetry.schema.js'
 import { NotFoundError, BadRequestError, ServiceUnavailableError } from '../../core/errors/errors.js'
 import { assignedZoneStatus } from '../../lib/zone-presence.js'
@@ -13,7 +15,7 @@ import { movementState } from '../../lib/movement-state.js'
 import { connectionStatus } from '../../lib/connection-state.js'
 import { getOpenTripsCached } from '../dispatches/open-trips.cache.js'
 import { tripGeometry } from '../../lib/dispatch-trip.js'
-import { fleetDayStart } from '../../lib/provider-time.js'
+import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 
 /** Fleet-local midnight as an ISO string, so it compares against `departedAt`
  *  (which is already an ISO instant) without re-parsing per vehicle. */
@@ -117,6 +119,95 @@ export async function getVehicleTrack(vehicleId: string, orgId: string, q: Track
             outside:   v.zone_id === null,
           })),
         },
+  }
+}
+
+/**
+ * Fleet-day boundaries for a `YYYY-MM-DD` string.
+ *
+ * Built by parsing with an explicit `+03:00` rather than by arithmetic on a
+ * Date, the same way analytics.repository anchors its windows. `new Date('…')`
+ * on a bare date reads UTC midnight, which is 03:00 EAT — so the first three
+ * hours of every fleet day would land in the day before, and the error is
+ * invisible on any day the unit happened not to work before 03:00.
+ */
+function fleetDayBounds(day: string) {
+  const from = new Date(`${day}T00:00:00.000+03:00`)
+  if (Number.isNaN(from.getTime())) throw new BadRequestError(`Unparseable day '${day}'`)
+  return { from, to: new Date(from.getTime() + 86_400_000) }
+}
+
+/**
+ * One unit's day, as a replayable path.
+ *
+ * ## What it is for, and why it is not `/track` with more options
+ *
+ * `/track` draws the recent line under a clicked vehicle. This answers "show me
+ * what this machine did on the 27th", which wants different columns (heading
+ * and speed, so a marker can point and a readout can move), a different window
+ * (a Kenyan calendar day, not an arbitrary span), and a different budget.
+ *
+ * ## Simplification is reported, not silent
+ *
+ * `rawPoints` and `points` are both returned. A caller that draws 431 points
+ * where 850 fixes were read is entitled to know that, and the ratio is the only
+ * way to tell "this unit barely moved" from "the simplifier ate the shape".
+ * Setting `toleranceM=0` and `dwellRadiusM=0` returns every positioned fix,
+ * which is what makes the claim checkable rather than a promise.
+ */
+export async function getVehiclePlayback(
+  vehicleId: string, orgId: string, q: PlaybackQuery,
+) {
+  const day = q.day ?? fleetDayKey().toISOString().slice(0, 10)
+  const { from, to } = fleetDayBounds(day)
+
+  // A day that has not started yet is a mistake worth naming. A day PART way
+  // through is not — it returns what has happened so far, which is what an
+  // operator watching today's work wants.
+  if (from.getTime() > Date.now()) {
+    throw new BadRequestError(`Fleet day ${day} has not started yet`)
+  }
+
+  const raw = await findPlaybackFixes(vehicleId, orgId, from, to)
+  if (!raw) throw new NotFoundError('Vehicle not found')
+
+  const points = simplifyPath(raw.points, {
+    toleranceM:   q.toleranceM,
+    dwellRadiusM: q.dwellRadiusM,
+  })
+
+  // Distance over the SIMPLIFIED path, deliberately. It is the length of the
+  // line the client will actually draw, so a reader comparing the figure to the
+  // route in front of them is comparing like with like. The raw path is longer
+  // by whatever GPS noise a stationary unit accumulated, which is not travel.
+  let metres = 0
+  for (let i = 1; i < points.length; i++) {
+    if (points[i].gapBefore) continue   // no evidence of a path across a silence
+    metres += metresBetween(points[i - 1].lat, points[i - 1].lng, points[i].lat, points[i].lng)
+  }
+
+  return {
+    vehicleId,
+    day,
+    from: from.getTime(),
+    to:   to.getTime(),
+    /** Positioned fixes read from the window, before any thinning. */
+    fixes: raw.fixes,
+    /** Points after dwell collapse + Douglas-Peucker — what the client draws. */
+    points,
+    rawPoints: raw.points.length,
+    simplify: { toleranceM: q.toleranceM, dwellRadiusM: q.dwellRadiusM },
+    /**
+     * The scan cap was hit, so the day is cut at its LATE end — see the note on
+     * ordering in findPlaybackFixes. Measured 2026-08-28, this affects 5 of 336
+     * units on a normal day.
+     */
+    truncated: raw.truncated,
+    firstAt: points[0]?.t ?? null,
+    lastAt:  points[points.length - 1]?.t ?? null,
+    distanceM: Math.round(metres),
+    /** Stretches the unit reported nothing for, which the line must break on. */
+    gaps: points.filter(p => p.gapBefore).length,
   }
 }
 

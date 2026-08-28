@@ -1,8 +1,8 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import { registerSseClient, emitHeartbeat } from '../../lib/sse.js'
-import { listPings, getVehicleTrack, getLatestPing, getFleetSnapshot, getActiveAlerts, getAlertHistoryCounts, getMaintenanceHistory, getVehicleServiceHistory, getVehicleGarageVisits } from './telemetry.service.js'
-import type { TelemetryListQuery, TrackQuery } from './telemetry.schema.js'
+import { listPings, getVehicleTrack, getVehiclePlayback, getLatestPing, getFleetSnapshot, getActiveAlerts, getAlertHistoryCounts, getMaintenanceHistory, getVehicleServiceHistory, getVehicleGarageVisits } from './telemetry.service.js'
+import type { TelemetryListQuery, TrackQuery, PlaybackQuery } from './telemetry.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -35,6 +35,17 @@ export const getVehicleTrackHandler: RequestHandler = async (req, res, next) => 
       p(req, 'vehicleId'), p(req, 'orgId'), req.query as unknown as TrackQuery,
     )
     sendSuccess(res, track)
+  } catch (err) { next(err) }
+}
+
+export const getVehiclePlaybackHandler: RequestHandler = async (req, res, next) => {
+  try {
+    // Same org-scoping rule as the track handler above: the PATH org, never the
+    // caller's home org.
+    const data = await getVehiclePlayback(
+      p(req, 'vehicleId'), p(req, 'orgId'), req.query as unknown as PlaybackQuery,
+    )
+    sendSuccess(res, data)
   } catch (err) { next(err) }
 }
 

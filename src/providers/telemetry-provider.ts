@@ -92,6 +92,27 @@ export interface VehicleTelemetryFrame {
      * ping for a probe that has been faulty for weeks would bury the feed.
      */
     fuelProbeFault?:     boolean
+
+    /**
+     * The unit's on-board recorder, when it has one.
+     *
+     * Provider-specific and rare: ONE unit of 1,496 in this Wialon account
+     * reports a camera at all (`VS Menengai CAMERA - KCS 078M`), so this is
+     * absent on essentially every frame. Optional rather than nullable for that
+     * reason — a null on 1,495 units would imply the question was asked and
+     * answered, when for most hardware it does not arise.
+     *
+     * `streamUrl` is separate from `hasCamera` on purpose: the recorder can be
+     * fitted and healthy while no URL is reachable, which is the state of the
+     * one real unit today. See readCamera in wialon.sensors for why an
+     * unrecognised value never becomes a streamUrl.
+     */
+    camera?: {
+      hasCamera:   boolean
+      streamUrl:   string | null
+      recording:   boolean | null
+      signalLost:  boolean | null
+    }
   }
 
   // ── Raw vendor envelope (stored in vehicle_telemetry_raws) ────────────────
