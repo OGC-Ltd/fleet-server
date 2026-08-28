@@ -141,8 +141,19 @@ function travelsForWork(orgCode: string, m: MachineIdentity): boolean {
 export interface FleetStateRow {
   vehicleId: string
   plate:     string
-  /** Plate prefix — EX, DZ, CTR. The operator's own machine vocabulary. */
+  /** Plate prefix — EX, DZ, CTR. The operator's own machine vocabulary. It
+   *  LABELS the row; it decides nothing — see `worksByTravel`. */
   category:  string
+  /**
+   * Is this machine's work travelling? — `travelsForWork`, resolved per machine.
+   *
+   * Carried on the row because clients kept re-deriving it from the plate and
+   * getting it wrong the same three ways: a plate-prefix list files tractors as
+   * road units, omits the heavy freight trucks entirely, and cannot match a
+   * SUKARI registration at all, so that whole fleet reads as plant. Anything
+   * splitting this fleet in two should read this field rather than guess.
+   */
+  worksByTravel: boolean
   state:     UnitState
   lastSeenAt: Date | null
   /** Hours the engine ran today, and the mean per observed day over the week
@@ -745,6 +756,7 @@ export async function fleetState(
       hoursToday:     todayHours,
       hoursWeekAvg:   perDay(Number(r?.week_s ?? 0) / 3600, r?.week_days),
       hoursMonthAvg:  perDay(Number(r?.month_s ?? 0) / 3600, r?.month_days),
+      worksByTravel: travels,
       stationaryHoursToday: Math.round(todayHours * idleShareToday * 10) / 10,
       idleHoursToday: travels ? Math.round(todayHours * idleShareToday * 10) / 10 : null,
       idleHoursWeekAvg: travels ? perDay((weekSecs / 3600) * idleShareWeek, r?.week_days) : null,
