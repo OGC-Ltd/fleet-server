@@ -18,8 +18,20 @@ function consumption(overrides: Partial<Consumption> = {}): Consumption {
     totals: { filledMl: 0, stolenMl: 0, fillings: 0, thefts: 0, windowDays: 30, activeDays: 0 },
     byDay: [],
     byVehicle: [],
+    drains: [],
     ...overrides,
   } as Consumption
+}
+
+/** One drain row as the repository hands it over — millilitres, not litres. */
+function drain(over: Partial<Consumption['drains'][number]> = {}) {
+  return {
+    id: 'd1', vehicleId: 'v1', registrationPlate: 'KDL 207X', name: 'Unit 01',
+    beganAt: new Date('2026-08-20T22:50:00Z'),
+    stolenMl: 40_000, location: 'Yard', cause: 'SIPHON',
+    causeReason: 'parked-sustained-fall', verdict: 'DRAIN', fallSeconds: 3600,
+    ...over,
+  } as Consumption['drains'][number]
 }
 
 describe('priceFuelConsumption', () => {
@@ -85,5 +97,59 @@ describe('priceFuelConsumption', () => {
     expect(out.byDay[0]).toMatchObject({ day: '2026-08-02', litresFilled: 0, cost: 0 })
     expect(out.byDay[1]).toMatchObject({ day: '2026-08-03', litresFilled: 50, litresLost: 10 })
     expect(out.byDay[1]?.cost).toBe(8968)
+  })
+})
+
+/**
+ * This layer REBUILDS the payload field by field rather than spreading the
+ * aggregate, so a field added to the repository reaches no client until it is
+ * named here too — and nothing fails when it isn't. `drains` was added upstream
+ * and dropped at this boundary: the endpoint went on returning a valid payload
+ * with the key simply absent, tsc was satisfied because nothing read it, and
+ * the report rendered an empty section instead of an error.
+ */
+describe('the drains behind the total', () => {
+  it('passes each drain through, priced like every other level', () => {
+    const out = priceFuelConsumption(consumption({
+      totals: { filledMl: 0, stolenMl: 40_000, fillings: 0, thefts: 1, windowDays: 30, activeDays: 1 },
+      drains: [drain()],
+    }), PRICE)
+
+    expect(out.drains).toHaveLength(1)
+    expect(out.drains[0]).toMatchObject({
+      registrationPlate: 'KDL 207X',
+      litres: 40,
+      cause: 'SIPHON',
+      causeReason: 'parked-sustained-fall',
+      fallSeconds: 3600,
+    })
+    // 40 L x 179.36
+    expect(out.drains[0]!.cost).toBe(7174)
+  })
+
+  it('sums to the litres printed above it', () => {
+    // The whole reason these come from the same query as the totals. A table
+    // that does not add up to its own headline is worse than no table.
+    const drains = [drain({ id: 'a', stolenMl: 40_000 }),
+                    drain({ id: 'b', stolenMl: 13_090 }),
+                    drain({ id: 'c', stolenMl: 7_500 })]
+    const out = priceFuelConsumption(consumption({
+      totals: { filledMl: 0, stolenMl: 60_590, fillings: 0, thefts: 3, windowDays: 30, activeDays: 2 },
+      drains,
+    }), PRICE)
+
+    const summed = out.drains.reduce((s, d) => s + d.litres, 0)
+    expect(Math.round(summed * 10) / 10).toBe(out.totals.litresLost)
+  })
+
+  it('keeps an unmeasured fall null rather than calling it zero', () => {
+    // Rows judged before 2026-08-28 have no measured duration. Zero would
+    // claim an instantaneous drop that nothing observed.
+    const out = priceFuelConsumption(consumption({
+      drains: [drain({ fallSeconds: null, cause: null, causeReason: null })],
+    }), PRICE)
+
+    expect(out.drains[0]!.fallSeconds).toBeNull()
+    expect(out.drains[0]!.cause).toBeNull()
   })
 })
