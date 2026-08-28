@@ -91,6 +91,37 @@ export type DrainCause =
   /** Not enough evidence to say. The default, and by far the most common. */
   | 'INDETERMINATE'
 
+/**
+ * Causes where the fuel did NOT leave the tank, whatever the verdict says.
+ *
+ * `NO_FUEL_LEFT` in fuel-adjudication does the same job one level up, on the
+ * VERDICT — a drop that turned out to be a refill, an oscillating probe, a dead
+ * sensor. This is the level below it: a row can be judged DRAIN, because the
+ * level really did fall and stay down, and still be a reading rather than a
+ * loss once the shape of the fall is examined.
+ *
+ * Both members are cases where the tank is the same afterwards:
+ *
+ *  · `SLOSH` — "a rate no engine could burn and no pump could draw". Fuel
+ *    moving inside the tank, or a probe inventing the movement.
+ *  · `SETTLING` — the fall decays like liquid finding its level after a stop.
+ *
+ * Measured over 30 days: 54 slosh rows carrying 3,571 L sat inside a
+ * "litres lost" figure of 217,608 L. Not the largest error in that number, but
+ * the one that is provably not fuel at all.
+ *
+ * `ENGINE_BURN` is deliberately NOT here. That fuel did leave — the engine
+ * burned it doing its job — so excluding it from a fuel-movement figure would
+ * be a different claim from the one this list makes. Whether ordinary
+ * consumption belongs in something LABELLED "lost" is a separate question, and
+ * a larger one: it is 17,104 L over the same window.
+ *
+ * And `INDETERMINATE` is not here either, nor an unjudged null, for the reason
+ * `NO_FUEL_LEFT` gives: we remove what we can DISPROVE, not what we merely
+ * doubt. A fall nobody could explain is not thereby explained away.
+ */
+export const CAUSE_NO_FUEL_LEFT: readonly DrainCause[] = ['SLOSH', 'SETTLING']
+
 export interface CauseJudgement {
   cause:      DrainCause
   /** Short slug naming the rule that decided, for auditing. */
