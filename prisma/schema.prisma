@@ -1197,6 +1197,44 @@ model FuelTheft {
   /// Short slug naming which cause rule decided, for auditing.
   causeReason      String?         @map("cause_reason")
 
+  /// The MEASURED shape of the fall this verdict was reached on — see
+  /// DropEvidence in modules/fuel/fuel-drop-shape.
+  ///
+  /// Computed for every drain since the classifier was written and then thrown
+  /// away: only the cause slugs survived, and `impliedLph` lived on solely as
+  /// text inside a notification string. That made every backtest impossible to
+  /// run and every labelled event impossible to explain — a reviewer asked "why
+  /// was this called a siphon" could be shown a slug and nothing else.
+  ///
+  /// Null on rows judged before 2026-08-28, and null wherever the fall could
+  /// not be measured at all. Never back-computed: the telemetry a drain was
+  /// judged on may have changed since, and a figure derived now would describe a
+  /// different fall from the one the verdict was about.
+  ///
+  /// `fallSeconds` also fixes DriverIncident.minutes, which reports
+  /// `detectedAt - beganAt` — the PROVIDER's window, the very quantity
+  /// PLATEAU_TOLERANCE exists to reject, and typically several times the real
+  /// fall.
+  fallSeconds      Int?            @map("fall_seconds")
+  /// Baseline to trough in millilitres, from the SMOOTHED series. Distinct from
+  /// `stolenMl`, which is the provider's claim; the two disagreeing is itself
+  /// evidence and the pair must stay comparable.
+  measuredDropMl   Int?            @map("measured_drop_ml")
+  /// Engine-on seconds inside the fall, and the share of its readings carrying
+  /// a MEASURED ignition rather than the speed fallback. The second number is
+  /// what says whether the first can be trusted.
+  engineSeconds    Int?            @map("engine_seconds")
+  engineEvidence   Float?          @map("engine_evidence")
+  /// Largest single-interval drop over the total. A siphon is one step; a burn
+  /// is many.
+  stepFraction     Float?          @map("step_fraction")
+  /// Litres per hour the fall implies. The figure the band is compared against,
+  /// and until now it existed only inside a sentence.
+  impliedLph       Float?          @map("implied_lph")
+  /// Kilometres covered during the fall, integrated from reported speed. Zero
+  /// and null mean different things — see DropEvidence.distanceKm.
+  fallDistanceKm   Float?          @map("fall_distance_km")
+
   vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
   driver          User?           @relation("TheftDriver", fields: [driverId], references: [id])
   reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
@@ -1214,6 +1252,69 @@ model FuelTheft {
   /// covering every drain in it.
   @@index([drainCause, beganAt])
   @@map("fuel_thefts")
+}
+
+/// What a human decided a fuel event actually was.
+///
+/// The only external check this detector has. Every threshold in the classifier
+/// is currently an ALERT-VOLUME choice rather than an accuracy one, because
+/// nothing says which flagged events were real: measured over 30 days, median
+/// excess sits flat at 29-31 L from 1.5x to 50x, so no value on that axis buys
+/// better targeting. The same gap blocks two further decisions — whether the
+/// measured tank balance should outrank the derived rate in `resolveBand`, and
+/// whether the 16 SUKARI announcements the consumption-basis change retired
+/// were true or false.
+///
+/// Twenty to thirty adjudicated events is enough to state precision for the
+/// first time.
+///
+/// Kept in its OWN table rather than as columns on the event, for two reasons.
+/// A label is an opinion with an author and a date, and two reviewers may
+/// disagree — which is data, not a conflict to resolve by overwriting. And the
+/// event rows are rewritten by the adjudication sweep, so a label living on one
+/// would be at the mercy of a re-judge.
+model FuelEventLabel {
+  id        String    @id @default(cuid())
+  /// The event this describes. `eventType` says which table `eventId` points
+  /// into — `fuel_thefts` or `fuel_fillings`.
+  ///
+  /// Deliberately NOT a foreign key. Postgres cannot express "FK only when the
+  /// discriminator says so", so an FK to fuel_thefts would reject every FILLING
+  /// label. A pair of nullable FK columns would buy referential integrity at the
+  /// cost of every reader coalescing two columns and every writer keeping them
+  /// exclusive; the import CLI resolves the id against the right table instead.
+  eventId   String    @map("event_id")
+  eventType FuelEventType @map("event_type")
+  label     FuelEventLabelValue
+  /// Who decided. Free text rather than a user FK: the reviewer is usually an
+  /// operations person working from a spreadsheet, not a system account, and
+  /// inventing a User row for them would put fiction in the roster.
+  labelledBy String   @map("labelled_by")
+  labelledAt DateTime @default(now()) @map("labelled_at")
+  /// Why. The most valuable column here when a label disagrees with the
+  /// verdict, and the only place a reviewer can say "the driver admitted it"
+  /// or "this probe is known bad".
+  note      String?
+
+  /// One label per reviewer per event. A reviewer correcting themselves updates
+  /// rather than accumulating, while two reviewers both keep their answer.
+  @@unique([eventId, eventType, labelledBy])
+  @@index([eventType, label])
+  @@map("fuel_event_labels")
+}
+
+/// A reviewer's verdict on an event.
+///
+/// UNSURE is a first-class answer and not a missing one. A reviewer forced to
+/// choose between THEFT and NOT_THEFT on an event they cannot call will guess,
+/// and a guessed label is worse than no label — it enters the precision
+/// arithmetic carrying the same weight as a certain one. The scoring excludes
+/// UNSURE from precision and reports its share separately, because a detector
+/// producing events nobody can adjudicate is telling you something too.
+enum FuelEventLabelValue {
+  THEFT
+  NOT_THEFT
+  UNSURE
 }
 
 // ---------------------------------------------------------------------------
