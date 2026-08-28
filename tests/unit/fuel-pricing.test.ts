@@ -128,19 +128,31 @@ describe('the drains behind the total', () => {
     expect(out.drains[0]!.cost).toBe(7174)
   })
 
-  it('sums to the litres printed above it', () => {
-    // The whole reason these come from the same query as the totals. A table
-    // that does not add up to its own headline is worse than no table.
-    const drains = [drain({ id: 'a', stolenMl: 40_000 }),
-                    drain({ id: 'b', stolenMl: 13_090 }),
-                    drain({ id: 'c', stolenMl: 7_500 })]
+  it('sums to the litres printed above it, within per-row rounding', () => {
+    // The whole reason these come from the same query as the totals: the
+    // MILLILITRES behind them are the same numbers, so the table cannot be
+    // describing a different population from its own headline.
+    //
+    // It is not an exact equality, and asserting one would be a false
+    // guarantee. Each row is rounded to 0.1 L on the way out while the total is
+    // rounded once from the millilitre sum, so the two differ by whatever the
+    // per-row rounding accumulates. Measured against production: KASULU's
+    // 2,604 drains sum to 196,573.6 L against a 196,561.6 L header — 12 L, and
+    // not random. `Math.round` breaks ties UPWARD and 242 of those rows end in
+    // exactly 50 ml, which is +12.1 L on its own.
+    //
+    // Half a decilitre per row is the honest bound, and it is the same shape of
+    // tolerance the per-vehicle cost test above uses for the same reason.
+    const drains = [drain({ id: 'a', stolenMl: 40_050 }),   // ties, rounds up
+                    drain({ id: 'b', stolenMl: 13_050 }),   // ties, rounds up
+                    drain({ id: 'c', stolenMl: 7_550 })]    // ties, rounds up
     const out = priceFuelConsumption(consumption({
-      totals: { filledMl: 0, stolenMl: 60_590, fillings: 0, thefts: 3, windowDays: 30, activeDays: 2 },
+      totals: { filledMl: 0, stolenMl: 60_650, fillings: 0, thefts: 3, windowDays: 30, activeDays: 2 },
       drains,
     }), PRICE)
 
     const summed = out.drains.reduce((s, d) => s + d.litres, 0)
-    expect(Math.round(summed * 10) / 10).toBe(out.totals.litresLost)
+    expect(Math.abs(summed - out.totals.litresLost)).toBeLessThanOrEqual(out.drains.length * 0.05)
   })
 
   it('keeps an unmeasured fall null rather than calling it zero', () => {
