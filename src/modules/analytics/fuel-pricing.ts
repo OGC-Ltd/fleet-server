@@ -117,6 +117,13 @@ export function priceFuelConsumption(data: FuelConsumption, { pricePerLitre, cur
       beganAt:           d.beganAt,
       litres:            litres(d.stolenMl),
       cost:              cost(d.stolenMl, pricePerLitre),
+      // The FSL either side of the fall, in litres. Carried so the row shows
+      // the tank level the probe read at that hour rather than only the
+      // difference — and so `levelBefore - levelAfter` visibly equals `litres`,
+      // which it does on every drain measured over 30 days. Null-safe: a level
+      // is absent, never zero, when the probe said nothing.
+      levelBefore:       d.levelBeforeMl == null ? null : litres(d.levelBeforeMl),
+      levelAfter:        d.levelAfterMl  == null ? null : litres(d.levelAfterMl),
       location:          d.location,
       cause:             d.cause,
       causeReason:       d.causeReason,

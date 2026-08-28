@@ -281,6 +281,11 @@ export async function fuelConsumption(
         id: true, vehicleId: true, beganAt: true, stolenMl: true,
         initialLocation: true, drainCause: true, causeReason: true,
         verdict: true, fallSeconds: true,
+        // The FSL either side of the fall — the tank level the probe actually
+        // read at that hour, not a derived figure. Present on 3,271 of 3,271
+        // drains over 30 days, and `stolenMl` equals their difference on every
+        // one of them, so a reader can check the row's arithmetic on the page.
+        initialFuelLevelMl: true, finalFuelLevelMl: true,
         vehicle: vehicleSelect,
       },
       orderBy: { beganAt: 'asc' },
@@ -366,6 +371,10 @@ export async function fuelConsumption(
       name:              t.vehicle.name,
       beganAt:           t.beganAt,
       stolenMl:          t.stolenMl,
+      // FSL, millilitres. Priced into litres on the way out like everything
+      // else — see fuel-pricing.
+      levelBeforeMl:     t.initialFuelLevelMl,
+      levelAfterMl:      t.finalFuelLevelMl,
       location:          t.initialLocation,
       cause:             t.drainCause,
       causeReason:       t.causeReason,

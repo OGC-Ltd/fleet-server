@@ -28,7 +28,8 @@ function drain(over: Partial<Consumption['drains'][number]> = {}) {
   return {
     id: 'd1', vehicleId: 'v1', registrationPlate: 'KDL 207X', name: 'Unit 01',
     beganAt: new Date('2026-08-20T22:50:00Z'),
-    stolenMl: 40_000, location: 'Yard', cause: 'SIPHON',
+    stolenMl: 40_000, levelBeforeMl: 280_900, levelAfterMl: 240_900,
+    location: 'Yard', cause: 'SIPHON',
     causeReason: 'parked-sustained-fall', verdict: 'DRAIN', fallSeconds: 3600,
     ...over,
   } as Consumption['drains'][number]
@@ -151,5 +152,38 @@ describe('the drains behind the total', () => {
 
     expect(out.drains[0]!.fallSeconds).toBeNull()
     expect(out.drains[0]!.cause).toBeNull()
+  })
+})
+
+describe('the FSL level either side of a drain', () => {
+  it('carries the tank level the probe read, in litres', () => {
+    const out = priceFuelConsumption(consumption({
+      drains: [drain({ levelBeforeMl: 280_900, levelAfterMl: 229_900, stolenMl: 51_000 })],
+    }), PRICE)
+
+    expect(out.drains[0]).toMatchObject({ levelBefore: 280.9, levelAfter: 229.9, litres: 51 })
+  })
+
+  it('the two levels account for the litres — the row checks itself', () => {
+    // Measured over 30 days of production: stolenMl equals
+    // initialFuelLevelMl - finalFuelLevelMl on 3,271 of 3,271 drains. The table
+    // prints all three, so a reader can verify the arithmetic without leaving
+    // the page — and this pins that they cannot silently drift apart.
+    const out = priceFuelConsumption(consumption({
+      drains: [drain({ levelBeforeMl: 89_000, levelAfterMl: 52_900, stolenMl: 36_100 })],
+    }), PRICE)
+
+    const d = out.drains[0]!
+    expect(Math.round((d.levelBefore! - d.levelAfter!) * 10) / 10).toBe(d.litres)
+  })
+
+  it('a level the probe never gave stays null, not zero', () => {
+    // Zero is a full-tank claim of "empty". Absent is absent.
+    const out = priceFuelConsumption(consumption({
+      drains: [drain({ levelBeforeMl: null, levelAfterMl: null })],
+    }), PRICE)
+
+    expect(out.drains[0]!.levelBefore).toBeNull()
+    expect(out.drains[0]!.levelAfter).toBeNull()
   })
 })
