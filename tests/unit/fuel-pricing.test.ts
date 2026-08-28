@@ -90,14 +90,40 @@ describe('priceFuelConsumption', () => {
     const out = priceFuelConsumption(consumption({
       totals: { filledMl: 50_000, stolenMl: 0, fillings: 1, thefts: 0, windowDays: 2, activeDays: 1 },
       byDay: [
-        { day: '2026-08-02', filledMl: 0,      stolenMl: 0,      fillings: 0, thefts: 0 },
-        { day: '2026-08-03', filledMl: 50_000, stolenMl: 10_000, fillings: 1, thefts: 1 },
+        { day: '2026-08-02', filledMl: 0,      stolenMl: 0,      fillings: 0, thefts: 0,
+          turbulenceMl: 2_500, turbulenceVehicles: 160 },
+        { day: '2026-08-03', filledMl: 50_000, stolenMl: 10_000, fillings: 1, thefts: 1,
+          turbulenceMl: null,  turbulenceVehicles: 0 },
       ],
     }), PRICE)
 
     expect(out.byDay[0]).toMatchObject({ day: '2026-08-02', litresFilled: 0, cost: 0 })
     expect(out.byDay[1]).toMatchObject({ day: '2026-08-03', litresFilled: 50, litresLost: 10 })
     expect(out.byDay[1]?.cost).toBe(8968)
+  })
+
+  /**
+   * Turbulence is the one per-day figure that is NOT priced and NOT zero-filled.
+   * It is fuel moving inside a tank rather than fuel bought or lost, so it has
+   * no cost; and a day with no reading is unknown rather than calm. The current
+   * fleet day is always in that state — fuel_daily_trends is written once, just
+   * after the day closes — so the null path is the normal one, not an edge.
+   */
+  it('converts turbulence to litres and leaves a day without a reading null', () => {
+    const out = priceFuelConsumption(consumption({
+      byDay: [
+        { day: '2026-08-02', filledMl: 0, stolenMl: 0, fillings: 0, thefts: 0,
+          turbulenceMl: 6_149, turbulenceVehicles: 126 },
+        { day: '2026-08-03', filledMl: 0, stolenMl: 0, fillings: 0, thefts: 0,
+          turbulenceMl: null,  turbulenceVehicles: 0 },
+      ],
+    }), PRICE)
+
+    expect(out.byDay[0]).toMatchObject({ turbulenceL: 6.1, turbulenceVehicles: 126 })
+    expect(out.byDay[1]?.turbulenceL).toBeNull()
+    expect(out.byDay[1]?.turbulenceVehicles).toBe(0)
+    // Never costed — there is no such thing as the price of slosh.
+    expect(out.byDay[0]).not.toHaveProperty('turbulenceCost')
   })
 })
 
