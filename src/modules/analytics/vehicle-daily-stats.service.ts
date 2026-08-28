@@ -43,6 +43,7 @@ import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import { REACH_METRES, DIG_SPEED_KMH, MAX_GAP_SECONDS, MIN_DIG_FIXES, SNAP_DEGREES } from './excavator-area.service.js'
+import { dozerDay } from './dozer-area.service.js'
 import { logger } from '../../lib/logger.js'
 
 /** What one day's aggregate looks like, before it is stored or added to. */
@@ -60,9 +61,15 @@ export interface VehicleDayFigures {
 }
 
 /**
- * Speed at or below which a running engine counts as idling rather than
- * working. Zero km/h — a stationary machine — because GPS jitter on a stationary machine
+ * Speed at or below which a running engine MIGHT be idling. Necessary, not
+ * sufficient — see `idle_fixes` in the query below.
+ *
+ * Zero km/h — a stationary machine — because GPS jitter on a stationary machine
  * reads a km/h or so and a machine creeping at 1 km/h is not travelling.
+ *
+ * Until 2026-08-28 this was the WHOLE test, which made "idle" and "not moving"
+ * the same thing and so counted a digging excavator as idle. Being slow is now
+ * one of two conditions; the other is that the position did not change.
  *
  * Defined here, beside the query that writes the stored counts, because the
  * history and the live read of today must count the same thing. Moving it makes
@@ -94,22 +101,46 @@ export async function vehicleFiguresForDay(
     peak_ml: number | null; last_alive_at: Date | null; last_level_at: Date | null
     engine_fixes: bigint; idle_fixes: bigint
   }>>`
-    SELECT t.vehicle_id,
+    WITH f AS (
+      SELECT t.vehicle_id, t.captured_at, t.fuel_level_ml, t.engine_on, t.speed_kmh,
+             -- The dig detector's half-metre grid. Has this fix landed in the
+             -- same cell as the one before it?
+             floor(t.lat / ${SNAP_DEGREES})             AS cy,
+             floor(t.lng / ${SNAP_DEGREES})             AS cx,
+             lag(floor(t.lat / ${SNAP_DEGREES})) OVER w AS prev_cy,
+             lag(floor(t.lng / ${SNAP_DEGREES})) OVER w AS prev_cx
+        FROM vehicle_telemetries t
+        ${scope}
+       WHERE t.captured_at >= ${dayStart}
+         AND t.captured_at <  ${dayEnd}
+      WINDOW w AS (PARTITION BY t.vehicle_id ORDER BY t.captured_at)
+    )
+    SELECT f.vehicle_id,
            count(*)               AS pings,
-           count(t.fuel_level_ml) AS level_pings,
-           max(t.fuel_level_ml)   AS peak_ml,
+           count(f.fuel_level_ml) AS level_pings,
+           max(f.fuel_level_ml)   AS peak_ml,
            -- ABOVE zero: a probe pinned at a flat zero is reporting and is also
            -- broken, and the report's DIED state depends on telling those apart.
-           max(t.captured_at) FILTER (WHERE t.fuel_level_ml > 0)         AS last_alive_at,
-           max(t.captured_at) FILTER (WHERE t.fuel_level_ml IS NOT NULL) AS last_level_at,
+           max(f.captured_at) FILTER (WHERE f.fuel_level_ml > 0)         AS last_alive_at,
+           max(f.captured_at) FILTER (WHERE f.fuel_level_ml IS NOT NULL) AS last_level_at,
            -- The idle ratio's two counts, from the same frames.
-           count(*) FILTER (WHERE t.engine_on = true) AS engine_fixes,
-           count(*) FILTER (WHERE t.engine_on = true
-                              AND coalesce(t.speed_kmh, 0) <= ${IDLE_SPEED_KMH}) AS idle_fixes
-      FROM vehicle_telemetries t
-      ${scope}
-     WHERE t.captured_at >= ${dayStart}
-       AND t.captured_at <  ${dayEnd}
+           count(*) FILTER (WHERE f.engine_on = true) AS engine_fixes,
+           -- Idle needs the machine to be BOTH slow and in the same place.
+           --
+           -- Speed alone counted a digging excavator as idle, because working in
+           -- place is exactly what an excavator does: EX read 66% idle over a
+           -- week on that definition. It is the same conflation the row-level
+           -- state machine was changed to remove, surviving in the stored counts
+           -- after it had been removed from the states.
+           --
+           -- A fix with no position cannot clear the test, and that is deliberate:
+           -- we cannot establish the machine stayed put, and idle is the claim
+           -- that needs establishing.
+           count(*) FILTER (WHERE f.engine_on = true
+                              AND coalesce(f.speed_kmh, 0) <= ${IDLE_SPEED_KMH}
+                              AND f.prev_cy IS NOT NULL
+                              AND f.cy = f.prev_cy AND f.cx = f.prev_cx) AS idle_fixes
+      FROM f
      GROUP BY 1`
 
   return rows.map(r => ({
@@ -231,6 +262,34 @@ export async function recordVehicleDailyStats(inDay: Date): Promise<{ day: strin
     } catch (err) {
       // One machine's geometry failing must not cost the whole day's rollup.
       logger.warn({ err, vehicleId: v.id }, 'excavator area failed for one unit')
+    }
+  }
+
+  // Dozers, into the SAME columns and by a different geometry.
+  //
+  // Both answer "ground this machine worked today, as an upper bound", which is
+  // what the column holds; the excavator's is a union of discs around a machine
+  // that slews in place and the dozer's a union of swaths along one that
+  // travels. See dozer-area.service for why the point method cannot serve both.
+  //
+  // Sequential for the same reason as above: each call unions a day of geometry
+  // on an instance with ~1 GB of RAM.
+  const dozers = await prisma.vehicle.findMany({
+    where:  { isActive: true, registrationPlate: { contains: 'DZ ' } },
+    select: { id: true },
+  })
+
+  for (const v of dozers) {
+    try {
+      const pushed = await dozerDay(v.id, dayStart, dayEnd)
+      if (!pushed) continue
+      await prisma.vehicleDailyStat.updateMany({
+        where: { vehicleId: v.id, day },
+        data:  { digAreaM2: pushed.areaM2, digSeconds: pushed.workedSeconds },
+      })
+      withArea++
+    } catch (err) {
+      logger.warn({ err, vehicleId: v.id }, 'dozer area failed for one unit')
     }
   }
 

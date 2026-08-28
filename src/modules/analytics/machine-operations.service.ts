@@ -231,6 +231,52 @@ export interface CategoryHours {
   totalHours: number
   /** meanHours against EXPECTED_HOURS_PER_DAY, as a percentage. */
   utilisation: number
+  /**
+   * Of `totalHours`, the ones the engine ran while the machine was NOT MOVING.
+   *
+   * Called stationary and not idle deliberately, because the underlying count
+   * cannot tell them apart. `vehicle_daily_stats.idleFixes` is
+   * `engine_on AND speed <= IDLE_SPEED_KMH` — speed alone, with no test of
+   * whether the position changed — so a digging excavator, which works in place
+   * by definition, lands in it. Measured over a week, EX reads 66% "idle" on
+   * that count, which is not what an operator would understand by the word.
+   *
+   * That is the same conflation the row-level state machine was changed to
+   * remove (STATIONARY is its own state, distinct from IDLING) and that
+   * `byCategory` stopped making in this same commit range. Naming it honestly
+   * is the least this can do until the count itself is fixed.
+   *
+   * For machines whose work IS travel — `resolveBasis` DISTANCE — stationary time
+   * genuinely is idle time, and the figure can be read that way. For plant it
+   * cannot. Separating the two needs the position-change test that
+   * `fuel-rate.service` already applies on the half-metre grid; doing it here
+   * means changing what `idleFixes` counts, which is a rollup change and a
+   * backfill rather than a rename.
+   *
+   * Scaled from the RATIO rather than counted from fixes: the sampling interval
+   * is irregular — p50 28 s, p99 905 s — so fixes times an assumed interval
+   * gave 103 idle hours inside a 24-hour day once already. The ratio is exact
+   * whatever the interval does, and `engineSeconds` supplies the scale.
+   *
+   * Null where no day in the range recorded it — absent, never zero, because
+   * zero is a strong claim and "not measured" is a different statement.
+   */
+  stationaryHours: number | null
+  /** totalHours minus stationaryHours — engine on AND moving. Null likewise. */
+  movingHours:     number | null
+  /**
+   * Ground this category covered across the range, kilometres.
+   *
+   * From `fuel_daily_trends.distance_m`, which since 2026-08-27 rejects hops
+   * below the jitter floor and hops implying an impossible speed. Before that
+   * guard this figure overstated SUKARI by 35%, so a category total taken from
+   * it would have been fiction for road vehicles.
+   *
+   * Reported for every category, plant included. It is near zero for machines
+   * that work in place, and that IS the useful signal — an excavator with real
+   * kilometres has been tramming rather than digging.
+   */
+  distanceKm:  number
 }
 
 /**
@@ -261,26 +307,51 @@ async function computeOperatingHours(
 
   const rows = await prisma.$queryRaw<Array<{
     plate: string; unit_days: bigint; total_seconds: bigint
+    idle_seconds: number | null; total_metres: bigint
   }>>`
     SELECT v.registration_plate AS plate,
            count(*)::bigint                            AS unit_days,
-           coalesce(sum(t.engine_seconds), 0)::bigint  AS total_seconds
+           coalesce(sum(t.engine_seconds), 0)::bigint  AS total_seconds,
+           -- Idle seconds per DAY, then summed: the ratio belongs to the day it
+           -- was measured on, and pooling numerators and denominators across
+           -- days would weight a busy day's ratio by another day's hours.
+           sum(t.engine_seconds * s.idle_fixes::float8 / nullif(s.engine_fixes, 0))
+             FILTER (WHERE s.engine_fixes > 0 AND s.idle_fixes IS NOT NULL)
+                                                       AS idle_seconds,
+           coalesce(sum(t.distance_m), 0)::bigint      AS total_metres
       FROM fuel_daily_trends t
       JOIN vehicles v ON v.id = t.vehicle_id
+      -- LEFT, so a category keeps its hours and distance even where the idle
+      -- ratio was never recorded. The rollup that writes those columns is
+      -- younger than the trend rows beside them.
+      LEFT JOIN vehicle_daily_stats s
+             ON s.vehicle_id = t.vehicle_id AND s.day = t.day
      WHERE v.organisation_id = ${orgId}
        AND v.is_active
        AND t.day >= ${from}::date
        AND t.engine_seconds IS NOT NULL
      GROUP BY 1`
 
-  const byCat = new Map<string, { units: number; unitDays: number; seconds: number }>()
+  const byCat = new Map<string, {
+    units: number; unitDays: number; seconds: number
+    idleSeconds: number; idleMeasured: boolean; metres: number
+  }>()
   for (const r of rows) {
     const category = machinePrefix(r.plate) ?? 'OTHER'
-    if (!byCat.has(category)) byCat.set(category, { units: 0, unitDays: 0, seconds: 0 })
+    if (!byCat.has(category)) {
+      byCat.set(category, {
+        units: 0, unitDays: 0, seconds: 0, idleSeconds: 0, idleMeasured: false, metres: 0,
+      })
+    }
     const c = byCat.get(category)!
     c.units++
     c.unitDays += Number(r.unit_days)
     c.seconds  += Number(r.total_seconds)
+    c.metres   += Number(r.total_metres)
+    // A category counts as measured once ANY unit in it contributed a ratio.
+    // The alternative — requiring all of them — would blank a whole category
+    // because one machine's tracker predates the rollup.
+    if (r.idle_seconds != null) { c.idleSeconds += r.idle_seconds; c.idleMeasured = true }
   }
 
   const categories = [...byCat.entries()].map(([category, c]) => {
@@ -288,13 +359,23 @@ async function computeOperatingHours(
     // a week ran its hours over three days, and dividing by seven would report
     // a machine that worked hard as idle.
     const meanHours = c.unitDays > 0 ? c.seconds / 3600 / c.unitDays : 0
+    const totalHours = Math.round(c.seconds / 3600)
+    // Clamped at totalHours: the ratio is per day and the hours are summed, so
+    // rounding can put idle a hair above the total on a category whose every
+    // day was almost entirely idle. Working hours must never read negative.
+    const stationaryHours = c.idleMeasured
+      ? Math.min(totalHours, Math.round(c.idleSeconds / 3600))
+      : null
     return {
       category,
       units:       c.units,
       unitDays:    c.unitDays,
       meanHours:   Math.round(meanHours * 10) / 10,
-      totalHours:  Math.round(c.seconds / 3600),
+      totalHours,
       utilisation: Math.round((meanHours / EXPECTED_HOURS_PER_DAY) * 100),
+      stationaryHours,
+      movingHours: stationaryHours == null ? null : totalHours - stationaryHours,
+      distanceKm:  Math.round(c.metres / 1000),
     }
   }).sort((a, b) => b.units - a.units)
 

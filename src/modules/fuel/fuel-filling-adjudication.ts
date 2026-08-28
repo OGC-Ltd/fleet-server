@@ -111,6 +111,35 @@ function median(values: number[]): number {
  * parked, a max-before/min-after pair would invent a fill or erase one on noise
  * alone. The series is median-filtered first as well, so an isolated spike
  * cannot reach either figure.
+ *
+ * ## Why this takes no `drainAt`, when `adjudicateDrain` takes a `fillingAt`
+ *
+ * The asymmetry looks like an oversight and is not. It was measured on
+ * 2026-08-26 over 30 days — `prisma/measure-fill-drain-overlap.ts`, which can be
+ * re-run — and the answer was decisive in both directions.
+ *
+ * **The medians already catch the phantom case.** 1,935 of 5,923 fillings
+ * (32.7%) have a drain inside this window. **77.4% of them are already
+ * REDISTRIBUTION, against 7.8% of the fillings with no drain nearby** — a
+ * tenfold enrichment, reached without knowing the drain existed. On a probe
+ * that swings symmetrically the before and after medians are the same, so the
+ * rise is ~0 and the row fails on its own evidence. The `MUFINDI - EX 22`
+ * oscillation that motivated asking is handled by the statistic, not by
+ * cross-referencing.
+ *
+ * **And the rows a drain-aware rule WOULD change are real fuel.** 208
+ * overlapping fillings are `level-rose`: 33,278 L claimed against 36,617 L our
+ * own telemetry watched arrive — we saw MORE go in than was claimed. They are
+ * dominated by `MUFINDI - DG 13` and `DG 12`, generators with ~1,700 L tanks
+ * refuelled 700-1,400 L every day or two, whose engines run 87-96% of the time.
+ * A generator refuelled while running legitimately shows a fill and a drain in
+ * the same eighty minutes. Suppressing those would delete the largest and
+ * best-corroborated deliveries on the fleet.
+ *
+ * So the two directions are not mirror images, and treating them as such would
+ * be the bug: a filling inside a drain's window genuinely explains a rise, so
+ * it must cut the recovery test — but a drain inside a filling's window does
+ * not unexplain an arrival this module watched happen.
  */
 export function adjudicateFilling(
   claim: FillingClaim,

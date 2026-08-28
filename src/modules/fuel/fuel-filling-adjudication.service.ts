@@ -18,6 +18,7 @@ import {
   adjudicateFilling, FILL_HOLD_MINUTES, FILL_LOOKBEHIND_MINUTES, FILL_SETTLE_MINUTES,
   type FillingClaim,
 } from './fuel-filling-adjudication.js'
+import { isConfirmed, isUncheckable } from './fuel-adjudication.js'
 import type { Adjudication, LevelSample } from './fuel-adjudication.js'
 
 export interface FillingAdjudicateOptions {
@@ -41,11 +42,16 @@ export interface FillingOutcome {
   stillPending:    number
   /** Millilitres claimed by rows we could not corroborate. */
   uncorroboratedMl: number
+  /**
+   * Rows a re-judgement left alone because it could no longer see what the
+   * first judgement saw. See the guard in `adjudicateFillings`.
+   */
+  kept:            number
 }
 
 const EMPTY: FillingOutcome = {
   examined: 0, refillConfirmed: 0, refillUnchecked: 0, redistribution: 0,
-  stillPending: 0, uncorroboratedMl: 0,
+  stillPending: 0, uncorroboratedMl: 0, kept: 0,
 }
 
 /**
@@ -87,6 +93,9 @@ export async function adjudicateFillings(opts: FillingAdjudicateOptions): Promis
     },
     select: {
       id: true, vehicleId: true, filledAt: true, filledMl: true,
+      // The verdict this row already carries, so a re-judgement can decline to
+      // replace a decision with the absence of one — see the guard below.
+      verdictReason: true,
       vehicle: { select: { registrationPlate: true } },
     },
     orderBy: { filledAt: 'asc' },
@@ -103,6 +112,24 @@ export async function adjudicateFillings(opts: FillingAdjudicateOptions): Promis
     )
 
     if (verdict.verdict === 'PENDING') { out.stillPending++; continue }
+
+    // A judgement must never be replaced by the absence of one.
+    //
+    // The drains have had this guard since `readjudicate-fuel` was written and
+    // the fillings did not, so `--rejudge` run after telemetry retention had
+    // aged out would overwrite a corroborated `level-rose` with
+    // `insufficient-telemetry`: the row was decided when the readings were
+    // there, and that they are gone now is a fact about our retention, not
+    // about the delivery.
+    //
+    // Harmless on the ordinary sweep — a PENDING row carries no reason, so
+    // `isConfirmed(null)` is false and this never fires — but it is the whole
+    // difference on a re-judgement.
+    if (isUncheckable(verdict) && isConfirmed(f.verdictReason ?? '')) {
+      out.kept++
+      continue
+    }
+
     if (verdict.verdict === 'REDISTRIBUTION') {
       out.redistribution++
       out.uncorroboratedMl += f.filledMl

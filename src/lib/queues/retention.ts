@@ -42,10 +42,10 @@ import { prisma } from '../prisma.js'
 import { trimCachedNotifications } from '../notifications/notification-cache.js'
 import { syncSensorInventory } from '../../modules/fuel/sensor-inventory.service.js'
 import { sweepProbeHealth } from '../../modules/fuel/fuel-probe-health.service.js'
-import { adjudicateFillings } from '../../modules/fuel/fuel-filling-adjudication.service.js'
 import { recordFuelTrendsWithCatchUp } from '../../modules/fuel/fuel-trend.service.js'
 import { recordVehicleDailyStats } from '../../modules/analytics/vehicle-daily-stats.service.js'
 import { deriveFuelRates } from '../../modules/fuel/fuel-rate.service.js'
+import { persistMeasuredBurnRates } from '../../modules/fuel/fuel-burn-rate.service.js'
 
 export const RETENTION_QUEUE = 'maintenance'
 const PRUNE_JOB = 'notifications:prune'
@@ -73,17 +73,15 @@ const PROBE_JOB = 'fuel:probe-health'
  * would call a newly-fitted sensor missing.
  */
 const SENSOR_JOB = 'fuel:sensor-inventory'
-/**
- * Fillings are adjudicated on the same daily cadence, and for the same reason
- * the probe sweep is here: it reads a window of our own telemetry and belongs
- * nowhere near the 15-minute Wialon session.
- *
- * It runs BEFORE the probe sweep, and the order is load-bearing. A filling
- * ruled REDISTRIBUTION is one the tank never received, and `adjudicateDrain`
- * cuts its recovery window at the first filling in the window — so judging
- * fillings first is what stops a phantom one truncating a drain's evidence.
- */
-const FILLING_JOB = 'fuel:adjudicate-fillings'
+// Filling adjudication used to be a daily job here, at 04:05, and it has moved
+// to the fuel cycle in lib/queues/fuel-events — every quarter hour, immediately
+// BEFORE the drains.
+//
+// The reasoning this job's docstring gave was right and its schedule defeated
+// it: judging fillings first is what stops a phantom one truncating a drain's
+// evidence, but drains were judged 288 times for every once the fillings were.
+// A filling recorded at 10:00 sat PENDING until the following morning, and
+// `adjudicateDrain` counts a PENDING filling as real. Same order, one clock.
 /**
  * The day's fuel trend row per vehicle — opening, closing, and the motion-slosh
  * moving average. See modules/fuel/fuel-trend.
@@ -318,16 +316,6 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
-  await queue.add(FILLING_JOB, {}, {
-    // 04:05 UTC — before the probe sweep at 04:23, so a phantom filling is
-    // already marked by the time anything reads the fuel ledgers for the day.
-    repeat:            { pattern: '5 4 * * *' },
-    removeOnComplete:  { count: 30 },
-    removeOnFail:      { count: 30 },
-    attempts:          3,
-    backoff:           { type: 'exponential', delay: 60_000 },
-  })
-
   await queue.add(TREND_JOB, {}, {
     // 21:20 UTC = 00:20 EAT, i.e. twenty minutes into the NEXT fleet day, so
     // the day being recorded has actually finished. `recordFuelTrends` is given
@@ -381,8 +369,14 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     // it.
     if (job.name === TREND_JOB) return recordFuelTrendsWithCatchUp(lastCompleteFleetDay())
     if (job.name === STATS_JOB) return recordVehicleDailyStats(lastCompleteFleetDay())
-    if (job.name === RATE_JOB) return deriveFuelRates({ apply: true })
-    if (job.name === FILLING_JOB) return adjudicateFillings({ apply: true })
+    // Both figures refresh together, so a row never carries a fresh derivation
+    // beside a stale balance. The measured half only ever updates rows the
+    // derivation created, so it must run second.
+    if (job.name === RATE_JOB) {
+      const derived = await deriveFuelRates({ apply: true })
+      await persistMeasuredBurnRates()
+      return derived
+    }
     if (job.name === SENSOR_JOB) return syncSensorInventory()
     if (job.name === PROBE_JOB) return sweepProbeHealth({ notify: true })
     if (job.name !== PRUNE_JOB) return
@@ -399,7 +393,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
 
   logger.info({
     queue: RETENTION_QUEUE, cron: '17 3 * * *',
-    fillingCron: '5 4 * * *', probeCron: '23 4 * * *', trendCron: '20 21 * * *',
+    probeCron: '23 4 * * *', trendCron: '20 21 * * *',
     rateCron: '40 2 * * 0', statsCron: '40 21 * * *',
     retentionDays: env.NOTIFICATION_RETENTION_DAYS,
   }, 'Maintenance jobs scheduled')

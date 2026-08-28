@@ -187,6 +187,16 @@ export function makeTheft(overrides: Partial<FuelTheft> = {}): FuelTheft {
     drainCause: null,
     causeConfidence: null,
     causeReason: null,
+    // Unmeasured by default, matching every row written before 2026-08-28 and
+    // every row whose fall could not be measured at all. Null here is not a
+    // placeholder — see the columns' note on why these are never back-computed.
+    fallSeconds: null,
+    measuredDropMl: null,
+    engineSeconds: null,
+    engineEvidence: null,
+    stepFraction: null,
+    impliedLph: null,
+    fallDistanceKm: null,
     ...overrides,
   }
 }

@@ -55,6 +55,48 @@ enum FuelEventType {
 /// covered 1,938 of 2,571 rows, leaving the ledger unreadable. How sure we are
 /// now lives in verdictReason and in `isConfirmed` beside the verdict, not
 /// instead of it. See modules/fuel/fuel-adjudication.
+/// How a fix's engine state was established — see `VehicleTelemetry.ignitionKnown`.
+///
+/// Recorded per fix rather than per vehicle because a unit can change source
+/// mid-window: a tracker whose ignition line is rewired starts reporting SENSOR
+/// where it previously only had METER, and a rule replayed over that window must
+/// be able to see the change rather than average across it.
+enum IgnitionSource {
+  /// A genuine digital ignition line — the only source that needs no inference.
+  /// `readIgnition` accepts it only when the value is actually binary.
+  SENSOR
+  /// The cumulative engine-hours counter advanced between this fix and the last,
+  /// so the engine ran in between. A measurement, not a heuristic.
+  METER
+  /// External supply voltage, thresholded per unit against its own two modes
+  /// (alternator charging vs at rest). The weakest of the three; adopted only
+  /// where a unit's distribution is genuinely bimodal.
+  VOLTAGE
+  /// Nothing could establish it. `engineOn` on such a row is the speed fallback
+  /// and says only whether the vehicle moved.
+  NONE
+}
+
+/// The denominator a machine's fuel use is measured against.
+///
+/// Mirrors `ConsumptionBasis` in modules/fuel/fuel-theft-classifier, which is
+/// where `resolveBasis` decides it; this enum only records the decision so a
+/// stored rate says which of its two figures is the real one. The rule, from
+/// the operator: machines whose work IS travelling are judged per kilometre,
+/// machines that burn while stationary are judged per engine-hour.
+enum ConsumptionBasis {
+  /// Litres per engine-hour. Excavators, dozers, loaders, graders, generators,
+  /// and tractors — a tractor works the field at 0 km/h and would score its
+  /// whole burn as unexplained on a distance denominator.
+  HOURS
+  /// Litres per kilometre, held internally as km/L. Trucks, lorries, trailers,
+  /// buses, saloons and company vehicles. Note this is the basis of the MACHINE;
+  /// `applicableBasis` still sends a road vehicle that did not travel back to
+  /// HOURS for the fall being judged, because an idling truck is burning, not
+  /// driving.
+  DISTANCE
+}
+
 enum FuelEventVerdict {
   PENDING        // too recent to judge — the level may still come back
   REFILL         // a filling explains it: fuel went IN, it did not leave
@@ -875,15 +917,34 @@ model VehicleDailyStat {
   /// ratio idleFixes/engineFixes is exact whatever the interval does, and
   /// fuel_daily_trends.engineSeconds supplies the scale.
   idleFixes   Int?     @map("idle_fixes")
-  /// Ground the machine's bucket could have reached that day, square metres.
+  /// Ground the machine worked that day, square metres — an UPPER BOUND, never
+  /// a survey.
   ///
-  /// Excavators only — null everywhere else, and null on an excavator whose day
-  /// was too thin to draw. Stored rather than computed on demand because the
-  /// geometry cannot be done inside an API request: measured 2026-08-20, one
-  /// machine's day took 19 s to read and union, and there are nineteen of them.
+  /// Two machine families, two geometries, one column, because both answer the
+  /// same question:
+  ///
+  /// - **Excavators** — a union of 8 m discs around distinct snapped positions.
+  ///   The arm sweeps around a body that stays put, so the body is what to
+  ///   buffer.
+  /// - **Dozers** (since 2026-08-28) — a union of 1.5 m buffers along the
+  ///   SEGMENTS between consecutive fixes. A dozer travels, so at ~10 m between
+  ///   fixes the point method would give disconnected discs with holes between
+  ///   them. See analytics/dozer-area.service.
+  ///
+  /// Null everywhere else, and null on a machine whose day was too thin to
+  /// draw. Stored rather than computed on demand because the geometry cannot be
+  /// done inside an API request: measured 2026-08-20, one excavator's day took
+  /// 19 s to read and union, and there are nineteen of them.
+  ///
+  /// Neither figure has been validated against a block of known extent, and
+  /// neither can tell working ground from ground merely crossed — a dozer
+  /// tramming between cuts is counted as if it were cutting. `MUFINDI: DZ 09`
+  /// measured 4.24 ha per engine hour against a 3 m blade's theoretical 0.38,
+  /// which is what that looks like.
   digAreaM2   Int?     @map("dig_area_m2")
-  /// Seconds that machine spent digging over that ground — the denominator of
-  /// the m2-per-hour rate, integrated the same way engineSeconds is.
+  /// Seconds the machine spent over that ground — the denominator of the
+  /// m2-per-hour rate, integrated the same way engineSeconds is. Digging for an
+  /// excavator; for a dozer, the time inside the segments that were counted.
   digSeconds  Int?     @map("dig_seconds")
   computedAt  DateTime @default(now()) @map("computed_at")
 
@@ -980,16 +1041,76 @@ model FuelDailyTrend {
 model VehicleFuelRate {
   id         String   @id @default(cuid())
   vehicleId  String   @unique @map("vehicle_id")
-  /// Litres per engine-hour. The primary basis for every vehicle type.
+  /// Litres per engine-hour. Always derived, and the figure a judgement uses
+  /// whenever `primaryBasis` is HOURS — or when a DISTANCE machine is judged on
+  /// a fall during which it did not travel. Never null: the derivation cannot
+  /// produce a run without engine time.
   lPerHour   Float    @map("l_per_hour")
-  /// Litres per kilometre — the secondary check on ROAD vehicles only.
-  /// Meaningless on plant, which measured 7.361 L/km at 1.5 km/h.
+  /// Litres per kilometre. The PRIMARY figure where `primaryBasis` is DISTANCE,
+  /// not the garnish this comment used to call it.
+  ///
+  /// Still meaningless on plant, which measured 7.361 L/km at 1.5 km/h, and
+  /// still null for anything the window gave no distance. `resolveBand` inverts
+  /// it to km/L and discards the result below ROAD_MIN_KM_PER_L, so a machine
+  /// that crawls gets no distance baseline however road-like its type.
+  ///
+  /// Measured 2026-08-27: 52 of the 55 DISTANCE machines holding their own rate
+  /// clear that floor, at 1.5-15.2 km/L. The binding constraint is not the
+  /// floor, it is rate coverage — only 55 of 207 DISTANCE machines have a rate
+  /// of their own at all, which is RATE_WINDOW_DAYS' three-day window.
   lPerKm     Float?   @map("l_per_km")
+  /// Which of the two figures above is this machine's real one, per
+  /// `resolveBasis`. Null on rows derived before 2026-08-27; the weekly
+  /// derivation fills it in. Nothing infers a default from null — a missing
+  /// basis means "not yet resolved", and HOURS is a claim, not a fallback.
+  primaryBasis ConsumptionBasis? @map("primary_basis")
+  /// Litres per engine-hour with the machine RUNNING BUT DOING NOTHING —
+  /// stationary, engine on, and not having moved a half-metre grid cell.
+  ///
+  /// Split out because blending it with working burn is a large part of the
+  /// 2-4x within-type spread. Measured 2026-08-27 over 7 days, working burn is
+  /// 1.85x idle across all HOURS machines, and per class: TRACTOR_MEDIUM 7.22x
+  /// (0.8 vs 6.1), TRACTOR_SMALL 2.75x, EXCAVATOR_LARGE 2.33x (6.7 vs 15.7).
+  ///
+  /// Null wherever the window gave too few runs of that kind — a machine that
+  /// never idled has no idle rate, and inventing one from its working figure
+  /// would be the fabrication these columns exist to end. Only meaningful for
+  /// HOURS machines; a road vehicle's idling is measured the same way but its
+  /// primary basis is distance.
+  idleLPerHour Float?  @map("idle_l_per_hour")
+  /// Litres per engine-hour while MOVING, or stationary and changing position —
+  /// digging, slewing, loading. See idleLPerHour for the split's evidence.
+  workLPerHour Float?  @map("work_l_per_hour")
+  /// Qualifying runs behind each split figure, so a thin one is visible rather
+  /// than merely present. Counted separately because a machine can have plenty
+  /// of one kind and almost none of the other — 73 idle runs against 708
+  /// working on TRACTOR_MEDIUM.
+  idleRuns     Int?    @map("idle_runs")
+  workRuns     Int?    @map("work_runs")
   /// Qualifying runs behind the figure. Below MIN_RUNS it is not used.
   runs       Int
   /// Days of telemetry the derivation read, so a rate carries its own window.
   windowDays Int      @map("window_days")
   derivedAt  DateTime @map("derived_at")
+
+  /// The tank-balance measurement from `fuel-burn-rate.service`, which closes
+  /// `burn = (opening - closing) + refills - drains` over 30 fleet-days and is
+  /// display-only today. Persisted here so `resolveBand` can prefer it over the
+  /// weaker three-day derivation — see the plan's 3.6 precedence.
+  ///
+  /// UNPOPULATED until the measured pipeline is wired to write them. A reader
+  /// must treat null as "not measured" and fall through, never as zero.
+  measuredLPerHour   Float?    @map("measured_l_per_hour")
+  /// The range the qualifying days span, mirroring MeasuredBurnRate's lo/hi.
+  measuredLoLPerHour Float?    @map("measured_lo_l_per_hour")
+  measuredHiLPerHour Float?    @map("measured_hi_l_per_hour")
+  /// The distance sibling of the balance above — awaits the plausibility filter
+  /// on `coveredSince`, without which inflated km deflate L/km and hide loss.
+  measuredLPerKm     Float?    @map("measured_l_per_km")
+  /// Qualifying DAYS behind the measured figures, against `runs` for the
+  /// derived ones. Different denominators, deliberately not sharing a column.
+  measuredDays       Int?      @map("measured_days")
+  measuredAt         DateTime? @map("measured_at")
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id])
 
@@ -1076,6 +1197,44 @@ model FuelTheft {
   /// Short slug naming which cause rule decided, for auditing.
   causeReason      String?         @map("cause_reason")
 
+  /// The MEASURED shape of the fall this verdict was reached on — see
+  /// DropEvidence in modules/fuel/fuel-drop-shape.
+  ///
+  /// Computed for every drain since the classifier was written and then thrown
+  /// away: only the cause slugs survived, and `impliedLph` lived on solely as
+  /// text inside a notification string. That made every backtest impossible to
+  /// run and every labelled event impossible to explain — a reviewer asked "why
+  /// was this called a siphon" could be shown a slug and nothing else.
+  ///
+  /// Null on rows judged before 2026-08-28, and null wherever the fall could
+  /// not be measured at all. Never back-computed: the telemetry a drain was
+  /// judged on may have changed since, and a figure derived now would describe a
+  /// different fall from the one the verdict was about.
+  ///
+  /// `fallSeconds` also fixes DriverIncident.minutes, which reports
+  /// `detectedAt - beganAt` — the PROVIDER's window, the very quantity
+  /// PLATEAU_TOLERANCE exists to reject, and typically several times the real
+  /// fall.
+  fallSeconds      Int?            @map("fall_seconds")
+  /// Baseline to trough in millilitres, from the SMOOTHED series. Distinct from
+  /// `stolenMl`, which is the provider's claim; the two disagreeing is itself
+  /// evidence and the pair must stay comparable.
+  measuredDropMl   Int?            @map("measured_drop_ml")
+  /// Engine-on seconds inside the fall, and the share of its readings carrying
+  /// a MEASURED ignition rather than the speed fallback. The second number is
+  /// what says whether the first can be trusted.
+  engineSeconds    Int?            @map("engine_seconds")
+  engineEvidence   Float?          @map("engine_evidence")
+  /// Largest single-interval drop over the total. A siphon is one step; a burn
+  /// is many.
+  stepFraction     Float?          @map("step_fraction")
+  /// Litres per hour the fall implies. The figure the band is compared against,
+  /// and until now it existed only inside a sentence.
+  impliedLph       Float?          @map("implied_lph")
+  /// Kilometres covered during the fall, integrated from reported speed. Zero
+  /// and null mean different things — see DropEvidence.distanceKm.
+  fallDistanceKm   Float?          @map("fall_distance_km")
+
   vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
   driver          User?           @relation("TheftDriver", fields: [driverId], references: [id])
   reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
@@ -1093,6 +1252,69 @@ model FuelTheft {
   /// covering every drain in it.
   @@index([drainCause, beganAt])
   @@map("fuel_thefts")
+}
+
+/// What a human decided a fuel event actually was.
+///
+/// The only external check this detector has. Every threshold in the classifier
+/// is currently an ALERT-VOLUME choice rather than an accuracy one, because
+/// nothing says which flagged events were real: measured over 30 days, median
+/// excess sits flat at 29-31 L from 1.5x to 50x, so no value on that axis buys
+/// better targeting. The same gap blocks two further decisions — whether the
+/// measured tank balance should outrank the derived rate in `resolveBand`, and
+/// whether the 16 SUKARI announcements the consumption-basis change retired
+/// were true or false.
+///
+/// Twenty to thirty adjudicated events is enough to state precision for the
+/// first time.
+///
+/// Kept in its OWN table rather than as columns on the event, for two reasons.
+/// A label is an opinion with an author and a date, and two reviewers may
+/// disagree — which is data, not a conflict to resolve by overwriting. And the
+/// event rows are rewritten by the adjudication sweep, so a label living on one
+/// would be at the mercy of a re-judge.
+model FuelEventLabel {
+  id        String    @id @default(cuid())
+  /// The event this describes. `eventType` says which table `eventId` points
+  /// into — `fuel_thefts` or `fuel_fillings`.
+  ///
+  /// Deliberately NOT a foreign key. Postgres cannot express "FK only when the
+  /// discriminator says so", so an FK to fuel_thefts would reject every FILLING
+  /// label. A pair of nullable FK columns would buy referential integrity at the
+  /// cost of every reader coalescing two columns and every writer keeping them
+  /// exclusive; the import CLI resolves the id against the right table instead.
+  eventId   String    @map("event_id")
+  eventType FuelEventType @map("event_type")
+  label     FuelEventLabelValue
+  /// Who decided. Free text rather than a user FK: the reviewer is usually an
+  /// operations person working from a spreadsheet, not a system account, and
+  /// inventing a User row for them would put fiction in the roster.
+  labelledBy String   @map("labelled_by")
+  labelledAt DateTime @default(now()) @map("labelled_at")
+  /// Why. The most valuable column here when a label disagrees with the
+  /// verdict, and the only place a reviewer can say "the driver admitted it"
+  /// or "this probe is known bad".
+  note      String?
+
+  /// One label per reviewer per event. A reviewer correcting themselves updates
+  /// rather than accumulating, while two reviewers both keep their answer.
+  @@unique([eventId, eventType, labelledBy])
+  @@index([eventType, label])
+  @@map("fuel_event_labels")
+}
+
+/// A reviewer's verdict on an event.
+///
+/// UNSURE is a first-class answer and not a missing one. A reviewer forced to
+/// choose between THEFT and NOT_THEFT on an event they cannot call will guess,
+/// and a guessed label is worse than no label — it enters the precision
+/// arithmetic carrying the same weight as a certain one. The scoring excludes
+/// UNSURE from precision and reports its share separately, because a detector
+/// producing events nobody can adjudicate is telling you something too.
+enum FuelEventLabelValue {
+  THEFT
+  NOT_THEFT
+  UNSURE
 }
 
 // ---------------------------------------------------------------------------
@@ -1180,6 +1402,29 @@ model VehicleTelemetry {
   // Motion & engine
   speedKmh   Float?  @map("speed_kmh")    // instantaneous GPS speed
   engineOn   Boolean @default(false) @map("engine_on") // digital I/O pin state
+
+  /// Was `engineOn` MEASURED, or inferred from movement?
+  ///
+  /// The adapter fills `engineOn` as `ignition ?? (speed > 0)`, so on a unit
+  /// whose ignition line reports nothing the column is a restatement of whether
+  /// the vehicle MOVED — and "engine off and stationary" becomes true of every
+  /// parked machine by construction. Any rule that reasons about the engine
+  /// must read THIS, never `engineOn` alone.
+  ///
+  /// NULL means unknown, not false: it is what a row written before this column
+  /// existed carries, and what an un-backfilled row carries. Test `IS TRUE`.
+  ignitionKnown  Boolean?        @map("ignition_known")
+  /// Where a known ignition state came from, so a method that is later
+  /// disproved can be withdrawn wholesale instead of being untangled.
+  ignitionSource IgnitionSource? @map("ignition_source")
+  /// The unit's own cumulative engine-hours counter at this fix (Wialon `cneh`).
+  ///
+  /// Present on ~96% of frames, and already the most trusted engine-time source
+  /// in the codebase — validated at 0 s error for `KTCC 959G` against 664 s and
+  /// 1,761 s for capped and uncapped gap integration. It was only ever persisted
+  /// as a DAILY rollup on `FuelDailyTrend`, so nothing could take a per-fix
+  /// delta from it.
+  engineHoursMeter Float?        @map("engine_hours_meter")
 
   // Fuel (FLS sensor reading)
   fuelLevelMl Int?   @map("fuel_level_ml") // calibrated tank level in millilitres

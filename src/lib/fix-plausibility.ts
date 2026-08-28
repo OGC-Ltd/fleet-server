@@ -39,6 +39,29 @@ import { haversineM } from './dispatch-trip.js'
  */
 export const PLAUSIBLE_KMH = 120
 
+/**
+ * Below this a hop is satellite wander, not travel — the fleet's ONE jitter
+ * floor, in metres.
+ *
+ * Three definitions of "ground covered" used three different answers until
+ * 2026-08-27: `coveredSince` 15 m, `measureKm` 20 m, and `fuel_daily_trends`'s
+ * `distance_m` no floor at all, so a parked machine's wander accumulated into
+ * its daily distance unchecked.
+ *
+ * TWENTY, for two reasons. It is the only one of the three ever defended in
+ * prose — "comfortably above the jitter and well below the distance covered
+ * between two fixes at any speed worth recording" — and, measured over 24 h,
+ * the choice barely matters: 15 m against 20 m is 1.52% of KASULU's distance
+ * and 1.98% of SUKARI's, against the 31.94% that the plausibility test removes
+ * from SUKARI. There was never a reason to have three answers to a question
+ * worth two per cent.
+ *
+ * Kept HERE, beside PLAUSIBLE_KMH, because the two guards are a pair: one drops
+ * hops too short to be travel and the other hops too long to be possible, and a
+ * caller that applies one without the other has half a filter.
+ */
+export const JITTER_FLOOR_M = 20
+
 interface Accepted { lat: number; lng: number; at: number }
 
 /** vehicleId → the last fix we believed. */

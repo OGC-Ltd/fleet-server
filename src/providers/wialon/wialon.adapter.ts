@@ -303,6 +303,11 @@ function toFrame(
     // fall back to the old speed heuristic — which cannot see idling at all,
     // since it makes "engine on" and "moving" the same signal.
     engineOn:   ignitionOn ?? ((speedKmh ?? 0) > 0),
+    // Whether that was a reading or a guess. `readIgnition` returns null when
+    // the unit has no usable ignition line, and on this fleet that is most of
+    // them — 78% of fuel falls carry no measured engine state.
+    ignitionKnown:    ignitionOn !== null,
+    engineHoursMeter: engineHours,
 
     // Calibrated probe reading; null when the unit has no fuel sensor or no
     // calibration table — never a raw ADC value.

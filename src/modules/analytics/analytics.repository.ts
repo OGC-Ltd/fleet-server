@@ -4,23 +4,13 @@ import { fleetDayStart } from '../../lib/provider-time.js'
 import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics.schema.js'
 import { calculateDriverRating } from './driver-rating.js'
 import type { FuelEventVerdict } from '../../../generated/prisma/client.js'
+import { NO_FUEL_LEFT, NO_FUEL_ARRIVED } from '../fuel/fuel-adjudication.js'
 
-/**
- * Verdicts where no fuel left the tank, and which therefore do not count.
- *
- * REDISTRIBUTION: our own level series showed the fuel come back with no
- *                 filling to explain it, so it never left the tank.
- * REFILL:         a filling explains the movement — fuel went IN.
- * SENSOR_FAULT:   the probe failed, not the tank — a dead FLS reports a full
- *                 tank draining to nothing (see modules/fuel/fuel-adjudication).
- *
- * A DRAIN counts whether or not it is confirmed. We subtract what we can
- * DISPROVE, not what we merely doubt — so a drain the telemetry could not check
- * still counts, because the provider saw a fall and we cannot show otherwise.
- * That is why `confirmed` is not consulted here: it is about our certainty, not
- * about whether the fuel went.
- */
-const NO_FUEL_LEFT: FuelEventVerdict[] = ['REDISTRIBUTION', 'REFILL', 'SENSOR_FAULT']
+// `NO_FUEL_LEFT` (drains) and `NO_FUEL_ARRIVED` (fillings) are imported rather
+// than declared here. They interpret a `Verdict`, so they live beside it in
+// modules/fuel/fuel-adjudication — and they are a matched pair that must not be
+// confused for each other, which is easier to see where both are defined
+// together than where one sits in analytics and the other in a report.
 
 // A delivery counts as "interrupted"/delayed when it took materially longer than
 // its moving time (distance ÷ average speed) implies — i.e. it spent a lot of
@@ -261,8 +251,14 @@ export async function fuelConsumption(
 
   const vehicleSelect = { select: { registrationPlate: true, name: true } }
   const [fillings, thefts] = await Promise.all([
+    // Deliveries that never arrived are excluded — see NO_FUEL_ARRIVED.
     prisma.fuelFilling.findMany({
-      where:  { vehicle: { organisationId: orgId }, ...vehicleWhere, filledAt: { gte: from, lte: to } },
+      where:  {
+        vehicle: { organisationId: orgId },
+        ...vehicleWhere,
+        filledAt: { gte: from, lte: to },
+        verdict: { notIn: NO_FUEL_ARRIVED },
+      },
       select: { vehicleId: true, filledAt: true, filledMl: true, vehicle: vehicleSelect },
       orderBy: { filledAt: 'asc' },
     }),
@@ -580,7 +576,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       },
       select: {
         id: true, driverId: true, vehicleId: true,
-        beganAt: true, detectedAt: true,
+        beganAt: true, detectedAt: true, fallSeconds: true,
         stolenMl: true, initialFuelLevelMl: true, finalFuelLevelMl: true,
         initialLocation: true,
         verdict: true, verdictReason: true,
@@ -637,7 +633,22 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       // Minutes the level was falling. 47 L over four hours and 47 L over four
       // minutes are different events with the same headline, so the rate is
       // carried rather than left to be inferred from a total.
-      minutes:  Math.round((th.detectedAt.getTime() - th.beganAt.getTime()) / 60_000),
+      //
+      // The MEASURED fall where we have it, falling back to the provider's
+      // window otherwise. Those are not the same quantity and the difference is
+      // large: `detectedAt - beganAt` is the window Wialon reports, and
+      // PLATEAU_TOLERANCE exists precisely because a machine sitting full for
+      // half an hour and then losing fuel in four minutes is reported as a
+      // 34-minute fall. Measured 2026-08-16, parked "falls" had a median
+      // duration of 33 minutes, most of it flat — so this column was dividing
+      // real rates by eight and turning siphons into trickles.
+      //
+      // Null fallSeconds means the row predates 2026-08-28 or its fall was not
+      // measurable. The provider window is then the only figure available, and
+      // it is better than nothing as long as nobody mistakes it for the other.
+      minutes:  th.fallSeconds != null
+        ? Math.max(1, Math.round(th.fallSeconds / 60))
+        : Math.round((th.detectedAt.getTime() - th.beganAt.getTime()) / 60_000),
       fromL:    th.initialFuelLevelMl == null ? null : Math.round(th.initialFuelLevelMl / 100) / 10,
       toL:      th.finalFuelLevelMl   == null ? null : Math.round(th.finalFuelLevelMl / 100) / 10,
       where:    th.initialLocation ?? null,
@@ -1024,7 +1035,11 @@ export async function operationsToday(orgId: string, vehicleIds: string[] | null
     // Measured litres off the fuel probes, same ledger the month card reads —
     // just clamped to the day so it is a RUNNING total rather than a period one.
     prisma.fuelFilling.findMany({
-      where:  { vehicle: { organisationId: orgId }, ...vehicleWhere, filledAt: { gte: dayStart } },
+      where:  {
+        vehicle: { organisationId: orgId }, ...vehicleWhere, filledAt: { gte: dayStart },
+        // Deliveries that never arrived are excluded — see NO_FUEL_ARRIVED.
+        verdict: { notIn: NO_FUEL_ARRIVED },
+      },
       select: { filledMl: true, filledAt: true },
     }),
     // Tractors SIGNED OUT today — the yard's own record of leaving, which

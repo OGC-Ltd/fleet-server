@@ -15,19 +15,42 @@
  */
 
 import { prisma } from './prisma.js'
+import { fleetDayStart, fleetDayKey } from './provider-time.js'
 
 /** org + day → period id. Periods are immutable once created. */
 const cache   = new Map<string, string>()
 const pending = new Map<string, Promise<string>>()
 
-/** Local-day bounds for `at`, matching how the DAILY periods were seeded. */
+/**
+ * The FLEET day containing `at` — 00:00 to 23:59:59.999 Africa/Nairobi.
+ *
+ * Was `setHours(0, 0, 0, 0)`, which is the HOST PROCESS's timezone and not a
+ * statement about the fleet at all. On the UTC box this runs on, that put the
+ * boundary at 03:00 EAT: every trip started between midnight and three in the
+ * morning was filed under the previous day's reporting period, and the operator
+ * saw an early-hours haul land on the wrong sheet.
+ *
+ * It was invisible on a developer machine in EAT and wrong in production, which
+ * is the worst combination — `provider-time` exists precisely so that "which
+ * day is this" has ONE answer regardless of where the code runs.
+ */
 function dayBounds(at: Date): { start: Date; end: Date } {
-  const start = new Date(at); start.setHours(0, 0, 0, 0)
-  const end   = new Date(at); end.setHours(23, 59, 59, 999)
-  return { start, end }
+  const start = fleetDayStart(at)
+  return { start, end: new Date(start.getTime() + 86_400_000 - 1) }
 }
 
-const keyOf = (orgId: string, at: Date) => `${orgId}:${dayBounds(at).start.toISOString().slice(0, 10)}`
+/**
+ * Note `fleetDayKey`, not `dayBounds(at).start` sliced to a date.
+ *
+ * `fleetDayStart` returns the INSTANT EAT-midnight falls on, which in UTC is
+ * 21:00 the previous evening — so taking its UTC calendar components labels
+ * every fleet day with the day BEFORE it. That off-by-one has shipped in this
+ * codebase once already; see `fleetDayKey`'s own note. Here it would have
+ * collided two adjacent days onto one cache slot for the three hours either
+ * side of the boundary.
+ */
+const keyOf = (orgId: string, at: Date) =>
+  `${orgId}:${fleetDayKey(at).toISOString().slice(0, 10)}`
 
 async function resolve(orgId: string, at: Date): Promise<string> {
   // An existing period that CONTAINS the moment wins, whatever its type — a
@@ -42,7 +65,10 @@ async function resolve(orgId: string, at: Date): Promise<string> {
   if (existing) return existing.id
 
   const { start, end } = dayBounds(at)
-  const label = `Live ${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`
+  // From fleetDayKey, NOT from `start`'s calendar components. `start` is 21:00
+  // UTC the previous evening, so getDate() on a UTC box names the day before —
+  // the label would have disagreed with the period it labels.
+  const label = `Live ${fleetDayKey(at).toISOString().slice(0, 10)}`
 
   // Two workers can race here for the same day. There is no unique constraint
   // on (org, start) to upsert against, so a loser re-reads rather than
