@@ -274,7 +274,15 @@ export async function fuelConsumption(
         beganAt: { gte: from, lte: to },
         verdict: { notIn: NO_FUEL_LEFT },
       },
-      select: { vehicleId: true, beganAt: true, stolenMl: true, vehicle: vehicleSelect },
+      // Wider than the totals need, because the same rows are now returned
+      // individually as `drains` — see the note there on why this is the query
+      // that has to produce them.
+      select: {
+        id: true, vehicleId: true, beganAt: true, stolenMl: true,
+        initialLocation: true, drainCause: true, causeReason: true,
+        verdict: true, fallSeconds: true,
+        vehicle: vehicleSelect,
+      },
       orderBy: { beganAt: 'asc' },
     }),
   ])
@@ -335,6 +343,35 @@ export async function fuelConsumption(
       fillings:          v.fillings,
       thefts:            v.thefts,
     })).sort((a, b) => b.filledMl - a.filledMl),
+    /**
+     * Every drain behind `totals.stolenMl`, one row each, newest first.
+     *
+     * From the SAME query the totals are summed from, deliberately. The
+     * alternative — the client calling `/fuel/thefts` for the window — filters
+     * on its own `verdict` set and its own date bounds, and the moment either
+     * drifts the report prints a table that does not add up to the figure
+     * printed above it. Here it cannot: a row is in this list if and only if it
+     * was counted, so the litres always sum to `totals.stolenMl`.
+     *
+     * `beganAt`, not `detectedAt` — the ledger dates a drain by when the fuel
+     * started leaving, which is the night an operator goes looking for it.
+     * `fallSeconds` is the MEASURED duration of the fall where the adjudicator
+     * could measure it, and null on rows judged before 2026-08-28. Null is not
+     * zero and must not be rendered as one.
+     */
+    drains: thefts.map(t => ({
+      id:                t.id,
+      vehicleId:         t.vehicleId,
+      registrationPlate: t.vehicle.registrationPlate,
+      name:              t.vehicle.name,
+      beganAt:           t.beganAt,
+      stolenMl:          t.stolenMl,
+      location:          t.initialLocation,
+      cause:             t.drainCause,
+      causeReason:       t.causeReason,
+      verdict:           t.verdict,
+      fallSeconds:       t.fallSeconds,
+    })).sort((a, b) => b.beganAt.getTime() - a.beganAt.getTime()),
   }
 }
 
