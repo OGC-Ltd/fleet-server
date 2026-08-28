@@ -81,6 +81,13 @@ export function priceFuelConsumption(data: FuelConsumption, { pricePerLitre, cur
       lossCost:     cost(d.stolenMl, pricePerLitre),
       fillings:     d.fillings,
       thefts:       d.thefts,
+      // Mean per-vehicle probe slosh that day, and the vehicles behind it.
+      // NOT priced: turbulence is fuel moving INSIDE a tank, not fuel bought or
+      // lost, and costing it would invent a number. Null, never 0, where the
+      // day has no reading — see the repository's note on why that is the
+      // normal case for the current day.
+      turbulenceL:  d.turbulenceMl == null ? null : litres(d.turbulenceMl),
+      turbulenceVehicles: d.turbulenceVehicles,
     })),
 
     byVehicle: data.byVehicle.map(v => ({

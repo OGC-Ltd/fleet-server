@@ -5,6 +5,7 @@ import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics
 import { calculateDriverRating } from './driver-rating.js'
 import type { FuelEventVerdict } from '../../../generated/prisma/client.js'
 import { NO_FUEL_LEFT, NO_FUEL_ARRIVED } from '../fuel/fuel-adjudication.js'
+import { vehicleSql } from './vehicle-filter.js'
 // The one implementation of "was an operator actually told about this". Read
 // here rather than re-derived on the client: a second copy of that rule would
 // drift from the alerts it is supposed to describe.
@@ -254,7 +255,7 @@ export async function fuelConsumption(
     fleetDayKey(new Date(from.getTime() + i * 86_400_000)))
 
   const vehicleSelect = { select: { registrationPlate: true, name: true } }
-  const [fillings, thefts] = await Promise.all([
+  const [fillings, thefts, turbulence] = await Promise.all([
     // Deliveries that never arrived are excluded — see NO_FUEL_ARRIVED.
     prisma.fuelFilling.findMany({
       where:  {
@@ -308,6 +309,41 @@ export async function fuelConsumption(
       },
       orderBy: { beganAt: 'asc' },
     }),
+    /**
+     * Probe turbulence per fleet day — the MEAN of the per-vehicle figure, and
+     * the count of vehicles it stands on.
+     *
+     * MEAN, never a sum: turbulence is a magnitude per tank (±L of slosh), so a
+     * sum would grow with the size of the fleet and describe nothing. `abs()`
+     * because the column is signed in storage — the same reading every other
+     * consumer takes of it (fuel-burn-rate, fuel-rate-series).
+     *
+     * `stops_averaged > 0` drops rows whose window never filled; with the null
+     * check it removes about 10% (≈285 of ≈310 rows a day are usable). The
+     * vehicle count travels with the figure because the population is a
+     * MINORITY of the fleet — the probed units only, 160 of 597 at Sukari
+     * measured 2026-08-28 — and a mean over a quarter of the yard should not be
+     * read as the yard.
+     *
+     * Raw SQL rather than Prisma groupBy because the mean wants `abs()` inside
+     * the aggregate. `to_char` rather than returning the DATE, so the fleet-day
+     * key is a string built in the database and no timezone can be applied to
+     * it twice on the way out.
+     */
+    prisma.$queryRaw<Array<{ day: string; turb_ml: number; vehicles: bigint }>>`
+      SELECT to_char(t.day, 'YYYY-MM-DD')        AS day,
+             avg(abs(t.turbulence_ml))::float8   AS turb_ml,
+             count(*)::bigint                    AS vehicles
+        FROM fuel_daily_trends t
+        JOIN vehicles v ON v.id = t.vehicle_id
+       WHERE v.organisation_id = ${orgId} AND v.is_active
+         AND t.day >= ${windowDays[0]}::date
+         AND t.day <= ${windowDays[windowDays.length - 1]}::date
+         AND t.turbulence_ml IS NOT NULL
+         AND t.stops_averaged > 0
+         ${vehicleSql(vehicleIds)}
+       GROUP BY 1
+    `,
   ])
 
   interface Bucket { filledMl: number; stolenMl: number; fillings: number; thefts: number }
@@ -342,6 +378,12 @@ export async function fuelConsumption(
   // presentation, so a per-day average must not divide by quiet days.
   const activeDays = byDay.size
 
+  // `vehicles` arrives as a bigint from count(*) and is narrowed here rather
+  // than at the edge: it reaches JSON eventually, and JSON.stringify throws on
+  // a bigint rather than coercing it.
+  const turbulenceByDay = new Map(
+    turbulence.map(t => [t.day, { turbMl: t.turb_ml, vehicles: Number(t.vehicles) }]))
+
   return {
     totals: {
       filledMl:   totalFilledMl,
@@ -352,9 +394,21 @@ export async function fuelConsumption(
       activeDays,
     },
     // One entry per window day, oldest→newest, zeroed where no fuel moved.
+    //
+    // Turbulence is the exception and is NULL where absent, never 0. A day with
+    // no reading is UNKNOWN, not calm, and this is the normal case rather than
+    // an edge one: fuel_daily_trends is written once per day at ~21:20 UTC,
+    // just after the fleet day closes, so the CURRENT day has no row at all and
+    // the rightmost point of the series is always null. A zero here would draw
+    // a daily "the probes went quiet" dip that never happened.
     byDay: windowDays.map((day) => {
       const v = byDay.get(day) ?? empty()
-      return { day, filledMl: v.filledMl, stolenMl: v.stolenMl, fillings: v.fillings, thefts: v.thefts }
+      const t = turbulenceByDay.get(day)
+      return {
+        day, filledMl: v.filledMl, stolenMl: v.stolenMl, fillings: v.fillings, thefts: v.thefts,
+        turbulenceMl:       t ? Math.round(t.turbMl) : null,
+        turbulenceVehicles: t ? t.vehicles : 0,
+      }
     }),
     // Thirstiest first — that is the order the operator wants to read.
     byVehicle: [...byVehicle].map(([vehicleId, v]) => ({
