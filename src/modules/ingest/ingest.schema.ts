@@ -19,6 +19,21 @@ export const telemetryPayloadSchema = z.object({
   fuelLevelMl:    z.number().int().nonnegative().optional(),
   fuelUsedMl:     z.number().int().optional(),
   cargoWeightKg:  z.number().nonnegative().optional(),
+
+  /**
+   * On-board camera state, where the unit has a recorder.
+   *
+   * Optional and absent on essentially every payload — one unit of 1,496 in
+   * this Wialon account has a camera. `cameraStreamUrl` is a URL only: the
+   * provider adapter drops anything that does not parse as http(s), so a value
+   * arriving here is always something a browser can open. Validated again
+   * anyway, because ingest is a public boundary and the adapter is not the only
+   * possible caller.
+   */
+  cameraFitted:     z.boolean().optional(),
+  cameraStreamUrl:  z.string().url().max(2048).optional(),
+  cameraRecording:  z.boolean().optional(),
+  cameraSignalLost: z.boolean().optional(),
   rawPayload:     z.record(z.string(), z.unknown()).optional(),
 })
 
