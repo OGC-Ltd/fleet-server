@@ -128,6 +128,9 @@ export function priceFuelConsumption(data: FuelConsumption, { pricePerLitre, cur
       cause:             d.cause,
       causeReason:       d.causeReason,
       verdict:           d.verdict,
+      // Whether an operator was told. 90 of 3,275 over 30 days — the gap
+      // between what the ledger RECORDS and what the detector CLAIMS.
+      announced:         d.announced,
       // Null on rows judged before 2026-08-28 — never back-computed.
       fallSeconds:       d.fallSeconds,
     })),

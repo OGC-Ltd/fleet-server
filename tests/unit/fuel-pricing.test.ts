@@ -30,7 +30,7 @@ function drain(over: Partial<Consumption['drains'][number]> = {}) {
     beganAt: new Date('2026-08-20T22:50:00Z'),
     stolenMl: 40_000, levelBeforeMl: 280_900, levelAfterMl: 240_900,
     location: 'Yard', cause: 'SIPHON',
-    causeReason: 'parked-sustained-fall', verdict: 'DRAIN', fallSeconds: 3600,
+    causeReason: 'parked-sustained-fall', verdict: 'DRAIN', announced: true, fallSeconds: 3600,
     ...over,
   } as Consumption['drains'][number]
 }
@@ -185,5 +185,18 @@ describe('the FSL level either side of a drain', () => {
 
     expect(out.drains[0]!.levelBefore).toBeNull()
     expect(out.drains[0]!.levelAfter).toBeNull()
+  })
+})
+
+describe('recorded is not announced', () => {
+  it('carries whether an operator was actually told', () => {
+    // 90 of 3,275 over 30 days. A reader who takes the row count as an alert
+    // count is out by a factor of thirty-six, so the payload has to be able to
+    // say which is which.
+    const out = priceFuelConsumption(consumption({
+      drains: [drain({ id: 'a', announced: true }), drain({ id: 'b', announced: false })],
+    }), PRICE)
+
+    expect(out.drains.map(d => d.announced)).toEqual([true, false])
   })
 })
