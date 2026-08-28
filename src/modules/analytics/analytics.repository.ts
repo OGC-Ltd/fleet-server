@@ -5,6 +5,10 @@ import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics
 import { calculateDriverRating } from './driver-rating.js'
 import type { FuelEventVerdict } from '../../../generated/prisma/client.js'
 import { NO_FUEL_LEFT, NO_FUEL_ARRIVED } from '../fuel/fuel-adjudication.js'
+// The one implementation of "was an operator actually told about this". Read
+// here rather than re-derived on the client: a second copy of that rule would
+// drift from the alerts it is supposed to describe.
+import { announces } from '../fuel/fuel-theft-classifier.js'
 
 // `NO_FUEL_LEFT` (drains) and `NO_FUEL_ARRIVED` (fillings) are imported rather
 // than declared here. They interpret a `Verdict`, so they live beside it in
@@ -379,6 +383,17 @@ export async function fuelConsumption(
       cause:             t.drainCause,
       causeReason:       t.causeReason,
       verdict:           t.verdict,
+      /**
+       * Was an operator actually told about this one?
+       *
+       * Measured over 30 days: 90 of 3,275. The ledger records every fall it
+       * cannot explain, and the classifier announces only the few it can stand
+       * behind — so a reader who takes the row count as an alert count is out
+       * by a factor of thirty-six. Carried per row so the report can say which
+       * is which instead of implying they are the same thing.
+       */
+      announced:         t.drainCause != null
+                           && announces({ cause: t.drainCause, reason: t.causeReason ?? '' }),
       fallSeconds:       t.fallSeconds,
     })).sort((a, b) => b.beganAt.getTime() - a.beganAt.getTime()),
   }
