@@ -27,7 +27,7 @@ import {
   adjudicateDrain, applyProbeTrustGate, smoothLevels, SETTLE_MINUTES, SWING_ML,
   type Adjudication, type DrainClaim, type LevelSample, type ProbeProfile, type Verdict,
 } from './fuel-adjudication.js'
-import { measureFall, type FallSample } from './fuel-drop-shape.js'
+import { measureFall, type FallSample, type DropEvidence } from './fuel-drop-shape.js'
 import {
   classifyDrain, resolveBand, resolveBasis, announces, mayUseTheftWording, type CauseJudgement,
   ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS,
@@ -232,7 +232,7 @@ export async function getProbeProfile(vehicleId: string, now: Date): Promise<Pro
 export async function judgeDrain(
   drain: DrainClaim & { vehicleId: string },
   now: Date,
-): Promise<Adjudication & { cause: CauseJudgement | null }> {
+): Promise<Adjudication & { cause: CauseJudgement | null; evidence: DropEvidence | null }> {
   const from = new Date(drain.beganAt.getTime() - LOOKBEHIND_MS)
   const to   = new Date(drain.detectedAt.getTime() + LOOKAHEAD_MS)
 
@@ -299,7 +299,7 @@ export async function judgeDrain(
   // Only a DRAIN has a cause to determine. A REDISTRIBUTION means the fuel came
   // back and a SENSOR_FAULT means the probe lied, so neither poses the question
   // "where did it go" that this answers.
-  if (verdict.verdict !== 'DRAIN') return { ...verdict, cause: null }
+  if (verdict.verdict !== 'DRAIN') return { ...verdict, cause: null, evidence: null }
 
   // The trust gate, asked only of the rows it can act on. It costs a second
   // query, and the great majority never need it: on the ledger as it stands 417
@@ -319,7 +319,7 @@ export async function judgeDrain(
   if (measured == null) {
     // No measurable fall in our own series. The verdict stands — the provider
     // saw something we could not — but there is nothing to attribute it to.
-    return { ...gated, cause: { cause: 'INDETERMINATE', reason: 'no-measurable-fall', confidence: 0.5, impliedLph: null } }
+    return { ...gated, cause: { cause: 'INDETERMINATE', reason: 'no-measurable-fall', confidence: 0.5, impliedLph: null }, evidence: null }
   }
 
   const { orgCode, plate, rate, lPerKm, vehicleType, tankCapacityLitres } =
@@ -331,7 +331,14 @@ export async function judgeDrain(
   // whether THIS fall belongs to it. A truck on the open road is judged per
   // kilometre; the same truck idling is judged per hour.
   const basis = resolveBasis(orgCode, { plate, vehicleType, tankCapacityLitres })
-  return { ...gated, cause: classifyDrain(measured.evidence, band, profile, basis) }
+  // The evidence rides out alongside the cause so the caller can PERSIST what
+  // the verdict was reached on. Computed here for every drain since the
+  // classifier was written and discarded every time until 2026-08-28.
+  return {
+    ...gated,
+    cause: classifyDrain(measured.evidence, band, profile, basis),
+    evidence: measured.evidence,
+  }
 }
 
 /**
@@ -564,6 +571,21 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
         drainCause:        verdict.cause?.cause      ?? null,
         causeConfidence:   verdict.cause?.confidence ?? null,
         causeReason:       verdict.cause?.reason     ?? null,
+        // The measured shape this verdict was reached on. Persisted as it was
+        // at judgement time and never recomputed: the sweep re-reads telemetry,
+        // so a figure derived later would describe a different fall while
+        // looking like a contemporaneous measurement.
+        //
+        // `impliedLph` comes off the CAUSE rather than the evidence — the
+        // classifier is what decides which denominator applies, and the same
+        // fall implies a different rate under HOURS than under DISTANCE.
+        fallSeconds:       verdict.evidence?.fallSeconds    ?? null,
+        measuredDropMl:    verdict.evidence?.dropMl         ?? null,
+        engineSeconds:     verdict.evidence?.engineSeconds  ?? null,
+        engineEvidence:    verdict.evidence?.engineEvidence ?? null,
+        stepFraction:      verdict.evidence?.stepFraction   ?? null,
+        fallDistanceKm:    verdict.evidence?.distanceKm     ?? null,
+        impliedLph:        verdict.cause?.impliedLph        ?? null,
       },
     })
 

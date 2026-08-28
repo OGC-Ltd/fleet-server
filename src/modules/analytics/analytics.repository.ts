@@ -576,7 +576,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       },
       select: {
         id: true, driverId: true, vehicleId: true,
-        beganAt: true, detectedAt: true,
+        beganAt: true, detectedAt: true, fallSeconds: true,
         stolenMl: true, initialFuelLevelMl: true, finalFuelLevelMl: true,
         initialLocation: true,
         verdict: true, verdictReason: true,
@@ -633,7 +633,22 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       // Minutes the level was falling. 47 L over four hours and 47 L over four
       // minutes are different events with the same headline, so the rate is
       // carried rather than left to be inferred from a total.
-      minutes:  Math.round((th.detectedAt.getTime() - th.beganAt.getTime()) / 60_000),
+      //
+      // The MEASURED fall where we have it, falling back to the provider's
+      // window otherwise. Those are not the same quantity and the difference is
+      // large: `detectedAt - beganAt` is the window Wialon reports, and
+      // PLATEAU_TOLERANCE exists precisely because a machine sitting full for
+      // half an hour and then losing fuel in four minutes is reported as a
+      // 34-minute fall. Measured 2026-08-16, parked "falls" had a median
+      // duration of 33 minutes, most of it flat — so this column was dividing
+      // real rates by eight and turning siphons into trickles.
+      //
+      // Null fallSeconds means the row predates 2026-08-28 or its fall was not
+      // measurable. The provider window is then the only figure available, and
+      // it is better than nothing as long as nobody mistakes it for the other.
+      minutes:  th.fallSeconds != null
+        ? Math.max(1, Math.round(th.fallSeconds / 60))
+        : Math.round((th.detectedAt.getTime() - th.beganAt.getTime()) / 60_000),
       fromL:    th.initialFuelLevelMl == null ? null : Math.round(th.initialFuelLevelMl / 100) / 10,
       toL:      th.finalFuelLevelMl   == null ? null : Math.round(th.finalFuelLevelMl / 100) / 10,
       where:    th.initialLocation ?? null,
