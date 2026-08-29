@@ -8,8 +8,9 @@
  */
 
 import { prisma } from '../prisma.js'
-import { readCachedNotifications, primeCache, type NotificationItem } from './notification-cache.js'
+import { readCachedNotifications, primeCache, readCachedVehicleDay, cacheVehicleDay, type NotificationItem } from './notification-cache.js'
 import { env } from '../../config/env.js'
+import { fleetDayBounds } from '../provider-time.js'
 
 const FLEET_TZ = 'Africa/Nairobi'
 const clockFmt = new Intl.DateTimeFormat('en-GB', {
@@ -53,6 +54,16 @@ export interface NotificationQuery {
    * happens to be holding — anything older has to come from here.
    */
   vehicleId?: string
+  /**
+   * One FLEET day, `YYYY-MM-DD`, Africa/Nairobi — the same calendar the
+   * playback endpoint and every rollup in this codebase use.
+   *
+   * A day rather than a free `from`/`to` range on purpose. Operations works in
+   * shifts, so "what did this unit do on the 27th" is the question actually
+   * being asked; and a day is a bounded, COMPLETE set, which is what makes the
+   * per-vehicle cache below possible at all. An arbitrary range is neither.
+   */
+  day?: string
 }
 
 /** DB row → the same shape the SSE feed and the cache use. */
@@ -83,9 +94,34 @@ function toItem(row: {
  */
 export async function getNotifications(
   orgId: string,
-  { limit = 50, before, alertTypes, severities, vehicleId }: NotificationQuery = {},
+  { limit = 50, before, alertTypes, severities, vehicleId, day }: NotificationQuery = {},
 ): Promise<NotificationPage> {
-  const capped = Math.min(Math.max(limit, 1), 200)
+  /**
+   * A whole vehicle-day is allowed past the paging cap.
+   *
+   * 200 is the right bound for a scrolling org feed, where the next page is one
+   * `before` away. A day is not a page — it is the complete answer to a
+   * question, and returning 200 of a unit's 154..N events would be a silent
+   * truncation of something the operator asked for in full. The busiest
+   * measured vehicle-day carried 154 notifications, so 500 clears it with room.
+   */
+  const dayRange = day ? fleetDayBounds(day) : null
+  const capped = Math.min(Math.max(limit, 1), dayRange ? 500 : 200)
+
+  /**
+   * A COMPLETED vehicle-day is served from its own cache.
+   *
+   * Only when the day is over. A day still running would cache a partial answer
+   * that then never updates — the worst kind of wrong, because it looks
+   * authoritative. Today always reads through.
+   */
+  const dayComplete = Boolean(dayRange && dayRange.to.getTime() <= Date.now())
+  if (vehicleId && day && dayComplete && !before && !alertTypes?.length && !severities?.length) {
+    const cached = await readCachedVehicleDay(vehicleId, day)
+    // `[]` is a real answer here — a unit that reported nothing that day — so
+    // only a null miss falls through.
+    if (cached) return { items: cached, source: 'cache' }
+  }
 
   // The cache is one mixed, capped, chronological set — it cannot answer a
   // filtered question without lying by omission, because the rows that match
@@ -107,7 +143,11 @@ export async function getNotifications(
   const rows = await prisma.notification.findMany({
     where:   {
       organisationId: orgId,
-      ...(before ? { occurredAt: { lt: before } } : {}),
+      // `before` pages back inside whatever window is in force, so a day read
+      // and a cursor compose rather than one overwriting the other.
+      ...(dayRange
+        ? { occurredAt: { gte: dayRange.from, lt: before && before < dayRange.to ? before : dayRange.to } }
+        : before ? { occurredAt: { lt: before } } : {}),
       ...(vehicleId ? { vehicleId } : {}),
       ...(alertTypes?.length ? { alertType: { in: alertTypes } } : {}),
       ...(severities?.length ? { severity:  { in: severities } } : {}),
@@ -128,6 +168,18 @@ export async function getNotifications(
   // priming from a filtered one would replace the whole feed with a slice of it.
   if (!before && !filtered && items.length > 0) {
     void primeCache(orgId, items.slice(0, env.NOTIFICATION_CACHE_MAX))
+  }
+
+  /**
+   * And write the vehicle-day back, which is the whole point of the shape.
+   *
+   * Empty days included — a quiet day is the commonest answer and the most
+   * wasteful to keep re-deriving. Not written when the read hit the cap, since
+   * that would cache a truncated day as if it were the whole one.
+   */
+  if (vehicleId && day && dayRange && dayComplete && !before && !alertTypes?.length && !severities?.length
+      && items.length < capped) {
+    void cacheVehicleDay(vehicleId, day, items, dayRange.from.getTime())
   }
 
   return { items, source: 'database' }

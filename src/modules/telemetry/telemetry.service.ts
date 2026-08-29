@@ -16,7 +16,7 @@ import { movementState } from '../../lib/movement-state.js'
 import { connectionStatus } from '../../lib/connection-state.js'
 import { getOpenTripsCached } from '../dispatches/open-trips.cache.js'
 import { tripGeometry } from '../../lib/dispatch-trip.js'
-import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
+import { fleetDayStart, fleetDayKey, fleetDayBounds as sharedFleetDayBounds } from '../../lib/provider-time.js'
 
 /** Fleet-local midnight as an ISO string, so it compares against `departedAt`
  *  (which is already an ISO instant) without re-parsing per vehicle. */
@@ -133,9 +133,12 @@ export async function getVehicleTrack(vehicleId: string, orgId: string, q: Track
  * invisible on any day the unit happened not to work before 03:00.
  */
 function fleetDayBounds(day: string) {
-  const from = new Date(`${day}T00:00:00.000+03:00`)
-  if (Number.isNaN(from.getTime())) throw new BadRequestError(`Unparseable day '${day}'`)
-  return { from, to: new Date(from.getTime() + 86_400_000) }
+  // The arithmetic moved to lib/provider-time so the notification reader shares
+  // it — a replay and the event list beside it must agree on what a day is.
+  // The 400 stays here, because that is an HTTP decision.
+  const bounds = sharedFleetDayBounds(day)
+  if (!bounds) throw new BadRequestError(`Unparseable day '${day}'`)
+  return bounds
 }
 
 /**
