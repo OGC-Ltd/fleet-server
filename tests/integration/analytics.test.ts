@@ -69,9 +69,19 @@ describe('GET /analytics/fuel-cost', () => {
     vehicle: { registrationPlate: 'KDL 201X', name: 'SINO ZZ4257V344JB1R' },
   })
 
-  // An explicit `to` bypasses the warm cache and queries directly, which is
-  // what makes the aggregate assertable against mocked rows.
-  const query = { days: '2', to: '2026-08-03T12:00:00Z' }
+  /**
+   * An explicit `to` is what makes the aggregate assertable against mocked
+   * rows — but it does NOT bypass the cache, it just keys a different entry,
+   * and the entry outlives the test that filled it.
+   *
+   * So every test here needs its OWN `to`. Sharing one meant the second test's
+   * 10 L of mocked filling was never read: it got the 40 L the first test had
+   * already warmed, asserted 8,000 against an expected 2,000, and had been
+   * failing for exactly that reason. `pricePerLitre` cannot save it — price is
+   * deliberately applied per request and never enters the key, so one entry
+   * serves every rate.
+   */
+  const query = (to: string) => ({ days: '2', to })
 
   it('costs the ledger at the configured rate', async () => {
     prismaMock.fuelFilling.findMany.mockResolvedValue([
@@ -79,7 +89,7 @@ describe('GET /analytics/fuel-cost', () => {
     ] as never)
     prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
 
-    const res = await request(app).get(`${BASE}/fuel-cost`).query(query)
+    const res = await request(app).get(`${BASE}/fuel-cost`).query(query('2026-08-03T12:00:00Z'))
 
     expect(res.status).toBe(200)
     expect(res.body.data.totals.litresFilled).toBe(40)
@@ -96,7 +106,7 @@ describe('GET /analytics/fuel-cost', () => {
     ] as never)
     prismaMock.fuelTheft.findMany.mockResolvedValue([] as never)
 
-    const res = await request(app).get(`${BASE}/fuel-cost`).query({ ...query, pricePerLitre: '200' })
+    const res = await request(app).get(`${BASE}/fuel-cost`).query({ ...query('2026-08-03T13:00:00Z'), pricePerLitre: '200' })
 
     expect(res.status).toBe(200)
     expect(res.body.data.price).toMatchObject({ pricePerLitre: 200, source: 'request' })
@@ -104,7 +114,7 @@ describe('GET /analytics/fuel-cost', () => {
   })
 
   it('rejects a non-positive price', async () => {
-    const res = await request(app).get(`${BASE}/fuel-cost`).query({ ...query, pricePerLitre: '0' })
+    const res = await request(app).get(`${BASE}/fuel-cost`).query({ ...query('2026-08-03T14:00:00Z'), pricePerLitre: '0' })
     expect(res.status).toBe(400)
   })
 })
