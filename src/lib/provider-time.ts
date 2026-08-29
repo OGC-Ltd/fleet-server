@@ -94,3 +94,20 @@ export function parseProviderTime(value: string | null | undefined): Date | null
 export function parseProviderTimeOr(value: string | null | undefined, fallback = new Date()): Date {
   return parseProviderTime(value) ?? fallback
 }
+
+/**
+ * A fleet day, `YYYY-MM-DD`, as the UTC instants that bound it.
+ *
+ * Extracted so the two callers cannot drift: `/playback` and the notification
+ * reader must agree on what "the 27th" means, or a replay and the event list
+ * beside it would describe different windows. Both are Africa/Nairobi, which is
+ * a fixed +03:00 with no DST — the offset is written literally for that reason.
+ *
+ * Returns null rather than throwing: this is a library, and how an unparseable
+ * day should be reported (400, ignore, fall back) belongs to the caller.
+ */
+export function fleetDayBounds(day: string): { from: Date; to: Date } | null {
+  const from = new Date(`${day}T00:00:00.000${PROVIDER_UTC_OFFSET}`)
+  if (Number.isNaN(from.getTime())) return null
+  return { from, to: new Date(from.getTime() + 86_400_000) }
+}

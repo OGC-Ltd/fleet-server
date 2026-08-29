@@ -262,3 +262,68 @@ export async function trimCachedNotifications(): Promise<number> {
   }
   return trimmed
 }
+
+// ── One vehicle, one fleet day ──────────────────────────────────────────────
+//
+// A SECOND cache with a different shape, because the org feed's shape cannot
+// answer this question. That one is capped at NOTIFICATION_CACHE_MAX and mixed
+// across every unit and type, so a per-vehicle read served from it would omit
+// exactly the matches it had evicted — which is why `getNotifications` sends
+// every filtered read straight to Postgres.
+//
+// A vehicle-day is different in the one way that matters: it is COMPLETE. The
+// whole set fits (the busiest measured vehicle-day carried 154 notifications),
+// and once the day is over the answer can never change. That is what makes it
+// cacheable without lying, and it is the read an operator makes over and over
+// while working through a unit's history.
+
+const dayKey = (vehicleId: string, day: string) => `notif:v:${vehicleId}:${day}`
+
+/**
+ * A completed vehicle-day, or null for "ask Postgres".
+ *
+ * Null rather than [] on a miss, an error or no Redis — [] is a claim that the
+ * unit did nothing that day, which is a real and different answer.
+ */
+export async function readCachedVehicleDay(
+  vehicleId: string, day: string,
+): Promise<NotificationItem[] | null> {
+  const redis = getCacheRedis()
+  if (!redis) return null
+  try {
+    const raw = await redis.get(dayKey(vehicleId, day))
+    if (raw == null) return null
+    const parsed = JSON.parse(raw) as NotificationItem[]
+    return Array.isArray(parsed) ? parsed : null
+  } catch (err) {
+    logger.debug({ err, vehicleId, day }, 'Vehicle-day cache read failed — falling back to Postgres')
+    return null
+  }
+}
+
+/**
+ * Store a completed vehicle-day, including an EMPTY one.
+ *
+ * A unit that reported nothing on a given day is the most common answer of all
+ * and the most wasteful to re-derive: without caching the empty case, every
+ * quiet day an operator scrolls past is a fresh index scan. `[]` is a fact
+ * about a finished day, not an absence of information — which is exactly why
+ * the read above distinguishes null from [].
+ *
+ * TTL is what remains of the retention window for that day, so a cached day
+ * cannot outlive the Postgres rows behind it and start answering for history
+ * the sweep has already deleted.
+ */
+export async function cacheVehicleDay(
+  vehicleId: string, day: string, items: NotificationItem[], dayStartMs: number,
+): Promise<void> {
+  const redis = getCacheRedis()
+  if (!redis) return
+  const ttlMs = dayStartMs + retentionMs() - Date.now()
+  if (ttlMs <= 0) return
+  try {
+    await redis.set(dayKey(vehicleId, day), JSON.stringify(items), 'EX', Math.ceil(ttlMs / 1000))
+  } catch (err) {
+    logger.debug({ err, vehicleId, day }, 'Vehicle-day cache write failed')
+  }
+}
