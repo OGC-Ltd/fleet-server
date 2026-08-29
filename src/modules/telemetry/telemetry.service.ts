@@ -5,6 +5,7 @@ import {
   type TrackPoint,
 } from './telemetry.repository.js'
 import { simplifyPath } from '../../lib/simplify-path.js'
+import { buildPlaybackEvents } from './playback-events.js'
 import { getMaintenanceHistoryCached, getOrgVehicleMaintenance } from './maintenance.cache.js'
 import { getFleetSnapshotCached } from './fleet-snapshot.cache.js'
 import type { TelemetryListQuery, TrackQuery, PlaybackQuery } from './telemetry.schema.js'
@@ -176,6 +177,15 @@ export async function getVehiclePlayback(
     dwellRadiusM: q.dwellRadiusM,
   })
 
+  /**
+   * What happened, against RAW points rather than simplified ones.
+   *
+   * Dwell collapse exists to delete exactly the fixes a stop is made of, so
+   * deriving stops from `points` would find almost none of them — the one
+   * ordering mistake available here. See playback-events.
+   */
+  const { events, truncatedEvents } = await buildPlaybackEvents(vehicleId, from, to, raw.points)
+
   // Distance over the SIMPLIFIED path, deliberately. It is the length of the
   // line the client will actually draw, so a reader comparing the figure to the
   // route in front of them is comparing like with like. The raw path is longer
@@ -208,6 +218,14 @@ export async function getVehiclePlayback(
     distanceM: Math.round(metres),
     /** Stretches the unit reported nothing for, which the line must break on. */
     gaps: points.filter(p => p.gapBefore).length,
+    /**
+     * Stops, drains, refills, zone crossings and speeding runs, in time order.
+     * Positions are deliberately absent — every one is placed on the track by
+     * its timestamp, because not one of the sources records a coordinate.
+     */
+    events,
+    /** The day held more than the cap; the least severe were dropped. */
+    truncatedEvents,
   }
 }
 

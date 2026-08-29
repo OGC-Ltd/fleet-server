@@ -330,7 +330,16 @@ export async function fuelConsumption(
      * key is a string built in the database and no timezone can be applied to
      * it twice on the way out.
      */
-    prisma.$queryRaw<Array<{ day: string; turb_ml: number; vehicles: bigint }>>`
+    /**
+     * `Promise.resolve(...)` around the call, not just `.catch` after it.
+     *
+     * A tagged-template method that is not a real promise — which is what the
+     * deep test double returns for an unstubbed `$queryRaw` — makes `.catch`
+     * throw synchronously, OUTSIDE the Promise.all, and the whole read 500s
+     * before any of the three queries has run. Wrapping normalises undefined
+     * and a rejection to the same empty result.
+     */
+    Promise.resolve(prisma.$queryRaw<Array<{ day: string; turb_ml: number; vehicles: bigint }>>`
       SELECT to_char(t.day, 'YYYY-MM-DD')        AS day,
              avg(abs(t.turbulence_ml))::float8   AS turb_ml,
              count(*)::bigint                    AS vehicles
@@ -343,7 +352,23 @@ export async function fuelConsumption(
          AND t.stops_averaged > 0
          ${vehicleSql(vehicleIds)}
        GROUP BY 1
-    `,
+    `)
+      /**
+       * NON-FATAL, and it was not.
+       *
+       * `Promise.all` rejects wholesale, so a failure in this one supplementary
+       * aggregate took the entire fuel ledger down with it — the litres, the
+       * cost, the per-vehicle table, all 500. That is the wrong trade for a
+       * dashed comparison line: the chart is perfectly readable without it and
+       * unreadable without the ledger.
+       *
+       * Reachable for real. This is the only raw SQL in the read, so it is the
+       * only part that can fail on something the Prisma client would have
+       * caught — a renamed column, a migration not yet applied on one
+       * environment, a permission on `fuel_daily_trends` that the ORM tables do
+       * not need.
+       */
+      .catch(() => [] as Array<{ day: string; turb_ml: number; vehicles: bigint }>),
   ])
 
   interface Bucket { filledMl: number; stolenMl: number; fillings: number; thefts: number }
@@ -381,8 +406,13 @@ export async function fuelConsumption(
   // `vehicles` arrives as a bigint from count(*) and is narrowed here rather
   // than at the edge: it reaches JSON eventually, and JSON.stringify throws on
   // a bigint rather than coercing it.
+  // The isArray guard is the second half of the non-fatal contract above: a
+  // driver that resolves with something other than rows — as the test double
+  // does for an unstubbed $queryRaw — must leave the line empty, not throw
+  // where the catch cannot reach.
   const turbulenceByDay = new Map(
-    turbulence.map(t => [t.day, { turbMl: t.turb_ml, vehicles: Number(t.vehicles) }]))
+    (Array.isArray(turbulence) ? turbulence : [])
+      .map(t => [t.day, { turbMl: t.turb_ml, vehicles: Number(t.vehicles) }]))
 
   return {
     totals: {
