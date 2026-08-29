@@ -41,6 +41,18 @@ export interface PlaybackEvent {
   label: string
   /** The number or wording behind it, where there is one. */
   detail?: string
+  /**
+   * Millilitres moved, for a refill or a drain. UNSIGNED — the direction is the
+   * kind, and carrying it twice invites the two to disagree.
+   *
+   * A number as well as `detail`, because the two are read in different places
+   * and want different things. The timeline shows the full sentence, including
+   * what our own probe saw where it differs from the provider's claim; the map
+   * pin has room for about five characters over a route and shows the figure
+   * alone. One raw number lets a client format for either without parsing the
+   * other's prose.
+   */
+  ml?: number
 }
 
 /**
@@ -223,6 +235,7 @@ async function readLoggedEvents(vehicleId: string, from: Date, to: Date): Promis
       // shown one without being able to see the other.
       detail: [litres(f.filledMl), f.observedRiseMl != null && f.observedRiseMl !== f.filledMl
         ? `probe saw ${litres(f.observedRiseMl)}` : null].filter(Boolean).join(' · ') || undefined,
+      ml: f.filledMl ?? undefined,
     })
   }
 
@@ -237,6 +250,7 @@ async function readLoggedEvents(vehicleId: string, from: Date, to: Date): Promis
       severity: confirmed ? 'critical' : 'warning',
       label: confirmed ? 'Fuel drain' : 'Fuel drain (unconfirmed)',
       detail: litres(th.stolenMl) ?? undefined,
+      ml: th.stolenMl ?? undefined,
     })
   }
 
