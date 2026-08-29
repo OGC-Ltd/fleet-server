@@ -34,11 +34,19 @@ function csv(v: unknown): string[] | undefined {
 
 export async function listNotifications(req: Request, res: Response) {
   const { orgId } = req.params as { orgId: string }
-  const { limit, before, alertType, severity, vehicleId } = req.query as Record<string, unknown>
+  const { limit, before, alertType, severity, vehicleId, day } = req.query as Record<string, unknown>
 
   const parsedLimit = limit ? Number(limit) : undefined
   if (parsedLimit !== undefined && !Number.isFinite(parsedLimit)) {
     return sendError(res, 400, 'limit must be a number')
+  }
+
+  // Validated HERE rather than let through to a silently-ignored filter: a
+  // caller who mistypes a day and gets the whole history back has been given a
+  // wrong answer that looks right.
+  const dayStr = day ? String(Array.isArray(day) ? day[0] : day) : undefined
+  if (dayStr !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(dayStr)) {
+    return sendError(res, 400, 'day must be YYYY-MM-DD')
   }
 
   let beforeDate: Date | undefined
@@ -58,6 +66,7 @@ export async function listNotifications(req: Request, res: Response) {
       // One vehicle only — a repeated param would be ambiguous, so take the
       // first and ignore the rest rather than silently unioning them.
       vehicleId:  vehicleId ? String(Array.isArray(vehicleId) ? vehicleId[0] : vehicleId) : undefined,
+      day:        dayStr,
     })
     return sendSuccess(res, {
       notifications: page.items,

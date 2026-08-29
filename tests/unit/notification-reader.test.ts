@@ -20,10 +20,16 @@ vi.mock('../../src/lib/prisma.js')
 vi.mock('../../src/lib/notifications/notification-cache.js', () => ({
   readCachedNotifications: vi.fn(),
   primeCache:              vi.fn(),
+  // The per-vehicle-day pair. A factory mock replaces the module WHOLESALE, so
+  // anything the subject imports and this omits is `undefined` at the call site
+  // — which surfaces as "not a function" from inside the reader rather than as
+  // a missing-export error, several frames from the cause.
+  readCachedVehicleDay:    vi.fn(),
+  cacheVehicleDay:         vi.fn(),
 }))
 
 import { prismaMock } from '../helpers/prisma.mock.js'
-import { readCachedNotifications, primeCache } from '../../src/lib/notifications/notification-cache.js'
+import { readCachedNotifications, primeCache, readCachedVehicleDay, cacheVehicleDay } from '../../src/lib/notifications/notification-cache.js'
 import { getNotifications } from '../../src/lib/notifications/notification.reader.js'
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -84,5 +90,121 @@ describe('getNotifications — vehicleId filter', () => {
 
     expect(page.source).toBe('cache')
     expect(prismaMock.notification.findMany).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * The per-vehicle DAY read, and the second cache that exists only because a day
+ * is a shape the org feed's cache cannot represent.
+ *
+ * The org cache is capped and mixed, so it can only answer "the newest N across
+ * everything" — which is why every filtered read above goes to Postgres. A
+ * vehicle-day is the opposite: bounded, complete, and once the day is over it
+ * can never change. That is what makes it safe to cache, and these tests pin
+ * the three conditions that keep it safe.
+ */
+describe('one vehicle, one fleet day', () => {
+  const DAY = '2026-08-02'
+  // Africa/Nairobi is +03:00 with no DST, so the day runs 21:00 the night
+  // before to 21:00 UTC. A UTC-midnight reading would file the first three
+  // hours of every fleet day under the previous one.
+  const FROM = new Date('2026-08-01T21:00:00.000Z')
+  const TO   = new Date('2026-08-02T21:00:00.000Z')
+
+  const whereOf = () =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (prismaMock.notification.findMany as any).mock.calls[0][0].where
+
+  it('bounds the query to the FLEET day, not the UTC one', async () => {
+    await getNotifications('org_1', { vehicleId: 'veh_1', day: DAY })
+    expect(whereOf().occurredAt).toEqual({ gte: FROM, lt: TO })
+  })
+
+  it('serves a completed day from its own cache, and does not touch Postgres', async () => {
+    vi.mocked(readCachedVehicleDay).mockResolvedValue([{ id: 'cached' } as never])
+    const page = await getNotifications('org_1', { vehicleId: 'veh_1', day: DAY })
+
+    expect(page.source).toBe('cache')
+    expect(page.items).toHaveLength(1)
+    expect(prismaMock.notification.findMany).not.toHaveBeenCalled()
+  })
+
+  /**
+   * An EMPTY day is an answer, not a miss. A unit that reported nothing is the
+   * commonest result and the most wasteful to re-derive, so `[]` must be served
+   * from the cache rather than falling through — which is why the cache read
+   * returns null for "not cached" instead of an empty array.
+   */
+  it('serves a cached EMPTY day rather than re-querying', async () => {
+    vi.mocked(readCachedVehicleDay).mockResolvedValue([])
+    const page = await getNotifications('org_1', { vehicleId: 'veh_1', day: DAY })
+
+    expect(page.source).toBe('cache')
+    expect(page.items).toEqual([])
+    expect(prismaMock.notification.findMany).not.toHaveBeenCalled()
+  })
+
+  it('writes a completed day back after a miss — including an empty one', async () => {
+    vi.mocked(readCachedVehicleDay).mockResolvedValue(null)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.notification.findMany as any).mockResolvedValue([])
+
+    const page = await getNotifications('org_1', { vehicleId: 'veh_1', day: DAY })
+
+    expect(page.source).toBe('database')
+    expect(cacheVehicleDay).toHaveBeenCalledWith('veh_1', DAY, [], FROM.getTime())
+  })
+
+  /**
+   * TODAY is never cached. A day still running would freeze a partial answer
+   * that never updates, which is worse than a slow one because it looks
+   * authoritative.
+   */
+  it('never caches a day that has not finished', async () => {
+    const today = new Date().toISOString().slice(0, 10)
+    // Tomorrow, to be certain the window has not closed whatever hour this runs.
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)
+
+    for (const d of [today, tomorrow]) {
+      vi.mocked(cacheVehicleDay).mockClear()
+      vi.mocked(readCachedVehicleDay).mockClear()
+      await getNotifications('org_1', { vehicleId: 'veh_1', day: d })
+      expect(readCachedVehicleDay).not.toHaveBeenCalled()
+      expect(cacheVehicleDay).not.toHaveBeenCalled()
+    }
+  })
+
+  /**
+   * A day is the complete answer to a question, not a page of one — so it is
+   * allowed past the 200 the scrolling org feed is bounded by. The busiest
+   * measured vehicle-day carried 154 notifications.
+   */
+  it('lets a whole day past the paging cap', async () => {
+    await getNotifications('org_1', { vehicleId: 'veh_1', day: DAY, limit: 500 })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((prismaMock.notification.findMany as any).mock.calls[0][0].take).toBe(500)
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.notification.findMany as any).mockClear()
+    await getNotifications('org_1', { limit: 500 })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((prismaMock.notification.findMany as any).mock.calls[0][0].take).toBe(200)
+  })
+
+  it('does not cache a day whose read hit the cap, which would freeze a truncated one', async () => {
+    vi.mocked(readCachedVehicleDay).mockResolvedValue(null)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.notification.findMany as any).mockResolvedValue(Array.from({ length: 5 }, () => row()))
+
+    await getNotifications('org_1', { vehicleId: 'veh_1', day: DAY, limit: 5 })
+    expect(cacheVehicleDay).not.toHaveBeenCalled()
+  })
+
+  it('leaves the ORG feed cache alone entirely', async () => {
+    vi.mocked(readCachedVehicleDay).mockResolvedValue(null)
+    await getNotifications('org_1', { vehicleId: 'veh_1', day: DAY })
+
+    expect(readCachedNotifications).not.toHaveBeenCalled()
+    expect(primeCache).not.toHaveBeenCalled()
   })
 })
