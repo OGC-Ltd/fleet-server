@@ -22,6 +22,8 @@ import { env } from '../../src/config/env.js'
 
 const target = () => RETENTION_TARGETS.find(t => t.name === 'vehicle_telemetry_raws')!
 
+const fixes = () => RETENTION_TARGETS.find(t => t.name === 'vehicle_telemetries')!
+
 /** Rebuild the SQL text from the tagged-template call the mock recorded. */
 function capturedSql(): string {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -75,6 +77,14 @@ describe('what it deletes', () => {
     expect(sql).toMatch(/newer\.captured_at\s*>\s*t\.captured_at/i)
   })
 
+  it('sweeps the raws BEFORE the fixes they hang off', () => {
+    // Ordering is not cosmetic. The raws target finds its victims by joining
+    // through vehicle_telemetries, so anything that outlives its parent row is
+    // unreachable by it forever.
+    const names = RETENTION_TARGETS.map(t => t.name)
+    expect(names.indexOf('vehicle_telemetry_raws')).toBeLessThan(names.indexOf('vehicle_telemetries'))
+  })
+
   it('parameterises the cutoff and the batch limit', async () => {
     const cutoff = new Date('2026-08-01T00:00:00Z')
     await target().prune(cutoff, 2000)
@@ -83,5 +93,42 @@ describe('what it deletes', () => {
     const [, ...values] = (prismaMock.$executeRaw as any).mock.calls[0] as [string[], ...unknown[]]
     expect(values).toEqual([cutoff, 2000])
     expect(capturedSql()).toMatch(/LIMIT \$2/)
+  })
+})
+
+/**
+ * The parsed-fix target. Same newest-ping guard, for a sharper reason: age
+ * alone would delete a vehicle's ONLY remaining fix and with it the record of
+ * where it last was — the exact question asked about a machine gone quiet.
+ */
+describe('vehicle_telemetries', () => {
+  it('is registered and takes its window from the environment', () => {
+    expect(fixes()).toBeDefined()
+    expect(fixes().days).toBe(env.TELEMETRY_RETENTION_DAYS)
+  })
+
+  it('keeps up with the fleet write rate', () => {
+    expect(fixes().batchSize! * fixes().maxBatches!).toBeGreaterThan(887_000)
+  })
+
+  it('spares a vehicle’s newest fix, however old', async () => {
+    await fixes().prune(new Date('2026-08-01T00:00:00Z'), 1000)
+    const sql = capturedSql().replace(/\s+/g, ' ')
+
+    expect(sql).toMatch(/EXISTS/i)
+    expect(sql).toMatch(/newer\.vehicle_id\s*=\s*t\.vehicle_id/i)
+    expect(sql).toMatch(/newer\.captured_at\s*>\s*t\.captured_at/i)
+  })
+
+  it('deletes the raw envelope in the same statement, so no orphan can survive', async () => {
+    // Nothing in the schema references vehicle_telemetries — not one foreign
+    // key — so a raw whose parent row is gone is unreachable by the raws sweep
+    // forever, and would leak 817 bytes at a time. The two windows are
+    // independent env vars; this is what stops them drifting into a leak.
+    await fixes().prune(new Date('2026-08-01T00:00:00Z'), 1000)
+    const sql = capturedSql().replace(/\s+/g, ' ')
+
+    expect(sql).toMatch(/DELETE FROM vehicle_telemetry_raws/i)
+    expect(sql).toMatch(/DELETE FROM vehicle_telemetries/i)
   })
 })

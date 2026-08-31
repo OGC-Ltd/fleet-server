@@ -122,6 +122,27 @@ const schema = z.object({
   // about fifty times the longest real need.
   TELEMETRY_RAW_RETENTION_DAYS: z.coerce.number().optional().default(7),
 
+  // How long a parsed telemetry fix is kept.
+  //
+  // 30 days because that is the longest window anything reads, and the API
+  // already says so: `/track` REFUSES a request longer than
+  // TRACK_MAX_WINDOW_DAYS rather than clamping it. Every other consumer is
+  // shorter — probe health 30, fuel adjudication's repeat window 30 and its
+  // profile 21, tank-state trend 14, fuel rates 7, machine operations and the
+  // dozer area one fleet day, fleet-state 24 h, the snapshot a single row.
+  //
+  // What this DOES change: five endpoints take a client-chosen from/to with no
+  // maximum span — /analytics/fuel-efficiency, /analytics/speeding, the
+  // /telemetry ping list, the zone timeline and sampled fixes. Beyond the
+  // window they return nothing instead of data. The dashboard calls none of
+  // them, but they are public API.
+  //
+  // And the replay scripts — build:trips, readjudicate-fuel, fuel-cause-replay
+  // — reconstruct history from raw fixes. Trips already built are unaffected
+  // (they are derived rows); re-running those over older dispatches would find
+  // nothing rather than erroring, which is the sharp edge here.
+  TELEMETRY_RETENTION_DAYS: z.coerce.number().optional().default(30),
+
   // How many notifications per org the Redis cache holds. The read endpoint
   // serves from cache up to this depth and falls through to Postgres beyond
   // it, so this is a latency knob, not a data-loss one.
