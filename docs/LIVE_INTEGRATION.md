@@ -98,7 +98,7 @@ duplicates. Run them in that order on a fresh database.
 
 ### 3.3 The webhook
 
-**`POST http://32.198.44.105/webhook/rai`** — registered with Controltech.
+**`POST http://18.232.178.169/webhook/rai`** — registered with Controltech.
 nginx proxies `/webhook/` → `127.0.0.1:3000`; the route is mounted at the root
 (not under `/api/v1`).
 
@@ -263,6 +263,25 @@ to exist in both, add an explicit mapping column rather than guessing.
 
 ### 5.5 Notifications — receiver READY, blocked on ACL
 
+> **Re-checked 2026-08-31.** Still blocked, and still on the same bit: the
+> resource's `uacl` is `35718709795`, which does not include `0x100000`. A
+> census of all eight visible resources returns `zl` (geozones) and `rep`
+> (report templates) but no `unf` field at all — so we cannot even see whether
+> rules exist, let alone read them.
+>
+> Independently confirmed from the traffic side the same day: of 682 deliveries
+> to `/webhook/rai`, **every one was RaiFactorySuite** (`movement.created`),
+> logged with `"wialon": null`. No Wialon notification has ever reached this
+> system.
+>
+> The host address below was also stale — it named an IP this box has not had
+> for some time, so a rule configured from an earlier copy of this document
+> would have POSTed into nowhere. Corrected throughout.
+>
+> This applies to **all four organisations**. Menengai's rules would live on
+> resource `25601229` and West Sugar's on `28842931` (its reports resource, not
+> RAI GROUP where its units bill — see `ORG_RESOURCES`).
+
 Wialon computes speeding, geofence entry/exit, idling and sensor rules against
 each unit's own calibrated limits. Its *Send a request* action can POST those
 to `/webhook/rai`, and **our receiving half is built, deployed and verified**
@@ -278,7 +297,7 @@ Ask them to configure each rule's action as:
 ```
 Action:  Send a request
 Method:  POST
-URL:     http://32.198.44.105/webhook/rai
+URL:     http://18.232.178.169/webhook/rai
 Headers: Content-Type: application/json
          X-Webhook-Secret: <FACTORY_SUITE_HOOK value>
 Body:
@@ -521,7 +540,7 @@ straight into its working tree:
 ```bash
 git push origin main
 GIT_SSH_COMMAND='ssh -i "C:\Users\supervisor\Documents\keys\logistics.pem"' \
-  git push ubuntu@32.198.44.105:/home/ubuntu/prod/fleet-server main
+  git push ubuntu@18.232.178.169:/home/ubuntu/prod/fleet-server main
 ```
 
 Then on the box (the **build step is mandatory** — pm2 runs `dist/`, not `src/`):

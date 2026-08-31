@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { env } from '../../config/env.js'
 
 export const analyticsRangeSchema = z.object({
   from: z.coerce.date(),
@@ -6,7 +7,10 @@ export const analyticsRangeSchema = z.object({
 })
 
 export const speedingQuerySchema = analyticsRangeSchema.extend({
-  thresholdKmh: z.coerce.number().int().min(1).default(80),
+  // Defaults to the configured fleet limit, so an unfiltered Speeding screen
+  // shows exactly what the live feed alerts on. A caller may still pass its own
+  // threshold to explore.
+  thresholdKmh: z.coerce.number().int().min(1).default(env.OVERSPEED_LIMIT_KMH),
 })
 
 // Deliveries dashboard: a trailing window of `days` (default 30), optionally
