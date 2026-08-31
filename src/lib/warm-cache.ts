@@ -26,6 +26,45 @@ const SLOW_BUILD_MS = 1_000
 /** How many caches the sweep rebuilds at once. See the note in `sweep`. */
 const SWEEP_WIDTH = 2
 
+/**
+ * How long after its last read an organisation keeps being warmed.
+ *
+ * The sweep is O(orgs x caches) and walks orgs SEQUENTIALLY, so its cost is
+ * linear in the number of customers on the platform — while the benefit is
+ * linear in the number being LOOKED AT, which is usually one.
+ *
+ * Measured 2026-08-31, the day Menengai and West Sugar took the platform from
+ * two organisations to four: `fleet-state` is meant to rebuild every 60 s and
+ * the actual gaps between rebuilds of one key were 96-129 s, clustering at
+ * 120 s. The sweep had stopped fitting inside its own interval and was running
+ * back to back, permanently. In one 28-minute window it logged 151 slow builds
+ * totalling 347 s — `fleet-state` 46 x 2.76 s, `fleet-tank-state` 42 x 2.79 s,
+ * `machine-summary` 42 x 1.55 s — on a box with two vCPUs that also runs a
+ * 2-second telemetry poll. Everything else on the instance was competing with
+ * a cache sweep that never stopped.
+ *
+ * Four organisations x seventeen caches is 68 keys a sweep. With one operator
+ * on one organisation, 51 of those rebuilds are work nobody will read.
+ *
+ * Fifteen minutes is long enough to cover someone switching between two or
+ * three fleets and back, and short enough that an organisation nobody has
+ * opened all day costs nothing.
+ */
+const ACTIVE_ORG_MS = 15 * 60_000
+
+/** orgId → when a cache was last READ for it. Writes come from `get`. */
+const lastRead = new Map<string, number>()
+
+/**
+ * The organisation a cache key belongs to.
+ *
+ * Every key in the registry starts with the org id; what follows is the
+ * cache's own business, and the separator is not consistent — `fleet-state`
+ * uses `|`, `maintenance-history` uses `:`. Splitting on either is enough,
+ * because a cuid contains neither.
+ */
+const orgOfKey = (key: string): string => key.split(/[|:]/)[0] ?? key
+
 interface Registered {
   name:    string
   keysFor: (orgId: string) => string[]
@@ -128,6 +167,12 @@ export function createWarmCache<T>(opts: {
   }
 
   const get = async (key: string): Promise<T> => {
+    // A READ is what marks an organisation active — deliberately here and not
+    // in the sweep, which calls `refreshIfStale`. If warming counted as
+    // activity every org would keep itself warm forever and this would do
+    // nothing at all.
+    lastRead.set(orgOfKey(key), Date.now())
+
     const entry = store.get(key)
     if (entry) {
       if (Date.now() - entry.fetchedAt > refreshMs && !entry.refreshing) {
@@ -167,12 +212,35 @@ export function createWarmCache<T>(opts: {
 export function startCacheWarmer(): () => void {
   let stopped = false
   let sweeping = false
+  let primed = false
 
   const sweep = async () => {
     if (sweeping) return
     sweeping = true
     try {
-      const orgs = await prisma.organisation.findMany({ select: { id: true } })
+      const all = await prisma.organisation.findMany({ select: { id: true } })
+
+      // The FIRST sweep primes every organisation; the ones after it refresh
+      // only what is being read.
+      //
+      // Both halves matter. Priming everything once is what stops a cold key
+      // ever blocking a request — `get` waits on the database only for a key
+      // that has never been computed, and after boot none has. From then on an
+      // idle org's entry simply ages: a read still returns instantly from the
+      // store and kicks off its own background refresh, so the cost of not
+      // warming it is staleness on one screen, not latency.
+      const cutoff = Date.now() - ACTIVE_ORG_MS
+      const orgs = primed
+        ? all.filter(o => (lastRead.get(o.id) ?? 0) > cutoff)
+        : all
+
+      if (primed && orgs.length < all.length) {
+        logger.debug(
+          { warming: orgs.length, of: all.length },
+          'warm-cache sweep skipping organisations nobody is reading',
+        )
+      }
+
       for (const org of orgs) {
         if (stopped) return
 
@@ -221,7 +289,10 @@ export function startCacheWarmer(): () => void {
   }
 
   sweep()
-    .then(() => { if (!stopped) logger.info({ caches: registry.map(r => r.name) }, 'warm caches primed') })
+    .then(() => {
+      primed = true
+      if (!stopped) logger.info({ caches: registry.map(r => r.name) }, 'warm caches primed')
+    })
   const timer = setInterval(() => void sweep(), REFRESH_MS)
 
   return () => { stopped = true; clearInterval(timer) }
