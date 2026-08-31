@@ -844,6 +844,11 @@ export async function fleetState(
  */
 const stateCache = createWarmCache<FleetState>({
   name: 'fleet-state',
+  // 2.76 s a build, measured over 46 of them on 2026-08-31, and the warmed
+  // key is a trailing THIRTY-DAY window — an aggregate that cannot move
+  // meaningfully in sixty seconds. Rebuilding it every minute for every
+  // organisation is what pushed the sweep past its own interval.
+  refreshMs: 5 * 60_000,
   // Keys grow with the window the operator picks, so they are capped and age
   // out oldest-first, exactly as the other windowed analytics caches are.
   maxEntries: 200,

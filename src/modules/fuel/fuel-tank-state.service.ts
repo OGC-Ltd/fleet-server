@@ -107,6 +107,11 @@ const TODAY = 'today'
 
 const tankStateCache = createWarmCache<VehicleTankState[]>({
   name: 'fleet-tank-state',
+  // 2.79 s a build, the joint most expensive on the sweep. Shorter than the
+  // other two because this one IS today's fuel and does move — but three
+  // minutes still costs a third of what a minute did, and a read serves the
+  // stored entry instantly and refreshes behind itself either way.
+  refreshMs: 3 * 60_000,
   warmKeysFor: (orgId) => [`${orgId}|${TODAY}`],
   compute: (key) => {
     const sep   = key.lastIndexOf('|')
