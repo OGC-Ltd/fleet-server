@@ -1,5 +1,5 @@
 /**
- * Wialon unit registry sync — for any fleet that owns its Wialon account.
+ * Wialon unit registry sync — for any fleet whose registry IS Wialon.
  *
  * Some fleets exist ONLY in Wialon; they are not in factorysuite. For those the
  * Wialon unit *is* the registry entry, and this script is the counterpart of
@@ -26,9 +26,9 @@
  * the same bargain `sync:sukari-gps` already makes.
  *
  * Run: npm run sync:wialon                    (KASULU, preview)
- *      npm run sync:wialon -- --apply
  *      npm run sync:menengai                  (MENENGAI, preview)
- *      npm run sync:menengai -- --apply
+ *      npm run sync:westsugar                 (WESTSUGAR, preview)
+ *      …add -- --apply to any of them to commit.
  */
 
 import 'dotenv/config'
@@ -39,6 +39,7 @@ import { WialonClient, positionToTelemetry, type WialonUnit } from '../src/provi
 import { tankCapacityOf } from '../src/providers/wialon/wialon.sensors.js'
 import { classifyUnit } from '../src/providers/wialon/wialon.vehicle-type.js'
 import { findFleet, syncableOrgCodes } from '../src/providers/wialon/wialon.account.js'
+import { normalisePlate } from '../src/providers/wialon/wialon.unit-name.js'
 
 const pool    = new pg.Pool({ connectionString: process.env.DIRECT_URL })
 const adapter = new PrismaPg(pool)
@@ -79,6 +80,18 @@ const APPLY    = process.argv.includes('--apply')
  * The winner is the SHORTER name: a second device is announced by a suffix, so
  * the base name is the one without one. Unit id breaks a tie, only so that two
  * runs never disagree.
+ *
+ * ## Why the loser's name is not enough on its own
+ *
+ * Falling back to the unit name assumes unit names are unique. On Menengai they
+ * are. On West Sugar they are not: 32 units share four names between them —
+ * "West Sugar - A" fifteen times and "West Sugar - D" thirteen. Those 15 have
+ * no plate, so all 15 fall back to the same string and 14 of them would fail
+ * the unique constraint one row at a time, mid-apply.
+ *
+ * So every value is checked against what has already been claimed, and a
+ * still-colliding one is qualified with the Wialon unit id — the only thing
+ * about these vehicles that is guaranteed distinct.
  */
 function resolvePlates(units: WialonUnit[], plateOf: (nm: string) => string): Map<number, string> {
   const claims = new Map<string, WialonUnit[]>()
@@ -87,12 +100,17 @@ function resolvePlates(units: WialonUnit[], plateOf: (nm: string) => string): Ma
     claims.set(p, [...(claims.get(p) ?? []), u])
   }
 
-  const out = new Map<number, string>()
+  const out   = new Map<number, string>()
+  const taken = new Set<string>()
+  const claim = (u: WialonUnit, preferred: string): void => {
+    const value = taken.has(preferred) ? `${u.nm.trim()} · wialon:${u.id}` : preferred
+    taken.add(value)
+    out.set(u.id, value)
+  }
+
   for (const [plate, claimants] of claims) {
-    if (claimants.length === 1) { out.set(claimants[0]!.id, plate); continue }
     const ranked = [...claimants].sort((a, b) => a.nm.trim().length - b.nm.trim().length || a.id - b.id)
-    out.set(ranked[0]!.id, plate)
-    for (const loser of ranked.slice(1)) out.set(loser.id, loser.nm.trim())
+    ranked.forEach((u, i) => claim(u, i === 0 ? plate : u.nm.trim()))
   }
   return out
 }
@@ -109,7 +127,7 @@ async function main() {
   if (!fleet) {
     throw new Error(
       `No Wialon fleet is defined for "${ORG_CODE}". Known: ${syncableOrgCodes().join(', ')}. ` +
-      `A fleet with no account of its own (West Kenya Sugar, Sukari) cannot be synced here — ` +
+      `A fleet whose registry comes from another provider (Sukari) cannot be synced here — ` +
       `see providers/wialon/wialon.account.`,
     )
   }
@@ -126,11 +144,21 @@ async function main() {
   // 1,496 units — and this script writes every unit it is handed into the org
   // as a vehicle. Unfiltered it would create over a thousand spurious rows.
   // The account id is the boundary; see providers/wialon/wialon.account.
-  const units = await client.listUnits(fleet.accountId)
+  const owned = await client.listUnits(fleet.accountId)
+  // Rai Group's account carries five customers. The mask is what separates
+  // West Sugar's 486 from Sukari's 344 and Aquamist's 77 — see wialon.account.
+  const units = fleet.nameMask ? owned.filter(u => fleet.nameMask!.test(u.nm)) : owned
   if (units.length === 0) {
-    throw new Error('Wialon returned no units — refusing to deactivate the whole fleet on a bad response')
+    throw new Error(
+      fleet.nameMask
+        ? `No unit in account ${fleet.accountId} matches ${fleet.nameMask} — refusing to continue on what looks like a renamed fleet`
+        : 'Wialon returned no units — refusing to deactivate the whole fleet on a bad response',
+    )
   }
-  console.log(`  ← ${units.length} units from Wialon account ${fleet.accountId}`)
+  console.log(
+    `  ← ${units.length} units from Wialon account ${fleet.accountId}` +
+    (fleet.nameMask ? ` matching ${fleet.nameMask} (of ${owned.length} in the account)` : ''),
+  )
 
   // A registry sync should refresh a fleet, never replace one. If the unit list
   // has shrunk or grown by more than half, something upstream changed shape —
@@ -147,27 +175,62 @@ async function main() {
 
   // ── plates ────────────────────────────────────────────────────────────────
   const plateFor = resolvePlates(units, fleet.plateOf)
-  const shared   = units.filter(u => plateFor.get(u.id) === u.nm.trim() && fleet.plateOf(u.nm) !== u.nm.trim())
-  if (shared.length > 0) {
-    console.log(`\n  ⚠  ${shared.length} unit(s) share a plate with another unit — a second device on one vehicle:`)
-    for (const u of shared) {
-      console.log(`      "${u.nm}" keeps its unit name; plate ${fleet.plateOf(u.nm)} goes to the shorter-named unit`)
+
+  // Units that did not get the identifier their name asked for, split by cause:
+  // a real plate claimed twice (one vehicle, two devices) versus a name that is
+  // not unique in the first place.
+  const displaced = units.filter(u => plateFor.get(u.id) !== fleet.plateOf(u.nm))
+  const twoDevice = displaced.filter(u => fleet.plateOf(u.nm) !== u.nm.trim())
+  const sameName  = displaced.filter(u => fleet.plateOf(u.nm) === u.nm.trim())
+  if (twoDevice.length > 0) {
+    console.log(`\n  ⚠  ${twoDevice.length} unit(s) share a plate with another unit — a second device on one vehicle:`)
+    for (const u of twoDevice.slice(0, 10)) {
+      console.log(`      "${u.nm}" → "${plateFor.get(u.id)}"; plate ${fleet.plateOf(u.nm)} goes to the shorter-named unit`)
     }
   }
-
-  // `registration_plate` is unique across the WHOLE table, not per org. A
-  // collision with another organisation's vehicle would fail mid-apply, one
-  // row at a time, so it is worth knowing before rather than during.
-  const wanted   = [...plateFor.values()]
-  const conflict = await prisma.vehicle.findMany({
-    where:  { registrationPlate: { in: wanted }, organisationId: { not: org.id } },
-    select: { registrationPlate: true, organisation: { select: { code: true } } },
-  })
-  if (conflict.length > 0) {
-    console.log(`\n  ⚠  ${conflict.length} plate(s) already belong to another organisation and will be SKIPPED:`)
-    for (const c of conflict.slice(0, 10)) console.log(`      ${c.registrationPlate} → ${c.organisation.code}`)
+  if (sameName.length > 0) {
+    console.log(`\n  ⚠  ${sameName.length} unit(s) carry no plate AND share their name with another unit.`)
+    console.log(`      Qualified with the Wialon unit id, because nothing else about them is distinct:`)
+    for (const u of sameName.slice(0, 6)) console.log(`      "${u.nm}" → "${plateFor.get(u.id)}"`)
+    if (sameName.length > 6) console.log(`      … and ${sameName.length - 6} more`)
   }
-  const blocked = new Set(conflict.map(c => c.registrationPlate))
+
+  // `registration_plate` is unique across the WHOLE table, not per org, so a
+  // collision with another organisation's vehicle would fail mid-apply, one row
+  // at a time. It is worth knowing before rather than during.
+  //
+  // Two different questions, and conflating them gets one of them wrong:
+  //
+  //   · Would the INSERT fail?  Only on a byte-identical string, because that
+  //     is what the unique index compares.
+  //   · Is it the same MACHINE? Compare on letters and digits only. The
+  //     database does not store plates in one format — Sukari's arrive from
+  //     factorysuite spaced ("KHMA 994J"), ours are normalised ("KHMA994J") —
+  //     so three West Sugar units name Sukari plant and would insert happily
+  //     as a second row for the same machine.
+  //
+  // Only the first blocks. The second is reported, because whether a machine
+  // moved between Rai Group companies is not a question this script can settle.
+  const wanted     = [...plateFor.values()]
+  const wantedNorm = wanted.map(normalisePlate)
+  const sameMachine = await prisma.$queryRawUnsafe<Array<{ plate: string; code: string; name: string }>>(
+    `select v.registration_plate as plate, o.code, v.name
+       from vehicles v join organisations o on o.id = v.organisation_id
+      where o.id <> $1
+        and upper(regexp_replace(v.registration_plate, '[^A-Za-z0-9]', '', 'g')) = any($2::text[])`,
+    org.id, wantedNorm,
+  )
+  const exact   = new Set(wanted)
+  const blocked = new Set(sameMachine.filter(r => exact.has(r.plate)).map(r => r.plate))
+
+  if (sameMachine.length > 0) {
+    console.log(`\n  ⚠  ${sameMachine.length} registration(s) already exist under another organisation:`)
+    for (const r of sameMachine.slice(0, 10)) {
+      const verdict = blocked.has(r.plate) ? 'SKIPPED — identical plate string' : 'imported anyway — same machine, different formatting'
+      console.log(`      ${r.plate.padEnd(12)} → ${r.code.padEnd(9)} ${verdict}`)
+      console.log(`      ${''.padEnd(12)}   "${r.name}"`)
+    }
+  }
 
   // ── groups ────────────────────────────────────────────────────────────────
   const groups = new Map<string, { name: string; count: number }>()

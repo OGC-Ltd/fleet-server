@@ -32,21 +32,25 @@
  *     bact 26777960  (Timsales)             115 units
  *     …five more, 8 units between them
  *
- * ## Two fleets, two shapes
+ * ## Two shapes of boundary
  *
  * KASULU and MENENGAI each own their account outright, so `bact` is the whole
- * boundary and the table below is the whole policy.
+ * boundary for them.
  *
- * WEST KENYA SUGAR is deliberately absent, and so is SUKARI, for the same
- * reason: neither has a single unit billed to its own account. "WEST KENYA
- * SUGAR" exists as resource 28842931 and holds 7 zones, but ZERO units carry
- * that `bact` — all 486 of them (299 named `West Sugar*`, 187 named `WKS*`)
- * sit under RAI GROUP beside Sukari's 344. Separating those needs a name mask,
- * which is what `sync:sukari-gps` already does for Sukari, and this table
- * would be lying if it implied `bact` could do it.
+ * WEST SUGAR does not. "WEST KENYA SUGAR" exists as resource 28842931 and
+ * holds 7 zones, but ZERO units carry that `bact` — all 486 of them (299 named
+ * `West Sugar*`, 187 named `WKS*`) sit under RAI GROUP beside Sukari's 344. So
+ * that fleet is `bact` AND a name mask, never the mask alone: one more unit
+ * named "West Sugar - 862129083035851" sits under account 17082202, a two-unit
+ * account that also holds a Menengai-named vehicle, and a bare name mask would
+ * sweep it in from a customer boundary nobody has confirmed.
+ *
+ * SUKARI stays absent. Its registry comes from RaiFactorySuite, and Wialon only
+ * supplies the GPS binding — `sync:sukari-gps` matches those by PLATE onto rows
+ * that already exist. Nothing here should create Sukari vehicles.
  */
 
-import { menengaiGroup, menengaiPlate } from './wialon.unit-name.js'
+import { menengaiGroup, menengaiPlate, westSugarGroup, parseWestSugarUnit } from './wialon.unit-name.js'
 
 /** Data flag that returns `bact`. Without it every unit looks unowned. */
 export const BILLING_PROPS_FLAG = 0x4
@@ -61,6 +65,9 @@ export const KASULU_WIALON_ACCOUNT_ID = 30394506
 /** Menengai's, holding Menengai, Rai MDF and MORL Farm — one organisation. */
 export const MENENGAI_WIALON_ACCOUNT_ID = 25601229
 
+/** Rai Group's shared account: Sukari, West Sugar, WKS, Aquamist and Pan Paper. */
+export const RAI_GROUP_WIALON_ACCOUNT_ID = 27625222
+
 export interface WialonFleet {
   /** Our `organisations.code`. */
   orgCode:  string
@@ -68,6 +75,13 @@ export interface WialonFleet {
   orgName:  string
   /** The account that owns this fleet's units, and its geozone resource. */
   accountId: number
+  /**
+   * When the account holds MORE than this fleet, the names that are ours.
+   *
+   * Applied on top of `accountId`, never instead of it. Rai Group's account
+   * carries five customers; without this, one org would swallow all 915 units.
+   */
+  nameMask?: RegExp
   /** Which vehicle group a unit belongs to, read from its name. */
   groupOf:  (unitName: string) => { code: string; name: string }
   /**
@@ -94,7 +108,7 @@ const FLEETS: WialonFleet[] = [
   },
   {
     orgCode:   'MENENGAI',
-    orgName:   'Menengai Group',
+    orgName:   'Menengai',
     accountId: MENENGAI_WIALON_ACCOUNT_ID,
     groupOf:   menengaiGroup,
     // 227 of the 244 units name a real registration; the other 17 are plant and
@@ -102,6 +116,20 @@ const FLEETS: WialonFleet[] = [
     // name, so the column stays unique and the screen says what Wialon says
     // rather than a blank or an invented code.
     plateOf:   (nm) => menengaiPlate(nm) ?? nm.trim(),
+  },
+  {
+    orgCode:   'WESTSUGAR',
+    orgName:   'West Sugar',
+    accountId: RAI_GROUP_WIALON_ACCOUNT_ID,
+    // `\b` after each alternative, so "WKSOMETHING" is not West Sugar. Anchored,
+    // so a Sukari unit that merely mentions the words cannot drift in.
+    nameMask:  /^\s*(west\s*sugar|wks)\b/i,
+    groupOf:   westSugarGroup,
+    // 421 of 486 name a plate. The remainder are IMEIs and single letters, and
+    // 32 units share just four names between them ("West Sugar - A" fifteen
+    // times), so the unit name alone is NOT an identifier for this fleet — the
+    // sync's duplicate resolution is what finally makes the column unique.
+    plateOf:   (nm) => parseWestSugarUnit(nm).plate ?? nm.trim(),
   },
 ]
 

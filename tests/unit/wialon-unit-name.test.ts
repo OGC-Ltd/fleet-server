@@ -17,6 +17,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   parseMenengaiUnit, menengaiPlate, menengaiGroup, normalisePlate,
+  parseWestSugarUnit, westSugarGroup,
 } from '../../src/providers/wialon/wialon.unit-name.js'
 
 describe('business unit', () => {
@@ -101,6 +102,79 @@ describe('plate', () => {
 
   it('compares plates on letters and digits only', () => {
     expect(normalisePlate('KCC 386Z')).toBe(normalisePlate('kcc386z'))
+  })
+})
+
+/**
+ * West Sugar. Also all real names, and this fleet is messier than Menengai in
+ * ways that are load-bearing: the name length varies from two segments to five,
+ * so nothing can be read positionally, and 32 units share four names.
+ */
+describe('West Sugar — division', () => {
+  it('separates the two naming conventions', () => {
+    expect(parseWestSugarUnit('WKS - Amuka - KDR 095Q').division).toBe('WKS')
+    expect(parseWestSugarUnit('West Sugar-Admin-KBJ 194Q-11km/l').division).toBe('WESTSUGAR')
+  })
+
+  it('does not treat a word merely starting with wks as the WKS division', () => {
+    expect(parseWestSugarUnit('WKSOMETHING - X - KBV 196V').division).toBe('WESTSUGAR')
+  })
+})
+
+describe('West Sugar — group', () => {
+  it('uses the estate for WKS', () => {
+    expect(parseWestSugarUnit('WKS - Naitiri - KBV 196V').group).toBe('NAITIRI')
+    expect(parseWestSugarUnit('WKS - Amuka - KDR 095Q').group).toBe('AMUKA')
+  })
+
+  it('folds the estate misspellings back together', () => {
+    // 12 of the 62 Kabras units are spelled KABARAS; three Naitiri names have
+    // the next field run into them.
+    expect(parseWestSugarUnit('WKS - Kabaras - KDL 280X').group).toBe('KABRAS')
+    expect(parseWestSugarUnit('WKS - Kabras - KDL 232X').group).toBe('KABRAS')
+    expect(parseWestSugarUnit('WKS - NAITIRIC - KBV 196V').group).toBe('NAITIRI')
+    expect(parseWestSugarUnit('WKS - NAITIRIKDR 083Q - X').group).toBe('NAITIRI')
+    expect(parseWestSugarUnit('WKS - Naitiri KTCB 257N - X').group).toBe('NAITIRI')
+  })
+
+  it('refuses to read an identifier as a group', () => {
+    // Two-segment names have no middle. Reading segment[1] regardless would
+    // file fifteen vehicles under a group called "A".
+    expect(parseWestSugarUnit('West Sugar - A').group).toBe('GENERAL')
+    expect(parseWestSugarUnit('West Sugar - D').group).toBe('GENERAL')
+    expect(parseWestSugarUnit('West Sugar - 864022086783544').group).toBe('GENERAL')
+    expect(parseWestSugarUnit('West Sugar-KTCB 497Z').group).toBe('GENERAL')
+    // …and a plate or an IMEI sitting in the middle slot is still an identifier.
+    expect(parseWestSugarUnit('WKS - KTCB 504Z - something').group).toBe('GENERAL')
+    expect(parseWestSugarUnit('West Sugar - 864022086612164 - x').group).toBe('GENERAL')
+  })
+
+  it('keeps the departments West Sugar actually writes', () => {
+    expect(parseWestSugarUnit('West Sugar-Admin-KBJ 194Q-11km/l').group).toBe('ADMIN')
+    expect(parseWestSugarUnit('West Sugar-Winches-KTCB 497Z-2km/l').group).toBe('WINCHES')
+    expect(parseWestSugarUnit('West Sugar - HP Equipment - KBV 196V').group).toBe('HP EQUIPMENT')
+  })
+
+  it('keeps the two divisions apart in the group code', () => {
+    expect(westSugarGroup('WKS - Winches - KBV 196V').code).toBe('WESTSUGAR_WKS_WINCHES')
+    expect(westSugarGroup('West Sugar-Winches-KTCB 497Z-2km/l').code).toBe('WESTSUGAR_WESTSUGAR_WINCHES')
+    expect(westSugarGroup('West Sugar - HP Equipment - KBV 196V').code).not.toMatch(/\s/)
+  })
+})
+
+describe('West Sugar — plate', () => {
+  it('finds the plate before the fuel-economy figure', () => {
+    // 120 names carry one. Every one is its own segment, so left-to-right
+    // scanning reaches the plate first and no stripping is needed.
+    expect(parseWestSugarUnit('West Sugar-Admin-KBJ 194Q-11km/l').plate).toBe('KBJ194Q')
+    expect(parseWestSugarUnit('West Sugar-Winches-KTCB 497Z-2km/l').plate).toBe('KTCB497Z')
+    expect(parseWestSugarUnit('WKS  - Naitiri -  KTCC 271G').plate).toBe('KTCC271G')
+  })
+
+  it('returns null for the units named only by IMEI or a single letter', () => {
+    for (const n of ['West Sugar - A', 'West Sugar - D', 'West Sugar - 864022086783544', 'West Sugar - CMF']) {
+      expect(parseWestSugarUnit(n).plate, n).toBeNull()
+    }
   })
 })
 
