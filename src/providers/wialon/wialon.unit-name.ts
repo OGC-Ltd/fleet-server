@@ -5,7 +5,11 @@
  * body type, no department. What structure exists lives in the naming
  * convention the operator types by hand, which differs per customer, so each
  * fleet gets its own reader here rather than one regex pretending to cover all
- * of them.
+ * of them. Two live here: Menengai first, then West Sugar below.
+ *
+ * Both share one plate reader, because both write plates the same way. They
+ * share nothing else — Menengai's names are a fixed three-part shape and West
+ * Sugar's run from two parts to five.
  *
  * Menengai's convention, measured across all 244 units of account 25601229 on
  * 2026-08-31:
@@ -116,6 +120,99 @@ export function parseMenengaiUnit(name: string): MenengaiUnitName {
     businessUnit,
     department: departmentOf(segments(name)[0] ?? '', businessUnit),
     plate:      menengaiPlate(name),
+  }
+}
+
+// ─── West Sugar ──────────────────────────────────────────────────────────────
+
+/**
+ * West Sugar's units do NOT own a Wialon account — see wialon.account — so the
+ * name is both the fleet boundary and the only structure available. It carries
+ * two conventions, written by different people at different times:
+ *
+ *     WKS - <ESTATE> - <PLATE>              WKS - Naitiri - KBV 196V
+ *     West Sugar - <SEGMENT> - <PLATE>      West Sugar-Admin-KBJ 194Q-11km/l
+ *     West Sugar - <PLATE|ASSET|IMEI>       West Sugar - 864022086783544
+ *
+ * Measured across all 486 units of the fleet on 2026-08-31: 165 names have two
+ * dash-segments, 194 have three, 125 have four and 2 have five. Nothing can be
+ * read positionally from the end.
+ *
+ * ## The km/l figures are NOT the Sukari problem
+ *
+ * 120 names carry a fuel-economy figure. Every one is its own segment, so
+ * scanning segments left to right finds the plate first: stripping the figure
+ * before matching changes the result for exactly 0 of 486 units. They are also
+ * two-digit here ("11km/l", "13km/l") where Sukari's are one, so the narrow
+ * expression sync-sukari-wialon needs would not even match them. Importing that
+ * machinery would be maintaining a shape this fleet does not have.
+ */
+export type WestSugarDivision = 'WKS' | 'WESTSUGAR'
+
+/**
+ * The estates WKS names, and the misspellings measured beside them.
+ *
+ * Matched as a PREFIX, which is what folds the fused names back in:
+ * "NAITIRIC", "NAITIRIKDR 083Q" and "NAITIRI KTCB 257N" are all Naitiri with
+ * the next field run into them, and a table of exact strings would need a new
+ * entry every time someone forgets a dash.
+ */
+const WKS_ESTATES = ['NAITIRI', 'KABRAS', 'AMUKA', 'KHALABA', 'LAKEAGRO', 'SELIA', 'WINCHES']
+
+/** "KABARAS" is how 12 of the 62 Kabras units are spelled. Same estate. */
+const ESTATE_ALIAS: Array<[RegExp, string]> = [[/^KABARAS/, 'KABRAS']]
+
+/**
+ * The group segment: the MIDDLE of the name, and only when there is a middle.
+ *
+ * `segments[1]` is the estate in a three-part name and the identifier in a
+ * two-part one — "West Sugar - A" would file 15 vehicles under a group called
+ * "A". So a name must have at least three segments before its second is read
+ * as anything but an identifier.
+ */
+function westSugarGroupToken(name: string, division: WestSugarDivision): string {
+  const parts = segments(name)
+  if (parts.length < 3) return 'GENERAL'
+
+  const raw = parts[1]!.toUpperCase().replace(/\s+/g, ' ').trim()
+  if (!raw) return 'GENERAL'
+
+  // Estates are resolved BEFORE the identifier check, not after. "NAITIRI KTCB
+  // 257N" is a Naitiri unit with the next field run into it, and it contains a
+  // plate — so testing for a plate first would throw the estate away. A bare
+  // "KTCB 504Z" starts with no estate, so it still falls through below.
+  if (division === 'WKS') {
+    for (const [re, canonical] of ESTATE_ALIAS) if (re.test(raw)) return canonical
+    for (const estate of WKS_ESTATES) if (raw.startsWith(estate)) return estate
+  }
+
+  // A plate or a bare IMEI in the middle slot names a vehicle, not a group.
+  if (/^\d+$/.test(raw) || PLATE_RE.test(raw)) return 'GENERAL'
+  return raw
+}
+
+export interface WestSugarUnitName {
+  division: WestSugarDivision
+  group:    string
+  plate:    string | null
+}
+
+/** Parse one West Sugar unit name. Same plate reader as Menengai. */
+export function parseWestSugarUnit(name: string): WestSugarUnitName {
+  const division: WestSugarDivision = /^\s*WKS\b/i.test(name) ? 'WKS' : 'WESTSUGAR'
+  return { division, group: westSugarGroupToken(name, division), plate: menengaiPlate(name) }
+}
+
+const DIVISION_LABEL: Record<WestSugarDivision, string> = {
+  WKS:       'WKS',
+  WESTSUGAR: 'West Sugar',
+}
+
+export function westSugarGroup(name: string): { code: string; name: string } {
+  const { division, group } = parseWestSugarUnit(name)
+  return {
+    code: `WESTSUGAR_${division}_${group}`.replace(/[^A-Z0-9_]+/gi, '_').toUpperCase(),
+    name: `${DIVISION_LABEL[division]} · ${group}`,
   }
 }
 

@@ -39,6 +39,17 @@ const LOCATIONS_BY_ORG: Record<string, Loc[]> = {
     { name: 'MORL Farm',         lat: -0.1989, lng: 35.8661 },
     { name: 'Nakuru',            lat: -0.3031, lng: 36.0800 },
   ],
+  // Same method: the densest 1.1 km cell per site, 2026-08-31. Kabras holds 82
+  // of the 448 reporting units, Naitiri 49 of 104, Amuka 3 of 9. Khalaba and
+  // the winches are too sparse to site this way and are left out rather than
+  // guessed. Kakamega is the county town by the factory — the only entry here
+  // not derived from telemetry.
+  WESTSUGAR: [
+    { name: 'Kabras Factory', lat: 0.3781, lng: 34.8333 },
+    { name: 'Naitiri',        lat: 0.7821, lng: 34.8776 },
+    { name: 'Amuka',          lat: 1.0714, lng: 34.9972 },
+    { name: 'Kakamega',       lat: 0.2827, lng: 34.7519 },
+  ],
 }
 const DEFAULT_ORG_CODE = 'SUKARI'
 
