@@ -68,6 +68,21 @@ export const MENENGAI_WIALON_ACCOUNT_ID = 25601229
 /** Rai Group's shared account: Sukari, West Sugar, WKS, Aquamist and Pan Paper. */
 export const RAI_GROUP_WIALON_ACCOUNT_ID = 27625222
 
+/**
+ * West Sugar's own resource — its REPORTS, not its units.
+ *
+ * Not an account id and deliberately not in `FLEETS`: zero units carry this
+ * `bact`, so it can never answer "whose unit is this". What it holds is the
+ * fleet's report templates, including the per-unit Advanced Fuel Analysis the
+ * fuel sync reads its fillings and drains from. RAI GROUP, where the units
+ * actually bill, carries no such template at all.
+ *
+ * The same split Sukari already has (units under RAI GROUP, reports on 28843152),
+ * which is why `ORG_RESOURCES` in fuel-sync states both ids per org rather than
+ * deriving one from the other.
+ */
+export const WEST_SUGAR_REPORT_RESOURCE_ID = 28842931
+
 export interface WialonFleet {
   /** Our `organisations.code`. */
   orgCode:  string
