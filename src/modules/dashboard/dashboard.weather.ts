@@ -25,6 +25,20 @@ const LOCATIONS_BY_ORG: Record<string, Loc[]> = {
     { name: 'Eldoret',   lat:  0.5143, lng: 35.2698 },
     { name: 'Mombasa',   lat: -4.0435, lng: 39.6682 },
   ],
+  // The three sites this org actually works from, MEASURED on 2026-08-31 as
+  // the densest 1.1 km cell of each business unit's last known fixes — 53 of
+  // 210 Menengai units, 11 of 20 Rai MDF, 5 of 14 MORL. Nakuru is the town the
+  // refinery sits in and is the only entry here not derived from telemetry.
+  //
+  // No delivery towns. Sukari's list above names six because its routes are
+  // known; inventing an equivalent for Menengai would put weather on the
+  // screen for roads its fleet may never take.
+  MENENGAI: [
+    { name: 'Menengai Refinery', lat: -0.2889, lng: 36.0446 },
+    { name: 'Rai MDF',           lat: -0.2186, lng: 35.9081 },
+    { name: 'MORL Farm',         lat: -0.1989, lng: 35.8661 },
+    { name: 'Nakuru',            lat: -0.3031, lng: 36.0800 },
+  ],
 }
 const DEFAULT_ORG_CODE = 'SUKARI'
 
