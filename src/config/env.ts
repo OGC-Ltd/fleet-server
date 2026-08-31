@@ -95,6 +95,19 @@ const schema = z.object({
   // How long a notification is kept before the retention sweep deletes it.
   NOTIFICATION_RETENTION_DAYS: z.coerce.number().optional().default(90),
 
+  // How long the RAW provider envelope behind each telemetry row is kept.
+  //
+  // Separate from the parsed row, and much shorter, because the two are read
+  // completely differently. `vehicle_telemetries` is scanned across weeks by
+  // trips, analytics and playback; `vehicle_telemetry_raws` is read for a
+  // vehicle's LATEST row (the dashboard, the map ping, tank state, the probe
+  // report) or for the hours around a fuel drain — never across a long window.
+  //
+  // 30 days is the longest window any measured consumer needs: probe health's
+  // LOOKBACK_DAYS. The sweep additionally never deletes the row behind a
+  // vehicle's newest ping, whatever its age — see lib/queues/retention.
+  TELEMETRY_RAW_RETENTION_DAYS: z.coerce.number().optional().default(30),
+
   // How many notifications per org the Redis cache holds. The read endpoint
   // serves from cache up to this depth and falls through to Postgres beyond
   // it, so this is a latency knob, not a data-loss one.

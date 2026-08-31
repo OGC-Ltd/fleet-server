@@ -26,11 +26,26 @@
  *
  * ## Adding targets
  *
- * `RETENTION_TARGETS` is the whole policy. The obvious next entries are the
- * telemetry tables — `vehicle_telemetry_raws` is 156 MB against notifications'
- * 464 kB, so that is where a retention policy actually reclaims disk. They are
- * deliberately NOT enabled here: analytics, trip history and the odometer
- * views read those tables, and nothing has confirmed how far back they look.
+ * `RETENTION_TARGETS` is the whole policy.
+ *
+ * `vehicle_telemetry_raws` is now one of them. That note used to say the
+ * telemetry tables were deliberately absent because "nothing has confirmed how
+ * far back they look", and sized the raws at 156 MB. Both have moved: the table
+ * is 9,968 MB — two thirds of the database, and larger than the parsed rows it
+ * backs — and the lookbacks have now been read off every consumer:
+ *
+ *   dashboard.repository  · telemetry.repository · db-follower
+ *   fuel-tank-state       · probe-report                         LATEST row per vehicle
+ *   fuel-adjudication     drain window: -30 min to +3 h
+ *
+ * Nothing scans the raw payload across a long window. That is what makes a
+ * short retention safe here and NOT on `vehicle_telemetries`, which trips,
+ * analytics and playback do scan across weeks — that table stays unpruned, and
+ * confirming its readers is a separate job.
+ *
+ * Measured 2026-08-31: 1.7 M of 12.9 M telemetry rows are over 30 days old.
+ * Note what this does and does not do — it CAPS growth, it does not shrink the
+ * database below where it is today.
  */
 
 import { Queue, Worker, type Job } from 'bullmq'
@@ -141,11 +156,25 @@ const MAX_BATCHES = 200
 interface RetentionTarget {
   name:  string
   days:  number
+  /**
+   * Overrides for a target whose churn the shared defaults cannot absorb.
+   *
+   * `BATCH_SIZE * MAX_BATCHES` is a per-sweep CEILING — 100,000 rows with the
+   * defaults. That is ample for notifications, which accrue a few thousand a
+   * day. It is nowhere near telemetry: measured 2026-08-31, after Menengai and
+   * West Sugar the fleet writes ~887,000 fixes a day, so a target capped at
+   * 100,000 would fall further behind every night and the ceiling warning
+   * would be the only sign. A retention target that cannot keep up is worse
+   * than none, because it looks like the problem is handled.
+   */
+  batchSize?:  number
+  maxBatches?: number
   /** Deletes one batch, returns how many rows went. */
   prune: (cutoff: Date, limit: number) => Promise<number>
 }
 
-const RETENTION_TARGETS: RetentionTarget[] = [
+/** Exported so the safety properties of each target can be pinned by test. */
+export const RETENTION_TARGETS: RetentionTarget[] = [
   {
     name: 'notifications',
     days: env.NOTIFICATION_RETENTION_DAYS,
@@ -198,6 +227,66 @@ const RETENTION_TARGETS: RetentionTarget[] = [
       return count
     },
   },
+  {
+    name: 'vehicle_telemetry_raws',
+    days: env.TELEMETRY_RAW_RETENTION_DAYS,
+    // 3 M rows a sweep against ~887 k created a day: enough to hold the line
+    // and to clear the whole backlog in one night, with headroom for the fleet
+    // to grow again.
+    //
+    // Measured against the live database 2026-08-31: the backlog is 1,707,874
+    // rows — 854 batches — and one batch's selection costs 521 ms while rows
+    // are plentiful. With the pause that is ~11 minutes at 03:17, most of it
+    // deliberately idle so the live poll keeps its connections. Steady-state
+    // sweeps are far cheaper: `vehicle_telemetries_captured_at_idx` already
+    // exists, and once the predicate is selective again the planner uses it
+    // instead of the parallel seq scan it picks while 13% of the table matches.
+    batchSize:  2_000,
+    maxBatches: 1_500,
+    /**
+     * Deletes the raw envelope, never the parsed row.
+     *
+     * ## The EXISTS clause is the whole safety property
+     *
+     * `dashboard.repository` and `telemetry.repository` reach a vehicle's
+     * current position through an INNER JOIN onto this table. Delete the raw
+     * behind a vehicle's newest ping and that vehicle does not go stale on the
+     * map — it DISAPPEARS from the snapshot entirely, because an inner join
+     * drops the row.
+     *
+     * Age alone cannot express that. A unit that last reported in January 2025
+     * still has a newest ping, and it is that January row the map renders. So
+     * the condition is not "old" but "old AND superseded": a raw row goes only
+     * when the same vehicle has a later fix, which is exactly the row no
+     * consumer is looking at. The subquery rides the
+     * (vehicle_id, captured_at) index and stops at the first newer row.
+     *
+     * Written as one statement rather than the select-then-delete the targets
+     * above use, because the id set here is millions of rows wide and the
+     * LIMIT has to be applied where the planner can see it.
+     *
+     * The clause is not theoretical. Measured 2026-08-31, a 30-day cutoff put
+     * 1,707,874 raw rows in scope and spared 195 — vehicles whose newest ping
+     * is itself older than thirty days, mostly units retired or long silent.
+     * Those 195 are precisely the rows the dashboard is joining to.
+     */
+    prune: async (cutoff, limit) => prisma.$executeRaw`
+      DELETE FROM vehicle_telemetry_raws r
+       USING (
+         SELECT raw.telemetry_id
+           FROM vehicle_telemetry_raws raw
+           JOIN vehicle_telemetries t ON t.id = raw.telemetry_id
+          WHERE t.captured_at < ${cutoff}
+            AND EXISTS (
+              SELECT 1
+                FROM vehicle_telemetries newer
+               WHERE newer.vehicle_id  = t.vehicle_id
+                 AND newer.captured_at > t.captured_at
+            )
+          LIMIT ${limit}
+       ) doomed
+       WHERE r.telemetry_id = doomed.telemetry_id`,
+  },
 ]
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -207,18 +296,20 @@ export async function runRetentionSweep(): Promise<Record<string, number>> {
   const deleted: Record<string, number> = {}
 
   for (const target of RETENTION_TARGETS) {
-    const cutoff = new Date(Date.now() - target.days * 24 * 60 * 60_000)
+    const cutoff     = new Date(Date.now() - target.days * 24 * 60 * 60_000)
+    const batchSize  = target.batchSize  ?? BATCH_SIZE
+    const maxBatches = target.maxBatches ?? MAX_BATCHES
     let total = 0
     let batches = 0
 
     try {
-      for (; batches < MAX_BATCHES; batches++) {
-        const n = await target.prune(cutoff, BATCH_SIZE)
+      for (; batches < maxBatches; batches++) {
+        const n = await target.prune(cutoff, batchSize)
         total += n
-        if (n < BATCH_SIZE) break     // drained
+        if (n < batchSize) break      // drained
         await sleep(BATCH_PAUSE_MS)
       }
-      if (batches >= MAX_BATCHES) {
+      if (batches >= maxBatches) {
         logger.warn(
           { target: target.name, deleted: total },
           'Retention sweep hit its batch ceiling — backlog continues next run',
