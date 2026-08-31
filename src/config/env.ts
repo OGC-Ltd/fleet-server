@@ -103,10 +103,24 @@ const schema = z.object({
   // vehicle's LATEST row (the dashboard, the map ping, tank state, the probe
   // report) or for the hours around a fuel drain — never across a long window.
   //
-  // 30 days is the longest window any measured consumer needs: probe health's
-  // LOOKBACK_DAYS. The sweep additionally never deletes the row behind a
-  // vehicle's newest ping, whatever its age — see lib/queues/retention.
-  TELEMETRY_RAW_RETENTION_DAYS: z.coerce.number().optional().default(30),
+  // Seven days, and the payload is why. Measured 2026-08-31 over 200,000 rows,
+  // it averages 716 bytes of which 21 carry anything not already held as a
+  // column — `odometer_km`, whose absence from `vehicle_telemetries` the schema
+  // notes itself. The rest is envelope:
+  //
+  //   flags   214 B   ten booleans; only fuelProbeFault is read
+  //   pos     141 B   duplicates lat / lng / speed_kmh / heading_deg
+  //   name     35 B   duplicates vehicles.name
+  //   …plus `ignition_known` and `engine_hours`, both promoted to columns by
+  //   backfill-telemetry-ignition; `doorStatus`, which has ONE distinct value
+  //   ("UNKNOWN") across the sample; and `panicButtonPressed`, never once true.
+  //
+  // Every consumer of the payload — db-follower, probe-report, tank state, the
+  // map's ping lateral — reads a vehicle's LATEST row, and the sweep spares
+  // that unconditionally at any age. The only window-sensitive reader is fuel
+  // adjudication's drain evidence, spanning -30 min to +3 h. Seven days is
+  // about fifty times the longest real need.
+  TELEMETRY_RAW_RETENTION_DAYS: z.coerce.number().optional().default(7),
 
   // How many notifications per org the Redis cache holds. The read endpoint
   // serves from cache up to this depth and falls through to Postgres beyond
