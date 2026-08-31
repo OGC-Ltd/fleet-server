@@ -806,6 +806,9 @@ const hoursCache = createWarmCache<Awaited<ReturnType<typeof computeOperatingHou
  */
 const summaryCache = createWarmCache<Awaited<ReturnType<typeof computeFleetWeekSummary>>>({
   name: 'machine-summary',
+  // 1.55 s a build over a SEVEN-DAY window. Same reasoning as fleet-state:
+  // a week's summary does not change between one minute and the next.
+  refreshMs: 5 * 60_000,
   maxEntries: 200,
   warmKeysFor: (orgId) => [windowCacheKey(orgId, 7, undefined, null)],
   compute: async (key) => {
