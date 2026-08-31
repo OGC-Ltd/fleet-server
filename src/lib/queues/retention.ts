@@ -43,9 +43,24 @@
  * analytics and playback do scan across weeks — that table stays unpruned, and
  * confirming its readers is a separate job.
  *
- * Measured 2026-08-31: 1.7 M of 12.9 M telemetry rows are over 30 days old.
+ * ## What the payload actually is
+ *
+ * Worth knowing before trusting the window. Averaged over 200,000 rows on
+ * 2026-08-31 the payload is 716 bytes, of which 21 carry anything not already
+ * held as a column: `odometer_km`. `pos` (141 B) duplicates four columns,
+ * `flags` (214 B) is ten booleans, `name` duplicates `vehicles.name`, and
+ * `ignition_known` and `engine_hours` were promoted to columns long ago by
+ * backfill-telemetry-ignition. `doorStatus` has ONE distinct value across the
+ * sample and `panicButtonPressed` was never once true.
+ *
+ * Ten gigabytes to carry one integer per row. Promoting `odometer_km` to a
+ * column the same way ignition was would make this table disposable outright —
+ * that is the real fix, and this target is the interim.
+ *
+ * Measured 2026-08-31: 10.4 M of 12.9 M rows are already older than seven days.
  * Note what this does and does not do — it CAPS growth, it does not shrink the
- * database below where it is today.
+ * database below where it is today, because Postgres reuses freed pages rather
+ * than returning them.
  */
 
 import { Queue, Worker, type Job } from 'bullmq'
@@ -230,17 +245,22 @@ export const RETENTION_TARGETS: RetentionTarget[] = [
   {
     name: 'vehicle_telemetry_raws',
     days: env.TELEMETRY_RAW_RETENTION_DAYS,
-    // 3 M rows a sweep against ~887 k created a day: enough to hold the line
-    // and to clear the whole backlog in one night, with headroom for the fleet
-    // to grow again.
+    // 3 M rows a sweep against ~887 k created a day: comfortably enough to hold
+    // the line, with headroom for the fleet to grow again.
     //
-    // Measured against the live database 2026-08-31: the backlog is 1,707,874
-    // rows — 854 batches — and one batch's selection costs 521 ms while rows
-    // are plentiful. With the pause that is ~11 minutes at 03:17, most of it
-    // deliberately idle so the live poll keeps its connections. Steady-state
+    // It does NOT clear the opening backlog in one night, and that is the right
+    // trade rather than an oversight. Measured 2026-08-31, 10,393,736 rows are
+    // already older than seven days, so the first four sweeps each hit this
+    // ceiling and log the warning below before the table reaches its window.
+    // Deleting 10 M rows in one 70-minute burst would leave a dead-tuple
+    // backlog autovacuum could not keep up with on an instance this size;
+    // spreading it over four nights costs nothing but patience.
+    //
+    // One batch's selection costs 521 ms while rows are plentiful, so a full
+    // sweep is ~11 minutes, most of it the deliberate pause. Steady-state
     // sweeps are far cheaper: `vehicle_telemetries_captured_at_idx` already
     // exists, and once the predicate is selective again the planner uses it
-    // instead of the parallel seq scan it picks while 13% of the table matches.
+    // instead of the parallel seq scan it picks while a large share matches.
     batchSize:  2_000,
     maxBatches: 1_500,
     /**
