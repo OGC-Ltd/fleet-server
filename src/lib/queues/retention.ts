@@ -38,10 +38,18 @@
  *   fuel-tank-state       · probe-report                         LATEST row per vehicle
  *   fuel-adjudication     drain window: -30 min to +3 h
  *
- * Nothing scans the raw payload across a long window. That is what makes a
- * short retention safe here and NOT on `vehicle_telemetries`, which trips,
- * analytics and playback do scan across weeks — that table stays unpruned, and
- * confirming its readers is a separate job.
+ * Nothing scans the raw payload across a long window, which is what lets that
+ * table go to seven days.
+ *
+ * `vehicle_telemetries` is now a target too, at thirty. Its readers were
+ * measured the same way and none exceeds that: probe health 30, fuel
+ * adjudication's repeat window 30 and profile 21, tank-state trend 14, fuel
+ * rates 7, machine operations and the dozer area one fleet day, fleet-state
+ * 24 h, the fleet snapshot a single row. `/track` already refuses a window
+ * longer than TRACK_MAX_WINDOW_DAYS outright, so this enforces a limit the API
+ * has published all along rather than inventing one. The two long windows in
+ * the codebase — maintenance history at 366 days and the driver overview at 90
+ * — read `trips` and `vehicle_alerts`, not fixes.
  *
  * ## What the payload actually is
  *
@@ -306,6 +314,64 @@ export const RETENTION_TARGETS: RetentionTarget[] = [
           LIMIT ${limit}
        ) doomed
        WHERE r.telemetry_id = doomed.telemetry_id`,
+  },
+  {
+    name: 'vehicle_telemetries',
+    days: env.TELEMETRY_RETENTION_DAYS,
+    // 1.7 M rows are over 30 days old, so the opening backlog clears in one
+    // sweep. Smaller batches than the raws target because this table carries
+    // five indexes — a primary key, two composite btrees, a unique on
+    // (device_id, captured_at) and a partial on moving fixes — and every
+    // deleted row has to be removed from all of them.
+    batchSize:  1_000,
+    maxBatches: 3_000,
+    /**
+     * Deletes the fix AND its raw envelope, in one statement.
+     *
+     * ## Why both, when the raws have their own target
+     *
+     * Nothing in the database references `vehicle_telemetries` — there is not
+     * one foreign key pointing at it, checked against the live schema. That
+     * makes this delete unconstrained, and it makes an orphan possible: the
+     * raws sweep finds its victims by JOINING through telemetry, so a raw
+     * whose parent row has gone is unreachable by it forever. It would leak
+     * quietly, at 817 bytes a time.
+     *
+     * Today the windows make that impossible — raws go at 7 days, fixes at 30,
+     * so the envelope is always gone first. But those are two independent env
+     * vars, and the day someone raises the raw window above this one is the day
+     * the leak starts. Deleting both here costs nothing when the raw is already
+     * gone and removes the failure mode entirely.
+     *
+     * ## The same newest-ping guard as the raws target, for a sharper reason
+     *
+     * There the concern was an INNER JOIN dropping a vehicle from the map.
+     * Here it is worse: age alone would delete a vehicle's ONLY remaining fix,
+     * and with it the record of where it last was. Measured 2026-08-31, 195
+     * vehicles have a newest ping older than thirty days — units retired, sold,
+     * or silent. "Where did it stop reporting" is precisely the question asked
+     * about a machine that has gone quiet, and it is the one this would erase.
+     */
+    prune: async (cutoff, limit) => prisma.$executeRaw`
+      WITH doomed AS (
+        SELECT t.id
+          FROM vehicle_telemetries t
+         WHERE t.captured_at < ${cutoff}
+           AND EXISTS (
+             SELECT 1
+               FROM vehicle_telemetries newer
+              WHERE newer.vehicle_id  = t.vehicle_id
+                AND newer.captured_at > t.captured_at
+           )
+         LIMIT ${limit}
+      ), envelopes AS (
+        DELETE FROM vehicle_telemetry_raws r
+         USING doomed d
+         WHERE r.telemetry_id = d.id
+      )
+      DELETE FROM vehicle_telemetries t
+       USING doomed d
+       WHERE t.id = d.id`,
   },
 ]
 
