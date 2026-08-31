@@ -1,5 +1,6 @@
 ﻿import { prisma } from '../../lib/prisma.js'
 import { getSimFleetVehicleIds } from '../../lib/sim-fleet.js'
+import { env } from '../../config/env.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics.schema.js'
 import { calculateDriverRating } from './driver-rating.js'
@@ -547,8 +548,14 @@ export async function violationHeatmap(orgId: string, q: AnalyticsRange) {
 // A driver is any org user holding one of the driver roles (see prisma/seed.ts).
 const DRIVER_ROLE_SLUGS = ['driver', 'senior_driver', 'junior_driver']
 
-// Overspeeding threshold (km/h) — matches the server's speeding-query default.
-const OVERSPEED_LIMIT_KMH = 80
+// Overspeeding threshold (km/h).
+//
+// From configuration, not a literal, because this number now has two readers
+// that must never disagree: the driver-conduct policy below, and the live feed
+// (lib/derived-alerts). It was a literal here while the feed could not report
+// speeding at all — so the platform suspended drivers against a limit it never
+// told an operator about. One value, one place, both sides.
+const OVERSPEED_LIMIT_KMH = env.OVERSPEED_LIMIT_KMH
 
 // kg → tonnes, 1 dp (shared with deliveriesAnalytics' presentation).
 const toTonnes = (kg: number) => Math.round(kg / 100) / 10
