@@ -27,7 +27,7 @@ vi.mock('../../src/lib/logger.js', () => ({
 vi.mock('../../src/lib/prisma.js')
 
 import { prismaMock } from '../helpers/prisma.mock.js'
-import { createWarmCache, startCacheWarmer } from '../../src/lib/warm-cache.js'
+import { createWarmCache, startCacheWarmer, isOrgActive } from '../../src/lib/warm-cache.js'
 
 const built: string[] = []
 
@@ -119,5 +119,30 @@ describe('the sweep and idle organisations', () => {
 
     expect(built).toEqual([])
     stop()
+  })
+})
+
+/**
+ * `isOrgActive` is exported because the cache sweep is not the only per-org job
+ * on a timer — `startAiInsightWarmer` filters on it too. Its edges are pinned
+ * here because a wrong answer there is expensive in a different currency: that
+ * job makes a model call per organisation.
+ */
+describe('isOrgActive', () => {
+  it('is false for an organisation nothing has read', () => {
+    expect(isOrgActive('org_never_touched')).toBe(false)
+  })
+
+  it('is true immediately after a read', async () => {
+    await cache.get('org_fresh|r')
+    expect(isOrgActive('org_fresh')).toBe(true)
+  })
+
+  it('goes false again once the window passes', async () => {
+    await cache.get('org_ages|r')
+    expect(isOrgActive('org_ages')).toBe(true)
+
+    vi.setSystemTime(clock + 16 * 60_000)
+    expect(isOrgActive('org_ages')).toBe(false)
   })
 })
