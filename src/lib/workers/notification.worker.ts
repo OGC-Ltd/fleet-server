@@ -21,7 +21,7 @@
  */
 
 import { eventBus }           from '../event-bus.js'
-import type { ProviderAlertEvent } from '../event-bus.js'
+import type { ProviderAlertEvent, FleetAlert } from '../event-bus.js'
 import { logger }             from '../logger.js'
 import { emitDashboardAlert } from '../sse.js'
 import { publishNotification } from '../notifications/notification.store.js'
@@ -48,6 +48,22 @@ function shouldPush(key: string): boolean {
     for (const [k, t] of lastPushedAt) if (now - t > PUSH_DEDUPE_MS) lastPushedAt.delete(k)
   }
   return true
+}
+
+/**
+ * The feed sentence for a derived alert.
+ *
+ * Overspeeding carries its FIGURE. "Overspeeding detected" is the label of a
+ * category; "Overspeeding detected — 104 km/h" is the thing that happened, and
+ * it is the difference between an operator having to open a screen and being
+ * able to triage from the feed. Every other type's label already says all we
+ * measured.
+ */
+function speedText(a: FleetAlert, label: string): string {
+  if (a.type === 'overspeeding' && Number.isFinite(a.speedKmh)) {
+    return `${label} — ${Math.round(a.speedKmh as number)} km/h`
+  }
+  return label
 }
 
 function handleProviderAlert(a: ProviderAlertEvent): void {
@@ -111,10 +127,11 @@ function handleProviderAlert(a: ProviderAlertEvent): void {
 export function startNotificationWorker(): () => void {
   const unsubTelemetry = eventBus.subscribe('alert:triggered', (alert) => {
     try {
+      const label = ALERT_LABELS[alert.type] ?? alert.type
       const payload = {
         alertType:   alert.type,
         severity:    ALERT_SEVERITY[alert.type],
-        title:       ALERT_LABELS[alert.type] ?? alert.type,
+        title:       label,
         vehicleId:   alert.vehicleId,
         vehicleName: alert.vehicleName,
         plate:       alert.plate,
@@ -126,15 +143,59 @@ export function startNotificationWorker(): () => void {
         meta:        alert.meta,
       }
 
-      // 1. Org-level SSE — dashboard alert feed
+      // 1. The `alert` SSE channel, for anything listening on it.
       emitDashboardAlert(alert.orgId, payload)
 
-      // 2. Web Push — all subscribers for this org
+      // 2. The LIVE FEED, its durable history and the Redis cache.
+      //
+      //    This is the step that was missing, and it is why turning the flags
+      //    on would still have shown an operator nothing. A derived alert used
+      //    to reach `emitDashboardAlert` and stop there — but the dashboard
+      //    subscribes to `feed` and `position` only, so the `alert` channel had
+      //    no listener, and nothing was ever written to `notifications`. The
+      //    event was simultaneously broadcast and invisible, with no history to
+      //    find it in afterwards.
+      //
+      //    `source: 'telemetry'` because that is where the fact came from — our
+      //    own fixes, not a provider's verdict. It reads alongside the fuel
+      //    ledger's `wialon` items and the geofence engine's `zone` ones.
+      publishNotification({
+        orgId:     alert.orgId,
+        // One episode, one id. The rising-edge guard in the poller fires once
+        // per transition, so the captured time of that frame identifies the
+        // episode — a redelivery of the same frame is deduplicated, and the
+        // next genuine episode mints a new one.
+        id:        `alert-${alert.type}-${alert.vehicleId}-${alert.capturedAt.getTime()}`,
+        source:    'telemetry',
+        alertType: alert.type,
+        severity:  ALERT_SEVERITY[alert.type] === 'CRITICAL' ? 'critical' : 'warning',
+        text:      speedText(alert, label),
+        at:        alert.capturedAt,
+        plate:     alert.plate,
+        vehicleId: alert.vehicleId,
+        // Where it happened, for the feed item's map pin — same field
+        // feed-events uses for the same purpose.
+        extra:     { lat: alert.lat, lng: alert.lng },
+      })
+
+      // 3. Web Push — CRITICAL only, and deduplicated.
+      //
+      //    This used to push every derived alert unconditionally, with no
+      //    dedupe of any kind. That was harmless only while the flags were all
+      //    false; the moment overspeeding became derivable it would have woken
+      //    every subscriber for each of the ~54 West Sugar units that exceed
+      //    the limit on an ordinary day, repeatedly. A warning belongs in the
+      //    feed, where an operator looks when they choose to; a phone is for
+      //    the critical family. Same dedupe window the provider path uses.
+      if (ALERT_SEVERITY[alert.type] !== 'CRITICAL') return
+      const key = `${alert.orgId}:${alert.type}:${alert.vehicleId}`
+      if (!shouldPush(key)) return
+
       void pushService.broadcastToOrg(alert.orgId, {
         title: `Fleet Alert — ${alert.plate}`,
-        body:  ALERT_LABELS[alert.type] ?? alert.type,
+        body:  label,
         data:  payload,
-        tag:   `${alert.orgId}:${alert.type}:${alert.vehicleId}`,
+        tag:   key,
       }).catch(err => logger.warn({ err, alert }, 'notification.worker: telemetry alert push failed'))
     } catch (err) {
       logger.warn({ err, alert }, 'notification.worker: failed to dispatch alert')

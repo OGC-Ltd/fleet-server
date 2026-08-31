@@ -35,6 +35,7 @@ import { emitDashboardNotice }   from './sse.js'
 import { startPollLoop }         from './poll-loop.js'
 import type { PollLoopHandle }   from './poll-loop.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
+import { deriveAlertFlags } from './derived-alerts.js'
 
 // Minimum gap before the SAME vehicle+alert is allowed to notify again. The
 // rising-edge map already suppresses a continuously-active flag; this stops a
@@ -83,6 +84,8 @@ interface DeviceMeta {
   vehicleName:     string
   plate:           string
   tankCapacityMl:  number
+  /** Which overspeed limit applies — see lib/derived-alerts. */
+  vehicleType:     string | null
   // Currently-assigned driver, folded into this same 5-min cache so
   // processTelemetry/persistSimEvents don't each re-query vehicleAssignment
   // per frame per cycle. Driver reassignment is a rare admin action, so a
@@ -108,6 +111,7 @@ async function refreshCache(): Promise<void> {
       name:               true,
       registrationPlate:  true,
       tankCapacityLitres: true,
+      vehicleType:        true,
       assignments: {
         where: { unassignedAt: null },
         select: { userId: true, user: { select: { fullName: true } } },
@@ -134,6 +138,7 @@ async function refreshCache(): Promise<void> {
     // size into the fuel sensor's name and sync-wialon reads it with
     // `tankCapacityOf`. Nothing derives, infers or defaults it.
     tankCapacityMl: (r.tankCapacityLitres ?? 0) * 1000,
+    vehicleType:    r.vehicleType ?? null,
     driverId:       r.assignments[0]?.userId ?? null,
     driverName:     r.assignments[0]?.user.fullName ?? null,
   }]))
@@ -208,6 +213,24 @@ class TelemetryPoller {
     await runWithConcurrency(frames, POLL_CONCURRENCY, async (frame) => {
       const meta = await getDeviceMeta(frame.deviceId)
       if (!meta) { skipped++; return }
+
+      // Flags this fleet's own telemetry can answer, for providers that send
+      // none. ORed on, never assigned: a provider that computes its own alerts
+      // keeps every one of them, and this can only add.
+      //
+      // Applied HERE, before the frame is persisted, so the `flags` written
+      // into rawPayload are the same ones the alert rows are opened from.
+      // db-follower reads that stored copy to rebuild a frame, so deriving
+      // after the write would give the two paths different answers for the
+      // same fix.
+      const derived = deriveAlertFlags(frame, {
+        vehicleId:      meta.vehicleId,
+        tankCapacityMl: meta.tankCapacityMl,
+        vehicleType:    meta.vehicleType,
+      })
+      for (const [k, v] of Object.entries(derived)) {
+        if (v) (frame.flags as Record<string, unknown>)[k] = true
+      }
 
       try {
         // 1. Persist to DB + emit per-vehicle SSE (existing ingest pipeline).

@@ -161,6 +161,46 @@ const schema = z.object({
   // Set 'false' on additional instances so only ONE runs it.
   FUEL_SYNC_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
 
+  /**
+   * The speed above which a unit is overspeeding, km/h.
+   *
+   * 80 is not a new number: `analytics.repository` has applied it to the
+   * Speeding screen and to the driver-suspension policy since long before the
+   * live feed could report it. Stated here so both read one value.
+   *
+   * It is CONFIGURATION, not an inference from the payload — which is the
+   * distinction the Wialon adapter's flag block was drawing when it refused to
+   * raise this flag on a guess. An operator sets a limit; we apply it.
+   */
+  OVERSPEED_LIMIT_KMH: z.coerce.number().optional().default(80),
+
+  /**
+   * Per-vehicle-type overrides, `TYPE:kmh` comma-separated —
+   * e.g. `TRACTOR:50,PLANT:40`.
+   *
+   * Empty by default, deliberately. One limit across a fleet mixing cane
+   * tractors, haulage trucks and saloons is crude, but the right number per
+   * class is an operator's judgement about their own roads and machines, not
+   * something to infer from telemetry. The mechanism ships ready; the values
+   * are set by whoever owns the policy, without a deploy.
+   */
+  OVERSPEED_LIMIT_BY_TYPE: z.string().optional().default(''),
+
+  /**
+   * Consecutive frames over the limit before the flag rises.
+   *
+   * A single fix at 95 km/h is as likely to be a GPS artefact as a speeding
+   * driver, and raising an alert on one is exactly the fabrication the adapter
+   * was guarding against. At a 2-second cadence three frames is a few seconds
+   * of sustained speed — cheap to satisfy when real, impossible to satisfy by
+   * accident. Measured on 24 h of live telemetry, nothing reported above
+   * 140 km/h on any fleet, so the channel itself is clean.
+   */
+  OVERSPEED_MIN_FRAMES: z.coerce.number().optional().default(3),
+
+  /** Tank percentage at or below which `lowFuel` rises. Needs a known tank. */
+  LOW_FUEL_PCT: z.coerce.number().optional().default(10),
+
   // Every 15 minutes. The job executes a Wialon report only for vehicles whose
   // own fuel readings actually moved, so a quiet cycle costs nothing.
   FUEL_SYNC_CRON: z.string().optional().default('*/15 * * * *'),
