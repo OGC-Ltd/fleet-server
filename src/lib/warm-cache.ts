@@ -65,6 +65,21 @@ const lastRead = new Map<string, number>()
  */
 const orgOfKey = (key: string): string => key.split(/[|:]/)[0] ?? key
 
+/**
+ * Has anything READ data for this organisation recently?
+ *
+ * Exported because the cache sweep is not the only per-org job on a timer.
+ * `startAiInsightWarmer` regenerates a brief for every organisation hourly, and
+ * its fact-gathering reads through these caches — so before this existed, that
+ * job marked all four organisations active every hour and held the cache sweep
+ * at full width for fifteen minutes at a time regardless of who was looking.
+ * Measured 2026-08-31, that is why scoping the cache sweep alone cut the build
+ * load 3x rather than 4x.
+ */
+export function isOrgActive(orgId: string): boolean {
+  return (lastRead.get(orgId) ?? 0) > Date.now() - ACTIVE_ORG_MS
+}
+
 interface Registered {
   name:    string
   keysFor: (orgId: string) => string[]
@@ -229,10 +244,7 @@ export function startCacheWarmer(): () => void {
       // idle org's entry simply ages: a read still returns instantly from the
       // store and kicks off its own background refresh, so the cost of not
       // warming it is staleness on one screen, not latency.
-      const cutoff = Date.now() - ACTIVE_ORG_MS
-      const orgs = primed
-        ? all.filter(o => (lastRead.get(o.id) ?? 0) > cutoff)
-        : all
+      const orgs = primed ? all.filter(o => isOrgActive(o.id)) : all
 
       if (primed && orgs.length < all.length) {
         logger.debug(
