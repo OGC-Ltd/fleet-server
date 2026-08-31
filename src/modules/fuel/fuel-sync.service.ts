@@ -48,18 +48,38 @@ import { publishNotificationDurable } from '../../lib/notifications/notification
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { shortPlaceLabel } from '../../lib/place-label.js'
+import {
+  KASULU_WIALON_ACCOUNT_ID,
+  MENENGAI_WIALON_ACCOUNT_ID,
+  WEST_SUGAR_REPORT_RESOURCE_ID,
+} from '../../providers/wialon/wialon.account.js'
 
 /**
  * Which Wialon resource holds each org's fuel templates.
  *
- * Kasulu's resource id equals its account id (see wialon.account). Sukari's
- * units live under the shared RAI GROUP account but its REPORTS sit on a
- * resource of its own, so the two ids are unrelated and both are stated rather
- * than derived.
+ * Kasulu's and Menengai's resource ids equal their account ids (see
+ * wialon.account). Sukari's and West Sugar's do NOT: both fleets bill to the
+ * shared RAI GROUP account while their REPORTS sit on resources of their own,
+ * and RAI GROUP carries no per-unit fuel template at all. So every id is stated
+ * rather than derived from the account — deriving would have silently pointed
+ * two of the four orgs at a resource with nothing to read.
+ *
+ * Menengai and West Sugar added 2026-08-31. Both resources were confirmed to
+ * carry the template `TEMPLATE_PREFERENCE` asks for first, so nothing else here
+ * had to change:
+ *
+ *     25601229  template  8  "Menengai1-Advanced Fuel Analysis Report (Per Vehicle)"
+ *     28842931  template  4  "West Kenya- Advanced Fuel Analysis Report (Per Vehicle)"
+ *
+ * An org missing from this list has no fuel ledger and no fuel feed items,
+ * however well instrumented its vehicles are — which is exactly what those two
+ * fleets looked like between onboarding and this line.
  */
 export const ORG_RESOURCES: ReadonlyArray<{ code: string; resourceId: number }> = [
-  { code: 'KASULU', resourceId: 30394506 },
-  { code: 'SUKARI', resourceId: 28843152 },
+  { code: 'KASULU',    resourceId: KASULU_WIALON_ACCOUNT_ID },
+  { code: 'SUKARI',    resourceId: 28843152 },
+  { code: 'MENENGAI',  resourceId: MENENGAI_WIALON_ACCOUNT_ID },
+  { code: 'WESTSUGAR', resourceId: WEST_SUGAR_REPORT_RESOURCE_ID },
 ]
 
 /**
