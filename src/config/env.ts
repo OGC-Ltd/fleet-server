@@ -95,6 +95,54 @@ const schema = z.object({
   // How long a notification is kept before the retention sweep deletes it.
   NOTIFICATION_RETENTION_DAYS: z.coerce.number().optional().default(90),
 
+  // How long the RAW provider envelope behind each telemetry row is kept.
+  //
+  // Separate from the parsed row, and much shorter, because the two are read
+  // completely differently. `vehicle_telemetries` is scanned across weeks by
+  // trips, analytics and playback; `vehicle_telemetry_raws` is read for a
+  // vehicle's LATEST row (the dashboard, the map ping, tank state, the probe
+  // report) or for the hours around a fuel drain — never across a long window.
+  //
+  // Seven days, and the payload is why. Measured 2026-08-31 over 200,000 rows,
+  // it averages 716 bytes of which 21 carry anything not already held as a
+  // column — `odometer_km`, whose absence from `vehicle_telemetries` the schema
+  // notes itself. The rest is envelope:
+  //
+  //   flags   214 B   ten booleans; only fuelProbeFault is read
+  //   pos     141 B   duplicates lat / lng / speed_kmh / heading_deg
+  //   name     35 B   duplicates vehicles.name
+  //   …plus `ignition_known` and `engine_hours`, both promoted to columns by
+  //   backfill-telemetry-ignition; `doorStatus`, which has ONE distinct value
+  //   ("UNKNOWN") across the sample; and `panicButtonPressed`, never once true.
+  //
+  // Every consumer of the payload — db-follower, probe-report, tank state, the
+  // map's ping lateral — reads a vehicle's LATEST row, and the sweep spares
+  // that unconditionally at any age. The only window-sensitive reader is fuel
+  // adjudication's drain evidence, spanning -30 min to +3 h. Seven days is
+  // about fifty times the longest real need.
+  TELEMETRY_RAW_RETENTION_DAYS: z.coerce.number().optional().default(7),
+
+  // How long a parsed telemetry fix is kept.
+  //
+  // 30 days because that is the longest window anything reads, and the API
+  // already says so: `/track` REFUSES a request longer than
+  // TRACK_MAX_WINDOW_DAYS rather than clamping it. Every other consumer is
+  // shorter — probe health 30, fuel adjudication's repeat window 30 and its
+  // profile 21, tank-state trend 14, fuel rates 7, machine operations and the
+  // dozer area one fleet day, fleet-state 24 h, the snapshot a single row.
+  //
+  // What this DOES change: five endpoints take a client-chosen from/to with no
+  // maximum span — /analytics/fuel-efficiency, /analytics/speeding, the
+  // /telemetry ping list, the zone timeline and sampled fixes. Beyond the
+  // window they return nothing instead of data. The dashboard calls none of
+  // them, but they are public API.
+  //
+  // And the replay scripts — build:trips, readjudicate-fuel, fuel-cause-replay
+  // — reconstruct history from raw fixes. Trips already built are unaffected
+  // (they are derived rows); re-running those over older dispatches would find
+  // nothing rather than erroring, which is the sharp edge here.
+  TELEMETRY_RETENTION_DAYS: z.coerce.number().optional().default(30),
+
   // How many notifications per org the Redis cache holds. The read endpoint
   // serves from cache up to this depth and falls through to Postgres beyond
   // it, so this is a latency knob, not a data-loss one.

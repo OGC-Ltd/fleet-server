@@ -26,11 +26,49 @@
  *
  * ## Adding targets
  *
- * `RETENTION_TARGETS` is the whole policy. The obvious next entries are the
- * telemetry tables — `vehicle_telemetry_raws` is 156 MB against notifications'
- * 464 kB, so that is where a retention policy actually reclaims disk. They are
- * deliberately NOT enabled here: analytics, trip history and the odometer
- * views read those tables, and nothing has confirmed how far back they look.
+ * `RETENTION_TARGETS` is the whole policy.
+ *
+ * `vehicle_telemetry_raws` is now one of them. That note used to say the
+ * telemetry tables were deliberately absent because "nothing has confirmed how
+ * far back they look", and sized the raws at 156 MB. Both have moved: the table
+ * is 9,968 MB — two thirds of the database, and larger than the parsed rows it
+ * backs — and the lookbacks have now been read off every consumer:
+ *
+ *   dashboard.repository  · telemetry.repository · db-follower
+ *   fuel-tank-state       · probe-report                         LATEST row per vehicle
+ *   fuel-adjudication     drain window: -30 min to +3 h
+ *
+ * Nothing scans the raw payload across a long window, which is what lets that
+ * table go to seven days.
+ *
+ * `vehicle_telemetries` is now a target too, at thirty. Its readers were
+ * measured the same way and none exceeds that: probe health 30, fuel
+ * adjudication's repeat window 30 and profile 21, tank-state trend 14, fuel
+ * rates 7, machine operations and the dozer area one fleet day, fleet-state
+ * 24 h, the fleet snapshot a single row. `/track` already refuses a window
+ * longer than TRACK_MAX_WINDOW_DAYS outright, so this enforces a limit the API
+ * has published all along rather than inventing one. The two long windows in
+ * the codebase — maintenance history at 366 days and the driver overview at 90
+ * — read `trips` and `vehicle_alerts`, not fixes.
+ *
+ * ## What the payload actually is
+ *
+ * Worth knowing before trusting the window. Averaged over 200,000 rows on
+ * 2026-08-31 the payload is 716 bytes, of which 21 carry anything not already
+ * held as a column: `odometer_km`. `pos` (141 B) duplicates four columns,
+ * `flags` (214 B) is ten booleans, `name` duplicates `vehicles.name`, and
+ * `ignition_known` and `engine_hours` were promoted to columns long ago by
+ * backfill-telemetry-ignition. `doorStatus` has ONE distinct value across the
+ * sample and `panicButtonPressed` was never once true.
+ *
+ * Ten gigabytes to carry one integer per row. Promoting `odometer_km` to a
+ * column the same way ignition was would make this table disposable outright —
+ * that is the real fix, and this target is the interim.
+ *
+ * Measured 2026-08-31: 10.4 M of 12.9 M rows are already older than seven days.
+ * Note what this does and does not do — it CAPS growth, it does not shrink the
+ * database below where it is today, because Postgres reuses freed pages rather
+ * than returning them.
  */
 
 import { Queue, Worker, type Job } from 'bullmq'
@@ -141,11 +179,25 @@ const MAX_BATCHES = 200
 interface RetentionTarget {
   name:  string
   days:  number
+  /**
+   * Overrides for a target whose churn the shared defaults cannot absorb.
+   *
+   * `BATCH_SIZE * MAX_BATCHES` is a per-sweep CEILING — 100,000 rows with the
+   * defaults. That is ample for notifications, which accrue a few thousand a
+   * day. It is nowhere near telemetry: measured 2026-08-31, after Menengai and
+   * West Sugar the fleet writes ~887,000 fixes a day, so a target capped at
+   * 100,000 would fall further behind every night and the ceiling warning
+   * would be the only sign. A retention target that cannot keep up is worse
+   * than none, because it looks like the problem is handled.
+   */
+  batchSize?:  number
+  maxBatches?: number
   /** Deletes one batch, returns how many rows went. */
   prune: (cutoff: Date, limit: number) => Promise<number>
 }
 
-const RETENTION_TARGETS: RetentionTarget[] = [
+/** Exported so the safety properties of each target can be pinned by test. */
+export const RETENTION_TARGETS: RetentionTarget[] = [
   {
     name: 'notifications',
     days: env.NOTIFICATION_RETENTION_DAYS,
@@ -198,6 +250,129 @@ const RETENTION_TARGETS: RetentionTarget[] = [
       return count
     },
   },
+  {
+    name: 'vehicle_telemetry_raws',
+    days: env.TELEMETRY_RAW_RETENTION_DAYS,
+    // 3 M rows a sweep against ~887 k created a day: comfortably enough to hold
+    // the line, with headroom for the fleet to grow again.
+    //
+    // It does NOT clear the opening backlog in one night, and that is the right
+    // trade rather than an oversight. Measured 2026-08-31, 10,393,736 rows are
+    // already older than seven days, so the first four sweeps each hit this
+    // ceiling and log the warning below before the table reaches its window.
+    // Deleting 10 M rows in one 70-minute burst would leave a dead-tuple
+    // backlog autovacuum could not keep up with on an instance this size;
+    // spreading it over four nights costs nothing but patience.
+    //
+    // One batch's selection costs 521 ms while rows are plentiful, so a full
+    // sweep is ~11 minutes, most of it the deliberate pause. Steady-state
+    // sweeps are far cheaper: `vehicle_telemetries_captured_at_idx` already
+    // exists, and once the predicate is selective again the planner uses it
+    // instead of the parallel seq scan it picks while a large share matches.
+    batchSize:  2_000,
+    maxBatches: 1_500,
+    /**
+     * Deletes the raw envelope, never the parsed row.
+     *
+     * ## The EXISTS clause is the whole safety property
+     *
+     * `dashboard.repository` and `telemetry.repository` reach a vehicle's
+     * current position through an INNER JOIN onto this table. Delete the raw
+     * behind a vehicle's newest ping and that vehicle does not go stale on the
+     * map — it DISAPPEARS from the snapshot entirely, because an inner join
+     * drops the row.
+     *
+     * Age alone cannot express that. A unit that last reported in January 2025
+     * still has a newest ping, and it is that January row the map renders. So
+     * the condition is not "old" but "old AND superseded": a raw row goes only
+     * when the same vehicle has a later fix, which is exactly the row no
+     * consumer is looking at. The subquery rides the
+     * (vehicle_id, captured_at) index and stops at the first newer row.
+     *
+     * Written as one statement rather than the select-then-delete the targets
+     * above use, because the id set here is millions of rows wide and the
+     * LIMIT has to be applied where the planner can see it.
+     *
+     * The clause is not theoretical. Measured 2026-08-31, a 30-day cutoff put
+     * 1,707,874 raw rows in scope and spared 195 — vehicles whose newest ping
+     * is itself older than thirty days, mostly units retired or long silent.
+     * Those 195 are precisely the rows the dashboard is joining to.
+     */
+    prune: async (cutoff, limit) => prisma.$executeRaw`
+      DELETE FROM vehicle_telemetry_raws r
+       USING (
+         SELECT raw.telemetry_id
+           FROM vehicle_telemetry_raws raw
+           JOIN vehicle_telemetries t ON t.id = raw.telemetry_id
+          WHERE t.captured_at < ${cutoff}
+            AND EXISTS (
+              SELECT 1
+                FROM vehicle_telemetries newer
+               WHERE newer.vehicle_id  = t.vehicle_id
+                 AND newer.captured_at > t.captured_at
+            )
+          LIMIT ${limit}
+       ) doomed
+       WHERE r.telemetry_id = doomed.telemetry_id`,
+  },
+  {
+    name: 'vehicle_telemetries',
+    days: env.TELEMETRY_RETENTION_DAYS,
+    // 1.7 M rows are over 30 days old, so the opening backlog clears in one
+    // sweep. Smaller batches than the raws target because this table carries
+    // five indexes — a primary key, two composite btrees, a unique on
+    // (device_id, captured_at) and a partial on moving fixes — and every
+    // deleted row has to be removed from all of them.
+    batchSize:  1_000,
+    maxBatches: 3_000,
+    /**
+     * Deletes the fix AND its raw envelope, in one statement.
+     *
+     * ## Why both, when the raws have their own target
+     *
+     * Nothing in the database references `vehicle_telemetries` — there is not
+     * one foreign key pointing at it, checked against the live schema. That
+     * makes this delete unconstrained, and it makes an orphan possible: the
+     * raws sweep finds its victims by JOINING through telemetry, so a raw
+     * whose parent row has gone is unreachable by it forever. It would leak
+     * quietly, at 817 bytes a time.
+     *
+     * Today the windows make that impossible — raws go at 7 days, fixes at 30,
+     * so the envelope is always gone first. But those are two independent env
+     * vars, and the day someone raises the raw window above this one is the day
+     * the leak starts. Deleting both here costs nothing when the raw is already
+     * gone and removes the failure mode entirely.
+     *
+     * ## The same newest-ping guard as the raws target, for a sharper reason
+     *
+     * There the concern was an INNER JOIN dropping a vehicle from the map.
+     * Here it is worse: age alone would delete a vehicle's ONLY remaining fix,
+     * and with it the record of where it last was. Measured 2026-08-31, 195
+     * vehicles have a newest ping older than thirty days — units retired, sold,
+     * or silent. "Where did it stop reporting" is precisely the question asked
+     * about a machine that has gone quiet, and it is the one this would erase.
+     */
+    prune: async (cutoff, limit) => prisma.$executeRaw`
+      WITH doomed AS (
+        SELECT t.id
+          FROM vehicle_telemetries t
+         WHERE t.captured_at < ${cutoff}
+           AND EXISTS (
+             SELECT 1
+               FROM vehicle_telemetries newer
+              WHERE newer.vehicle_id  = t.vehicle_id
+                AND newer.captured_at > t.captured_at
+           )
+         LIMIT ${limit}
+      ), envelopes AS (
+        DELETE FROM vehicle_telemetry_raws r
+         USING doomed d
+         WHERE r.telemetry_id = d.id
+      )
+      DELETE FROM vehicle_telemetries t
+       USING doomed d
+       WHERE t.id = d.id`,
+  },
 ]
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -207,18 +382,20 @@ export async function runRetentionSweep(): Promise<Record<string, number>> {
   const deleted: Record<string, number> = {}
 
   for (const target of RETENTION_TARGETS) {
-    const cutoff = new Date(Date.now() - target.days * 24 * 60 * 60_000)
+    const cutoff     = new Date(Date.now() - target.days * 24 * 60 * 60_000)
+    const batchSize  = target.batchSize  ?? BATCH_SIZE
+    const maxBatches = target.maxBatches ?? MAX_BATCHES
     let total = 0
     let batches = 0
 
     try {
-      for (; batches < MAX_BATCHES; batches++) {
-        const n = await target.prune(cutoff, BATCH_SIZE)
+      for (; batches < maxBatches; batches++) {
+        const n = await target.prune(cutoff, batchSize)
         total += n
-        if (n < BATCH_SIZE) break     // drained
+        if (n < batchSize) break      // drained
         await sleep(BATCH_PAUSE_MS)
       }
-      if (batches >= MAX_BATCHES) {
+      if (batches >= maxBatches) {
         logger.warn(
           { target: target.name, deleted: total },
           'Retention sweep hit its batch ceiling — backlog continues next run',
