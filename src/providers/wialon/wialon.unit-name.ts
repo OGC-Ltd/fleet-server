@@ -69,8 +69,31 @@ const BUSINESS_UNITS: Array<[MenengaiBusinessUnit, RegExp]> = [
  */
 const PLATE_RE = /\b([A-Z]{2,4}\s*\d{3,4}\s*[A-Z]?)\b/
 
-/** Compare plates on letters and digits only — operators space them by hand. */
+/**
+ * Compare plates on letters and digits only — operators space them by hand.
+ *
+ * For COMPARISON ONLY. Storing this form was a mistake made on 2026-08-31:
+ * 645 Menengai and West Sugar vehicles went in as "KAT087E" while the 598
+ * Sukari rows already in the table read "KHMA 994J", so one database held a
+ * registration in two shapes and the plate on screen matched neither the
+ * vehicle's own name nor a number plate. Use `formatPlate` to store.
+ */
 export const normalisePlate = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '')
+
+/**
+ * A registration in the form it is WRITTEN: letters, one space, digits, then
+ * the optional suffix letter closed up — "KAT 087E", "KTCC 271G".
+ *
+ * Reconstructed rather than copied out of the unit name, because the operator's
+ * spacing is not consistent ("SUKARI-HAULMASTER-KTCC  770G" double-spaces it,
+ * others omit it entirely) and the point of this is one canonical shape. What
+ * it produces matches the 598 Sukari rows that arrived from factorysuite, which
+ * is the convention already in the database.
+ */
+export function formatPlate(s: string): string {
+  const m = normalisePlate(s).match(/^([A-Z]{2,4})(\d{3,4})([A-Z]?)$/)
+  return m ? `${m[1]} ${m[2]}${m[3]}` : s.trim()
+}
 
 const segments = (name: string): string[] =>
   name.split(/\s*-\s*/).map(s => s.trim()).filter(Boolean)
@@ -86,7 +109,7 @@ const segments = (name: string): string[] =>
 export function menengaiPlate(name: string): string | null {
   for (const part of segments(name)) {
     const m = part.toUpperCase().match(PLATE_RE)
-    if (m) return normalisePlate(m[1]!)
+    if (m) return formatPlate(m[1]!)
   }
   return null
 }

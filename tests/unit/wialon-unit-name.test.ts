@@ -16,7 +16,7 @@
 
 import { describe, it, expect } from 'vitest'
 import {
-  parseMenengaiUnit, menengaiPlate, menengaiGroup, normalisePlate,
+  parseMenengaiUnit, menengaiPlate, menengaiGroup, normalisePlate, formatPlate,
   parseWestSugarUnit, westSugarGroup,
 } from '../../src/providers/wialon/wialon.unit-name.js'
 
@@ -70,15 +70,15 @@ describe('department', () => {
 
 describe('plate', () => {
   it('reads the registration out of each business unit’s shape', () => {
-    expect(menengaiPlate('CPO - Menengai - KCC 386Z')).toBe('KCC386Z')
-    expect(menengaiPlate('FG - RAIMDF - KCP 070P')).toBe('KCP070P')
-    expect(menengaiPlate('MORL FARM EQUIPMENT - KTCC 085A')).toBe('KTCC085A')
+    expect(menengaiPlate('CPO - Menengai - KCC 386Z')).toBe('KCC 386Z')
+    expect(menengaiPlate('FG - RAIMDF - KCP 070P')).toBe('KCP 070P')
+    expect(menengaiPlate('MORL FARM EQUIPMENT - KTCC 085A')).toBe('KTCC 085A')
   })
 
   it('prefers the plate over a device part number written after it', () => {
     // FMB140 is a Teltonika model and satisfies the plate shape on its own.
     // Reading left to right is what keeps the real registration.
-    expect(menengaiPlate('CPO - Menengai - KCC 386Z - FMB140')).toBe('KCC386Z')
+    expect(menengaiPlate('CPO - Menengai - KCC 386Z - FMB140')).toBe('KCC 386Z')
   })
 
   it('returns null for the plant and gensets rather than a near-miss', () => {
@@ -100,8 +100,24 @@ describe('plate', () => {
     }
   })
 
-  it('compares plates on letters and digits only', () => {
+  it('stores the registration the way it is written', () => {
+    // Not "KCC386Z". The 598 Sukari rows already in the table read "KHMA 994J",
+    // and a plate that matches neither the vehicle's own name nor a real
+    // number plate is the defect this replaced.
+    expect(formatPlate('KCC386Z')).toBe('KCC 386Z')
+    expect(formatPlate('kcc 386z')).toBe('KCC 386Z')
+    expect(formatPlate('KTCC  271G')).toBe('KTCC 271G')
+  })
+
+  it('still compares on letters and digits only', () => {
     expect(normalisePlate('KCC 386Z')).toBe(normalisePlate('kcc386z'))
+  })
+
+  it('leaves anything that is not plate-shaped alone', () => {
+    // The 85 units named by IMEI or asset keep their unit name as identifier;
+    // reformatting must not mangle those.
+    expect(formatPlate('West Sugar - A')).toBe('West Sugar - A')
+    expect(formatPlate('MORL FARM EQUIPMENT - GENSET MOLO RIVER')).toBe('MORL FARM EQUIPMENT - GENSET MOLO RIVER')
   })
 })
 
@@ -166,9 +182,9 @@ describe('West Sugar — plate', () => {
   it('finds the plate before the fuel-economy figure', () => {
     // 120 names carry one. Every one is its own segment, so left-to-right
     // scanning reaches the plate first and no stripping is needed.
-    expect(parseWestSugarUnit('West Sugar-Admin-KBJ 194Q-11km/l').plate).toBe('KBJ194Q')
-    expect(parseWestSugarUnit('West Sugar-Winches-KTCB 497Z-2km/l').plate).toBe('KTCB497Z')
-    expect(parseWestSugarUnit('WKS  - Naitiri -  KTCC 271G').plate).toBe('KTCC271G')
+    expect(parseWestSugarUnit('West Sugar-Admin-KBJ 194Q-11km/l').plate).toBe('KBJ 194Q')
+    expect(parseWestSugarUnit('West Sugar-Winches-KTCB 497Z-2km/l').plate).toBe('KTCB 497Z')
+    expect(parseWestSugarUnit('WKS  - Naitiri -  KTCC 271G').plate).toBe('KTCC 271G')
   })
 
   it('returns null for the units named only by IMEI or a single letter', () => {
