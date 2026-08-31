@@ -30,6 +30,7 @@ import { getDeliveriesAnalytics } from '../analytics/deliveries.cache.js'
 // attached by this service rather than by the cached query — and they are
 // exactly the live signals this brief is built on.
 import { getFleetSnapshot } from '../telemetry/telemetry.service.js'
+import { isOrgActive } from '../../lib/warm-cache.js'
 import { resolveEstatePlaces } from '../../lib/zone-presence.js'
 // The SHARED staleness threshold, not a second copy of it. Beyond this age a
 // fix cannot support a claim about what the vehicle is doing — the same rule
@@ -1918,13 +1919,40 @@ export async function getAiInsight(orgId: string): Promise<AiInsightResponse> {
   return { configured: true, insight: null }
 }
 
-/** Hourly regeneration for every org — started from index.ts. */
+/**
+ * Hourly regeneration — started from index.ts.
+ *
+ * The FIRST pass covers every organisation, so each has a brief from boot.
+ * After that it regenerates only organisations somebody has actually looked at
+ * in the last fifteen minutes, for two reasons:
+ *
+ *   · Every generation is a model call. Briefing a fleet nobody has opened all
+ *     day is money spent on prose no one reads.
+ *   · `collectFacts` reads through the warm caches, so this job MARKS an
+ *     organisation active. Unscoped it re-marked all four every hour and held
+ *     the cache sweep at full width for fifteen minutes each time, which is
+ *     why scoping that sweep alone cut its build load 3x rather than 4x
+ *     (measured 2026-08-31).
+ *
+ * Skipping costs nothing an operator sees: `getAiInsight` returns the stored
+ * brief, and a cold miss generates in the background while the client renders
+ * its own fallback. Same stale-while-revalidate bargain the caches make.
+ *
+ * This does not feed itself. The activity window is fifteen minutes and this
+ * runs hourly, so an organisation generated at T is no longer active at T+60 —
+ * only a real read keeps it in the set.
+ */
 export function startAiInsightWarmer(): () => void {
   if (!env.OPENAI_API_KEY) return () => {}
   let stopped = false
+  let primed = false
   const sweep = async () => {
     try {
-      const orgs = await prisma.organisation.findMany({ select: { id: true } })
+      const all  = await prisma.organisation.findMany({ select: { id: true } })
+      const orgs = primed ? all.filter(o => isOrgActive(o.id)) : all
+      if (primed && orgs.length < all.length) {
+        logger.debug({ briefing: orgs.length, of: all.length }, 'AI insight sweep skipping idle organisations')
+      }
       for (const org of orgs) {
         if (stopped) return
         await generateFor(org.id)
@@ -1933,7 +1961,7 @@ export function startAiInsightWarmer(): () => void {
       logger.warn({ err }, 'AI insight sweep failed')
     }
   }
-  void sweep()
+  void sweep().then(() => { primed = true })
   const timer = setInterval(() => void sweep(), REFRESH_MS)
   return () => { stopped = true; clearInterval(timer) }
 }
