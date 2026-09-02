@@ -33,9 +33,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # The version pm2 runs on the box (nvm v24.18.0). Building on a different
+  # The version pm2 runs on the box (nvm v24.20.0). Building on a different
   # major here would prove nothing about what will run there.
-  NODE_VERSION: '24.18.0'
+  NODE_VERSION: '24.20.0'
 
 jobs:
   build:
@@ -190,7 +190,7 @@ jobs:
           set -euo pipefail
           # `bash -lc` over ssh does not load nvm — node, npm and pm2 are all
           # "command not found" without this.
-          export PATH="$HOME/.nvm/versions/node/v24.18.0/bin:$PATH"
+          export PATH="$HOME/.nvm/versions/node/v24.20.0/bin:$PATH"
           cd /home/ubuntu/prod/fleet-server
 
           echo "--- deploying $(git log --oneline -1)"
@@ -233,5 +233,5 @@ jobs:
           done
           echo "::error::fleet-server did not answer /health after the restart"
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" \
-            'export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH; pm2 logs server --lines 60 --nostream'
+            'export PATH=$HOME/.nvm/versions/node/v24.20.0/bin:$PATH; pm2 logs server --lines 60 --nostream'
           exit 1
