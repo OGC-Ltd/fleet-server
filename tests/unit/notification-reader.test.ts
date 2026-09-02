@@ -31,6 +31,7 @@ vi.mock('../../src/lib/notifications/notification-cache.js', () => ({
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { readCachedNotifications, primeCache, readCachedVehicleDay, cacheVehicleDay } from '../../src/lib/notifications/notification-cache.js'
 import { getNotifications } from '../../src/lib/notifications/notification.reader.js'
+import { fleetDayKey } from '../../src/lib/provider-time.js'
 
 const row = (over: Record<string, unknown> = {}) => ({
   feedId:     'zn-veh_1-zone_9-entry-1754134200000',
@@ -161,9 +162,14 @@ describe('one vehicle, one fleet day', () => {
    * authoritative.
    */
   it('never caches a day that has not finished', async () => {
-    const today = new Date().toISOString().slice(0, 10)
-    // Tomorrow, to be certain the window has not closed whatever hour this runs.
-    const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)
+    // Both days come from `fleetDayKey`, the same clock the reader judges
+    // "finished" by. Deriving them from the UTC date instead made this test
+    // fail for the three hours between EAT midnight and UTC midnight (21:00-
+    // 00:00 UTC): the UTC "today" is by then yesterday in Ndhiwa, so it IS a
+    // completed day and caching it is correct. Tomorrow alone would pass, but
+    // today is the case worth asserting.
+    const today = fleetDayKey().toISOString().slice(0, 10)
+    const tomorrow = fleetDayKey(new Date(Date.now() + 86_400_000)).toISOString().slice(0, 10)
 
     for (const d of [today, tomorrow]) {
       vi.mocked(cacheVehicleDay).mockClear()
