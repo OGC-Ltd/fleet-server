@@ -84,6 +84,33 @@ cache, which is designed to be disposable. Under `volatile-lru` only keys
 carrying a TTL are evictable and BullMQ's scheduler and meta keys carry none.
 `CONFIG` is disabled on ElastiCache, so read the policy from `INFO memory`.
 
+## Running a second instance alongside the first
+
+`POLL_ENABLED=false` does **not** make an instance passive. It stops the
+telemetry poller and nothing else. The three BullMQ queues are gated on their
+own flags, and **all five default to `true`**, so simply giving a second box a
+`REDIS_URL` starts fuel sync, fuel settle, fuel adjudication, trip building and
+the retention sweep. While the first box is still live that means two hosts
+calling Wialon on one account and two writing the same derived rows.
+
+Set these explicitly on any instance that is not the live one:
+
+```sh
+FUEL_SYNC_ENABLED=false
+FUEL_SETTLE_ENABLED=false
+FUEL_ADJUDICATION_ENABLED=false
+TRIP_BUILD_ENABLED=false
+RETENTION_SWEEP_ENABLED=false
+```
+
+Each logs its own `… NOT started` line at boot, so the startup log is the place
+to confirm it took. Leaving `REDIS_URL` set is right: the notification cache and
+the BullMQ connection stay exercised, the jobs just never register.
+
+At cutover this reverses — the flags go back to `true` on the new box **after**
+the old one is stopped, alongside `POLL_ENABLED` and
+`RAIFACTORYSUITE_POLL_ENABLED`.
+
 ## Deploying
 
 Same push-into-worktree model as before — the box holds no GitHub credentials,
