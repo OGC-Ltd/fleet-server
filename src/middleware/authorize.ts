@@ -28,6 +28,35 @@ import { resolveSubject, can, canReachOrg, vehicleScopeIn } from '../lib/authz/s
 export type PermissionResolver = (req: Parameters<RequestHandler>[0]) => string
 
 /**
+ * The vehicle filter to hand downstream — NULL while shadow mode is on.
+ *
+ * Shadow mode has to be genuinely observational. A denial it merely logs is
+ * harmless, but the vehicle SCOPE is not a denial: it is a filter the
+ * repositories and the SSE fan-out apply silently. Leaving it live while
+ * nothing else is enforced would blank the map for anyone whose membership does
+ * not already cover the organisation they are looking at — and under
+ * AUTH_BYPASS, which is how production runs today, that is every organisation
+ * except the bypass account's own. The rollout would present as an outage.
+ *
+ * The scope is still computed, and LOGGED when it would have bitten, which is
+ * the information the shadow pass exists to collect.
+ */
+function scopeToApply(
+  subject: Parameters<typeof vehicleScopeIn>[0],
+  orgId: string,
+  where: string,
+): Set<string> | null {
+  const scope = vehicleScopeIn(subject, orgId)
+  if (scope === null) return null
+  if (env.AUTHZ_ENFORCE) return scope
+  logger.warn(
+    { userId: subject.userId, orgId, visibleVehicles: scope.size, where },
+    'authz: WOULD NARROW to a vehicle subset (shadow mode) — showing the whole fleet',
+  )
+  return null
+}
+
+/**
  * Require a permission for this route.
  *
  * On a route carrying `:orgId` the permission must be held IN that
@@ -73,14 +102,13 @@ export function requirePermission(slug: string | PermissionResolver): RequestHan
       // Hand the row filter downstream. Repositories read this rather than
       // re-resolving, so one request cannot see two different fleets.
       if (orgId) {
-        const vehicleIds = vehicleScopeIn(subject, orgId)
         req.authz = {
           userId,
           orgId,
           isPlatform: subject.isPlatform,
           // null = the whole fleet. Distinct from an empty set, which is a
           // membership narrowed to nothing and must return nothing.
-          vehicleIds,
+          vehicleIds: scopeToApply(subject, orgId, 'requirePermission'),
         }
       }
 
@@ -110,7 +138,7 @@ export const attachAuthz: RequestHandler = async (req, _res, next) => {
       userId,
       orgId,
       isPlatform: subject.isPlatform,
-      vehicleIds: vehicleScopeIn(subject, orgId),
+      vehicleIds: scopeToApply(subject, orgId, 'attachAuthz'),
     }
     next()
   } catch (err) {

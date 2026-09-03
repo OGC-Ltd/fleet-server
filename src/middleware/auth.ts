@@ -169,11 +169,22 @@ export const requireOrgAccess: RequestHandler = async (req, _res, next) => {
 
     // Available to handlers that are not behind requirePermission — notably the
     // SSE handshake, where the vehicle scope decides what the stream may carry.
+    //
+    // Withheld entirely while AUTHZ_ENFORCE is off: the scope is a silent
+    // filter, not a denial, and applying it during a shadow pass would blank
+    // the map for every organisation the caller is not already a member of.
+    const scope = vehicleScopeIn(subject, orgId)
+    if (scope !== null && !env.AUTHZ_ENFORCE) {
+      logger.warn(
+        { userId, orgId, visibleVehicles: scope.size },
+        'authz: WOULD NARROW to a vehicle subset (shadow mode) — showing the whole fleet',
+      )
+    }
     req.authz = {
       userId,
       orgId,
       isPlatform: subject.isPlatform,
-      vehicleIds: vehicleScopeIn(subject, orgId),
+      vehicleIds: env.AUTHZ_ENFORCE ? scope : null,
     }
 
     next()
