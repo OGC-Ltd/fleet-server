@@ -352,10 +352,20 @@ function buildTrip(
   }
 }
 
-export async function getFleetSnapshot(orgId: string) {
+/**
+ * @param vehicleIds  NULL for the whole fleet, or the set this caller may see.
+ *   Applied AFTER the warm cache on purpose: the cache is per-organisation and
+ *   expensive to build (tens of seconds on this data), so it must stay shared
+ *   between callers rather than being rebuilt per permission set. Filtering a
+ *   few hundred rows afterwards costs nothing.
+ */
+export async function getFleetSnapshot(orgId: string, vehicleIds: Set<string> | null = null) {
   // Warmed cache — the snapshot is each client's first paint only; the live
   // SSE stream takes over immediately after (see fleet-snapshot.cache.ts).
-  const snapshot = await getFleetSnapshotCached(orgId)
+  const cached = await getFleetSnapshotCached(orgId)
+  const snapshot = Array.isArray(cached) && vehicleIds
+    ? cached.filter((v) => vehicleIds.has((v as { vehicleId: string }).vehicleId))
+    : cached
 
   // What each vehicle is out on. Warmed, so this adds no query to the request
   // path — see open-trips.cache.

@@ -29,9 +29,25 @@ export async function updateGroup(orgId: string, groupId: string, dto: UpdateGro
 
 const WITH_GROUP = { vehicleGroup: { select: { id: true, name: true, code: true } } }
 
-export async function findAllVehicles(orgId: string, { page, limit, vehicleGroupId }: ListQuery) {
+/**
+ * @param vehicleIds  NULL for the whole fleet, or the set this caller may see.
+ *   Folded into the WHERE rather than filtered afterwards, so `total` and the
+ *   paging match what the caller can see. Filtering the page after the query
+ *   would report a total the caller cannot reach and leave short pages.
+ */
+export async function findAllVehicles(
+  orgId: string,
+  { page, limit, vehicleGroupId }: ListQuery,
+  vehicleIds: Set<string> | null = null,
+) {
   const skip = (page - 1) * limit
-  const where = { organisationId: orgId, ...(vehicleGroupId ? { vehicleGroupId } : {}) }
+  const where = {
+    organisationId: orgId,
+    ...(vehicleGroupId ? { vehicleGroupId } : {}),
+    // An EMPTY set is a real answer - a membership narrowed to nothing - and
+    // `in: []` correctly matches no rows. Only NULL means "unrestricted".
+    ...(vehicleIds ? { id: { in: [...vehicleIds] } } : {}),
+  }
   const [data, total] = await prisma.$transaction([
     prisma.vehicle.findMany({ where, skip, take: limit, include: WITH_GROUP, orderBy: { name: 'asc' } }),
     prisma.vehicle.count({ where }),

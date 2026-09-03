@@ -11,7 +11,32 @@ const schema = z.object({
   // HS256 signing secret for the app's own access/refresh JWTs (auth.service.ts)
   JWT_SECRET: z.string().min(32),
 
+  // Skips TOKEN verification only, never authorisation: a bypassed request is
+  // still resolved to a real user and still checked against that user's roles.
+  // Refuses to boot under NODE_ENV=production (see the guard below).
   AUTH_BYPASS: z.string().optional().default('false').transform(v => v === 'true'),
+
+  // WHICH user AUTH_BYPASS attaches. Without it the middleware took whatever
+  // `findFirst` returned - no orderBy, so an arbitrary row, and in practice a
+  // driver belonging to one organisation. That made local behaviour depend on
+  // physical row order.
+  AUTH_BYPASS_EMAIL: z.string().optional(),
+
+  // Staged rollout switch. FALSE = shadow mode: permission checks run and every
+  // denial is logged, but the request proceeds. It exists so a mis-mapped route
+  // is found by reading a log rather than by locking an operator out, and it
+  // MUST become true - the boot warning in app.ts says so on every start.
+  AUTHZ_ENFORCE: z.string().optional().default('false').transform(v => v === 'true'),
+
+  // `Secure` on the auth cookies. False only because the box serves plain HTTP
+  // today; every credential is sniffable on the wire until TLS terminates in
+  // front of it, at which point this becomes true.
+  COOKIE_SECURE: z.string().optional().default('false').transform(v => v === 'true'),
+
+  // Access-token lifetime. Short, because a revoked account keeps working until
+  // its current access token expires.
+  ACCESS_TTL_S: z.coerce.number().int().positive().optional().default(900),
+  REFRESH_TTL_S: z.coerce.number().int().positive().optional().default(60 * 60 * 24 * 30),
 
   // Set to 'false' to run this instance API-only (no telemetry poller / sim).
   // Use for a local dev server reading a DB that another deployment is already
@@ -254,6 +279,22 @@ const isLocalDbUrl = (url: string) => /@(localhost|127\.0\.0\.1)[:/]/.test(url)
 
 const guarded = schema.superRefine((cfg, ctx) => {
   if (cfg.NODE_ENV !== 'production') return
+  // AUTH_BYPASS attaches a user with no token at all, so in production it is an
+  // open door rather than a convenience.
+  //
+  // This is FATAL only once AUTHZ_ENFORCE is on, because the two together are
+  // incoherent - enforcing permissions on a request that skipped authentication
+  // decides nothing. It is deliberately NOT fatal on its own: the live box runs
+  // AUTH_BYPASS=true today, and a deploy that refused to boot would take the
+  // fleet down to fix a door that has been open for months. app.ts warns about
+  // it on every start until it is closed.
+  if (cfg.AUTH_BYPASS && cfg.AUTHZ_ENFORCE) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['AUTH_BYPASS'],
+      message: 'cannot be true when AUTHZ_ENFORCE is true - authorising a request that skipped authentication is meaningless',
+    })
+  }
   for (const key of ['DATABASE_URL', 'DIRECT_URL'] as const) {
     if (isLocalDbUrl(cfg[key])) {
       ctx.addIssue({

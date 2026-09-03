@@ -1,17 +1,13 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import request from 'supertest'
 import type { Express } from 'express'
-import { makeTrip, TEST_ORG_ID, testAuthUser } from '../helpers/factories.js'
+import { makeTrip, TEST_ORG_ID } from '../helpers/factories.js'
+import { authMock, authorizeMock } from '../helpers/auth-mock.js'
 
 vi.mock('../../src/lib/prisma.js')
 
-vi.mock('../../src/middleware/auth.ts', () => ({
-  authenticate: vi.fn((_req: unknown, _res: unknown, next: () => void) => {
-    (_req as Record<string, unknown>)['user'] = testAuthUser
-    next()
-  }),
-  requireOrgAccess: vi.fn((_req: unknown, _res: unknown, next: () => void) => next()),
-}))
+vi.mock('../../src/middleware/auth.ts', () => authMock())
+vi.mock('../../src/middleware/authorize.ts', () => authorizeMock())
 
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { buildApp } from '../helpers/app.js'

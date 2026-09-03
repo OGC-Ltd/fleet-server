@@ -2,6 +2,7 @@
 // Includes analytics, drivers, maintenance, and plant.
 
 import { prisma } from '../../lib/prisma.js'
+import { BadRequestError } from '../../core/errors/errors.js'
 import { getDeliveriesAnalytics } from '../analytics/deliveries.cache.js'
 import { getDriversOverview } from '../analytics/drivers-overview.cache.js'
 import { getFleetSnapshotCached } from '../telemetry/fleet-snapshot.cache.js'
@@ -15,9 +16,10 @@ import { getFuelConsumption } from '../analytics/fuel-cost.cache.js'
 import { priceFuelConsumption } from '../analytics/fuel-pricing.js'
 
 import { renderReportPdf, type ReportData, type ReportBarRow, type ReportInsight } from './report-pdf.renderer.js'
+import { collectOperations } from './operations-report.js'
 
 // ── UPDATED: include 'plant' ──────────────────────────────────────────────
-export const PDF_REPORT_KINDS = ['analytics', 'drivers', 'maintenance', 'plant'] as const
+export const PDF_REPORT_KINDS = ['analytics', 'drivers', 'maintenance', 'plant', 'operations'] as const
 export type PdfReportKind = (typeof PDF_REPORT_KINDS)[number]
 
 // Fuel-cost model — mirrors fleettrack's AnalyticsScreen constants exactly so
@@ -50,15 +52,29 @@ const fmtDay = (day: string) =>
   new Date(`${day}T00:00:00Z`).toLocaleDateString('en-KE', { month: 'short', day: 'numeric', timeZone: 'UTC' })
 
 // ── main entry ─────────────────────────────────────────────────────────────
-export async function generateReportPdf(orgId: string, kind: PdfReportKind, days: number):
-  Promise<{ buffer: Buffer; filename: string }> {
+/**
+ * @param vehicleIds  NULL for the whole fleet, or the caller's vehicle scope.
+ *   Only the operations report honours it today: the other four aggregate
+ *   across an organisation, and the roles that may take them all see the whole
+ *   fleet. Passing a scope to one of those would silently produce a document
+ *   whose totals no two readers agree on, so it is refused rather than ignored.
+ */
+export async function generateReportPdf(
+  orgId: string, kind: PdfReportKind, days: number, vehicleIds: Set<string> | null = null,
+): Promise<{ buffer: Buffer; filename: string }> {
   const org = await prisma.organisation.findUnique({ where: { id: orgId }, select: { name: true, code: true } })
   const orgName = org?.name ?? 'Fleet'
   const orgRegion = REGION_BY_CODE[org?.code ?? ''] ?? 'Kenya'
   const short = (org?.code ?? 'fleet').charAt(0) + (org?.code ?? 'fleet').slice(1).toLowerCase()
 
   let data: ReportData
-  if (kind === 'plant') {
+  if (kind === 'operations') {
+    data = await collectOperations(orgId, days, vehicleIds)
+  } else if (vehicleIds) {
+    throw new BadRequestError(
+      `The ${kind} report is an organisation-wide document and cannot be produced for a restricted vehicle scope`,
+    )
+  } else if (kind === 'plant') {
     data = await collectPlantAnalytics(orgId, days)
   } else if (kind === 'analytics') {
     data = await collectAnalytics(orgId, days)

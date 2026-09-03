@@ -21,8 +21,7 @@
  */
 
 import { eventBus }           from '../event-bus.js'
-import type { ProviderAlertEvent, FleetAlert, AlertType } from '../event-bus.js'
-import { overspeedLimitFor } from '../derived-alerts.js'
+import type { ProviderAlertEvent, AlertType } from '../event-bus.js'
 import { logger }             from '../logger.js'
 import { emitDashboardAlert } from '../sse.js'
 import { publishNotification } from '../notifications/notification.store.js'
@@ -52,49 +51,6 @@ function shouldPush(key: string): boolean {
 }
 
 /**
- * The feed sentence for a derived alert.
- *
- * Overspeeding carries its FIGURE. "Overspeeding detected" is the label of a
- * category; "Overspeeding detected — 104 km/h" is the thing that happened, and
- * it is the difference between an operator having to open a screen and being
- * able to triage from the feed. Every other type's label already says all we
- * measured.
- */
-/**
- * Live-feed wording.
- *
- * Overspeeding gets a sentence rather than a label: an operator reading the
- * feed needs to know WHO was driving and WHICH limit was broken, because 89
- * km/h is a fault for a tractor and unremarkable for a truck — the limit is
- * per vehicle type (see lib/derived-alerts). "Overspeeding detected — 89 km/h"
- * answered neither.
- *
- * Driver and vehicle type ride along in `meta`, put there by the poller from
- * its own 5-minute cache, so this costs no query. Both fall back rather than
- * being omitted: an unassigned unit is a real state and reads as "Unassigned",
- * and a vehicle whose type nobody recorded still gets the fleet default limit.
- *
- * The destination is NOT available here. It lives on the open dispatch, which
- * the telemetry path deliberately does not load — so the sentence says "en
- * route to destination" until something carries it.
- */
-function speedText(a: FleetAlert, label: string): string {
-  if (a.type === 'overspeeding' && Number.isFinite(a.speedKmh)) {
-    const driver =
-      typeof a.meta?.driverName === 'string' && a.meta.driverName.trim() !== ''
-        ? a.meta.driverName
-        : 'Unassigned'
-    const vehicleType =
-      typeof a.meta?.vehicleType === 'string' ? a.meta.vehicleType : null
-    const limit = overspeedLimitFor(vehicleType)
-
-    return `ALERT: ${a.plate} · ${driver} detected at ${Math.round(a.speedKmh as number)} km/h `
-      + `en route to destination. Speed limit ${limit} km/h`
-  }
-  return label
-}
-
-/**
  * Derived alerts that are real, recorded, and NOT worth a feed line.
  *
  * Both stay in `vehicle_alerts` and on the `alert` SSE channel — the counts,
@@ -106,6 +62,23 @@ function speedText(a: FleetAlert, label: string): string {
 const FEED_SUPPRESSED: ReadonlySet<AlertType> = new Set<AlertType>([
   'lowFuel',
   'engineIdling',
+  // OVERSPEEDING IS WRITTEN ELSEWHERE. lib/feed-events already publishes a
+  // feed line for it, off the same rising edge, and has done since before this
+  // worker learned to. Both wrote a row for one incident with different ids —
+  // `feed-<ts>-<vehicle>-0` and `alert-overspeeding-<vehicle>-<ts>` — so the
+  // dashboard's dedupe, which keys on id, could not collapse them. Measured on
+  // 2026-09-03: of 379 overspeeding moments in 48 hours, 206 carried exactly
+  // two rows.
+  //
+  // feed-events is the one that survives, because it is the one that names the
+  // driver, the destination and the limit. Removing it instead would have meant
+  // reimplementing all three here.
+  //
+  // The `alert` SSE channel and Web Push are UNAFFECTED: emitDashboardAlert
+  // runs above this check, and push is critical-only while overspeeding is a
+  // warning. `vehicle_alerts` is written by alerts.worker off 'alerts:sync',
+  // which never passed through here at all. Only the duplicate feed row stops.
+  'overspeeding',
 ])
 
 function handleProviderAlert(a: ProviderAlertEvent): void {
@@ -216,7 +189,7 @@ export function startNotificationWorker(): () => void {
         source:    'telemetry',
         alertType: alert.type,
         severity:  ALERT_SEVERITY[alert.type] === 'CRITICAL' ? 'critical' : 'warning',
-        text:      speedText(alert, label),
+        text:      label,
         at:        alert.capturedAt,
         plate:     alert.plate,
         vehicleId: alert.vehicleId,

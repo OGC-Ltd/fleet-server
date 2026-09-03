@@ -1,17 +1,13 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import request from 'supertest'
 import type { Express } from 'express'
-import { makeOrg, TEST_ORG_ID, testAuthUser } from '../helpers/factories.js'
+import { makeOrg, TEST_ORG_ID } from '../helpers/factories.js'
+import { authMock, authorizeMock, setTestSubject, resetTestSubject } from '../helpers/auth-mock.js'
 
 vi.mock('../../src/lib/prisma.js')
 
-vi.mock('../../src/middleware/auth.ts', () => ({
-  authenticate: vi.fn((_req: unknown, _res: unknown, next: () => void) => {
-    (_req as Record<string, unknown>)['user'] = testAuthUser
-    next()
-  }),
-  requireOrgAccess: vi.fn((_req: unknown, _res: unknown, next: () => void) => next()),
-}))
+vi.mock('../../src/middleware/auth.ts', () => authMock())
+vi.mock('../../src/middleware/authorize.ts', () => authorizeMock())
 
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { buildApp } from '../helpers/app.js'
@@ -19,6 +15,16 @@ import { buildApp } from '../helpers/app.js'
 let app: Express
 
 beforeAll(async () => { app = await buildApp() })
+
+// The tenant router is PLATFORM surface now. It carries no :orgId, so
+// requireOrgAccess cannot guard it — and it used to fail open when the param
+// was absent, which is how any authenticated member of one organisation could
+// list, read and PATCH every other one. These tests describe what a platform
+// subject may do; tests/integration/authz-enforcement covers the refusal.
+beforeEach(() => {
+  resetTestSubject()
+  setTestSubject({ orgs: '*' })
+})
 
 
 const BASE = '/api/v1/organisations'
