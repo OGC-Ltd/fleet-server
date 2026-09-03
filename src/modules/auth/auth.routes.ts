@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { authLimiter } from '../../middleware/rateLimiter.js'
+import { authLimiter, refreshLimiter } from '../../middleware/rateLimiter.js'
 import { validateBody } from '../../middleware/validate.js'
 import { loginSchema, refreshSchema } from './auth.schema.js'
 import { authenticate } from '../../middleware/auth.js'
@@ -8,7 +8,7 @@ import { loginHandler, refreshHandler, logoutHandler, meHandler } from './auth.c
 const router = Router()
 
 router.post('/login', authLimiter, validateBody(loginSchema), loginHandler)
-router.post('/refresh', authLimiter, validateBody(refreshSchema), refreshHandler)
+router.post('/refresh', refreshLimiter, validateBody(refreshSchema), refreshHandler)
 // No `authenticate`: logging out must work when the access token has already
 // expired, which is exactly when a user reaches for it. The refresh cookie
 // identifies the session to revoke, and presenting a token you already hold
