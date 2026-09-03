@@ -25,8 +25,8 @@ export async function updateGroup(orgId: string, groupId: string, dto: UpdateGro
 
 // ── Vehicles ────────────────────────────────────────────────────────────────
 
-export async function listVehicles(orgId: string, query: ListQuery) {
-  return repo.findAllVehicles(orgId, query)
+export async function listVehicles(orgId: string, query: ListQuery, vehicleIds: Set<string> | null = null) {
+  return repo.findAllVehicles(orgId, query, vehicleIds)
 }
 
 export async function getVehicle(orgId: string, vehicleId: string) {

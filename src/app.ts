@@ -2,9 +2,13 @@ import express from 'express'
 import helmet from 'helmet'
 import cors from 'cors'
 import compression from 'compression'
+import cookieParser from 'cookie-parser'
 import { env } from './config/env.js'
+import { logger } from './lib/logger.js'
 import { globalLimiter } from './middleware/rateLimiter.js'
 import { errorHandler } from './middleware/errorHandler.js'
+import { requirePermission } from './middleware/authorize.js'
+import { resolveSubject, canReachOrg } from './lib/authz/subject.js'
 import { sendError, sendSuccess } from './core/response/response.js'
 
 import authRoutes from './modules/auth/auth.routes.js'
@@ -34,10 +38,22 @@ import { reverseGeocode } from './lib/geocode.js'
 import { prisma } from './lib/prisma.js'
 import * as roleCtrl from './modules/roles/role.controller.js'
 import { listQuerySchema } from './modules/roles/role.schema.js'
-import { validateQuery } from './middleware/validate.js'
+import { validateQuery, validateBody } from './middleware/validate.js'
+import * as userCtrl from './modules/users/user.controller.js'
+import { provisionUserSchema } from './modules/users/user.schema.js'
 
 export function createApp() {
   const app = express()
+
+  // Say out loud, on every boot, when the doors are open. Both of these are
+  // transitional states of the authorisation rollout, and the failure mode for
+  // each is silence: nothing misbehaves, requests simply are not being judged.
+  if (env.AUTH_BYPASS) {
+    logger.warn('AUTH_BYPASS=true — every request is authenticated as a fixed account, with no token')
+  }
+  if (!env.AUTHZ_ENFORCE) {
+    logger.warn('AUTHZ_ENFORCE=false — permission checks run and log, but nothing is denied')
+  }
 
   // BigInt values (VehicleTelemetry.id) are not JSON-serializable by default
   app.set("trust proxy", 1);
@@ -48,6 +64,8 @@ export function createApp() {
   app.use(helmet())
   app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }))
   app.use(compression())
+  // The auth tokens are httpOnly cookies (see modules/auth/auth.cookies).
+  app.use(cookieParser())
   // Keep the raw bytes alongside the parsed body: webhook HMAC signatures are
   // computed over exactly what was sent, and re-serialising the parsed object
   // would change key order/whitespace and invalidate the signature.
@@ -104,27 +122,64 @@ export function createApp() {
   // The roster effectively never changes at runtime, and every client blocks
   // its first data fetch on this call — cache it in memory (60s TTL) so it
   // doesn't pay a remote-DB round trip per request.
-  let bootstrapCache: { data: unknown; fetchedAt: number } | null = null
-  app.get(`${v1}/bootstrap`, async (_req, res) => {
+  //
+  // NOW AUTHENTICATED, and filtered to what the caller may reach. It used to be
+  // open, and returned every tenant's id, name and code to anyone who asked —
+  // which is also how a client learned the :orgId it then used to read that
+  // tenant's data. The roster cache stays shared (it is the same rows for
+  // everyone); the FILTER is per request.
+  let bootstrapCache: { orgs: { id: string; name: string; code: string }[]; fetchedAt: number } | null = null
+  app.get(`${v1}/bootstrap`, authenticate, async (req, res) => {
     try {
-      if (bootstrapCache && Date.now() - bootstrapCache.fetchedAt < 60_000) {
-        return sendSuccess(res, bootstrapCache.data)
+      if (!bootstrapCache || Date.now() - bootstrapCache.fetchedAt >= 60_000) {
+        bootstrapCache = {
+          orgs: await prisma.organisation.findMany({
+            select:  { id: true, name: true, code: true },
+            orderBy: { createdAt: 'asc' },
+          }),
+          fetchedAt: Date.now(),
+        }
       }
-      const orgs = await prisma.organisation.findMany({
-        select:  { id: true, name: true, code: true },
-        orderBy: { createdAt: 'asc' },
-      })
+
+      let orgs = bootstrapCache.orgs
+      const userId = req.user?.id
+      if (userId) {
+        const subject = await resolveSubject(userId)
+        const mine = orgs.filter((o) => canReachOrg(subject, o.id))
+        // Shadow mode returns the full roster and says so, because narrowing it
+        // is what would blank the dashboard's org switcher — the most visible
+        // possible failure, and one worth seeing in a log first.
+        if (mine.length !== orgs.length && !env.AUTHZ_ENFORCE) {
+          logger.warn(
+            { userId, visible: mine.length, total: orgs.length },
+            'authz: WOULD NARROW bootstrap roster (shadow mode) — returning all',
+          )
+        } else {
+          orgs = mine
+        }
+      }
+
       const first = orgs[0]
       if (!first) return sendError(res, 503, 'No organisation configured')
-      const data = { orgId: first.id, orgName: first.name, orgs }
-      bootstrapCache = { data, fetchedAt: Date.now() }
-      sendSuccess(res, data)
+      sendSuccess(res, { orgId: first.id, orgName: first.name, orgs })
     } catch { sendError(res, 500, 'Bootstrap failed') }
   })
 
   app.use(`${v1}/auth`, authRoutes)
   app.use(`${v1}/organisations`, orgRoutes)
   app.get(`${v1}/permissions`, authenticate, validateQuery(listQuerySchema), roleCtrl.listPermissions)
+
+  // Platform user provisioning — one person, several organisations, a different
+  // role in each. No :orgId, so requirePermission admits only a platform role:
+  // an org admin creating users goes through
+  // POST /organisations/:orgId/users/provision, which is pinned to that tenant.
+  app.post(
+    `${v1}/users`,
+    authenticate,
+    requirePermission('user:create'),
+    validateBody(provisionUserSchema),
+    userCtrl.provisionAcrossOrgs,
+  )
 
   // Web Push public key — no auth; called by Service Workers before subscribe
   app.get(`${v1}/notifications/vapid-key`, notificationsCtrl.getVapidKey)
@@ -160,7 +215,7 @@ export function createApp() {
   app.use(`${orgBase}/dashboard`, dashboardRoutes)
 
   // Org-wide dashboard SSE stream + push subscription management
-  app.get(`${orgBase}/live`, authenticate, requireOrgAccess, notificationsCtrl.dashboardStream)
+  app.get(`${orgBase}/live`, authenticate, requireOrgAccess, requirePermission('notification:read'), notificationsCtrl.dashboardStream)
   app.use(`${orgBase}/notifications`, notificationsOrgRouter)
 
   app.use((_req, res) => {

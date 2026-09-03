@@ -204,6 +204,7 @@ model Organisation {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   roles             Role[]
+  memberships       OrgMembership[]
   users             User[]
   vehicleGroups     VehicleGroup[]
   vehicles          Vehicle[]
@@ -225,17 +226,23 @@ model Organisation {
 /// Named role scoped to an organisation (e.g. "fleet_manager", "driver", "mechanic").
 model Role {
   id             String   @id @default(cuid())
-  organisationId String   @map("organisation_id")
+  /// NULL = a PLATFORM role: its permissions apply in every organisation.
+  /// Used by super_admin and director, and by nothing else — an org-scoped
+  /// role cannot express "all tenants" because it is keyed to one.
+  organisationId String?  @map("organisation_id")
   name           String
   slug           String
   description    String?
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  organisation Organisation     @relation(fields: [organisationId], references: [id])
+  organisation Organisation?    @relation(fields: [organisationId], references: [id])
   permissions  RolePermission[]
   userRoles    UserRole[]
 
+  // Platform roles are NOT covered by this: Postgres treats NULLs as
+  // distinct, so two roles with organisation_id NULL and the same slug both
+  // satisfy it. A partial unique index in the migration closes that.
   @@unique([organisationId, slug])
   @@index([organisationId])
   @@map("roles")
@@ -308,6 +315,9 @@ model User {
 
   // IAM
   userRoles UserRole[]
+  memberships        OrgMembership[] @relation("MembershipUser")
+  membershipsGranted OrgMembership[] @relation("MembershipGrantedBy")
+  authSessions       AuthSession[]
 
   // Driver-specific relations (only relevant when user holds "driver" role)
   vehicleAssignments VehicleAssignment[] @relation("AssignedUser")
@@ -346,7 +356,107 @@ model UserRole {
   @@index([userId])
   @@index([roleId])
   @@index([userId, revokedAt]) // fast "active roles for user" query
+  // No @@unique([userId, roleId]) — grants are SOFT-revoked, so a plain
+  // unique would make a revoked role ungrantable ever again. The migration
+  // adds a PARTIAL unique index (WHERE revoked_at IS NULL) instead, which
+  // forbids two LIVE grants of one role while leaving history alone. That
+  // is the constraint user.service.ts:34 already catches P2002 for.
   @@map("user_roles")
+}
+
+/// Which organisations a person may reach, and how much of each fleet.
+///
+/// This is the authority for cross-tenant access. `User.organisationId` is who
+/// EMPLOYS someone and stays exactly as it was — 551 driver rows depend on it,
+/// and it backs the roster query in analytics.repository. Membership is a
+/// different question: which tenants may this account read. One person can hold
+/// several, with a different role in each (roles are org-scoped, so the role
+/// grant itself carries the organisation).
+///
+/// The vehicle scope lives here rather than on the role because two operators
+/// holding the same role routinely watch different trucks.
+model OrgMembership {
+  id             String    @id @default(cuid())
+  userId         String    @map("user_id")
+  organisationId String    @map("organisation_id")
+  /// true  — every vehicle in the organisation, including ones added later.
+  /// false — only what `vehicleScopes` names. Defaulting to TRUE keeps the
+  ///         meaning of every backfilled row unchanged; narrowing is opt-in.
+  allVehicles    Boolean   @default(true) @map("all_vehicles")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  /// Soft revoke, matching UserRole — an access history is worth keeping.
+  revokedAt      DateTime? @map("revoked_at")
+  createdById    String?   @map("created_by")
+
+  user          User                     @relation("MembershipUser", fields: [userId], references: [id])
+  organisation  Organisation             @relation(fields: [organisationId], references: [id])
+  createdBy     User?                    @relation("MembershipGrantedBy", fields: [createdById], references: [id])
+  vehicleScopes MembershipVehicleScope[]
+
+  @@unique([userId, organisationId])
+  @@index([userId, revokedAt])
+  @@index([organisationId])
+  @@map("org_memberships")
+}
+
+/// One entry in a restricted membership's visible-vehicle set.
+///
+/// Exactly one of `vehicleId` / `vehicleGroupId` is set — enforced by a CHECK
+/// constraint in the migration, because Prisma cannot express it. A group entry
+/// is not sugar for listing its members: vehicles added to that group later are
+/// included automatically, which is the whole reason to scope by group on a
+/// 486-unit fleet.
+///
+/// Deliberately NOT VehicleAssignment. That table means "who DRIVES this
+/// vehicle" — ingest.service reads it to stamp driver_id onto telemetry, and
+/// vehicle.service enforces one active PRIMARY per vehicle. Giving an operator
+/// forty vehicles to watch through it would record them as the driver of all
+/// forty and corrupt every driver metric downstream.
+model MembershipVehicleScope {
+  id             String  @id @default(cuid())
+  membershipId   String  @map("membership_id")
+  vehicleId      String? @map("vehicle_id")
+  vehicleGroupId String? @map("vehicle_group_id")
+
+  membership   OrgMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  vehicle      Vehicle?      @relation(fields: [vehicleId], references: [id])
+  vehicleGroup VehicleGroup? @relation(fields: [vehicleGroupId], references: [id])
+
+  @@unique([membershipId, vehicleId])
+  @@unique([membershipId, vehicleGroupId])
+  @@index([membershipId])
+  @@map("membership_vehicle_scopes")
+}
+
+/// A live refresh-token family. Access tokens stay stateless JWTs; refresh
+/// tokens are stored so they can be ROTATED and so a leak can be detected.
+///
+/// `tokenHash` is sha256 of an opaque 32-byte token — not a JWT, because once a
+/// token is stored server-side a signature proves nothing the lookup does not.
+///
+/// Rotation: each refresh stamps `rotatedAt` on the row it consumed and issues a
+/// successor sharing `familyId`. Presenting an already-rotated token therefore
+/// means two parties hold it, so the whole family is revoked rather than the one
+/// row — the legitimate holder is forced to log in again, which is the point.
+model AuthSession {
+  id            String    @id @default(cuid())
+  userId        String    @map("user_id")
+  familyId      String    @map("family_id")
+  tokenHash     String    @unique @map("token_hash")
+  issuedAt      DateTime  @default(now()) @map("issued_at")
+  expiresAt     DateTime  @map("expires_at")
+  rotatedAt     DateTime? @map("rotated_at")
+  revokedAt     DateTime? @map("revoked_at")
+  revokedReason String?   @map("revoked_reason")
+  userAgent     String?   @map("user_agent")
+  ip            String?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([expiresAt]) // the expiry sweep
+  @@map("auth_sessions")
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +500,7 @@ model VehicleGroup {
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
   vehicles     Vehicle[]
+  membershipScopes MembershipVehicleScope[]
 
   @@unique([organisationId, code])
   @@index([organisationId])
@@ -444,6 +555,7 @@ model Vehicle {
   vehicleGroup VehicleGroup @relation(fields: [vehicleGroupId], references: [id])
 
   assignments        VehicleAssignment[]
+  membershipScopes   MembershipVehicleScope[]
   trips              Trip[]
   engineHourSessions EngineHourSession[]
   fuelFillings       FuelFilling[]

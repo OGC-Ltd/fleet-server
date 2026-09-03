@@ -2,6 +2,33 @@ import type { Response } from 'express'
 
 interface SseClient {
   res: Response
+  /**
+   * The vehicles this connection may be told about. NULL means no restriction.
+   *
+   * A stream is a subscription, not a read, so it cannot be filtered by the
+   * route guard that let it open — every event has to be judged as it is
+   * written. Without this, a dashboard client scoped to three trucks would
+   * still receive live positions and alerts for the entire fleet: the payloads
+   * were already on the wire, and only the UI was ever narrowing them.
+   */
+  vehicleIds: Set<string> | null
+  /** Who opened it, so a revoked account's streams can be closed. */
+  userId?: string
+}
+
+/**
+ * May this client be told about this event?
+ *
+ * Fails CLOSED for a scoped client: an event that names no vehicle is withheld
+ * rather than broadcast, because "it has no vehicleId" is not evidence that it
+ * concerns a vehicle this person may see. Keep-alives are the exception -
+ * withholding those would just kill the connection.
+ */
+function visibleTo(client: SseClient, event: string, data: unknown): boolean {
+  if (client.vehicleIds === null) return true
+  if (event === 'heartbeat' || event === 'connected') return true
+  const vehicleId = (data as { vehicleId?: unknown } | null)?.vehicleId
+  return typeof vehicleId === 'string' && client.vehicleIds.has(vehicleId)
 }
 
 // In-process SSE registry.
@@ -18,7 +45,10 @@ function channelKey(orgId: string, vehicleId: string) {
 export function registerSseClient(orgId: string, vehicleId: string, res: Response): () => void {
   const key = channelKey(orgId, vehicleId)
   if (!registry.has(key)) registry.set(key, new Set())
-  const client: SseClient = { res }
+  // Per-vehicle streams need no scope of their own: the route that opened this
+  // one already proved the caller may see THAT vehicle, and it carries nothing
+  // else.
+  const client: SseClient = { res, vehicleIds: null }
   registry.get(key)!.add(client)
   return () => {
     registry.get(key)?.delete(client)
@@ -71,15 +101,24 @@ function dashboardKey(orgId: string) {
 const lastPositions = new Map<string, Map<string, unknown>>()
 
 /** Write the org's cached per-vehicle positions straight to one client. */
-export function replayDashboardPositions(orgId: string, res: Response): number {
+export function replayDashboardPositions(
+  orgId: string,
+  res: Response,
+  vehicleIds: Set<string> | null = null,
+): number {
   const positions = lastPositions.get(orgId)
   if (!positions?.size) return 0
-  for (const data of positions.values()) {
+  let sent = 0
+  // The replay is the entire fleet as of the last tick, so leaving it unscoped
+  // would hand a restricted client everything the live stream withholds.
+  for (const [vehicleId, data] of positions) {
+    if (vehicleIds && !vehicleIds.has(vehicleId)) continue
     try {
       res.write(`event: position\ndata: ${JSON.stringify(data, bigIntReplacer)}\n\n`)
+      sent++
     } catch { /* client disconnected mid-replay */ }
   }
-  return positions.size
+  return sent
 }
 
 function broadcastDashboard(orgId: string, event: string, data: unknown) {
@@ -88,14 +127,19 @@ function broadcastDashboard(orgId: string, event: string, data: unknown) {
   if (!clients?.size) return
   const payload = `event: ${event}\ndata: ${JSON.stringify(data, bigIntReplacer)}\n\n`
   for (const client of clients) {
+    if (!visibleTo(client, event, data)) continue
     try { client.res.write(payload) } catch { /* client disconnected */ }
   }
 }
 
-export function registerDashboardClient(orgId: string, res: Response): () => void {
+export function registerDashboardClient(
+  orgId: string,
+  res: Response,
+  scope: { vehicleIds?: Set<string> | null; userId?: string } = {},
+): () => void {
   const key = dashboardKey(orgId)
   if (!registry.has(key)) registry.set(key, new Set())
-  const client: SseClient = { res }
+  const client: SseClient = { res, vehicleIds: scope.vehicleIds ?? null, userId: scope.userId }
   registry.get(key)!.add(client)
   return () => {
     registry.get(key)?.delete(client)
@@ -135,18 +179,31 @@ export function emitDashboardFeed(orgId: string, item: unknown) {
  * restart, and one org's traffic can no longer crowd out another's, because
  * each org is queried for its own rows.
  */
-export async function replayDashboardFeed(orgId: string, res: Response, limit = 40): Promise<number> {
+export async function replayDashboardFeed(
+  orgId: string,
+  res: Response,
+  limit = 40,
+  vehicleIds: Set<string> | null = null,
+): Promise<number> {
   const { getNotifications } = await import('./notifications/notification.reader.js')
   const { items } = await getNotifications(orgId, { limit })
 
   // getNotifications returns newest-first; the panel wants the replay in
   // arrival order so its prepend leaves the newest at the top.
+  let sent = 0
   for (const item of [...items].reverse()) {
+    // Same fail-closed rule as the live stream: a scoped client is not shown a
+    // history item that names no vehicle it may see.
+    if (vehicleIds) {
+      const vid = (item as { vehicleId?: unknown }).vehicleId
+      if (typeof vid !== 'string' || !vehicleIds.has(vid)) continue
+    }
     try {
       res.write(`event: feed\ndata: ${JSON.stringify({ ...item, orgId }, bigIntReplacer)}\n\n`)
+      sent++
     } catch { /* client disconnected mid-replay */ }
   }
-  return items.length
+  return sent
 }
 
 /** Vehicle position + state snapshot — powers the live map markers. */
@@ -172,4 +229,27 @@ export function emitDashboardHeartbeat(orgId: string) {
 /** Lifecycle notice (refuel, vehicle back online, etc.) — powers the notification inbox. */
 export function emitDashboardNotice(orgId: string, data: unknown) {
   broadcastDashboard(orgId, 'notice', data)
+}
+
+/**
+ * Close every dashboard stream this user holds.
+ *
+ * An access token lives 15 minutes and an SSE connection lives for hours, so
+ * revoking a role does not by itself stop a stream that is already open — it
+ * was authorised once, at handshake, and never asked again. This is how a
+ * revocation reaches one that is already running.
+ */
+export function closeDashboardStreamsForUser(userId: string): number {
+  let closed = 0
+  for (const [key, clients] of registry) {
+    if (!key.endsWith(':dashboard')) continue
+    for (const client of [...clients]) {
+      if (client.userId !== userId) continue
+      try { client.res.end() } catch { /* already gone */ }
+      clients.delete(client)
+      closed++
+    }
+    if (clients.size === 0) registry.delete(key)
+  }
+  return closed
 }

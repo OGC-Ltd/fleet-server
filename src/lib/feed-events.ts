@@ -14,6 +14,7 @@
 // sse.ts and replayed to newly connected clients.
 
 import { publishNotification } from './notifications/notification.store.js'
+import { overspeedLimitFor } from './derived-alerts.js'
 
 interface FeedSource {
   vehicleId:     string
@@ -25,6 +26,12 @@ interface FeedSource {
   speedKmh:      number | null
   cargoWeightKg: number | null
   cargoDesc:     string | null
+  /**
+   * Drives the limit quoted in the overspeeding line. Optional because the
+   * db-follower path can be missing it; `overspeedLimitFor(null)` then returns
+   * the fleet-wide limit, which is the same answer the text used to hardcode.
+   */
+  vehicleType:   string | null
   phase:         string | null
   leg:           { from?: string; to?: string; plannedArrivalMs?: number } | null
   flags:         { overspeeding: boolean; fuelInconsistency: boolean }
@@ -112,7 +119,13 @@ export function deriveFeedEvents(orgId: string, p: FeedSource): void {
     items.push({
       type: 'warning',
       // No "Driver notified." claim — no notify/escalate mechanism exists yet.
-      text: `ALERT: ${who} detected at ${Math.round(p.speedKmh ?? 0)} km/h en route to ${to}. Speed limit 80 km/h.`,
+      // The limit is READ, not written in. It was the literal 80 until this
+      // became the only place an overspeeding line is produced; a fleet that
+      // sets OVERSPEED_LIMIT_BY_TYPE=TRACTOR:50 would otherwise be told a
+      // tractor at 55 km/h broke an 80 limit, which is both wrong and the exact
+      // figure someone would dispute the alert with.
+      text: `ALERT: ${who} detected at ${Math.round(p.speedKmh ?? 0)} km/h en route to ${to}. `
+          + `Speed limit ${overspeedLimitFor(p.vehicleType ?? null)} km/h.`,
     })
   }
   if (p.flags.fuelInconsistency && !st.fuelInconsistency) {
