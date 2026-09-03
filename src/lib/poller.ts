@@ -284,6 +284,7 @@ class TelemetryPoller {
           plate:          meta.plate,
           tankCapacityMl: meta.tankCapacityMl,
           driverName:     meta.driverName,
+          vehicleType:    meta.vehicleType,
         })
 
         // 3. Determine which flags are currently active
