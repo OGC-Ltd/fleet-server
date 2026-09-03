@@ -381,6 +381,12 @@ class TelemetryPoller {
               batteryVoltageV: frame.batteryVoltageV,
               doorStatus:      frame.doorStatus,
               fuelUsedMl:      frame.fuelUsedMl,
+              // Carried for the feed's overspeeding sentence, which names the
+              // driver and the limit that was broken. Both are already in this
+              // 5-minute cache, so neither costs a query here — which is the
+              // whole reason driverName was folded into DeviceMeta.
+              driverName:      meta.driverName,
+              vehicleType:     meta.vehicleType,
             },
           })
         }
