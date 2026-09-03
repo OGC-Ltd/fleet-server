@@ -21,7 +21,8 @@
  */
 
 import { eventBus }           from '../event-bus.js'
-import type { ProviderAlertEvent, FleetAlert } from '../event-bus.js'
+import type { ProviderAlertEvent, FleetAlert, AlertType } from '../event-bus.js'
+import { overspeedLimitFor } from '../derived-alerts.js'
 import { logger }             from '../logger.js'
 import { emitDashboardAlert } from '../sse.js'
 import { publishNotification } from '../notifications/notification.store.js'
@@ -59,12 +60,53 @@ function shouldPush(key: string): boolean {
  * able to triage from the feed. Every other type's label already says all we
  * measured.
  */
+/**
+ * Live-feed wording.
+ *
+ * Overspeeding gets a sentence rather than a label: an operator reading the
+ * feed needs to know WHO was driving and WHICH limit was broken, because 89
+ * km/h is a fault for a tractor and unremarkable for a truck — the limit is
+ * per vehicle type (see lib/derived-alerts). "Overspeeding detected — 89 km/h"
+ * answered neither.
+ *
+ * Driver and vehicle type ride along in `meta`, put there by the poller from
+ * its own 5-minute cache, so this costs no query. Both fall back rather than
+ * being omitted: an unassigned unit is a real state and reads as "Unassigned",
+ * and a vehicle whose type nobody recorded still gets the fleet default limit.
+ *
+ * The destination is NOT available here. It lives on the open dispatch, which
+ * the telemetry path deliberately does not load — so the sentence says "en
+ * route to destination" until something carries it.
+ */
 function speedText(a: FleetAlert, label: string): string {
   if (a.type === 'overspeeding' && Number.isFinite(a.speedKmh)) {
-    return `${label} — ${Math.round(a.speedKmh as number)} km/h`
+    const driver =
+      typeof a.meta?.driverName === 'string' && a.meta.driverName.trim() !== ''
+        ? a.meta.driverName
+        : 'Unassigned'
+    const vehicleType =
+      typeof a.meta?.vehicleType === 'string' ? a.meta.vehicleType : null
+    const limit = overspeedLimitFor(vehicleType)
+
+    return `ALERT: ${a.plate} · ${driver} detected at ${Math.round(a.speedKmh as number)} km/h `
+      + `en route to destination. Speed limit ${limit} km/h`
   }
   return label
 }
+
+/**
+ * Derived alerts that are real, recorded, and NOT worth a feed line.
+ *
+ * Both stay in `vehicle_alerts` and on the `alert` SSE channel — the counts,
+ * the history and anything watching that channel are unchanged. What stops is
+ * the narration: on this fleet lowFuel and engineIdling fire often enough to
+ * crowd out the events an operator is actually scanning for, and neither
+ * describes something needing a decision in the moment.
+ */
+const FEED_SUPPRESSED: ReadonlySet<AlertType> = new Set<AlertType>([
+  'lowFuel',
+  'engineIdling',
+])
 
 function handleProviderAlert(a: ProviderAlertEvent): void {
   // 1. Live feed + durable history + hot cache, in one call.
@@ -144,7 +186,12 @@ export function startNotificationWorker(): () => void {
       }
 
       // 1. The `alert` SSE channel, for anything listening on it.
+      //    Deliberately BEFORE the feed suppression below: a suppressed alert
+      //    is still an alert, and anything subscribed to this channel should
+      //    keep seeing it. Only the feed line is withheld.
       emitDashboardAlert(alert.orgId, payload)
+
+      if (FEED_SUPPRESSED.has(alert.type)) return
 
       // 2. The LIVE FEED, its durable history and the Redis cache.
       //
