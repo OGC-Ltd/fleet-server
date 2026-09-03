@@ -103,8 +103,29 @@ const schema = z.object({
   OPENAI_MODEL:   z.string().default('gpt-5-nano'),
 
   CORS_ORIGIN: z.string().default('*'),
-  RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
+  // 100 requests per SECOND, per client IP.
+  //
+  // These two were 100 per 60_000 ms — 1.7 a second — which is less than one
+  // dashboard load costs: a single page fans out across the snapshot, the feed,
+  // the geofences, the summary and a dozen analytics endpoints, so a few views
+  // inside a minute spent the whole budget and the platform 429'd its own
+  // users. Per-client rather than per-nginx because app.ts trusts one proxy
+  // hop; see middleware/rateLimiter.
+  RATE_LIMIT_WINDOW_MS: z.coerce.number().default(1_000),
   RATE_LIMIT_MAX: z.coerce.number().default(100),
+
+  // Sign-in attempts per 15 minutes. NOT scaled with the global limit — this
+  // one is brute-force defence, not capacity, and is meant to be tight.
+  LOGIN_RATE_LIMIT_MAX: z.coerce.number().default(20),
+
+  // Token refreshes per 15 minutes. Separate from LOGIN because a refresh is
+  // not a credential guess: a browser refreshes on load and again on expiry, so
+  // several open tabs would otherwise spend the sign-in budget and report "too
+  // many attempts" to somebody who never typed a password.
+  REFRESH_RATE_LIMIT_MAX: z.coerce.number().default(120),
+
+  // Device telemetry per MINUTE — its window is fixed in rateLimiter rather
+  // than shared, so the global knob above cannot redefine this one's meaning.
   INGEST_RATE_LIMIT_MAX: z.coerce.number().default(500),
 
   // OpenWeather — powers the route weather card (server-side proxy; key never ships to the client)
