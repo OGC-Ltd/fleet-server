@@ -24,16 +24,20 @@
  * fine here — the limit exists to stop a runaway client, not to shape traffic
  * to the millisecond.
  *
- * ## One process
+ * ## Any number of processes
  *
- * The store is in-memory, so the limit is per NODE PROCESS. pm2 runs a single
- * `server` in fork mode today, which makes that exact. Moving to cluster mode
- * would silently multiply every limit here by the instance count, and would
- * need a shared store (Redis is already available) to stay honest.
+ * The counter lives in Redis, not in the process, so these numbers mean what
+ * they say however many workers serve traffic — see rate-limit-store, which
+ * also explains what happens when Redis is not there.
+ *
+ * This does NOT make the app safe to run multi-instance. The SSE registry, the
+ * pollers and several dedupe and cooldown maps are still per-process, and some
+ * of them fail far less visibly than a loose rate limit would.
  */
 
 import { rateLimit } from 'express-rate-limit'
 import { env } from '../config/env.js'
+import { createRateLimitStore } from './rate-limit-store.js'
 
 const shared = {
   standardHeaders: 'draft-8' as const,
@@ -44,6 +48,7 @@ const shared = {
 /** Everything, unless a route below overrides it. Default: 100 per second. */
 export const globalLimiter = rateLimit({
   ...shared,
+  store:    createRateLimitStore('rl:global:'),
   windowMs: env.RATE_LIMIT_WINDOW_MS,
   limit:    env.RATE_LIMIT_MAX,
 })
@@ -56,6 +61,7 @@ export const globalLimiter = rateLimit({
  */
 export const authLimiter = rateLimit({
   ...shared,
+  store:    createRateLimitStore('rl:login:'),
   windowMs: 15 * 60_000,
   limit:    env.LOGIN_RATE_LIMIT_MAX,
 })
@@ -72,6 +78,7 @@ export const authLimiter = rateLimit({
  */
 export const refreshLimiter = rateLimit({
   ...shared,
+  store:    createRateLimitStore('rl:refresh:'),
   windowMs: 15 * 60_000,
   limit:    env.REFRESH_RATE_LIMIT_MAX,
 })
@@ -87,6 +94,7 @@ export const refreshLimiter = rateLimit({
  */
 export const ingestLimiter = rateLimit({
   ...shared,
+  store:    createRateLimitStore('rl:ingest:'),
   windowMs: 60_000,
   limit:    env.INGEST_RATE_LIMIT_MAX,
 })
