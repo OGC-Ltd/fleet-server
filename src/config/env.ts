@@ -102,6 +102,35 @@ const schema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL:   z.string().default('gpt-5-nano'),
 
+  // ── Transactional mail (Mailtrap) ────────────────────────────────────────
+  // Every one of these is optional with a default, so an unconfigured
+  // deployment BOOTS and simply does not send — the same treatment
+  // OPENAI_API_KEY and WIALON_TOKEN get. A mailer that refused to start would
+  // take the whole API down over a feature most requests never touch.
+  //
+  // APP_BASE_URL counts toward "configured" on purpose: every mail this system
+  // sends carries a link, and a mail with a broken link is worse than no mail.
+  //
+  // NOTE: `npm run dev` loads .env.example, not .env, so the token belongs in
+  // BOTH if you want to exercise mail locally — or run with
+  // DOTENV_CONFIG_PATH=.env. The real token never belongs in .env.example,
+  // which is committed.
+  MAILTRAP_API_TOKEN: z.string().optional().default(''),
+  MAILTRAP_API_URL:   z.string().optional().default('https://send.api.mailtrap.io/api/send'),
+  MAIL_FROM_EMAIL:    z.string().optional().default(''),
+  MAIL_FROM_NAME:     z.string().optional().default('Rai Group Fleet'),
+  /** Dashboard origin, used to build the links in invite and reset mails. */
+  APP_BASE_URL:       z.string().optional().default(''),
+
+  // How long an emailed link stays good. An invite is generous because it may
+  // wait for someone's Monday; a reset is short because it is a live
+  // credential for an account that already exists.
+  INVITE_TTL_S:         z.coerce.number().int().positive().optional().default(604_800), // 7 days
+  PASSWORD_RESET_TTL_S: z.coerce.number().int().positive().optional().default(3_600),   // 1 hour
+
+  /** Password-reset requests allowed per IP per 15 minutes. */
+  PASSWORD_RESET_RATE_LIMIT_MAX: z.coerce.number().int().positive().optional().default(5),
+
   CORS_ORIGIN: z.string().default('*'),
   // 100 requests per SECOND, per client IP.
   //

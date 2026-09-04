@@ -113,6 +113,37 @@ export function authorizeMock() {
         next()
       }),
     ),
+    // The strict variant shares requirePermission's decision entirely — the
+    // real difference is that it never falls through to shadow mode, and the
+    // mock has no shadow mode to fall through to. Declared as its own export
+    // because `vi.mock` replaces the module wholesale: a router importing a
+    // name this factory does not return fails every test in the file at
+    // import time, which is the breakage this helper exists to prevent.
+    requirePermissionStrict: vi.fn((slug: string | ((req: unknown) => string)) =>
+      vi.fn((req: Record<string, unknown>, _res: unknown, next: (err?: unknown) => void) => {
+        const need = typeof slug === 'string' ? slug : slug(req)
+        const held = subject.permissions
+        const params = (req['params'] ?? {}) as Record<string, string | undefined>
+        const orgId = params['orgId']
+
+        if (!orgId && subject.orgs !== '*') {
+          return next(new ForbiddenError(`Missing permission: ${need}`))
+        }
+        if (subject.orgs !== '*' && orgId && !subject.orgs.includes(orgId)) {
+          return next(new ForbiddenError(`Missing permission: ${need}`))
+        }
+        if (!held.includes('*') && !held.includes(need)) {
+          return next(new ForbiddenError(`Missing permission: ${need}`))
+        }
+        req['authz'] = {
+          userId:     subject.user.id,
+          orgId:      orgId ?? '',
+          isPlatform: subject.orgs === '*',
+          vehicleIds: subject.vehicleScope === 'all' ? null : new Set(subject.vehicleScope),
+        }
+        next()
+      }),
+    ),
     requireVehicleInScope: vi.fn((req: Record<string, unknown>, _res: unknown, next: (err?: unknown) => void) => {
       if (subject.vehicleScope === 'all') return next()
       const params = (req['params'] ?? {}) as Record<string, string | undefined>

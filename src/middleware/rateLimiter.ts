@@ -67,6 +67,40 @@ export const authLimiter = rateLimit({
 })
 
 /**
+ * Password-reset requests, on their own budget.
+ *
+ * Same reasoning as the refresh limiter below: asking for a reset link is not
+ * a sign-in attempt, and sharing the login bucket would mean a few reset
+ * requests spend the password allowance and the user is then told they have
+ * made too many sign-in attempts — for something that was not a sign-in.
+ *
+ * Tight, because this route sends mail to an address the caller chose. The
+ * per-ACCOUNT cooldown in tokens.service.ts covers what an IP limit cannot: a
+ * mail-bomb aimed at one inbox from many sources.
+ */
+export const passwordResetLimiter = rateLimit({
+  ...shared,
+  store:    createRateLimitStore('rl:pwreset:'),
+  windowMs: 15 * 60_000,
+  limit:    env.PASSWORD_RESET_RATE_LIMIT_MAX,
+})
+
+/**
+ * Authenticated actions that verify a credential — today, changing your own
+ * password.
+ *
+ * Tighter than the general limit because the request carries the CURRENT
+ * password: without this, an attacker holding a stolen access token could
+ * brute-force it at the global 100/s.
+ */
+export const sensitiveLimiter = rateLimit({
+  ...shared,
+  store:    createRateLimitStore('rl:sensitive:'),
+  windowMs: 15 * 60_000,
+  limit:    10,
+})
+
+/**
  * Token refresh, which is NOT a credential guess and must not share the login
  * budget.
  *

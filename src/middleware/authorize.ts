@@ -120,6 +120,73 @@ export function requirePermission(slug: string | PermissionResolver): RequestHan
 }
 
 /**
+ * Require a permission, with NO shadow mode.
+ *
+ * `requirePermission` above is deliberately observational while
+ * `AUTHZ_ENFORCE=false`: it covers ~90 endpoints that were written before any
+ * of them had a permission, and the way to find the ones mapped wrongly is to
+ * watch real traffic rather than to guess. That reasoning is sound for routes
+ * that already existed and were already reachable.
+ *
+ * It is exactly wrong for a route that did not exist yesterday. An endpoint
+ * that creates accounts, changes roles or suspends people has no legacy
+ * traffic to observe and no mapping to discover — it is new, its permission is
+ * known, and shipping it in a mode that logs "WOULD DENY" and then creates the
+ * user anyway would be shipping an open door with a diary.
+ *
+ * So: new privileged routes use this. It always denies, and it always applies
+ * the real vehicle scope rather than shadow mode's null. Everything else is
+ * identical, including the platform-surface rule for routes with no :orgId.
+ *
+ * Note this closes an AUTHORIZATION hole only. While `AUTH_BYPASS` is on, the
+ * caller is whoever that flag names and no token is checked at all, so these
+ * checks grade the bypass account. Authentication has to be real for any of
+ * this to mean anything.
+ */
+export function requirePermissionStrict(slug: string | PermissionResolver): RequestHandler {
+  return async (req, _res, next) => {
+    try {
+      const userId = req.user?.id
+      if (!userId) throw new UnauthorizedError('Not authenticated')
+
+      const need = typeof slug === 'string' ? slug : slug(req)
+      const orgId = (req.params['orgId'] as string | undefined) ?? null
+      const subject = await resolveSubject(userId)
+
+      const allowed = orgId === null
+        ? subject.isPlatform && can(subject, null, need)
+        : canReachOrg(subject, orgId) && can(subject, orgId, need)
+
+      if (!allowed) {
+        logger.info(
+          {
+            userId, orgId, need,
+            route: `${req.method} ${req.baseUrl}${req.route?.path ?? req.path}`,
+            scope: orgId === null ? 'platform' : 'organisation',
+          },
+          'authz: denied (strict)',
+        )
+        throw new ForbiddenError(`Missing permission: ${need}`)
+      }
+
+      if (orgId) {
+        req.authz = {
+          userId,
+          orgId,
+          isPlatform: subject.isPlatform,
+          // The REAL scope, not scopeToApply's shadow-mode null.
+          vehicleIds: vehicleScopeIn(subject, orgId),
+        }
+      }
+
+      next()
+    } catch (err) {
+      next(err)
+    }
+  }
+}
+
+/**
  * Populate `req.authz` without demanding a particular permission.
  *
  * For routes whose access is settled by `requireOrgAccess` alone but which
