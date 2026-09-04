@@ -1,13 +1,13 @@
 generator client {
-  provider             = "prisma-client"
-  output               = "../generated/prisma"
+  provider            = "prisma-client"
+  output              = "../generated/prisma"
   // Without these, the generator emits extensionless relative imports
   // (e.g. `from './enums'`), which only resolves under a bundler/loader.
   // Plain `node dist/src/index.js` in production needs explicit .js
   // specifiers to resolve ESM imports — same convention already used
   // throughout src/.
-  moduleFormat         = "esm"
-  importFileExtension  = "js"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
 }
 
 datasource db {
@@ -26,7 +26,7 @@ enum UserStatus {
 
 enum AssignmentType {
   PRIMARY // permanently assigned driver
-  RELIEF  // temporary / cover assignment
+  RELIEF // temporary / cover assignment
 }
 
 enum PeriodType {
@@ -98,9 +98,9 @@ enum ConsumptionBasis {
 }
 
 enum FuelEventVerdict {
-  PENDING        // too recent to judge — the level may still come back
-  REFILL         // a filling explains it: fuel went IN, it did not leave
-  DRAIN          // the level went down and did not come back
+  PENDING // too recent to judge — the level may still come back
+  REFILL // a filling explains it: fuel went IN, it did not leave
+  DRAIN // the level went down and did not come back
   REDISTRIBUTION // the level returned with no filling: undulation, it never left
   /// The fuel probe failed, not the tank. Not a fuel event at all, and never
   /// announced: blaming a driver for a dead sensor is the one outcome here
@@ -142,9 +142,9 @@ enum FuelDrainCause {
 
 /// Shape of a geofence boundary.
 enum GeofenceType {
-  CIRCLE  // defined by centerLat + centerLng + radiusM
+  CIRCLE // defined by centerLat + centerLng + radiusM
   POLYGON // defined by polygonCoords (GeoJSON ring)
-  LINE    // corridor: polygonCoords is the centre-line, widthM its width
+  LINE // corridor: polygonCoords is the centre-line, widthM its width
 }
 
 /// Controls whether the fence is an allowed zone or a forbidden zone.
@@ -176,17 +176,17 @@ enum AlertSeverity {
 
 /// Top-level tenant. All entities are scoped to an organisation.
 model Organisation {
-  id        String   @id @default(cuid())
-  name      String
-  code      String   @unique
+  id          String   @id @default(cuid())
+  name        String
+  code        String   @unique
   /// The yard/plant every dispatch leaves from and returns to, MEASURED from
   /// the fleet's own telemetry (the densest cell of fixes) rather than typed
   /// in — see prisma/sync-destinations.ts. NULL until that script has run.
   ///
   /// It is the origin of every round trip: the provider records a destination
   /// and nothing else, so "where did it set off from" has no other source.
-  hubLat    Float?   @map("hub_lat")
-  hubLng    Float?   @map("hub_lng")
+  hubLat      Float?   @map("hub_lat")
+  hubLng      Float?   @map("hub_lng")
   /// The GATE the fleet actually leaves through — the barrier/weigh-out, not
   /// the yard's centre. Distinct from the hub even when they are metres apart
   /// (SUKARI's are 17 m apart), because a departure is measured against the
@@ -194,29 +194,30 @@ model Organisation {
   /// operator, and re-derivable from telemetry: the gate is where outbound
   /// vehicles halt, which clusters far more tightly than anything else on the
   /// way out. NULL falls back to the hub radius — see lib/yard-departure.
-  gateLat     Float? @map("gate_lat")
-  gateLng     Float? @map("gate_lng")
+  gateLat     Float?   @map("gate_lat")
+  gateLng     Float?   @map("gate_lng")
   /// How far past the gate counts as through it. Sized from the measured halt
   /// spread (13-20 m at SUKARI), wide enough to contain the halt and narrow
   /// enough to stay clear of the next cluster inside the site.
-  gateRadiusM Int?   @map("gate_radius_m")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  gateRadiusM Int?     @map("gate_radius_m")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
-  roles             Role[]
-  users             User[]
-  vehicleGroups     VehicleGroup[]
-  vehicles          Vehicle[]
-  reportingPeriods  ReportingPeriod[]
-  routes            Route[]
-  geofences         Geofence[]
-  ingestApiKeys     IngestApiKey[]
-  pushSubscriptions PushSubscription[]
-  alerts            VehicleAlert[]
-  silos             Silo[]
-  providerAlerts    ProviderAlert[]
-  notifications     Notification[]
-  dispatches        Dispatch[]
+  roles                Role[]
+  memberships          OrgMembership[]
+  users                User[]
+  vehicleGroups        VehicleGroup[]
+  vehicles             Vehicle[]
+  reportingPeriods     ReportingPeriod[]
+  routes               Route[]
+  geofences            Geofence[]
+  ingestApiKeys        IngestApiKey[]
+  pushSubscriptions    PushSubscription[]
+  alerts               VehicleAlert[]
+  silos                Silo[]
+  providerAlerts       ProviderAlert[]
+  notifications        Notification[]
+  dispatches           Dispatch[]
   dispatchDestinations DispatchDestination[]
 
   @@map("organisations")
@@ -225,17 +226,23 @@ model Organisation {
 /// Named role scoped to an organisation (e.g. "fleet_manager", "driver", "mechanic").
 model Role {
   id             String   @id @default(cuid())
-  organisationId String   @map("organisation_id")
+  /// NULL = a PLATFORM role: its permissions apply in every organisation.
+  /// Used by super_admin and director, and by nothing else — an org-scoped
+  /// role cannot express "all tenants" because it is keyed to one.
+  organisationId String?  @map("organisation_id")
   name           String
   slug           String
   description    String?
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  organisation Organisation     @relation(fields: [organisationId], references: [id])
+  organisation Organisation?    @relation(fields: [organisationId], references: [id])
   permissions  RolePermission[]
   userRoles    UserRole[]
 
+  // Platform roles are NOT covered by this: Postgres treats NULLs as
+  // distinct, so two roles with organisation_id NULL and the same slug both
+  // satisfy it. A partial unique index in the migration closes that.
   @@unique([organisationId, slug])
   @@index([organisationId])
   @@map("roles")
@@ -270,32 +277,39 @@ model RolePermission {
 /// A person who can log in to the system and/or be assigned to a vehicle.
 /// Drivers are Users who hold the "driver" Role.
 model User {
-  id             String     @id @default(cuid())
-  organisationId String     @map("organisation_id")
-  fullName       String     @map("full_name")
+  id                  String     @id @default(cuid())
+  organisationId      String     @map("organisation_id")
+  fullName            String     @map("full_name")
   // NULL for people synced from the RaiFactorySuite driver registry — the
   // provider holds no email addresses and drivers don't log in. Postgres
   // permits many NULLs under a unique index, so logins stay unaffected.
-  email          String?    @unique
-  phone          String?
-  licenceNumber  String?    @map("licence_number")
-  employeeId     String?    @map("employee_id")
+  email               String?    @unique
+  phone               String?
+  licenceNumber       String?    @map("licence_number")
+  employeeId          String?    @map("employee_id")
   // RaiFactorySuite driver UUID — the stable upsert key for sync:drivers.
-  externalId     String?    @unique @map("external_id")
+  externalId          String?    @unique @map("external_id")
   // Provider's DUTY state (ON_DUTY / OFF_DUTY / TERMINATED) — distinct from
   // `status`, which is employment standing in our own RBAC model.
-  dutyStatus     String?    @map("duty_status")
+  dutyStatus          String?    @map("duty_status")
   // Provider's driver class (TRACTOR / TRUCK / COMPANY_VEHICLE) — the vehicle
   // type this driver is licensed to operate.
-  driverType     String?    @map("driver_type")
-  status         UserStatus @default(ACTIVE)
+  driverType          String?    @map("driver_type")
+  status              UserStatus @default(ACTIVE)
   // bcrypt hash for local auth (scripts/set-password.ts sets it).
   // NULL = account cannot log in (all pre-2026-07 accounts start this way —
   // auth previously lived in Supabase and its user pool was never populated).
-  passwordHash   String?    @map("password_hash")
-  createdAt      DateTime   @default(now()) @map("created_at")
-  updatedAt      DateTime   @updatedAt @map("updated_at")
-  deletedAt      DateTime?  @map("deleted_at") // soft delete — preserves FK integrity on trips
+  passwordHash        String?    @map("password_hash")
+  /// When the password was last set, and how many times it has been set.
+  /// There was no record of this at all: an operator asking "when did this
+  /// account last change its password" had nowhere to look, and neither did
+  /// the person who owned it. Two columns rather than an audit table — the
+  /// question asked was when and how many, not from which IP.
+  passwordChangedAt   DateTime?  @map("password_changed_at")
+  passwordChangeCount Int        @default(0) @map("password_change_count")
+  createdAt           DateTime   @default(now()) @map("created_at")
+  updatedAt           DateTime   @updatedAt @map("updated_at")
+  deletedAt           DateTime?  @map("deleted_at") // soft delete — preserves FK integrity on trips
 
   // Persisted driver rating (1.0–5.0, starts at 5.0). Overspeeding is scored
   // per-trip and updated here on trip completion (see simulation.persistence.ts)
@@ -307,7 +321,12 @@ model User {
   organisation Organisation @relation(fields: [organisationId], references: [id])
 
   // IAM
-  userRoles UserRole[]
+  userRoles             UserRole[]
+  memberships           OrgMembership[] @relation("MembershipUser")
+  membershipsGranted    OrgMembership[] @relation("MembershipGrantedBy")
+  authSessions          AuthSession[]
+  passwordTokens        PasswordToken[] @relation("PasswordTokenUser")
+  passwordTokensCreated PasswordToken[] @relation("PasswordTokenCreatedBy")
 
   // Driver-specific relations (only relevant when user holds "driver" role)
   vehicleAssignments VehicleAssignment[] @relation("AssignedUser")
@@ -346,7 +365,149 @@ model UserRole {
   @@index([userId])
   @@index([roleId])
   @@index([userId, revokedAt]) // fast "active roles for user" query
+  // No @@unique([userId, roleId]) — grants are SOFT-revoked, so a plain
+  // unique would make a revoked role ungrantable ever again. The migration
+  // adds a PARTIAL unique index (WHERE revoked_at IS NULL) instead, which
+  // forbids two LIVE grants of one role while leaving history alone. That
+  // is the constraint user.service.ts:34 already catches P2002 for.
   @@map("user_roles")
+}
+
+/// Which organisations a person may reach, and how much of each fleet.
+///
+/// This is the authority for cross-tenant access. `User.organisationId` is who
+/// EMPLOYS someone and stays exactly as it was — 551 driver rows depend on it,
+/// and it backs the roster query in analytics.repository. Membership is a
+/// different question: which tenants may this account read. One person can hold
+/// several, with a different role in each (roles are org-scoped, so the role
+/// grant itself carries the organisation).
+///
+/// The vehicle scope lives here rather than on the role because two operators
+/// holding the same role routinely watch different trucks.
+model OrgMembership {
+  id             String    @id @default(cuid())
+  userId         String    @map("user_id")
+  organisationId String    @map("organisation_id")
+  /// true  — every vehicle in the organisation, including ones added later.
+  /// false — only what `vehicleScopes` names. Defaulting to TRUE keeps the
+  ///         meaning of every backfilled row unchanged; narrowing is opt-in.
+  allVehicles    Boolean   @default(true) @map("all_vehicles")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  /// Soft revoke, matching UserRole — an access history is worth keeping.
+  revokedAt      DateTime? @map("revoked_at")
+  createdById    String?   @map("created_by")
+
+  user          User                     @relation("MembershipUser", fields: [userId], references: [id])
+  organisation  Organisation             @relation(fields: [organisationId], references: [id])
+  createdBy     User?                    @relation("MembershipGrantedBy", fields: [createdById], references: [id])
+  vehicleScopes MembershipVehicleScope[]
+
+  @@unique([userId, organisationId])
+  @@index([userId, revokedAt])
+  @@index([organisationId])
+  @@map("org_memberships")
+}
+
+/// One entry in a restricted membership's visible-vehicle set.
+///
+/// Exactly one of `vehicleId` / `vehicleGroupId` is set — enforced by a CHECK
+/// constraint in the migration, because Prisma cannot express it. A group entry
+/// is not sugar for listing its members: vehicles added to that group later are
+/// included automatically, which is the whole reason to scope by group on a
+/// 486-unit fleet.
+///
+/// Deliberately NOT VehicleAssignment. That table means "who DRIVES this
+/// vehicle" — ingest.service reads it to stamp driver_id onto telemetry, and
+/// vehicle.service enforces one active PRIMARY per vehicle. Giving an operator
+/// forty vehicles to watch through it would record them as the driver of all
+/// forty and corrupt every driver metric downstream.
+model MembershipVehicleScope {
+  id             String  @id @default(cuid())
+  membershipId   String  @map("membership_id")
+  vehicleId      String? @map("vehicle_id")
+  vehicleGroupId String? @map("vehicle_group_id")
+
+  membership   OrgMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  vehicle      Vehicle?      @relation(fields: [vehicleId], references: [id])
+  vehicleGroup VehicleGroup? @relation(fields: [vehicleGroupId], references: [id])
+
+  @@unique([membershipId, vehicleId])
+  @@unique([membershipId, vehicleGroupId])
+  @@index([membershipId])
+  @@map("membership_vehicle_scopes")
+}
+
+/// A live refresh-token family. Access tokens stay stateless JWTs; refresh
+/// tokens are stored so they can be ROTATED and so a leak can be detected.
+///
+/// `tokenHash` is sha256 of an opaque 32-byte token — not a JWT, because once a
+/// token is stored server-side a signature proves nothing the lookup does not.
+///
+/// Rotation: each refresh stamps `rotatedAt` on the row it consumed and issues a
+/// successor sharing `familyId`. Presenting an already-rotated token therefore
+/// means two parties hold it, so the whole family is revoked rather than the one
+/// row — the legitimate holder is forced to log in again, which is the point.
+model AuthSession {
+  id            String    @id @default(cuid())
+  userId        String    @map("user_id")
+  familyId      String    @map("family_id")
+  tokenHash     String    @unique @map("token_hash")
+  issuedAt      DateTime  @default(now()) @map("issued_at")
+  expiresAt     DateTime  @map("expires_at")
+  rotatedAt     DateTime? @map("rotated_at")
+  revokedAt     DateTime? @map("revoked_at")
+  revokedReason String?   @map("revoked_reason")
+  userAgent     String?   @map("user_agent")
+  ip            String?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([expiresAt]) // the expiry sweep
+  @@map("auth_sessions")
+}
+
+/// Purpose of a password-setting link. One table serves both because the
+/// lifecycle is identical — single-use, hashed at rest, expiring, revocable,
+/// consumed in the same transaction that writes the new password hash. They
+/// differ only in how long they last and what the email says, and two tables
+/// would mean two consumption paths where consumption is the half that must be
+/// exactly right.
+enum PasswordTokenPurpose {
+  INVITE
+  RESET
+}
+
+/// An emailed link that lets someone set a password.
+///
+/// Shaped after AuthSession deliberately: the raw token goes to the person and
+/// only its sha256 is stored, so a database read cannot recover a working
+/// link. Single-use is enforced by the QUERY (consumedAt/revokedAt null and
+/// expiresAt in the future) plus writing consumedAt inside the same
+/// transaction as the password update — not by a boolean somebody has to
+/// remember to check.
+model PasswordToken {
+  id            String               @id @default(cuid())
+  userId        String               @map("user_id")
+  purpose       PasswordTokenPurpose
+  tokenHash     String               @unique @map("token_hash")
+  createdAt     DateTime             @default(now()) @map("created_at")
+  expiresAt     DateTime             @map("expires_at")
+  consumedAt    DateTime?            @map("consumed_at")
+  revokedAt     DateTime?            @map("revoked_at")
+  revokedReason String?              @map("revoked_reason")
+  /// The inviting admin. NULL for a self-service reset, which nobody granted.
+  createdById   String?              @map("created_by")
+  requestedIp   String?              @map("requested_ip")
+  requestedUa   String?              @map("requested_user_agent")
+
+  user      User  @relation("PasswordTokenUser", fields: [userId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("PasswordTokenCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([userId, purpose, consumedAt])
+  @@index([expiresAt]) // the expiry sweep, when one is written
+  @@map("password_tokens")
 }
 
 // ---------------------------------------------------------------------------
@@ -359,19 +520,19 @@ model UserRole {
 model IngestApiKey {
   id             String    @id @default(cuid())
   organisationId String    @map("organisation_id")
-  label          String                           // human name e.g. "RaiFactorySuite Webhook"
+  label          String // human name e.g. "RaiFactorySuite Webhook"
   keyHash        String    @unique @map("key_hash") // SHA-256(rawKey) — raw key shown once at creation
   isActive       Boolean   @default(true) @map("is_active")
   createdAt      DateTime  @default(now()) @map("created_at")
-  expiresAt      DateTime? @map("expires_at")    // NULL = no expiry
-  lastUsedAt     DateTime? @map("last_used_at")  // updated on every successful ingest
+  expiresAt      DateTime? @map("expires_at") // NULL = no expiry
+  lastUsedAt     DateTime? @map("last_used_at") // updated on every successful ingest
   createdById    String?   @map("created_by")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
   createdBy    User?        @relation("ApiKeyCreatedBy", fields: [createdById], references: [id])
 
   @@index([organisationId])
-  @@index([keyHash])       // primary lookup on every ingest request
+  @@index([keyHash]) // primary lookup on every ingest request
   @@map("ingest_api_keys")
 }
 
@@ -388,8 +549,9 @@ model VehicleGroup {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  organisation Organisation @relation(fields: [organisationId], references: [id])
-  vehicles     Vehicle[]
+  organisation     Organisation             @relation(fields: [organisationId], references: [id])
+  vehicles         Vehicle[]
+  membershipScopes MembershipVehicleScope[]
 
   @@unique([organisationId, code])
   @@index([organisationId])
@@ -409,7 +571,7 @@ model Vehicle {
   deviceId           String   @unique @map("device_id")
   // RaiFactorySuite vehicle UUID — the stable upsert key for sync:vehicles.
   externalId         String?  @unique @map("external_id")
-  vehicleType        String   @map("vehicle_type")      // TRACTOR, TRUCK, COMPANY_VEHICLE, …
+  vehicleType        String   @map("vehicle_type") // TRACTOR, TRUCK, COMPANY_VEHICLE, …
   /// Manufacturer model, e.g. "CAT D8T", "KOMATSU D155A", "JOHN DEERE 6110B".
   ///
   /// Free text, and nullable because almost nothing has it yet. It exists
@@ -444,6 +606,7 @@ model Vehicle {
   vehicleGroup VehicleGroup @relation(fields: [vehicleGroupId], references: [id])
 
   assignments        VehicleAssignment[]
+  membershipScopes   MembershipVehicleScope[]
   trips              Trip[]
   engineHourSessions EngineHourSession[]
   fuelFillings       FuelFilling[]
@@ -489,8 +652,8 @@ model VehicleAssignment {
   assignedBy User?   @relation("AssignedByUser", fields: [assignedById], references: [id])
 
   @@index([vehicleId, unassignedAt]) // "who is assigned to this vehicle right now?"
-  @@index([userId, unassignedAt])    // "which vehicle is this driver assigned to?"
-  @@index([vehicleId, assignedAt])   // time-range lookups for incident investigation
+  @@index([userId, unassignedAt]) // "which vehicle is this driver assigned to?"
+  @@index([vehicleId, assignedAt]) // time-range lookups for incident investigation
   @@map("vehicle_assignments")
 }
 
@@ -528,19 +691,19 @@ model ReportingPeriod {
 model Route {
   id              String   @id @default(cuid())
   organisationId  String   @map("organisation_id")
-  name            String                           // "Garissa Depot → Nairobi CBD Warehouse"
+  name            String // "Garissa Depot → Nairobi CBD Warehouse"
   originName      String   @map("origin_name")
   originLat       Float    @map("origin_lat")
   originLng       Float    @map("origin_lng")
   destinationName String   @map("destination_name")
   destinationLat  Float    @map("destination_lat")
   destinationLng  Float    @map("destination_lng")
-  distanceKm      Float?   @map("distance_km")    // expected / approved distance
+  distanceKm      Float?   @map("distance_km") // expected / approved distance
   isActive        Boolean  @default(true) @map("is_active") // retire without deleting
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
-  organisation Organisation   @relation(fields: [organisationId], references: [id])
+  organisation Organisation    @relation(fields: [organisationId], references: [id])
   waypoints    RouteWaypoint[]
   trips        Trip[]
 
@@ -554,15 +717,15 @@ model Route {
 model RouteWaypoint {
   id       String  @id @default(cuid())
   routeId  String  @map("route_id")
-  sequence Int                      // 1-based ordering along the route
-  name     String?                  // e.g. "Thika Bypass Interchange"
+  sequence Int // 1-based ordering along the route
+  name     String? // e.g. "Thika Bypass Interchange"
   lat      Float
   lng      Float
   radiusM  Int     @default(200) @map("radius_m") // arrival tolerance in metres
 
   route Route @relation(fields: [routeId], references: [id], onDelete: Cascade)
 
-  @@unique([routeId, sequence])       // enforce ordering uniqueness
+  @@unique([routeId, sequence]) // enforce ordering uniqueness
   @@index([routeId, sequence])
   @@map("route_waypoints")
 }
@@ -573,24 +736,24 @@ model RouteWaypoint {
 
 /// A named spatial boundary applied to one or more vehicles.
 model Geofence {
-  id             String     @id @default(cuid())
-  organisationId String     @map("organisation_id")
-  name           String                          // "Nairobi CBD Delivery Zone"
-  type           GeofenceType                    // CIRCLE | POLYGON | LINE
-  mode           FenceMode  @default(ALLOWLIST) @map("mode") // ALLOWLIST | BLOCKLIST
+  id             String                                    @id @default(cuid())
+  organisationId String                                    @map("organisation_id")
+  name           String // "Nairobi CBD Delivery Zone"
+  type           GeofenceType // CIRCLE | POLYGON | LINE
+  mode           FenceMode                                 @default(ALLOWLIST) @map("mode") // ALLOWLIST | BLOCKLIST
   /// Provider's own zone id (e.g. "wialon:zone:14") — upsert key for syncs.
-  externalId     String?    @unique @map("external_id")
+  externalId     String?                                   @unique @map("external_id")
   // Circle geometry
-  centerLat      Float?     @map("center_lat")
-  centerLng      Float?     @map("center_lng")
-  radiusM        Int?       @map("radius_m")
+  centerLat      Float?                                    @map("center_lat")
+  centerLng      Float?                                    @map("center_lng")
+  radiusM        Int?                                      @map("radius_m")
   // Polygon geometry — GeoJSON LinearRing [[lng,lat],...] stored as Json.
   // Also holds a LINE fence's centre-line path, same [[lng,lat],…] ordering.
-  polygonCoords  Json?      @map("polygon_coords")
+  polygonCoords  Json?                                     @map("polygon_coords")
   /// LINE (corridor) only: full width in metres. A vehicle is inside when it
   /// is within widthM/2 of the centre-line — how Wialon models haulage roads,
   /// drains and rivers.
-  widthM         Float?     @map("width_m")
+  widthM         Float?                                    @map("width_m")
   /// DERIVED PostGIS shape — a CIRCLE's centre buffered by radiusM, a POLYGON's
   /// ring, a LINE's centre-line buffered by widthM/2. The columns above stay the
   /// source of truth; the `geofences_geom_sync` trigger keeps this in step with
@@ -602,11 +765,11 @@ model Geofence {
   /// Prisma has no geography type: `Unsupported` means it is never returned by
   /// findMany/findFirst. Read it through $queryRaw.
   geom           Unsupported("geography(Geometry, 4326)")?
-  isActive       Boolean    @default(true) @map("is_active")
-  createdAt      DateTime   @default(now()) @map("created_at")
-  updatedAt      DateTime   @updatedAt @map("updated_at")
+  isActive       Boolean                                   @default(true) @map("is_active")
+  createdAt      DateTime                                  @default(now()) @map("created_at")
+  updatedAt      DateTime                                  @updatedAt @map("updated_at")
 
-  organisation Organisation      @relation(fields: [organisationId], references: [id])
+  organisation Organisation        @relation(fields: [organisationId], references: [id])
   vehicles     VehicleGeofence[]
   violations   GeofenceViolation[]
 
@@ -617,10 +780,10 @@ model Geofence {
 
 /// Join table scoping a Geofence to a specific Vehicle, with audit trail.
 model VehicleGeofence {
-  vehicleId   String   @map("vehicle_id")
-  geofenceId  String   @map("geofence_id")
-  assignedAt  DateTime @default(now()) @map("assigned_at")
-  assignedById String? @map("assigned_by")
+  vehicleId    String   @map("vehicle_id")
+  geofenceId   String   @map("geofence_id")
+  assignedAt   DateTime @default(now()) @map("assigned_at")
+  assignedById String?  @map("assigned_by")
 
   vehicle    Vehicle  @relation(fields: [vehicleId], references: [id])
   geofence   Geofence @relation(fields: [geofenceId], references: [id], onDelete: Cascade)
@@ -638,12 +801,12 @@ model GeofenceViolation {
   vehicleId  String    @map("vehicle_id")
   geofenceId String    @map("geofence_id")
   driverId   String?   @map("driver_id")
-  occurredAt DateTime  @map("occurred_at")  // timestamp from the triggering telemetry ping
-  resolvedAt DateTime? @map("resolved_at")  // when the vehicle returned / dispatcher acknowledged
+  occurredAt DateTime  @map("occurred_at") // timestamp from the triggering telemetry ping
+  resolvedAt DateTime? @map("resolved_at") // when the vehicle returned / dispatcher acknowledged
   lat        Float
   lng        Float
   speedKmh   Float?    @map("speed_kmh")
-  notifiedAt DateTime? @map("notified_at")  // when SSE / SMS alert was dispatched
+  notifiedAt DateTime? @map("notified_at") // when SSE / SMS alert was dispatched
 
   vehicle  Vehicle  @relation(fields: [vehicleId], references: [id])
   geofence Geofence @relation(fields: [geofenceId], references: [id])
@@ -651,8 +814,8 @@ model GeofenceViolation {
 
   @@index([vehicleId, occurredAt])
   @@index([geofenceId, occurredAt])
-  @@index([driverId, occurredAt])   // driver-centric violation reports
-  @@index([occurredAt])             // org-wide violation timeline
+  @@index([driverId, occurredAt]) // driver-centric violation reports
+  @@index([occurredAt]) // org-wide violation timeline
   @@map("geofence_violations")
 }
 
@@ -666,7 +829,7 @@ model VehicleAlert {
   id             String        @id @default(cuid())
   organisationId String        @map("organisation_id")
   vehicleId      String        @map("vehicle_id")
-  type           String        // AlertType: overspeeding, fuelInconsistency, lowFuel, …
+  type           String // AlertType: overspeeding, fuelInconsistency, lowFuel, …
   severity       AlertSeverity
   message        String
   lat            Float?
@@ -697,15 +860,15 @@ model VehicleAlert {
 model Silo {
   id             String   @id @default(cuid())
   organisationId String   @map("organisation_id")
-  name           String                              // "Sukari HQ Silo 1"
-  code           String                              // stable per-org identifier — "SILO-HQ-01"
-  locationName   String   @map("location_name")      // "Sukari Industries, Kakamega"
+  name           String // "Sukari HQ Silo 1"
+  code           String // stable per-org identifier — "SILO-HQ-01"
+  locationName   String   @map("location_name") // "Sukari Industries, Kakamega"
   lat            Float
   lng            Float
   capacityTonnes Float    @map("capacity_tonnes")
   storedTonnes   Float    @map("stored_tonnes")
-  sugarType      String   @map("sugar_type")         // RAW | PROCESSED
-  status         String   @default("ok")             // ok | warning | critical
+  sugarType      String   @map("sugar_type") // RAW | PROCESSED
+  status         String   @default("ok") // ok | warning | critical
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
@@ -722,36 +885,36 @@ model Silo {
 
 /// One recorded journey: a vehicle moving from A to B.
 model Trip {
-  id                      String    @id @default(cuid())
-  vehicleId               String    @map("vehicle_id")
-  driverId                String?   @map("driver_id")          // nullable — may be unassigned
-  reportingPeriodId       String    @map("reporting_period_id")
-  routeId                 String?   @map("route_id")           // NULL = ad-hoc / unplanned trip
+  id                      String   @id @default(cuid())
+  vehicleId               String   @map("vehicle_id")
+  driverId                String?  @map("driver_id") // nullable — may be unassigned
+  reportingPeriodId       String   @map("reporting_period_id")
+  routeId                 String?  @map("route_id") // NULL = ad-hoc / unplanned trip
   /// The completed dispatch this trip was measured from, when it came from one.
   /// UNIQUE, so the builder can be re-run over any window without duplicating —
   /// the same idempotency the fuel sync gets from matching. NULL for trips from
   /// any other source (the retired simulator's rows, the REST create endpoint).
-  dispatchId              String?   @unique @map("dispatch_id")
-  beganAt                 DateTime  @map("began_at")
-  endedAt                 DateTime  @map("ended_at")
-  initialLocation         String?   @map("initial_location")
-  finalLocation           String?   @map("final_location")
-  durationSeconds         Int       @map("duration_seconds")   // store as int, format in app
-  mileageKm               Float     @map("mileage_km")
-  avgSpeedKmh             Float?    @map("avg_speed_kmh")
-  maxSpeedKmh             Float?    @map("max_speed_kmh")
-  engineHoursSeconds      Int?      @map("engine_hours_seconds")
-  consumedMl              Int?      @map("consumed_ml")        // millilitres as int — no float drift
-  consumedByFlsMl         Int?      @map("consumed_by_fls_ml")
-  ratesDeviationByFls     Float?    @map("rates_deviation_by_fls")
-  avgConsumptionL100km    Float?    @map("avg_consumption_l100km")
-  avgConsumptionByFls     Float?    @map("avg_consumption_by_fls")
-  avgIdleConsumptionByFls Float?    @map("avg_idle_consumption_by_fls")
-  avgMileagePerUnitFls    Float?    @map("avg_mileage_per_unit_fls")
-  initialFuelLevelMl      Int?      @map("initial_fuel_level_ml")
-  finalFuelLevelMl        Int?      @map("final_fuel_level_ml")
-  maxFuelLevelMl          Int?      @map("max_fuel_level_ml")
-  minFuelLevelMl          Int?      @map("min_fuel_level_ml")
+  dispatchId              String?  @unique @map("dispatch_id")
+  beganAt                 DateTime @map("began_at")
+  endedAt                 DateTime @map("ended_at")
+  initialLocation         String?  @map("initial_location")
+  finalLocation           String?  @map("final_location")
+  durationSeconds         Int      @map("duration_seconds") // store as int, format in app
+  mileageKm               Float    @map("mileage_km")
+  avgSpeedKmh             Float?   @map("avg_speed_kmh")
+  maxSpeedKmh             Float?   @map("max_speed_kmh")
+  engineHoursSeconds      Int?     @map("engine_hours_seconds")
+  consumedMl              Int?     @map("consumed_ml") // millilitres as int — no float drift
+  consumedByFlsMl         Int?     @map("consumed_by_fls_ml")
+  ratesDeviationByFls     Float?   @map("rates_deviation_by_fls")
+  avgConsumptionL100km    Float?   @map("avg_consumption_l100km")
+  avgConsumptionByFls     Float?   @map("avg_consumption_by_fls")
+  avgIdleConsumptionByFls Float?   @map("avg_idle_consumption_by_fls")
+  avgMileagePerUnitFls    Float?   @map("avg_mileage_per_unit_fls")
+  initialFuelLevelMl      Int?     @map("initial_fuel_level_ml")
+  finalFuelLevelMl        Int?     @map("final_fuel_level_ml")
+  maxFuelLevelMl          Int?     @map("max_fuel_level_ml")
+  minFuelLevelMl          Int?     @map("min_fuel_level_ml")
 
   vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
   driver          User?           @relation("TripDriver", fields: [driverId], references: [id])
@@ -833,18 +996,18 @@ model VehicleServiceRecord {
 /// (where, when in, when out, what was worked on), not just the odometer
 /// cycle bookkeeping.
 model VehicleGarageVisit {
-  id            String   @id @default(cuid())
-  vehicleId     String   @map("vehicle_id")
-  garageName    String   @map("garage_name")
-  garageLat     Float    @map("garage_lat")
-  garageLng     Float    @map("garage_lng")
-  enteredAt     DateTime @map("entered_at")
-  exitedAt      DateTime @map("exited_at")
-  durationMinutes Int    @map("duration_minutes")
-  odometerKm    Float    @map("odometer_km")
-  severityScore Float    @map("severity_score")   // 0–1
-  itemsFixed    Json     @map("items_fixed")       // [{ name, replaced }, ...]
-  createdAt     DateTime @default(now()) @map("created_at")
+  id              String   @id @default(cuid())
+  vehicleId       String   @map("vehicle_id")
+  garageName      String   @map("garage_name")
+  garageLat       Float    @map("garage_lat")
+  garageLng       Float    @map("garage_lng")
+  enteredAt       DateTime @map("entered_at")
+  exitedAt        DateTime @map("exited_at")
+  durationMinutes Int      @map("duration_minutes")
+  odometerKm      Float    @map("odometer_km")
+  severityScore   Float    @map("severity_score") // 0–1
+  itemsFixed      Json     @map("items_fixed") // [{ name, replaced }, ...]
+  createdAt       DateTime @default(now()) @map("created_at")
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id])
 
@@ -888,18 +1051,18 @@ model VehicleGarageVisit {
 /// alive RIGHT NOW, they change all day, and the report already scans that
 /// window separately. A rollup of today would be stale by construction.
 model VehicleDailyStat {
-  id          String   @id @default(cuid())
-  vehicleId   String   @map("vehicle_id")
+  id          String    @id @default(cuid())
+  vehicleId   String    @map("vehicle_id")
   /// The FLEET day this describes (Kenyan, not UTC — see lib/provider-time).
-  day         DateTime @db.Date
+  day         DateTime  @db.Date
   /// Every frame the unit sent that day, whatever it carried.
   pings       Int
   /// Frames carrying a fuel level at all — null is "the channel said nothing",
   /// which is the distinction the report's NOT_REPORTING state rests on.
-  levelPings  Int      @map("level_pings")
+  levelPings  Int       @map("level_pings")
   /// Highest level seen that day. Max across days gives the month's peak,
   /// which is what the calibration check compares a tank's capacity against.
-  peakMl      Int?     @map("peak_ml")
+  peakMl      Int?      @map("peak_ml")
   /// Last frame with a level ABOVE ZERO. A probe reading a flat zero all day is
   /// reporting, and is also broken; separating these two is the whole point.
   lastAliveAt DateTime? @map("last_alive_at")
@@ -908,7 +1071,7 @@ model VehicleDailyStat {
   /// Fixes that day with the engine running — the DENOMINATOR of the idle
   /// ratio. Zero means the engine never ran; null means the day predates these
   /// columns.
-  engineFixes Int?     @map("engine_fixes")
+  engineFixes Int?      @map("engine_fixes")
   /// Of those, the ones the unit was not moving for.
   ///
   /// A COUNT, and never converted to a duration here. The sampling interval is
@@ -916,7 +1079,7 @@ model VehicleDailyStat {
   /// wrong, and gave 103 idle hours inside a 24-hour day once already. The
   /// ratio idleFixes/engineFixes is exact whatever the interval does, and
   /// fuel_daily_trends.engineSeconds supplies the scale.
-  idleFixes   Int?     @map("idle_fixes")
+  idleFixes   Int?      @map("idle_fixes")
   /// Ground the machine worked that day, square metres — an UPPER BOUND, never
   /// a survey.
   ///
@@ -941,12 +1104,12 @@ model VehicleDailyStat {
   /// tramming between cuts is counted as if it were cutting. `MUFINDI: DZ 09`
   /// measured 4.24 ha per engine hour against a 3 m blade's theoretical 0.38,
   /// which is what that looks like.
-  digAreaM2   Int?     @map("dig_area_m2")
+  digAreaM2   Int?      @map("dig_area_m2")
   /// Seconds the machine spent over that ground — the denominator of the
   /// m2-per-hour rate, integrated the same way engineSeconds is. Digging for an
   /// excavator; for a dozer, the time inside the segments that were counted.
-  digSeconds  Int?     @map("dig_seconds")
-  computedAt  DateTime @default(now()) @map("computed_at")
+  digSeconds  Int?      @map("dig_seconds")
+  computedAt  DateTime  @default(now()) @map("computed_at")
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
 
@@ -959,30 +1122,30 @@ model VehicleDailyStat {
 }
 
 model FuelDailyTrend {
-  id            String   @id @default(cuid())
-  vehicleId     String   @map("vehicle_id")
+  id               String   @id @default(cuid())
+  vehicleId        String   @map("vehicle_id")
   /// The FLEET day this describes (Kenyan, not UTC — see lib/provider-time).
-  day           DateTime @db.Date
+  day              DateTime @db.Date
   /// Closing level of the previous day; equals that day's closingMl.
-  openingMl     Int?     @map("opening_ml")
-  closingMl     Int?     @map("closing_ml")
+  openingMl        Int?     @map("opening_ml")
+  closingMl        Int?     @map("closing_ml")
   /// opening − closing. Not "burned" on a day carrying a refuel.
-  consumedMl    Int?     @map("consumed_ml")
+  consumedMl       Int?     @map("consumed_ml")
   /// Moving average of per-RUN slosh while in motion, over the last
   /// TURBULENCE_STOPS runs WHEREVER THEY FELL — the window crosses midnight.
   /// Slosh, not fuel moved. Formula at stopTurbulence in fuel-tank-state.
-  turbulenceMl  Int?     @map("turbulence_ml")
+  turbulenceMl     Int?     @map("turbulence_ml")
   /// Ground covered that day, in metres — summed from the position fixes,
   /// since vehicle_telemetries carries no odometer. Metres because an integer
   /// of them is exact where a float of kilometres accumulates error.
-  distanceM      Int?    @map("distance_m")
+  distanceM        Int?     @map("distance_m")
   /// Fuel the engine is EXPECTED to have burned over that distance, at
   /// KM_PER_LITRE. An expectation, not a measurement — compare against
   /// consumedMl, which is what the tank actually did.
   ///
   /// The DISTANCE half of the pair. engineBurnMl is the other, and is the
   /// better basis for the 215 of 310 probed units that are plant or tractors.
-  expectedBurnMl Int?    @map("expected_burn_ml")
+  expectedBurnMl   Int?     @map("expected_burn_ml")
   /// The unit's cumulative ENGINE-HOUR METER at the end of that day — the
   /// machine's own counter, the way an odometer reads, NOT hours run that day.
   /// From Wialon's cneh, which arrives in the raw payload rather than as a
@@ -991,30 +1154,30 @@ model FuelDailyTrend {
   /// The READING, not the day-over-day delta: the adapter carries the last
   /// known value forward, so a delta between two boundary reads can
   /// misattribute hours across days.
-  engineHoursMeter Float? @map("engine_hours_meter")
+  engineHoursMeter Float?   @map("engine_hours_meter")
   /// Seconds the engine ran that day, integrated from every fix and capped at
   /// MAX_ENGINE_GAP_SECONDS per gap. A measurement, not an estimate.
-  engineSeconds  Int?    @map("engine_seconds")
+  engineSeconds    Int?     @map("engine_seconds")
 
   /// Fuel expected to have burned over those hours, at the vehicle's measured
   /// litres-per-hour (vehicle_fuel_rates, falling back to its org+type median).
   /// The ENGINE half of the pair, and the primary basis for every type —
   /// position freezes at speed 0, so a working excavator covers no ground.
   /// Null, never zero, when the machine and its type have no measured rate.
-  engineBurnMl   Int?    @map("engine_burn_ml")
+  engineBurnMl   Int?     @map("engine_burn_ml")
   /// Stops under HEAVY_STOP_MINUTES — a pause in the work.
-  temporaryStops Int     @default(0) @map("temporary_stops")
+  temporaryStops Int      @default(0) @map("temporary_stops")
   /// Stops of HEAVY_STOP_MINUTES or more — the machine standing down.
-  heavyStops     Int     @default(0) @map("heavy_stops")
+  heavyStops     Int      @default(0) @map("heavy_stops")
   /// This day's individual run slosh values, in order, one per run.
   ///
   /// Kept because a moving average that spans days needs the runs themselves —
   /// a day's mean cannot be un-meaned. Most days hold one or two.
-  runSloshMl    Int[]    @map("run_slosh_ml")
+  runSloshMl     Int[]    @map("run_slosh_ml")
   /// STOPS the moving average spans, so a one-run figure is not read as
   /// confidently as an eight-run one. See stopTurbulence for the formula.
-  stopsAveraged Int      @default(0) @map("stops_averaged")
-  computedAt    DateTime @map("computed_at")
+  stopsAveraged  Int      @default(0) @map("stops_averaged")
+  computedAt     DateTime @map("computed_at")
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id])
 
@@ -1039,13 +1202,13 @@ model FuelDailyTrend {
 ///
 /// Feeds expectations only. Nothing that judges a fuel event reads this.
 model VehicleFuelRate {
-  id         String   @id @default(cuid())
-  vehicleId  String   @unique @map("vehicle_id")
+  id           String            @id @default(cuid())
+  vehicleId    String            @unique @map("vehicle_id")
   /// Litres per engine-hour. Always derived, and the figure a judgement uses
   /// whenever `primaryBasis` is HOURS — or when a DISTANCE machine is judged on
   /// a fall during which it did not travel. Never null: the derivation cannot
   /// produce a run without engine time.
-  lPerHour   Float    @map("l_per_hour")
+  lPerHour     Float             @map("l_per_hour")
   /// Litres per kilometre. The PRIMARY figure where `primaryBasis` is DISTANCE,
   /// not the garnish this comment used to call it.
   ///
@@ -1058,7 +1221,7 @@ model VehicleFuelRate {
   /// clear that floor, at 1.5-15.2 km/L. The binding constraint is not the
   /// floor, it is rate coverage — only 55 of 207 DISTANCE machines have a rate
   /// of their own at all, which is RATE_WINDOW_DAYS' three-day window.
-  lPerKm     Float?   @map("l_per_km")
+  lPerKm       Float?            @map("l_per_km")
   /// Which of the two figures above is this machine's real one, per
   /// `resolveBasis`. Null on rows derived before 2026-08-27; the weekly
   /// derivation fills it in. Nothing infers a default from null — a missing
@@ -1077,21 +1240,21 @@ model VehicleFuelRate {
   /// would be the fabrication these columns exist to end. Only meaningful for
   /// HOURS machines; a road vehicle's idling is measured the same way but its
   /// primary basis is distance.
-  idleLPerHour Float?  @map("idle_l_per_hour")
+  idleLPerHour Float?            @map("idle_l_per_hour")
   /// Litres per engine-hour while MOVING, or stationary and changing position —
   /// digging, slewing, loading. See idleLPerHour for the split's evidence.
-  workLPerHour Float?  @map("work_l_per_hour")
+  workLPerHour Float?            @map("work_l_per_hour")
   /// Qualifying runs behind each split figure, so a thin one is visible rather
   /// than merely present. Counted separately because a machine can have plenty
   /// of one kind and almost none of the other — 73 idle runs against 708
   /// working on TRACTOR_MEDIUM.
-  idleRuns     Int?    @map("idle_runs")
-  workRuns     Int?    @map("work_runs")
+  idleRuns     Int?              @map("idle_runs")
+  workRuns     Int?              @map("work_runs")
   /// Qualifying runs behind the figure. Below MIN_RUNS it is not used.
-  runs       Int
+  runs         Int
   /// Days of telemetry the derivation read, so a rate carries its own window.
-  windowDays Int      @map("window_days")
-  derivedAt  DateTime @map("derived_at")
+  windowDays   Int               @map("window_days")
+  derivedAt    DateTime          @map("derived_at")
 
   /// The tank-balance measurement from `fuel-burn-rate.service`, which closes
   /// `burn = (opening - closing) + refills - drains` over 30 fleet-days and is
@@ -1162,7 +1325,7 @@ model FuelFilling {
 model FuelTheft {
   id                 String   @id @default(cuid())
   vehicleId          String   @map("vehicle_id")
-  driverId           String?  @map("driver_id")          // nullable — vehicle may be unattended
+  driverId           String?  @map("driver_id") // nullable — vehicle may be unattended
   reportingPeriodId  String   @map("reporting_period_id")
   beganAt            DateTime @map("began_at")
   detectedAt         DateTime @map("detected_at")
@@ -1170,7 +1333,7 @@ model FuelTheft {
   initialFuelLevelMl Int?     @map("initial_fuel_level_ml")
   finalFuelLevelMl   Int?     @map("final_fuel_level_ml")
   stolenMl           Int      @map("stolen_ml")
-  initialSpeedKmh    Float?   @map("initial_speed_kmh")  // 0 = stationary drain
+  initialSpeedKmh    Float?   @map("initial_speed_kmh") // 0 = stationary drain
   finalSpeedKmh      Float?   @map("final_speed_kmh")
 
   /// Our verdict on the provider's claim — see FuelEventVerdict and
@@ -1190,12 +1353,12 @@ model FuelTheft {
   /// FuelDrainCause and modules/fuel/fuel-theft-classifier. Null on rows that
   /// never reached a drain verdict, and on every row written before this
   /// existed.
-  drainCause       FuelDrainCause? @map("drain_cause")
+  drainCause      FuelDrainCause? @map("drain_cause")
   /// How sure we are the CAUSE is right, 0-1. Distinct from
   /// `verdictConfidence`, which grades a different decision.
-  causeConfidence  Float?          @map("cause_confidence")
+  causeConfidence Float?          @map("cause_confidence")
   /// Short slug naming which cause rule decided, for auditing.
-  causeReason      String?         @map("cause_reason")
+  causeReason     String?         @map("cause_reason")
 
   /// The MEASURED shape of the fall this verdict was reached on — see
   /// DropEvidence in modules/fuel/fuel-drop-shape.
@@ -1215,25 +1378,25 @@ model FuelTheft {
   /// `detectedAt - beganAt` — the PROVIDER's window, the very quantity
   /// PLATEAU_TOLERANCE exists to reject, and typically several times the real
   /// fall.
-  fallSeconds      Int?            @map("fall_seconds")
+  fallSeconds    Int?   @map("fall_seconds")
   /// Baseline to trough in millilitres, from the SMOOTHED series. Distinct from
   /// `stolenMl`, which is the provider's claim; the two disagreeing is itself
   /// evidence and the pair must stay comparable.
-  measuredDropMl   Int?            @map("measured_drop_ml")
+  measuredDropMl Int?   @map("measured_drop_ml")
   /// Engine-on seconds inside the fall, and the share of its readings carrying
   /// a MEASURED ignition rather than the speed fallback. The second number is
   /// what says whether the first can be trusted.
-  engineSeconds    Int?            @map("engine_seconds")
-  engineEvidence   Float?          @map("engine_evidence")
+  engineSeconds  Int?   @map("engine_seconds")
+  engineEvidence Float? @map("engine_evidence")
   /// Largest single-interval drop over the total. A siphon is one step; a burn
   /// is many.
-  stepFraction     Float?          @map("step_fraction")
+  stepFraction   Float? @map("step_fraction")
   /// Litres per hour the fall implies. The figure the band is compared against,
   /// and until now it existed only inside a sentence.
-  impliedLph       Float?          @map("implied_lph")
+  impliedLph     Float? @map("implied_lph")
   /// Kilometres covered during the fall, integrated from reported speed. Zero
   /// and null mean different things — see DropEvidence.distanceKm.
-  fallDistanceKm   Float?          @map("fall_distance_km")
+  fallDistanceKm Float? @map("fall_distance_km")
 
   vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
   driver          User?           @relation("TheftDriver", fields: [driverId], references: [id])
@@ -1274,7 +1437,7 @@ model FuelTheft {
 /// event rows are rewritten by the adjudication sweep, so a label living on one
 /// would be at the mercy of a re-judge.
 model FuelEventLabel {
-  id        String    @id @default(cuid())
+  id         String              @id @default(cuid())
   /// The event this describes. `eventType` says which table `eventId` points
   /// into — `fuel_thefts` or `fuel_fillings`.
   ///
@@ -1283,18 +1446,18 @@ model FuelEventLabel {
   /// label. A pair of nullable FK columns would buy referential integrity at the
   /// cost of every reader coalescing two columns and every writer keeping them
   /// exclusive; the import CLI resolves the id against the right table instead.
-  eventId   String    @map("event_id")
-  eventType FuelEventType @map("event_type")
-  label     FuelEventLabelValue
+  eventId    String              @map("event_id")
+  eventType  FuelEventType       @map("event_type")
+  label      FuelEventLabelValue
   /// Who decided. Free text rather than a user FK: the reviewer is usually an
   /// operations person working from a spreadsheet, not a system account, and
   /// inventing a User row for them would put fiction in the roster.
-  labelledBy String   @map("labelled_by")
-  labelledAt DateTime @default(now()) @map("labelled_at")
+  labelledBy String              @map("labelled_by")
+  labelledAt DateTime            @default(now()) @map("labelled_at")
   /// Why. The most valuable column here when a label disagrees with the
   /// verdict, and the only place a reviewer can say "the driver admitted it"
   /// or "this probe is known bad".
-  note      String?
+  note       String?
 
   /// One label per reviewer per event. A reviewer correcting themselves updates
   /// rather than accumulating, while two reviewers both keep their answer.
@@ -1372,7 +1535,7 @@ model VehicleSensor {
   /// not a measurement. Null when there is no table.
   calibratedMax     Float?   @map("calibrated_max")
   firstSeenAt       DateTime @default(now()) @map("first_seen_at")
-  syncedAt          DateTime @updatedAt      @map("synced_at")
+  syncedAt          DateTime @updatedAt @map("synced_at")
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
 
@@ -1387,21 +1550,21 @@ model VehicleSensor {
 model VehicleTelemetry {
   id         BigInt   @id @default(autoincrement())
   vehicleId  String   @map("vehicle_id")
-  deviceId   String   @map("device_id")   // denormalised — no join needed on ingest
-  driverId   String?  @map("driver_id")   // denormalised — active driver at ping time
+  deviceId   String   @map("device_id") // denormalised — no join needed on ingest
+  driverId   String?  @map("driver_id") // denormalised — active driver at ping time
   capturedAt DateTime @map("captured_at") // device timestamp (NOT server receipt time)
   receivedAt DateTime @default(now()) @map("received_at")
 
   // Position
   lat        Float?
   lng        Float?
-  altitudeM  Float?  @map("altitude_m")
-  headingDeg Float?  @map("heading_deg")  // 0-360 compass bearing
-  accuracyM  Float?  @map("accuracy_m")   // GPS horizontal accuracy in metres
+  altitudeM  Float? @map("altitude_m")
+  headingDeg Float? @map("heading_deg") // 0-360 compass bearing
+  accuracyM  Float? @map("accuracy_m") // GPS horizontal accuracy in metres
 
   // Motion & engine
-  speedKmh   Float?  @map("speed_kmh")    // instantaneous GPS speed
-  engineOn   Boolean @default(false) @map("engine_on") // digital I/O pin state
+  speedKmh Float?  @map("speed_kmh") // instantaneous GPS speed
+  engineOn Boolean @default(false) @map("engine_on") // digital I/O pin state
 
   /// Was `engineOn` MEASURED, or inferred from movement?
   ///
@@ -1413,10 +1576,10 @@ model VehicleTelemetry {
   ///
   /// NULL means unknown, not false: it is what a row written before this column
   /// existed carries, and what an un-backfilled row carries. Test `IS TRUE`.
-  ignitionKnown  Boolean?        @map("ignition_known")
+  ignitionKnown    Boolean?        @map("ignition_known")
   /// Where a known ignition state came from, so a method that is later
   /// disproved can be withdrawn wholesale instead of being untangled.
-  ignitionSource IgnitionSource? @map("ignition_source")
+  ignitionSource   IgnitionSource? @map("ignition_source")
   /// The unit's own cumulative engine-hours counter at this fix (Wialon `cneh`).
   ///
   /// Present on ~96% of frames, and already the most trusted engine-time source
@@ -1424,11 +1587,11 @@ model VehicleTelemetry {
   /// 1,761 s for capped and uncapped gap integration. It was only ever persisted
   /// as a DAILY rollup on `FuelDailyTrend`, so nothing could take a per-fix
   /// delta from it.
-  engineHoursMeter Float?        @map("engine_hours_meter")
+  engineHoursMeter Float?          @map("engine_hours_meter")
 
   // Fuel (FLS sensor reading)
-  fuelLevelMl Int?   @map("fuel_level_ml") // calibrated tank level in millilitres
-  fuelUsedMl  Int?   @map("fuel_used_ml")  // delta vs. previous ping (negative = impossible → flag)
+  fuelLevelMl Int? @map("fuel_level_ml") // calibrated tank level in millilitres
+  fuelUsedMl  Int? @map("fuel_used_ml") // delta vs. previous ping (negative = impossible → flag)
 
   // Cargo weight (load-cell sensor — NULL if vehicle not fitted)
   cargoWeightKg Float? @map("cargo_weight_kg")
@@ -1456,10 +1619,10 @@ model VehicleTelemetry {
   /// nothing is fitted" and "no feed because the lens is dead".
   cameraSignalLost Boolean? @map("camera_signal_lost")
 
-  vehicle Vehicle  @relation(fields: [vehicleId], references: [id])
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
 
-  @@unique([deviceId, capturedAt])    // idempotent ingest
-  @@index([vehicleId, capturedAt])    // timeline + latest-ping (B-tree serves ASC and DESC)
+  @@unique([deviceId, capturedAt]) // idempotent ingest
+  @@index([vehicleId, capturedAt]) // timeline + latest-ping (B-tree serves ASC and DESC)
   // A THIRD index exists on this table that is NOT declared here:
   //   vehicle_telemetries_moving_idx (vehicle_id, captured_at DESC)
   //     WHERE speed_kmh > 0
@@ -1468,7 +1631,7 @@ model VehicleTelemetry {
   // up" as drift — without it the fleet snapshot's last-moved lookup scans the
   // full history of every vehicle that has never moved, and the query times
   // out. Details and measurements in that migration's header.
-  @@index([capturedAt])               // partition key — range queries across all vehicles
+  @@index([capturedAt]) // partition key — range queries across all vehicles
   @@map("vehicle_telemetries")
 }
 
@@ -1477,7 +1640,7 @@ model VehicleTelemetry {
 /// Linked 1-to-1 via the same BigInt id as VehicleTelemetry.
 model VehicleTelemetryRaw {
   telemetryId BigInt @id @map("telemetry_id") // FK = VehicleTelemetry.id (no Prisma relation — avoid eager load)
-  payload     Json                            // original vendor JSON/parsed binary packet
+  payload     Json // original vendor JSON/parsed binary packet
 
   @@map("vehicle_telemetry_raws")
 }
@@ -1491,17 +1654,17 @@ model VehicleTelemetryRaw {
 /// departureWeightKg / arrivalWeightKg come from load-cell sensor readings
 /// pushed in VehicleTelemetry.cargoWeightKg at trip start and end.
 model CargoManifest {
-  id                 String    @id @default(cuid())
-  tripId             String    @unique @map("trip_id") // one manifest per trip
-  description        String?                           // free-text e.g. "Maize flour 50 kg bags"
-  cargoType          CargoType? @map("cargo_type")     // enum — prevents "bulk" vs "BULK" drift
-  declaredWeightKg   Float?    @map("declared_weight_kg")  // from waybill
-  departureWeightKg  Float?    @map("departure_weight_kg") // sensor reading at trip start
-  arrivalWeightKg    Float?    @map("arrival_weight_kg")   // sensor reading at trip end
-  weightVarianceKg   Float?    @map("weight_variance_kg")  // computed: departure - arrival
-  notes              String?
-  createdAt          DateTime  @default(now()) @map("created_at")
-  updatedAt          DateTime  @updatedAt @map("updated_at")
+  id                String     @id @default(cuid())
+  tripId            String     @unique @map("trip_id") // one manifest per trip
+  description       String? // free-text e.g. "Maize flour 50 kg bags"
+  cargoType         CargoType? @map("cargo_type") // enum — prevents "bulk" vs "BULK" drift
+  declaredWeightKg  Float?     @map("declared_weight_kg") // from waybill
+  departureWeightKg Float?     @map("departure_weight_kg") // sensor reading at trip start
+  arrivalWeightKg   Float?     @map("arrival_weight_kg") // sensor reading at trip end
+  weightVarianceKg  Float?     @map("weight_variance_kg") // computed: departure - arrival
+  notes             String?
+  createdAt         DateTime   @default(now()) @map("created_at")
+  updatedAt         DateTime   @updatedAt @map("updated_at")
 
   trip Trip @relation(fields: [tripId], references: [id])
 
@@ -1517,14 +1680,14 @@ model CargoManifest {
 /// Keyed by endpoint (unique per browser × origin). Stale subscriptions
 /// (HTTP 410/404 from the push service) are automatically cleaned up.
 model PushSubscription {
-  id             String    @id @default(cuid())
-  organisationId String?   @map("organisation_id")
-  userId         String?   @map("user_id")
-  endpoint       String    @unique        // push service URL — the natural key
-  p256dh         String    @map("p256dh") // ECDH public key (base64url)
-  auth           String                   // HMAC auth secret (base64url)
-  userAgent      String?   @map("user_agent")
-  createdAt      DateTime  @default(now()) @map("created_at")
+  id             String   @id @default(cuid())
+  organisationId String?  @map("organisation_id")
+  userId         String?  @map("user_id")
+  endpoint       String   @unique // push service URL — the natural key
+  p256dh         String   @map("p256dh") // ECDH public key (base64url)
+  auth           String // HMAC auth secret (base64url)
+  userAgent      String?  @map("user_agent")
+  createdAt      DateTime @default(now()) @map("created_at")
 
   organisation Organisation? @relation(fields: [organisationId], references: [id])
   user         User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -1579,7 +1742,7 @@ model VehiclePeriodSummary {
 model SimulationState {
   deviceId  String   @id @map("device_id")
   orgId     String?  @map("organisation_id")
-  state     Json                            // serialised VehicleSimState
+  state     Json // serialised VehicleSimState
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("simulation_states")
@@ -1591,7 +1754,7 @@ model SimulationMeta {
   id         String   @id @default("singleton")
   lastTickAt DateTime @map("last_tick_at")
   simDayKey  String?  @map("sim_day_key")
-  simClockMs BigInt?  @map("sim_clock_ms")   // simulated-time epoch ms (6× real; paused across downtime)
+  simClockMs BigInt?  @map("sim_clock_ms") // simulated-time epoch ms (6× real; paused across downtime)
 
   @@map("simulation_meta")
 }
@@ -1603,23 +1766,23 @@ model SimulationMeta {
 /// pre-composed, may concern people rather than a vehicle, and is keyed by the
 /// provider's own id so a webhook redelivery is idempotent.
 model ProviderAlert {
-  id             String    @id @default(cuid())
+  id             String   @id @default(cuid())
   /// RaiFactorySuite alert UUID — dedupe key for webhook retries + backfill.
-  externalId     String    @unique @map("external_id")
-  organisationId String    @map("organisation_id")
+  externalId     String   @unique @map("external_id")
+  organisationId String   @map("organisation_id")
   /// Vehicle named in the alert, when its plate resolves to our registry.
-  vehicleId      String?   @map("vehicle_id")
-  type           String    // TRACTOR_OVERDUE, DRIVER_BLOCKED, …
-  severity       String    // info | warning | critical — mapped from `type`
+  vehicleId      String?  @map("vehicle_id")
+  type           String // TRACTOR_OVERDUE, DRIVER_BLOCKED, …
+  severity       String // info | warning | critical — mapped from `type`
   message        String
   /// Provider-side id of the related record (dispatch, driver, …).
-  relatedId      String?   @map("related_id")
-  plate          String?   // plate parsed out of the message, if any
-  acknowledged   Boolean   @default(false)
-  createdAt      DateTime  @map("created_at")     // provider's timestamp
-  receivedAt     DateTime  @default(now()) @map("received_at")
+  relatedId      String?  @map("related_id")
+  plate          String? // plate parsed out of the message, if any
+  acknowledged   Boolean  @default(false)
+  createdAt      DateTime @map("created_at") // provider's timestamp
+  receivedAt     DateTime @default(now()) @map("received_at")
   /// 'webhook' when pushed to us, 'backfill' when pulled by sync:alerts.
-  source         String    @default("webhook")
+  source         String   @default("webhook")
   raw            Json?
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
@@ -1647,26 +1810,26 @@ model ProviderAlert {
 /// 1000 rows with no pagination, so the history it exposes is a sliding window
 /// that will eventually drop the trips the duration statistics are built from.
 model Dispatch {
-  id             String    @id @default(cuid())
+  id               String    @id @default(cuid())
   /// Provider's dispatch UUID — dedupe key across webhook, reconciler and backfill.
-  externalId     String    @unique @map("external_id")
-  organisationId String    @map("organisation_id")
+  externalId       String    @unique @map("external_id")
+  organisationId   String    @map("organisation_id")
   /// NULL when the plate does not resolve to our registry.
-  vehicleId      String?   @map("vehicle_id")
-  plate          String
-  driverName     String    @map("driver_name")
+  vehicleId        String?   @map("vehicle_id")
+  plate            String
+  driverName       String    @map("driver_name")
   /// Free text, verbatim from the provider. Never parsed into coordinates.
-  destination    String?
+  destination      String?
   /// DISPATCHED | OVERDUE | COMPLETED | CANCELLED, as the provider reports it.
-  status         String
-  dispatchedAt   DateTime  @map("dispatched_at")
+  status           String
+  dispatchedAt     DateTime  @map("dispatched_at")
   /// The dispatcher's own commitment, when they set one — present on about a
   /// third of open dispatches. Beats any estimate we could compute.
   expectedReturnAt DateTime? @map("expected_return_at")
   actualReturnAt   DateTime? @map("actual_return_at")
-  receivedAt     DateTime  @default(now()) @map("received_at")
+  receivedAt       DateTime  @default(now()) @map("received_at")
   /// 'webhook' when pushed, 'reconciler' on the safety-net poll, 'backfill' from sync:dispatches.
-  source         String    @default("webhook")
+  source           String    @default("webhook")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
   vehicle      Vehicle?     @relation(fields: [vehicleId], references: [id])
@@ -1698,21 +1861,21 @@ model Dispatch {
 /// Validated 2026-08-03 against an operator-supplied coordinate for NYAONDO:
 /// 39 trips, 0.1 km spread, and the derived point sits 83 m from theirs.
 model DispatchDestination {
-  id             String   @id @default(cuid())
-  organisationId String   @map("organisation_id")
+  id               String   @id @default(cuid())
+  organisationId   String   @map("organisation_id")
   /// UPPER(TRIM(dispatch.destination)) — the same key the duration statistics
   /// group on, because the dispatchers type it freehand and the casing wanders.
-  name           String
-  lat            Float
-  lng            Float
+  name             String
+  lat              Float
+  lng              Float
   /// Completed trips this point was measured from.
-  samples        Int
+  samples          Int
   /// Median distance from a trip's own turn-around to the consensus point.
   /// Small = a place; large = a spread-out zone with no single point.
-  spreadM        Int      @map("spread_m")
+  spreadM          Int      @map("spread_m")
   /// Straight-line hub → here, cached so the round-trip maths needs one row.
-  distanceFromHubM Int    @map("distance_from_hub_m")
-  computedAt     DateTime @default(now()) @map("computed_at")
+  distanceFromHubM Int      @map("distance_from_hub_m")
+  computedAt       DateTime @default(now()) @map("computed_at")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
 

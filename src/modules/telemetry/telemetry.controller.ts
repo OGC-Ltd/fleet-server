@@ -8,7 +8,7 @@ const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] a
 
 export const getFleetSnapshotHandler: RequestHandler = async (req, res, next) => {
   try {
-    const data = await getFleetSnapshot(p(req, 'orgId'))
+    const data = await getFleetSnapshot(p(req, 'orgId'), req.authz?.vehicleIds ?? null)
     sendSuccess(res, data)
   } catch (err) { next(err) }
 }
@@ -108,7 +108,13 @@ export const getVehicleGarageVisitsHandler: RequestHandler = async (req, res, ne
 export const liveVehicleFeed: RequestHandler = (req, res, next) => {
   try {
     const vehicleId = p(req, 'vehicleId')
-    const orgId = req.user!.organisationId
+    // The PATH org, like every sibling handler — see the note at the top of this
+    // file. This one read `req.user.organisationId` instead, so under
+    // AUTH_BYPASS it subscribed to the bypass user's home organisation rather
+    // than the one in the URL, and the stream stayed silent for every vehicle
+    // outside it. Now that a user can hold several organisations, the home org
+    // is not even a good guess.
+    const orgId = p(req, 'orgId')
 
     res.setHeader('Content-Type', 'text/event-stream')
     res.setHeader('Cache-Control', 'no-cache')

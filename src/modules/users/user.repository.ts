@@ -12,6 +12,18 @@ const SELECT_USER = {
   status: true,
   createdAt: true,
   updatedAt: true,
+  // The password history the account page and the admin roster both show.
+  // `passwordChangedAt: null` on an account that has one means it was set
+  // before this was recorded — distinct from an account that has no password
+  // at all, which the roster tells apart by whether an invite is pending.
+  passwordChangedAt: true,
+  passwordChangeCount: true,
+  // Roles held IN THIS organisation. The roster's whole job is showing who can
+  // do what, and a list of names with no roles beside them does not.
+  userRoles: {
+    where: { revokedAt: null },
+    select: { assignedAt: true, role: { select: { id: true, slug: true, name: true, organisationId: true } } },
+  },
 }
 
 export async function findAll(orgId: string, { page, limit, status }: ListUserQuery) {

@@ -47,6 +47,7 @@ export interface TelemetryProcessedEvent {
   plate:           string
   tankCapacityMl?: number   // used by telemetry.worker to compute fuelLevelPct
   driverName?:     string | null   // assigned driver, for the live feed
+  vehicleType?:    string | null   // for the feed's overspeeding line, which quotes the per-type limit
 }
 
 // Published by the poller instead of awaiting syncFrameAlerts() inline — lets

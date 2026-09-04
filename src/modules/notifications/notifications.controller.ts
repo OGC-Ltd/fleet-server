@@ -102,6 +102,13 @@ const HEARTBEAT_MS = 25_000
 
 export async function dashboardStream(req: Request, res: Response) {
   const { orgId } = req.params as { orgId: string }
+  // Set by requireOrgAccess. NULL means the whole fleet; a Set means this
+  // client is only ever told about those vehicles — in the replay below and in
+  // every live event for as long as the connection lasts. A stream authorised
+  // once at handshake cannot be filtered later by the route guard, so the scope
+  // has to travel with the connection.
+  const authz = (req as Request & { authz?: { vehicleIds: Set<string> | null; userId: string } }).authz
+  const vehicleIds = authz?.vehicleIds ?? null
 
   res.setHeader('Content-Type',  'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache, no-transform')
@@ -114,17 +121,17 @@ export async function dashboardStream(req: Request, res: Response) {
 
   // Replay the fleet's last-known positions so this client is in sync with
   // every other open browser immediately, not after the next poll tick.
-  const replayed = replayDashboardPositions(orgId, res)
+  const replayed = replayDashboardPositions(orgId, res, vehicleIds)
   // …and this org's recent activity, so the Live Feed panel has history. Async
   // because it reads the durable store (Redis, then Postgres) rather than an
   // in-memory buffer — see replayDashboardFeed. Awaited before the client is
   // registered so the replay cannot interleave with a live item arriving
   // mid-read, which would land an older event above a newer one.
-  const feedReplayed = await replayDashboardFeed(orgId, res)
+  const feedReplayed = await replayDashboardFeed(orgId, res, 40, vehicleIds)
     .catch((err) => { logger.warn({ err, orgId }, 'Feed replay failed — panel starts empty and fills from live events'); return 0 })
   logger.debug({ orgId, replayed, feedReplayed }, 'Dashboard SSE client connected')
 
-  const cleanup   = registerDashboardClient(orgId, res)
+  const cleanup   = registerDashboardClient(orgId, res, { vehicleIds, userId: authz?.userId })
   const heartbeat = setInterval(() => {
     try { emitDashboardHeartbeat(orgId) } catch { /* ignore */ }
   }, HEARTBEAT_MS)

@@ -50,6 +50,8 @@ export function makeUser(overrides: Partial<User> = {}): User {
     driverType: null,
     status: 'ACTIVE',
     passwordHash: null,
+    passwordChangedAt: null,
+    passwordChangeCount: 0,
     createdAt: now(),
     updatedAt: now(),
     deletedAt: null,
