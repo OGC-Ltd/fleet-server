@@ -26,9 +26,35 @@ const SELECT_USER = {
   },
 }
 
-export async function findAll(orgId: string, { page, limit, status }: ListUserQuery) {
+export async function findAll(orgId: string, { page, limit, status, access }: ListUserQuery) {
   const skip = (page - 1) * limit
-  const where = { organisationId: orgId, deletedAt: null, ...(status ? { status } : {}) }
+
+  /**
+   * "Invited to access the system" — either they can sign in, or an invitation
+   * was issued for them.
+   *
+   * An EXPIRED or revoked invitation still counts. Somebody invited three
+   * weeks ago who never opened the link is exactly who an administrator needs
+   * to see, so they can resend it; filtering on a live token would hide the
+   * one case the roster exists to surface.
+   *
+   * Accounts synced from the driver registry match neither arm — no password
+   * was ever set and no invitation was ever sent — which is what drops 549 of
+   * 553 rows without naming the registry or relying on externalId.
+   */
+  const invited = {
+    OR: [
+      { passwordHash: { not: null } },
+      { passwordTokens: { some: { purpose: 'INVITE' as const } } },
+    ],
+  }
+
+  const where = {
+    organisationId: orgId,
+    deletedAt: null,
+    ...(status ? { status } : {}),
+    ...(access === 'system' ? invited : {}),
+  }
   const [data, total] = await prisma.$transaction([
     prisma.user.findMany({ where, skip, take: limit, select: SELECT_USER, orderBy: { createdAt: 'desc' } }),
     prisma.user.count({ where }),
