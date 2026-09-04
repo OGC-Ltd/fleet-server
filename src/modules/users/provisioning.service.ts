@@ -54,6 +54,7 @@ async function applyMembership(
   userId: string,
   input: MembershipInput,
   grantedById?: string,
+  allowPlatformRoles = false,
 ): Promise<void> {
   const org = await prisma.organisation.findUnique({
     where: { id: input.organisationId }, select: { id: true },
@@ -114,8 +115,17 @@ async function applyMembership(
 
   // A platform role reaches every tenant, so granting one is not an
   // organisation-level act and an org admin must not be able to do it.
+  //
+  // An EXPLICIT capability, not inferred from restrictToOrgId. It was inferred
+  // once, and the inference broke the moment the org route learned to grant
+  // several organisations at once: that path has to drop restrictToOrgId (it
+  // is granting more than one org, each checked separately), which silently
+  // re-permitted platform roles on a route that must never allow them.
+  //
+  // "Which organisations may I touch" and "may I hand out a platform role" are
+  // two different questions and are now two different arguments.
   const platformRoles = roles.filter((r) => r.organisationId === null)
-  if (platformRoles.length && grantedById !== undefined) {
+  if (platformRoles.length && !allowPlatformRoles) {
     // Left to the dedicated platform path, which checks `platform:admin`.
     throw new ValidationError({
       memberships: [`${platformRoles.map((r) => r.slug).join(', ')} are platform roles and cannot be granted through an organisation`],
@@ -169,7 +179,7 @@ async function applyMembership(
  */
 export async function provisionUser(
   dto: ProvisionUserDto,
-  opts: { restrictToOrgId?: string; grantedById?: string } = {},
+  opts: { restrictToOrgId?: string; grantedById?: string; allowPlatformRoles?: boolean } = {},
 ) {
   if (dto.memberships.length === 0) {
     throw new ValidationError({
@@ -188,8 +198,20 @@ export async function provisionUser(
   }
 
   let userId: string
+  // Whether this call CREATED the account, and whether it could already sign
+  // in. The invite path needs both: inviting somebody whose account already
+  // has a password is an account-takeover vector via a guessed email address,
+  // and "created" is the difference between "we made an account" and "we added
+  // an existing person to your organisation" — two different things to tell an
+  // admin.
+  const created = !existing
+  let hadPassword = false
   if (existing) {
     userId = existing.id
+    const before = await prisma.user.findUnique({
+      where: { id: userId }, select: { passwordHash: true },
+    })
+    hadPassword = Boolean(before?.passwordHash)
     if (dto.password) {
       await prisma.user.update({
         where: { id: userId },
@@ -217,27 +239,28 @@ export async function provisionUser(
   }
 
   for (const m of dto.memberships) {
-    await applyMembership(userId, m, opts.grantedById)
+    await applyMembership(userId, m, opts.grantedById, opts.allowPlatformRoles ?? false)
   }
 
   // The resolver caches for five minutes. Without this a fresh grant looks like
   // it did not take, and the natural response is to grant it again.
   await invalidateSubject(userId)
 
-  return prisma.user.findUnique({ where: { id: userId }, select: USER_VIEW })
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: USER_VIEW })
+  return { user, created, hadPassword }
 }
 
 /** Set one organisation's membership and roles for an existing user. */
 export async function setMembership(
   userId: string,
   input: MembershipInput,
-  opts: { restrictToOrgId?: string; grantedById?: string } = {},
+  opts: { restrictToOrgId?: string; grantedById?: string; allowPlatformRoles?: boolean } = {},
 ) {
   assertAllowedOrg(input.organisationId, opts.restrictToOrgId)
   const user = await prisma.user.findFirst({ where: { id: userId, deletedAt: null }, select: { id: true } })
   if (!user) throw new NotFoundError('User')
 
-  await applyMembership(userId, input, opts.grantedById)
+  await applyMembership(userId, input, opts.grantedById, opts.allowPlatformRoles ?? false)
   await invalidateSubject(userId)
   return listMemberships(userId)
 }

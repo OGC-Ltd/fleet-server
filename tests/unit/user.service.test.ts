@@ -33,7 +33,7 @@ describe('user.service', () => {
     it('creates user in the correct org', async () => {
       const dto = { fullName: 'Alice', email: 'alice@x.com' }
       const user = makeUser(dto)
-      mockRepo.create.mockResolvedValue(user)
+      mockRepo.create.mockResolvedValue(user as never)
 
       const result = await service.createUser(ORG, dto)
       expect(mockRepo.create).toHaveBeenCalledWith(ORG, dto)
@@ -45,7 +45,7 @@ describe('user.service', () => {
     it('updates when user exists', async () => {
       const user = makeUser({ id: 'u1' })
       mockRepo.findById.mockResolvedValue(user as never)
-      mockRepo.update.mockResolvedValue({ ...user, fullName: 'Bob' })
+      mockRepo.update.mockResolvedValue({ ...user, fullName: 'Bob' } as never)
 
       const result = await service.updateUser(ORG, 'u1', { fullName: 'Bob' })
       expect(result.fullName).toBe('Bob')

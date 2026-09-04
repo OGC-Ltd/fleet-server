@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import crypto from 'node:crypto'
+import { mintToken, hashToken } from '../../lib/tokens.js'
 import { env } from '../../config/env.js'
 import { UnauthorizedError } from '../../core/errors/errors.js'
 import { prisma } from '../../lib/prisma.js'
@@ -52,10 +53,13 @@ type SafeUser = { id: string; organisationId: string; email: string | null; full
 
 export type SessionContext = { userAgent?: string | null; ip?: string | null }
 
-const sha256 = (raw: string): string => crypto.createHash('sha256').update(raw).digest('hex')
+// Lifted into lib/tokens.ts so the password-token service shares one
+// definition of how a secret is minted and hashed, rather than a second copy
+// that could drift.
+const sha256 = hashToken
 
 /** Opaque, unguessable, and URL-safe so it survives a cookie round trip intact. */
-const mintRefreshToken = (): string => crypto.randomBytes(32).toString('base64url')
+const mintRefreshToken = mintToken
 
 function signAccessToken(user: { id: string; email: string | null }, sid: string): string {
   // Accounts synced from the RaiFactorySuite driver registry carry no email
@@ -70,7 +74,7 @@ function signAccessToken(user: { id: string; email: string | null }, sid: string
 }
 
 /** Open a new session family, or extend an existing one by one rotation. */
-async function issueSession(
+export async function issueSession(
   user: { id: string; email: string | null },
   ctx: SessionContext,
   familyId?: string,

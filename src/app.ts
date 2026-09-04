@@ -12,6 +12,7 @@ import { resolveSubject, canReachOrg } from './lib/authz/subject.js'
 import { sendError, sendSuccess } from './core/response/response.js'
 
 import authRoutes from './modules/auth/auth.routes.js'
+import accountRoutes from './modules/account/account.routes.js'
 import orgRoutes from './modules/organisations/organisation.routes.js'
 import userRoutes from './modules/users/user.routes.js'
 import roleRoutes from './modules/roles/role.routes.js'
@@ -166,6 +167,10 @@ export function createApp() {
   })
 
   app.use(`${v1}/auth`, authRoutes)
+  // Self-service: change your own name or password, and the public
+  // forgot-password / set-password pair. NOT under /auth — see the note in
+  // account.routes.ts about the dashboard's refresh-and-replay.
+  app.use(`${v1}/account`, accountRoutes)
   app.use(`${v1}/organisations`, orgRoutes)
   app.get(`${v1}/permissions`, authenticate, validateQuery(listQuerySchema), roleCtrl.listPermissions)
 

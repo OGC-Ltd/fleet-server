@@ -1,8 +1,9 @@
 import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
-import { requirePermission } from '../../middleware/authorize.js'
+import { requirePermission, requirePermissionStrict } from '../../middleware/authorize.js'
+import { requireRealAuth } from '../../middleware/requireRealAuth.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
-import { createUserSchema, updateUserSchema, listUserQuerySchema, assignRoleSchema, orgProvisionUserSchema, setMembershipSchema } from './user.schema.js'
+import { createUserSchema, updateUserSchema, listUserQuerySchema, assignRoleSchema, orgProvisionUserSchema, setMembershipSchema, setUserStatusSchema, setUserRoleSchema } from './user.schema.js'
 import * as ctrl from './user.controller.js'
 
 // Mounted at /api/v1/organisations/:orgId/users
@@ -18,7 +19,16 @@ router.post('/', requirePermission('user:create'), validateBody(createUserSchema
 //
 // Creates a person AND grants them this organisation in one call, unlike
 // POST '/' above, which records someone (a synced driver, say) with no way in.
-router.post('/provision', requirePermission('user:create'), validateBody(orgProvisionUserSchema), ctrl.provisionInOrg)
+//
+// requirePermissionStrict, not requirePermission: this route did not exist
+// yesterday, so it has no legacy traffic for shadow mode to observe and no
+// mapping to discover. Shipping account creation in a mode that logs
+// "WOULD DENY" and then creates the user anyway would be shipping an open door
+// with a diary attached.
+router.post('/provision', requireRealAuth, requirePermissionStrict('user:create'), validateBody(orgProvisionUserSchema), ctrl.provisionInOrg)
+
+// Also before /:userId — a literal must beat the parameter that would swallow it.
+router.get('/assignable-roles', requirePermissionStrict('user:assign_role'), ctrl.listAssignableRoles)
 
 router.get('/:userId', requirePermission('user:read'), ctrl.getOne)
 
@@ -30,6 +40,11 @@ router.put('/:userId/memberships', requirePermission('user:assign_role'), valida
 router.delete('/:userId/memberships', requirePermission('user:assign_role'), ctrl.deleteMembership)
 router.patch('/:userId', requirePermission('user:update'), validateBody(updateUserSchema), ctrl.update)
 router.delete('/:userId', requirePermission('user:delete'), ctrl.remove)
+
+// ── Administration of an existing person, all strictly gated ────────────────
+router.post('/:userId/resend-invite', requireRealAuth, requirePermissionStrict('user:create'), ctrl.resendInvite)
+router.patch('/:userId/status', requireRealAuth, requirePermissionStrict('user:update'), validateBody(setUserStatusSchema), ctrl.setUserStatus)
+router.patch('/:userId/role', requireRealAuth, requirePermissionStrict('user:assign_role'), validateBody(setUserRoleSchema), ctrl.setUserRole)
 
 router.post('/:userId/roles', requirePermission('user:assign_role'), validateBody(assignRoleSchema), ctrl.assignRole)
 router.delete('/:userId/roles/:roleId', requirePermission('user:assign_role'), ctrl.revokeRole)

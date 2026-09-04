@@ -50,15 +50,53 @@ export const provisionUserSchema = z.object({
   memberships: z.array(membershipInputSchema).min(1),
 })
 
-/** The org-scoped form: the organisation is the path, so it is not in the body. */
+/**
+ * The org-scoped form: the organisation is the path, so it is not in the body.
+ *
+ * `password` is REMOVED here, and that is a security fix rather than tidying.
+ * provisionUser overwrites the password of an account that already exists with
+ * the given email — so an admin at org A who typed an address belonging to
+ * somebody at org B would take over that account. Org admins now invite
+ * instead: the person sets their own password through a link, and nobody else
+ * can set it for them. The platform-level POST /users keeps the field.
+ */
 export const orgProvisionUserSchema = provisionUserSchema
-  .omit({ memberships: true })
+  .omit({ memberships: true, password: true })
   .extend({
     roleSlugs:       z.array(z.string().min(1)).default([]),
     allVehicles:     z.boolean().default(true),
     vehicleIds:      z.array(z.string().cuid()).default([]),
     vehicleGroupIds: z.array(z.string().cuid()).default([]),
+    /** Email the new person a set-password link. Off only for a bulk import. */
+    sendInvite:      z.boolean().default(true),
+    /**
+     * Additional organisations, each with its OWN roles.
+     *
+     * Somebody can be a dispatcher at one site and an accountant at another,
+     * and forcing one role across every organisation would have made the
+     * roster lie about what they can do. The path organisation is always
+     * granted; these are on top of it.
+     *
+     * The caller is checked against EVERY organisation named here — holding
+     * user:create at the path org says nothing about the others. See
+     * assertCanGrantOrgs in the controller.
+     */
+    memberships: z.array(z.object({
+      organisationId: z.string().min(1),
+      roleSlugs:      z.array(z.string().min(1)).max(5).default([]),
+      allVehicles:    z.boolean().default(true),
+    })).max(20).default([]),
   })
+
+/** Flipping a person between ACTIVE and SUSPENDED, and nothing else. */
+export const setUserStatusSchema = z.object({
+  status: z.enum(['ACTIVE', 'SUSPENDED']),
+}).strict()
+
+/** Replacing a person's roles in THIS organisation. */
+export const setUserRoleSchema = z.object({
+  roleSlugs: z.array(z.string().min(1)).max(5),
+}).strict()
 
 export const setMembershipSchema = membershipInputSchema.omit({ organisationId: true })
 
@@ -70,3 +108,5 @@ export type MembershipInput = z.infer<typeof membershipInputSchema>
 export type ProvisionUserDto = z.infer<typeof provisionUserSchema>
 export type OrgProvisionUserDto = z.infer<typeof orgProvisionUserSchema>
 export type SetMembershipDto = z.infer<typeof setMembershipSchema>
+export type SetUserStatusDto = z.infer<typeof setUserStatusSchema>
+export type SetUserRoleDto = z.infer<typeof setUserRoleSchema>

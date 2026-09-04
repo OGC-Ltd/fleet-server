@@ -10,6 +10,8 @@ import { ACCESS_COOKIE } from '../modules/auth/auth.cookies.js'
 interface AccessTokenPayload {
   sub: string      // user id (users.id)
   email: string
+  /** auth_sessions.id this token was minted for — see auth.service.issueSession. */
+  sid?: string
   typ: 'access' | 'refresh'
   exp: number
 }
@@ -28,6 +30,24 @@ type AuthUser = NonNullable<Awaited<ReturnType<typeof lookupUserByEmail>>>
 const USER_CACHE_MS = 60_000
 const userCache = new Map<string, { user: AuthUser; fetchedAt: number }>()
 const BYPASS_KEY = 'auth-bypass' // no '@' — can never collide with an email key
+
+/**
+ * Drop a user from the identity cache.
+ *
+ * The cache is keyed by EMAIL and holds `fullName` among other things, so a
+ * user who renames themselves keeps seeing the old name from /auth/me for up
+ * to USER_CACHE_MS. Sixty seconds of a stale display name is not a security
+ * problem, but it looks like the save silently failed, which is worse than the
+ * wait.
+ *
+ * Note this clears the cache in THIS process only. Under pm2 cluster mode the
+ * other workers keep their copy until it ages out — which is why the account
+ * routes return the updated user in the response body rather than expecting
+ * the client to re-fetch it.
+ */
+export function forgetUser(email: string | null | undefined): void {
+  if (email) userCache.delete(email)
+}
 
 const readUserCache = (key: string): AuthUser | null => {
   const hit = userCache.get(key)
@@ -105,6 +125,10 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
     const payload = jwt.verify(token, env.JWT_SECRET) as AccessTokenPayload
     // A refresh token is NOT a credential for API calls
     if (payload.typ !== 'access') throw new UnauthorizedError('Invalid token')
+
+    // Carried through so the account page can mark the caller's own device in
+    // its session list. Nothing authorises on it.
+    req.authSessionId = payload.sid
 
     let user = readUserCache(payload.email)
     if (!user) {

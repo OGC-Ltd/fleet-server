@@ -289,6 +289,20 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
 export const PLATFORM_ROLE_SLUGS: string[] =
   ROLE_DEFINITIONS.filter((r) => r.platform).map((r) => r.slug)
 
+/**
+ * The roles an organisation admin may hand out.
+ *
+ * The complement of PLATFORM_ROLE_SLUGS. Used to narrow the role picker, so
+ * the UI never offers a choice the API will refuse — and to keep the ~40
+ * legacy seeded rows out of it, which are org-scoped but are not roles anybody
+ * should be assigning today.
+ *
+ * This is presentation, not enforcement: applyMembership refusing platform
+ * roles on an org-restricted call is what actually stops the grant.
+ */
+export const ORG_ROLE_SLUGS: string[] =
+  ROLE_DEFINITIONS.filter((r) => !r.platform).map((r) => r.slug)
+
 export const VEHICLE_SCOPABLE_ROLE_SLUGS: string[] =
   ROLE_DEFINITIONS.filter((r) => r.vehicleScopable).map((r) => r.slug)
 
