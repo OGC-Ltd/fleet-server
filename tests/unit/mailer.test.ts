@@ -2,24 +2,42 @@
  * The mailer's two invariants.
  *
  * Both are about what happens when mail does NOT work, because that is the
- * state this deployment runs in until a Mailtrap token is on the box, and
- * because the failure mode being guarded against is severe: sendMail is called
- * from inside API requests that have already committed their work, so a throw
- * here would turn a successful password change into a 500 and invite the user
- * to do it again.
+ * state this deployment runs in whenever a credential is missing, and because
+ * the failure being guarded against is severe: sendMail is called from inside
+ * API requests that have already committed their work, so a throw here would
+ * turn a successful password change into a 500 and invite the user to do it
+ * again.
  *
- *   1. Unconfigured is a silent, successful no-op — and does not touch fetch.
+ *   1. Unconfigured is a silent, successful no-op — and never opens a socket.
  *   2. A failing send is caught, whatever shape the failure takes.
+ *
+ * nodemailer is mocked rather than pointed at a real server: these tests are
+ * about the wrapper's contract, and a unit test that needs the network is a
+ * unit test that fails on a train.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { MailtrapClient } from '../../src/providers/mailtrap/mailtrap.client.js'
-import { sendMail } from '../../src/lib/mailer/mailer.js'
-import { inviteEmail, resetEmail, passwordChangedEmail } from '../../src/lib/mailer/templates.js'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+
+// Typed params, so asserting on mock.calls[0][0] type-checks instead of
+// indexing an empty tuple.
+type SentMail = Record<string, unknown>
+type TransportOpts = Record<string, unknown>
+const sendMailSpy = vi.hoisted(() =>
+  vi.fn(async (_m: SentMail) => ({ rejected: [] as string[], response: '250 OK' })))
+const createTransport = vi.hoisted(() =>
+  vi.fn((_o: TransportOpts) => ({ sendMail: sendMailSpy, close: () => {} })))
+vi.mock('nodemailer', () => ({
+  default: { createTransport },
+  createTransport,
+}))
 
 vi.mock('../../src/lib/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
+
+import { MailtrapClient } from '../../src/providers/mailtrap/mailtrap.client.js'
+import { sendMail } from '../../src/lib/mailer/mailer.js'
+import { inviteEmail, resetEmail, passwordChangedEmail } from '../../src/lib/mailer/templates.js'
 
 const MAIL = inviteEmail({
   fullName: 'Maya Okonkwo',
@@ -30,70 +48,89 @@ const MAIL = inviteEmail({
 })
 
 /** A fully-configured client whose transport is ours to control. */
-const configured = () => new MailtrapClient('tok', 'no-reply@demomailtrap.co', 'Rai', 'https://api.test/send', 'https://fleet.example')
+const configured = (port = 587) =>
+  new MailtrapClient('tok', 'no-reply@raioperations.com', 'Rai', 'live.smtp.mailtrap.io', port, 'api', 'https://fleet.example')
 
-beforeEach(() => { vi.restoreAllMocks() })
-afterEach(() => { vi.unstubAllGlobals() })
+beforeEach(() => {
+  vi.clearAllMocks()
+  sendMailSpy.mockResolvedValue({ rejected: [], response: '250 OK' })
+})
 
 describe('sendMail — dormant when unconfigured', () => {
-  it('reports unconfigured and never calls fetch when the token is missing', async () => {
-    const fetchSpy = vi.fn()
-    vi.stubGlobal('fetch', fetchSpy)
-    const client = new MailtrapClient('', 'no-reply@demomailtrap.co', 'Rai', 'https://api.test/send', 'https://fleet.example')
+  it('reports unconfigured and never builds a transport when the token is missing', async () => {
+    const client = new MailtrapClient('', 'no-reply@raioperations.com', 'Rai', 'live.smtp.mailtrap.io', 587, 'api', 'https://fleet.example')
 
     await expect(sendMail('a@b.test', 'A', MAIL, client)).resolves.toEqual({ sent: false, reason: 'unconfigured' })
-    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(createTransport).not.toHaveBeenCalled()
+    expect(sendMailSpy).not.toHaveBeenCalled()
   })
 
   it('treats a missing APP_BASE_URL as unconfigured — a mail with a broken link is worse than none', async () => {
-    const client = new MailtrapClient('tok', 'no-reply@demomailtrap.co', 'Rai', 'https://api.test/send', '')
+    const client = new MailtrapClient('tok', 'no-reply@raioperations.com', 'Rai', 'live.smtp.mailtrap.io', 587, 'api', '')
     expect(client.isConfigured).toBe(false)
     await expect(sendMail('a@b.test', 'A', MAIL, client)).resolves.toEqual({ sent: false, reason: 'unconfigured' })
+  })
+
+  it('treats a missing SMTP user as unconfigured', async () => {
+    const client = new MailtrapClient('tok', 'no-reply@raioperations.com', 'Rai', 'live.smtp.mailtrap.io', 587, '', 'https://fleet.example')
+    expect(client.isConfigured).toBe(false)
   })
 })
 
 describe('sendMail — a send failure never escapes', () => {
   it('resolves rather than rejecting when the transport throws', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('ECONNRESET')))
+    sendMailSpy.mockRejectedValueOnce(new Error('ECONNRESET'))
     await expect(sendMail('a@b.test', 'A', MAIL, configured())).resolves.toEqual({ sent: false, reason: 'send-failed' })
   })
 
-  it('resolves when Mailtrap rejects the sender (the unverified-domain 4xx)', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: false, status: 422, text: async () => '{"errors":["sender domain not verified"]}',
-    }))
+  it('resolves when the server refuses the sender (the unverified-domain case)', async () => {
+    sendMailSpy.mockRejectedValueOnce(Object.assign(new Error('550 sender not allowed'), { responseCode: 550 }))
     await expect(sendMail('a@b.test', 'A', MAIL, configured())).resolves.toEqual({ sent: false, reason: 'send-failed' })
   })
 
-  it('carries the response body into the error, so 422 is diagnosable', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: false, status: 422, text: async () => 'sender domain not verified',
-    }))
-    await expect(configured().send({ to: 'a@b.test', subject: 's', text: 't', html: '<p>t</p>' }))
-      .rejects.toThrow(/422.*sender domain not verified/)
+  it('treats a per-recipient rejection as a failure, not a success', async () => {
+    // SMTP can accept the message and refuse one address in the same exchange.
+    // Reporting that as sent would tell an admin an invitation is on its way
+    // when nothing was delivered.
+    sendMailSpy.mockResolvedValueOnce({ rejected: ['a@b.test'], response: '550 no such user' })
+    await expect(sendMail('a@b.test', 'A', MAIL, configured())).resolves.toEqual({ sent: false, reason: 'send-failed' })
   })
 })
 
 describe('sendMail — happy path', () => {
-  it('posts the shape Mailtrap expects', async () => {
-    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '' })
-    vi.stubGlobal('fetch', fetchSpy)
-
+  it('sends with the credentials and shape Mailtrap expects', async () => {
     await expect(sendMail('driver@example.test', 'Maya Okonkwo', MAIL, configured())).resolves.toEqual({ sent: true })
 
-    expect(fetchSpy).toHaveBeenCalledTimes(1)
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe('https://api.test/send')
-    expect((init.headers as Record<string, string>)['Api-Token']).toBe('tok')
+    const transport = createTransport.mock.calls[0]![0]
+    expect(transport).toMatchObject({
+      host: 'live.smtp.mailtrap.io',
+      port: 587,
+      // STARTTLS on 587, not implicit TLS — `secure: true` here would hang
+      // waiting for a handshake the server never starts.
+      secure: false,
+      requireTLS: true,
+      auth: { user: 'api', pass: 'tok' },
+    })
 
-    const body = JSON.parse(String(init.body))
-    expect(body.from).toEqual({ email: 'no-reply@demomailtrap.co', name: 'Rai' })
-    expect(body.to).toEqual([{ email: 'driver@example.test', name: 'Maya Okonkwo' }])
-    expect(body.subject).toBeTruthy()
+    const sent = sendMailSpy.mock.calls[0]![0]
+    expect(sent['from']).toEqual({ address: 'no-reply@raioperations.com', name: 'Rai' })
+    expect(sent['to']).toEqual({ address: 'driver@example.test', name: 'Maya Okonkwo' })
     // Both parts, always — some clients render only text.
-    expect(body.text).toContain('https://fleet.example/#setup=abc')
-    expect(body.html).toContain('https://fleet.example/#setup=abc')
-    expect(body.category).toBe('invite')
+    expect(String(sent['text'])).toContain('https://fleet.example/#setup=abc')
+    expect(String(sent['html'])).toContain('https://fleet.example/#setup=abc')
+  })
+
+  it('uses implicit TLS on 465', async () => {
+    await sendMail('a@b.test', 'A', MAIL, configured(465))
+    expect(createTransport.mock.calls[0]![0]).toMatchObject({ port: 465, secure: true, requireTLS: false })
+  })
+
+  it('reuses one transport across sends rather than reconnecting per message', async () => {
+    const client = configured()
+    await sendMail('a@b.test', 'A', MAIL, client)
+    await sendMail('c@d.test', 'C', MAIL, client)
+    expect(createTransport).toHaveBeenCalledTimes(1)
+    expect(sendMailSpy).toHaveBeenCalledTimes(2)
   })
 })
 

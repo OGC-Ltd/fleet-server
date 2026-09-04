@@ -115,8 +115,17 @@ const schema = z.object({
   // BOTH if you want to exercise mail locally — or run with
   // DOTENV_CONFIG_PATH=.env. The real token never belongs in .env.example,
   // which is committed.
+  // SMTP rather than the HTTP send API: the HTTP route needs the sending
+  // domain verified, and SMTP works against the demo domain today. The token
+  // is the SMTP PASSWORD — Mailtrap uses one credential for both.
   MAILTRAP_API_TOKEN: z.string().optional().default(''),
-  MAILTRAP_API_URL:   z.string().optional().default('https://send.api.mailtrap.io/api/send'),
+  MAILTRAP_SMTP_HOST: z.string().optional().default('live.smtp.mailtrap.io'),
+  // 587 (STARTTLS) is Mailtrap's recommendation. 465 is implicit TLS and the
+  // client switches mode on that number alone, so changing it is enough.
+  MAILTRAP_SMTP_PORT: z.coerce.number().int().positive().optional().default(587),
+  // `api`, verified against live.smtp.mailtrap.io. The docs also circulate
+  // `apismtp@mailtrap.io`, which this account rejects with 535.
+  MAILTRAP_SMTP_USER: z.string().optional().default('api'),
   MAIL_FROM_EMAIL:    z.string().optional().default(''),
   MAIL_FROM_NAME:     z.string().optional().default('Rai Group Fleet'),
   /** Dashboard origin, used to build the links in invite and reset mails. */
