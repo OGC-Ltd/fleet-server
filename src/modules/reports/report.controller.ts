@@ -69,7 +69,7 @@ export const downloadPdfReport: RequestHandler = async (req, res, next) => {
     }
     // Trailing window; clamped to the same 366-day ceiling the history API uses.
     const days = Math.min(366, Math.max(1, Number(req.query.days) || 30))
-    const { buffer, filename } = await generateReportPdf(p(req, 'orgId'), kind, days)
+    const { buffer, filename } = await generateReportPdf(p(req, 'orgId'), kind, days, req.authz?.vehicleIds ?? null)
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
     res.setHeader('Content-Length', String(buffer.length))

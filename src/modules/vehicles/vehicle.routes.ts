@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
+import { requirePermission, requireVehicleInScope } from '../../middleware/authorize.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
 import { createGroupSchema, updateGroupSchema, createVehicleSchema, updateVehicleSchema, createAssignmentSchema, listQuerySchema } from './vehicle.schema.js'
 import * as ctrl from './vehicle.controller.js'
@@ -9,24 +10,24 @@ const router = Router({ mergeParams: true })
 router.use(authenticate, requireOrgAccess)
 
 // Vehicle groups
-router.get('/vehicle-groups', ctrl.listGroups)
-router.post('/vehicle-groups', validateBody(createGroupSchema), ctrl.createGroup)
-router.patch('/vehicle-groups/:groupId', validateBody(updateGroupSchema), ctrl.updateGroup)
+router.get('/vehicle-groups', requirePermission('vehicle:read'), ctrl.listGroups)
+router.post('/vehicle-groups', requirePermission('vehicle:create'), validateBody(createGroupSchema), ctrl.createGroup)
+router.patch('/vehicle-groups/:groupId', requirePermission('vehicle:update'), validateBody(updateGroupSchema), ctrl.updateGroup)
 
 // Vehicles
-router.get('/vehicles', validateQuery(listQuerySchema), ctrl.list)
-router.post('/vehicles', validateBody(createVehicleSchema), ctrl.create)
-router.get('/vehicles/:vehicleId', ctrl.getOne)
+router.get('/vehicles', requirePermission('vehicle:read'), validateQuery(listQuerySchema), ctrl.list)
+router.post('/vehicles', requirePermission('vehicle:create'), validateBody(createVehicleSchema), ctrl.create)
+router.get('/vehicles/:vehicleId', requirePermission('vehicle:read'), requireVehicleInScope, ctrl.getOne)
 // Operator brief — 2-3 sentences on what this unit has done today. Generated
 // on demand (see vehicle-brief) rather than warmed, because a 597-vehicle
 // fleet cannot have every unit's narrative regenerated on a timer.
-router.get('/vehicles/:vehicleId/brief', ctrl.getBrief)
-router.patch('/vehicles/:vehicleId', validateBody(updateVehicleSchema), ctrl.update)
-router.delete('/vehicles/:vehicleId', ctrl.remove)
+router.get('/vehicles/:vehicleId/brief', requirePermission('vehicle:read'), requireVehicleInScope, ctrl.getBrief)
+router.patch('/vehicles/:vehicleId', requirePermission('vehicle:update'), requireVehicleInScope, validateBody(updateVehicleSchema), ctrl.update)
+router.delete('/vehicles/:vehicleId', requirePermission('vehicle:delete'), requireVehicleInScope, ctrl.remove)
 
 // Assignments
-router.get('/vehicles/:vehicleId/assignments', ctrl.listAssignments)
-router.post('/vehicles/:vehicleId/assignments', validateBody(createAssignmentSchema), ctrl.createAssignment)
-router.delete('/vehicles/:vehicleId/assignments/:assignmentId', ctrl.endAssignment)
+router.get('/vehicles/:vehicleId/assignments', requirePermission('assignment:read'), requireVehicleInScope, ctrl.listAssignments)
+router.post('/vehicles/:vehicleId/assignments', requirePermission('assignment:create'), requireVehicleInScope, validateBody(createAssignmentSchema), ctrl.createAssignment)
+router.delete('/vehicles/:vehicleId/assignments/:assignmentId', requirePermission('assignment:delete'), requireVehicleInScope, ctrl.endAssignment)
 
 export default router

@@ -83,7 +83,7 @@ export interface DashboardPositionPayload {
 }
 
 export function startTelemetryWorker(): () => void {
-  const unsub = eventBus.subscribe('telemetry:processed', ({ frame, orgId, vehicleId, vehicleName, plate, tankCapacityMl, driverName }) => {
+  const unsub = eventBus.subscribe('telemetry:processed', ({ frame, orgId, vehicleId, vehicleName, plate, tankCapacityMl, driverName, vehicleType }) => {
     try {
       const fuelLevelPct = (frame.fuelLevelMl != null && tankCapacityMl)
         ? Math.round((frame.fuelLevelMl / tankCapacityMl) * 100)
@@ -203,6 +203,7 @@ export function startTelemetryWorker(): () => void {
         speedKmh:      payload.speedKmh,
         cargoWeightKg: payload.cargoWeightKg,
         cargoDesc:     payload.cargoDesc,
+        vehicleType:   vehicleType ?? null,
         phase:         payload.phase ?? null,
         leg:           payload.leg ?? null,
         flags:         payload.flags,

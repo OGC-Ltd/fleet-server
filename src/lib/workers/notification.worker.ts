@@ -21,7 +21,7 @@
  */
 
 import { eventBus }           from '../event-bus.js'
-import type { ProviderAlertEvent, FleetAlert } from '../event-bus.js'
+import type { ProviderAlertEvent, AlertType } from '../event-bus.js'
 import { logger }             from '../logger.js'
 import { emitDashboardAlert } from '../sse.js'
 import { publishNotification } from '../notifications/notification.store.js'
@@ -51,20 +51,35 @@ function shouldPush(key: string): boolean {
 }
 
 /**
- * The feed sentence for a derived alert.
+ * Derived alerts that are real, recorded, and NOT worth a feed line.
  *
- * Overspeeding carries its FIGURE. "Overspeeding detected" is the label of a
- * category; "Overspeeding detected — 104 km/h" is the thing that happened, and
- * it is the difference between an operator having to open a screen and being
- * able to triage from the feed. Every other type's label already says all we
- * measured.
+ * Both stay in `vehicle_alerts` and on the `alert` SSE channel — the counts,
+ * the history and anything watching that channel are unchanged. What stops is
+ * the narration: on this fleet lowFuel and engineIdling fire often enough to
+ * crowd out the events an operator is actually scanning for, and neither
+ * describes something needing a decision in the moment.
  */
-function speedText(a: FleetAlert, label: string): string {
-  if (a.type === 'overspeeding' && Number.isFinite(a.speedKmh)) {
-    return `${label} — ${Math.round(a.speedKmh as number)} km/h`
-  }
-  return label
-}
+const FEED_SUPPRESSED: ReadonlySet<AlertType> = new Set<AlertType>([
+  'lowFuel',
+  'engineIdling',
+  // OVERSPEEDING IS WRITTEN ELSEWHERE. lib/feed-events already publishes a
+  // feed line for it, off the same rising edge, and has done since before this
+  // worker learned to. Both wrote a row for one incident with different ids —
+  // `feed-<ts>-<vehicle>-0` and `alert-overspeeding-<vehicle>-<ts>` — so the
+  // dashboard's dedupe, which keys on id, could not collapse them. Measured on
+  // 2026-09-03: of 379 overspeeding moments in 48 hours, 206 carried exactly
+  // two rows.
+  //
+  // feed-events is the one that survives, because it is the one that names the
+  // driver, the destination and the limit. Removing it instead would have meant
+  // reimplementing all three here.
+  //
+  // The `alert` SSE channel and Web Push are UNAFFECTED: emitDashboardAlert
+  // runs above this check, and push is critical-only while overspeeding is a
+  // warning. `vehicle_alerts` is written by alerts.worker off 'alerts:sync',
+  // which never passed through here at all. Only the duplicate feed row stops.
+  'overspeeding',
+])
 
 function handleProviderAlert(a: ProviderAlertEvent): void {
   // 1. Live feed + durable history + hot cache, in one call.
@@ -144,7 +159,12 @@ export function startNotificationWorker(): () => void {
       }
 
       // 1. The `alert` SSE channel, for anything listening on it.
+      //    Deliberately BEFORE the feed suppression below: a suppressed alert
+      //    is still an alert, and anything subscribed to this channel should
+      //    keep seeing it. Only the feed line is withheld.
       emitDashboardAlert(alert.orgId, payload)
+
+      if (FEED_SUPPRESSED.has(alert.type)) return
 
       // 2. The LIVE FEED, its durable history and the Redis cache.
       //
@@ -169,7 +189,7 @@ export function startNotificationWorker(): () => void {
         source:    'telemetry',
         alertType: alert.type,
         severity:  ALERT_SEVERITY[alert.type] === 'CRITICAL' ? 'critical' : 'warning',
-        text:      speedText(alert, label),
+        text:      label,
         at:        alert.capturedAt,
         plate:     alert.plate,
         vehicleId: alert.vehicleId,

@@ -31,8 +31,11 @@
     "seed": "tsx prisma/seed.ts",
     "seed:aquamist": "tsx prisma/seed-aquamist.ts",
     "seed:orgs": "tsx prisma/seed-orgs.ts",
+    "rename:orgs": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/rename-orgs.ts",
     "seed:kasulu": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/seed-kasulu.ts",
     "seed:admins": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/seed-admins.ts",
+    "seed:rbac": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/seed-rbac.ts",
+    "seed:superadmin": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/seed-superadmin.ts",
     "sync:vehicles": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-vehicles.ts",
     "sync:drivers": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-drivers.ts",
     "seed:org": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/seed-org.ts",
@@ -58,6 +61,7 @@
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",
+    "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
@@ -83,6 +87,7 @@
     "bcryptjs": "^3.0.3",
     "bullmq": "^5.81.2",
     "compression": "^1.8.1",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
@@ -93,6 +98,7 @@
     "pdfkit": "^0.19.1",
     "pg": "^8.22.0",
     "pino": "^10.3.1",
+    "rate-limit-redis": "^6.0.1",
     "web-push": "^3.6.7",
     "zod": "^4.4.3"
   }

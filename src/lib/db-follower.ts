@@ -50,6 +50,7 @@ interface VehicleMeta {
    */
   tankCapacityL:  number | null
   driverName:     string | null
+  vehicleType:    string | null
 }
 
 let metaCache    = new Map<string, VehicleMeta>()   // vehicleId → meta
@@ -65,6 +66,7 @@ async function getMeta(): Promise<Map<string, VehicleMeta>> {
       name: true,
       registrationPlate: true,
       tankCapacityLitres: true,
+      vehicleType:        true,
       assignments: {
         where: { unassignedAt: null },
         select: { user: { select: { fullName: true } } },
@@ -79,6 +81,7 @@ async function getMeta(): Promise<Map<string, VehicleMeta>> {
     tankCapacityMl: (r.tankCapacityLitres ?? 200) * 1000,
     tankCapacityL:  r.tankCapacityLitres ?? null,
     driverName:     r.assignments[0]?.user.fullName ?? null,
+    vehicleType:    r.vehicleType ?? null,
   }]))
   metaLoadedAt = Date.now()
   return metaCache
@@ -212,6 +215,7 @@ async function runOneCycle(): Promise<void> {
         speedKmh:      payload.speedKmh,
         cargoWeightKg: payload.cargoWeightKg,
         cargoDesc:     payload.cargoDesc,
+        vehicleType:   m.vehicleType,
         phase:         payload.phase ?? null,
         leg:           payload.leg ?? null,
         flags,

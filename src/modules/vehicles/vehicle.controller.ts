@@ -31,7 +31,7 @@ export const updateGroup: RequestHandler = async (req, res, next) => {
 
 export const list: RequestHandler = async (req, res, next) => {
   try {
-    const { data, total } = await service.listVehicles(p(req, 'orgId'), req.query as unknown as ListQuery)
+    const { data, total } = await service.listVehicles(p(req, 'orgId'), req.query as unknown as ListQuery, req.authz?.vehicleIds ?? null)
     sendSuccess(res, data, 200, { total, page: Number(req.query['page']), limit: Number(req.query['limit']) })
   } catch (err) { next(err) }
 }

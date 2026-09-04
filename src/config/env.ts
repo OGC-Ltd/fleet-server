@@ -11,7 +11,32 @@ const schema = z.object({
   // HS256 signing secret for the app's own access/refresh JWTs (auth.service.ts)
   JWT_SECRET: z.string().min(32),
 
+  // Skips TOKEN verification only, never authorisation: a bypassed request is
+  // still resolved to a real user and still checked against that user's roles.
+  // Refuses to boot under NODE_ENV=production (see the guard below).
   AUTH_BYPASS: z.string().optional().default('false').transform(v => v === 'true'),
+
+  // WHICH user AUTH_BYPASS attaches. Without it the middleware took whatever
+  // `findFirst` returned - no orderBy, so an arbitrary row, and in practice a
+  // driver belonging to one organisation. That made local behaviour depend on
+  // physical row order.
+  AUTH_BYPASS_EMAIL: z.string().optional(),
+
+  // Staged rollout switch. FALSE = shadow mode: permission checks run and every
+  // denial is logged, but the request proceeds. It exists so a mis-mapped route
+  // is found by reading a log rather than by locking an operator out, and it
+  // MUST become true - the boot warning in app.ts says so on every start.
+  AUTHZ_ENFORCE: z.string().optional().default('false').transform(v => v === 'true'),
+
+  // `Secure` on the auth cookies. False only because the box serves plain HTTP
+  // today; every credential is sniffable on the wire until TLS terminates in
+  // front of it, at which point this becomes true.
+  COOKIE_SECURE: z.string().optional().default('false').transform(v => v === 'true'),
+
+  // Access-token lifetime. Short, because a revoked account keeps working until
+  // its current access token expires.
+  ACCESS_TTL_S: z.coerce.number().int().positive().optional().default(900),
+  REFRESH_TTL_S: z.coerce.number().int().positive().optional().default(60 * 60 * 24 * 30),
 
   // Set to 'false' to run this instance API-only (no telemetry poller / sim).
   // Use for a local dev server reading a DB that another deployment is already
@@ -77,9 +102,59 @@ const schema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL:   z.string().default('gpt-5-nano'),
 
+  // ── Transactional mail (Mailtrap) ────────────────────────────────────────
+  // Every one of these is optional with a default, so an unconfigured
+  // deployment BOOTS and simply does not send — the same treatment
+  // OPENAI_API_KEY and WIALON_TOKEN get. A mailer that refused to start would
+  // take the whole API down over a feature most requests never touch.
+  //
+  // APP_BASE_URL counts toward "configured" on purpose: every mail this system
+  // sends carries a link, and a mail with a broken link is worse than no mail.
+  //
+  // NOTE: `npm run dev` loads .env.example, not .env, so the token belongs in
+  // BOTH if you want to exercise mail locally — or run with
+  // DOTENV_CONFIG_PATH=.env. The real token never belongs in .env.example,
+  // which is committed.
+  MAILTRAP_API_TOKEN: z.string().optional().default(''),
+  MAILTRAP_API_URL:   z.string().optional().default('https://send.api.mailtrap.io/api/send'),
+  MAIL_FROM_EMAIL:    z.string().optional().default(''),
+  MAIL_FROM_NAME:     z.string().optional().default('Rai Group Fleet'),
+  /** Dashboard origin, used to build the links in invite and reset mails. */
+  APP_BASE_URL:       z.string().optional().default(''),
+
+  // How long an emailed link stays good. An invite is generous because it may
+  // wait for someone's Monday; a reset is short because it is a live
+  // credential for an account that already exists.
+  INVITE_TTL_S:         z.coerce.number().int().positive().optional().default(604_800), // 7 days
+  PASSWORD_RESET_TTL_S: z.coerce.number().int().positive().optional().default(3_600),   // 1 hour
+
+  /** Password-reset requests allowed per IP per 15 minutes. */
+  PASSWORD_RESET_RATE_LIMIT_MAX: z.coerce.number().int().positive().optional().default(5),
+
   CORS_ORIGIN: z.string().default('*'),
-  RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
+  // 100 requests per SECOND, per client IP.
+  //
+  // These two were 100 per 60_000 ms — 1.7 a second — which is less than one
+  // dashboard load costs: a single page fans out across the snapshot, the feed,
+  // the geofences, the summary and a dozen analytics endpoints, so a few views
+  // inside a minute spent the whole budget and the platform 429'd its own
+  // users. Per-client rather than per-nginx because app.ts trusts one proxy
+  // hop; see middleware/rateLimiter.
+  RATE_LIMIT_WINDOW_MS: z.coerce.number().default(1_000),
   RATE_LIMIT_MAX: z.coerce.number().default(100),
+
+  // Sign-in attempts per 15 minutes. NOT scaled with the global limit — this
+  // one is brute-force defence, not capacity, and is meant to be tight.
+  LOGIN_RATE_LIMIT_MAX: z.coerce.number().default(20),
+
+  // Token refreshes per 15 minutes. Separate from LOGIN because a refresh is
+  // not a credential guess: a browser refreshes on load and again on expiry, so
+  // several open tabs would otherwise spend the sign-in budget and report "too
+  // many attempts" to somebody who never typed a password.
+  REFRESH_RATE_LIMIT_MAX: z.coerce.number().default(120),
+
+  // Device telemetry per MINUTE — its window is fixed in rateLimiter rather
+  // than shared, so the global knob above cannot redefine this one's meaning.
   INGEST_RATE_LIMIT_MAX: z.coerce.number().default(500),
 
   // OpenWeather — powers the route weather card (server-side proxy; key never ships to the client)
@@ -254,6 +329,22 @@ const isLocalDbUrl = (url: string) => /@(localhost|127\.0\.0\.1)[:/]/.test(url)
 
 const guarded = schema.superRefine((cfg, ctx) => {
   if (cfg.NODE_ENV !== 'production') return
+  // AUTH_BYPASS attaches a user with no token at all, so in production it is an
+  // open door rather than a convenience.
+  //
+  // This is FATAL only once AUTHZ_ENFORCE is on, because the two together are
+  // incoherent - enforcing permissions on a request that skipped authentication
+  // decides nothing. It is deliberately NOT fatal on its own: the live box runs
+  // AUTH_BYPASS=true today, and a deploy that refused to boot would take the
+  // fleet down to fix a door that has been open for months. app.ts warns about
+  // it on every start until it is closed.
+  if (cfg.AUTH_BYPASS && cfg.AUTHZ_ENFORCE) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['AUTH_BYPASS'],
+      message: 'cannot be true when AUTHZ_ENFORCE is true - authorising a request that skipped authentication is meaningless',
+    })
+  }
   for (const key of ['DATABASE_URL', 'DIRECT_URL'] as const) {
     if (isLocalDbUrl(cfg[key])) {
       ctx.addIssue({
