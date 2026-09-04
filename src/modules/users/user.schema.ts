@@ -17,6 +17,20 @@ export const listUserQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   status: z.enum(['ACTIVE', 'SUSPENDED', 'TERMINATED']).optional(),
+  /**
+   * Who counts as a "user".
+   *
+   * `all` is every person row, which for Sukari is 553 — of whom 549 are
+   * driver records synced from the RaiFactorySuite registry. They are people,
+   * and they belong in the driver screens, but they have never had a password
+   * and never will: nobody invited them to the dashboard. A roster whose job
+   * is "who can get in" listing 553 rows with one of them real is not a
+   * roster, it is a haystack.
+   *
+   * `system` narrows to people who were actually given access. Opt-in rather
+   * than the default, so the existing callers of this endpoint are unaffected.
+   */
+  access: z.enum(['all', 'system']).optional().default('all'),
 })
 
 export const assignRoleSchema = z.object({

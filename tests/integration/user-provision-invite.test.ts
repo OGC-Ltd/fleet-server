@@ -236,6 +236,33 @@ describe('granting more than one organisation', () => {
   })
 })
 
+describe('GET / — who counts as a user', () => {
+  it('narrows to people with access when access=system', async () => {
+    setTestSubject({ permissions: ['user:read'] })
+    prismaMock.$transaction.mockResolvedValue([[], 0] as never)
+
+    await request(app).get(`${BASE}?access=system`)
+
+    const where = (prismaMock.user.findMany.mock.calls[0]![0]! as { where: Record<string, unknown> }).where
+    // Either they can sign in, or an invitation was issued for them. A synced
+    // driver record matches neither, which is what drops 549 of 553 rows.
+    expect(where['OR']).toEqual([
+      { passwordHash: { not: null } },
+      { passwordTokens: { some: { purpose: 'INVITE' } } },
+    ])
+  })
+
+  it('lists everybody by default, so existing callers are unaffected', async () => {
+    setTestSubject({ permissions: ['user:read'] })
+    prismaMock.$transaction.mockResolvedValue([[], 0] as never)
+
+    await request(app).get(BASE)
+
+    const where = (prismaMock.user.findMany.mock.calls[0]![0]! as { where: Record<string, unknown> }).where
+    expect(where['OR']).toBeUndefined()
+  })
+})
+
 describe('GET /assignable-roles', () => {
   it('never offers a platform role', async () => {
     setTestSubject({ permissions: ['user:assign_role'] })
