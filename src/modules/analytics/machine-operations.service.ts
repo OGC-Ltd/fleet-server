@@ -736,7 +736,11 @@ async function computeFleetWeekSummary(
         // rather than a fleet total that swings with how many units reported.
         hours:      dayUnitDays > 0
           ? Math.round((Number(d.seconds) / 3600 / dayUnitDays) * 10) / 10 : 0,
-        distanceKm: Math.round(Number(d.metres) / 1000),
+        // One decimal, like `hours` above. Whole kilometres floored the entire
+        // series for plant: an excavator that works all day in one pit moves a
+        // few hundred metres, so every point rounded to 0 and the line drew
+        // flat along the axis under a headline that had figures in it.
+        distanceKm: Math.round(Number(d.metres) / 100) / 10,
         blocks:     blocksByDay.get(key) ?? 0,
       }
     })
@@ -749,7 +753,7 @@ async function computeFleetWeekSummary(
       day: todayKey,
       hours: liveUnitIds.length > 0
         ? Math.round((liveSeconds / 3600 / liveUnitIds.length) * 10) / 10 : 0,
-      distanceKm: Math.round(liveMetres / 1000),
+      distanceKm: Math.round(liveMetres / 100) / 10,
       blocks: blocksByDay.get(todayKey) ?? 0,
     })
     return rows

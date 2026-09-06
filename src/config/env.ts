@@ -236,6 +236,22 @@ const schema = z.object({
   // BullMQ's repeatable jobs already de-duplicate on a shared Redis, so this
   // is belt-and-braces for the case where instances point at different Redises.
   RETENTION_SWEEP_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+  /**
+   * The nightly rollups, separately from the sweep that deletes.
+   *
+   * They shared a flag until 2026-09-06, and the sharing was the bug: five of
+   * the six schedulers on the maintenance queue COMPUTE things
+   * (vehicle_daily_stats, fuel_daily_trends, burn rates, the probe and sensor
+   * reports) and exactly one deletes. Turning the sweep off on an instance —
+   * which is the right call for a box you do not want pruning shared data, and
+   * what af-south-1 was set to during the migration — silently stopped every
+   * rollup with it, and the analytics that read those tables went quietly
+   * empty.
+   *
+   * Defaults ON, like the flags it sits beside: an instance that says nothing
+   * should keep its own analytics current.
+   */
+  NIGHTLY_ROLLUPS_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
 
   // Fuel fillings and drains from Wialon's own reports onto the Live Feed.
   // Like the retention sweep this needs Redis and is inert without it; unlike

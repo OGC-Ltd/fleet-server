@@ -429,14 +429,36 @@ export interface RetentionHandle {
 export async function startRetentionSweep(): Promise<RetentionHandle> {
   const noop: RetentionHandle = { stop: async () => {} }
 
-  if (!env.RETENTION_SWEEP_ENABLED) {
-    logger.warn('RETENTION_SWEEP_ENABLED=false — notification retention sweep NOT started')
-    return noop
+  // Two independent decisions, and conflating them was a real outage of the
+  // quiet kind.
+  //
+  // Six schedulers live on this queue. Exactly ONE deletes anything (the prune
+  // below); the other five COMPUTE — vehicle_daily_stats, fuel_daily_trends,
+  // burn rates, and the probe and sensor reports. They were all gated by
+  // RETENTION_SWEEP_ENABLED, so turning the sweep off — which is the right
+  // call for an instance you do not want pruning shared data, and exactly what
+  // af-south-1 was set to during the migration — silently stopped every
+  // rollup with it.
+  //
+  // Nothing failed. The jobs simply never ran, `vehicle_daily_stats` stopped
+  // gaining days, and the three analytics that read it (the daily-activity
+  // heatmap, fuel per unit of work, and the distance series) went empty with
+  // no error anywhere to explain why. A flag named for deletion now gates only
+  // deletion.
+  const sweep   = env.RETENTION_SWEEP_ENABLED
+  const rollups = env.NIGHTLY_ROLLUPS_ENABLED
+
+  if (!sweep) {
+    logger.warn('RETENTION_SWEEP_ENABLED=false — the notification retention sweep is NOT scheduled')
   }
+  if (!rollups) {
+    logger.warn('NIGHTLY_ROLLUPS_ENABLED=false — daily stats, fuel trends, burn rates and the probe/sensor reports are NOT scheduled; the analytics that read those tables will stop gaining days')
+  }
+  if (!sweep && !rollups) return noop
 
   const connection = getQueueRedis()
   if (!connection) {
-    logger.warn('No REDIS_URL — notification retention sweep NOT started; notifications will accumulate indefinitely')
+    logger.warn('No REDIS_URL — maintenance jobs NOT started; notifications will accumulate and the nightly rollups will not run')
     return noop
   }
 
@@ -460,7 +482,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     await queue.removeRepeatableByKey(r.key)
   }
 
-  await queue.add(PRUNE_JOB, {}, {
+  if (sweep) await queue.add(PRUNE_JOB, {}, {
     // 03:17 UTC — off the hour, so it doesn't coincide with every other
     // cron on the box, and outside Kenyan working hours (UTC+3).
     repeat:            { pattern: '17 3 * * *' },
@@ -470,7 +492,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
-  await queue.add(PROBE_JOB, {}, {
+  if (rollups) await queue.add(PROBE_JOB, {}, {
     // 04:23 UTC — 07:23 in Nairobi, so the day's list of machines needing a
     // fitter is on the feed as the workshop opens rather than overnight where
     // it scrolls away before anyone reads it. Clear of the prune above, which
@@ -482,7 +504,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
-  await queue.add(SENSOR_JOB, {}, {
+  if (rollups) await queue.add(SENSOR_JOB, {}, {
     // 04:11 UTC — after the filling pass and BEFORE the probe sweep at 04:23,
     // so the day's fault list is built against configuration read the same
     // morning rather than yesterday's.
@@ -493,7 +515,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
-  await queue.add(TREND_JOB, {}, {
+  if (rollups) await queue.add(TREND_JOB, {}, {
     // 21:20 UTC = 00:20 EAT, i.e. twenty minutes into the NEXT fleet day, so
     // the day being recorded has actually finished. `recordFuelTrends` is given
     // a timestamp inside the day it should write, not "now".
@@ -504,7 +526,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
-  await queue.add(STATS_JOB, {}, {
+  if (rollups) await queue.add(STATS_JOB, {}, {
     // 21:40 UTC — twenty minutes after the trend job, which reads the same
     // fleet day. Sequential rather than concurrent: the worker runs one job at
     // a time anyway, and spacing them keeps two full-day scans off the same
@@ -516,7 +538,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
-  await queue.add(RATE_JOB, {}, {
+  if (rollups) await queue.add(RATE_JOB, {}, {
     // 02:40 UTC on SUNDAY. Weekly because a consumption rate moves over weeks,
     // and clear of every daily job above — this one sorts the whole
     // fuel-carrying telemetry window against a 1 GB RDS, so it must not land
@@ -569,9 +591,14 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
   worker.on('failed', (job, err) => logger.error({ err, jobId: job?.id }, 'Retention job failed'))
 
   logger.info({
-    queue: RETENTION_QUEUE, cron: '17 3 * * *',
-    probeCron: '23 4 * * *', trendCron: '20 21 * * *',
-    rateCron: '40 2 * * 0', statsCron: '40 21 * * *',
+    queue: RETENTION_QUEUE,
+    sweep, rollups,
+    cron:      sweep   ? '17 3 * * *'  : null,
+    probeCron: rollups ? '23 4 * * *'  : null,
+    sensorCron: rollups ? '11 4 * * *' : null,
+    trendCron: rollups ? '20 21 * * *' : null,
+    statsCron: rollups ? '40 21 * * *' : null,
+    rateCron:  rollups ? '40 2 * * 0'  : null,
     retentionDays: env.NOTIFICATION_RETENTION_DAYS,
   }, 'Maintenance jobs scheduled')
 
