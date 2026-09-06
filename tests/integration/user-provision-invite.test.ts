@@ -237,29 +237,60 @@ describe('granting more than one organisation', () => {
 })
 
 describe('GET / — who counts as a user', () => {
-  it('narrows to people with access when access=system', async () => {
+  const whereOf = () =>
+    (prismaMock.user.findMany.mock.calls[0]![0]! as { where: Record<string, unknown> }).where
+
+  it('narrows to invited people when access=system, and says so as AND of two clauses', async () => {
     setTestSubject({ permissions: ['user:read'] })
     prismaMock.$transaction.mockResolvedValue([[], 0] as never)
 
     await request(app).get(`${BASE}?access=system`)
 
-    const where = (prismaMock.user.findMany.mock.calls[0]![0]! as { where: Record<string, unknown> }).where
-    // Either they can sign in, or an invitation was issued for them. A synced
-    // driver record matches neither, which is what drops 549 of 553 rows.
-    expect(where['OR']).toEqual([
-      { passwordHash: { not: null } },
+    // Two independent narrowings that must BOTH hold, which is why they are an
+    // AND of two ORs rather than one flat OR: reachable-from-this-organisation
+    // and invited-to-the-system. Flattening them would list an invited person
+    // from another tenant.
+    const and = whereOf()['AND'] as Record<string, unknown>[]
+    expect(and).toHaveLength(2)
+    expect(and[0]!['OR']).toEqual([
+      { organisationId: TEST_ORG_ID },
+      { memberships: { some: { organisationId: TEST_ORG_ID, revokedAt: null } } },
+    ])
+    // An invitation counts however it ended — expired, consumed or revoked.
+    // Somebody invited three weeks ago who never opened the link is exactly
+    // who the roster exists to surface.
+    expect(and[1]!['OR']).toEqual([
       { passwordTokens: { some: { purpose: 'INVITE' } } },
+      { passwordHash: { not: null } },
     ])
   })
 
-  it('lists everybody by default, so existing callers are unaffected', async () => {
+  it('scopes by membership, not just the employer column, in every mode', async () => {
     setTestSubject({ permissions: ['user:read'] })
     prismaMock.$transaction.mockResolvedValue([[], 0] as never)
 
     await request(app).get(BASE)
 
-    const where = (prismaMock.user.findMany.mock.calls[0]![0]! as { where: Record<string, unknown> }).where
-    expect(where['OR']).toBeUndefined()
+    // The regression this guards: `users.organisation_id` records who EMPLOYS
+    // somebody and never changes. Scoping to it alone meant an administrator
+    // could grant a person from another site access to their organisation and
+    // then never see them in their own roster — so never take it back.
+    expect(whereOf()['OR']).toEqual([
+      { organisationId: TEST_ORG_ID },
+      { memberships: { some: { organisationId: TEST_ORG_ID, revokedAt: null } } },
+    ])
+  })
+
+  it('never filters suspended accounts out on its own', async () => {
+    setTestSubject({ permissions: ['user:read'] })
+    prismaMock.$transaction.mockResolvedValue([[], 0] as never)
+
+    await request(app).get(`${BASE}?access=system`)
+
+    // Status is a column to display, not a reason to omit a row: an admin who
+    // cannot see a suspended account cannot reinstate one.
+    expect(whereOf()['status']).toBeUndefined()
+    expect(whereOf()['deletedAt']).toBeNull()
   })
 })
 
@@ -281,24 +312,32 @@ describe('GET /assignable-roles', () => {
     expect(res.body.data.roles.map((r: { slug: string }) => r.slug)).not.toContain('super_admin')
   })
 
-  it('returns roles the table holds beyond the seeded catalogue', async () => {
+  it('offers the named catalogue, plus any role somebody actually holds', async () => {
     setTestSubject({ permissions: ['user:assign_role'] })
-    prismaMock.role.findMany.mockResolvedValue([
-      { id: 'r_legacy', slug: 'weighbridge_clerk', name: 'Weighbridge Clerk' },
-      { id: 'r_disp', slug: 'dispatcher', name: 'Dispatcher' },
-    ] as never)
+    // Two queries now: the catalogue, and the roles in use. The mock answers
+    // both, so a legacy role nobody in the catalogue names still comes back.
+    prismaMock.role.findMany
+      .mockResolvedValueOnce([{ id: 'r_disp', slug: 'dispatcher', name: 'Dispatch Manager' }] as never)
+      .mockResolvedValueOnce([{ id: 'r_legacy', slug: 'weighbridge_clerk', name: 'Weighbridge Clerk' }] as never)
 
     const res = await request(app).get(`${BASE}/assignable-roles`)
 
-    // The database decides what exists, not a list in application code: a role
-    // an operator added by hand must be assignable.
     const slugs = res.body.data.roles.map((r: { slug: string }) => r.slug)
+    // A role somebody holds must be offered even though it is not on the
+    // operator's list. The edit form sends the COMPLETE set of roles a person
+    // should have and the server revokes the rest, so a held role missing from
+    // the picker would be stripped the moment anyone saved that row.
     expect(slugs).toContain('weighbridge_clerk')
-    // ...but the catalogue roles lead, because they are what admins look for.
+    // ...but the named catalogue leads, in the order it was named.
     expect(slugs[0]).toBe('dispatcher')
-    // And no slug filter is sent — the query asks only for this organisation.
-    const where = prismaMock.role.findMany.mock.calls[0]![0]!.where as Record<string, unknown>
-    expect(where['slug']).toBeUndefined()
+
+    // The catalogue query is the one that filters by slug; the in-use query
+    // filters by live grants instead, which is what lets it find the rest.
+    const first  = prismaMock.role.findMany.mock.calls[0]![0]!.where as Record<string, unknown>
+    const second = prismaMock.role.findMany.mock.calls[1]![0]!.where as Record<string, unknown>
+    expect(first['slug']).toEqual({ in: expect.arrayContaining(['hr', 'admin', 'super_admin', 'operator']) })
+    expect(second['slug']).toBeUndefined()
+    expect(second['userRoles']).toEqual({ some: { revokedAt: null, user: { deletedAt: null } } })
   })
 })
 

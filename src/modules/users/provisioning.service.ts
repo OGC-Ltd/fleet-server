@@ -25,6 +25,7 @@ import bcrypt from 'bcryptjs'
 import { prisma } from '../../lib/prisma.js'
 import { NotFoundError, ValidationError, ConflictError } from '../../core/errors/errors.js'
 import { invalidateSubject } from '../../lib/authz/subject.js'
+import { invalidateRosterForUser } from './roster.cache.js'
 import type { MembershipInput, ProvisionUserDto } from './user.schema.js'
 
 const BCRYPT_ROUNDS = 12
@@ -245,6 +246,11 @@ export async function provisionUser(
   // The resolver caches for five minutes. Without this a fresh grant looks like
   // it did not take, and the natural response is to grant it again.
   await invalidateSubject(userId)
+  // Same argument, one layer up: the admin who just created this person is
+  // about to look at the roster they are supposed to be in. The organisations
+  // named in the request are passed explicitly because a brand-new membership
+  // is not yet resolvable from the user row.
+  await invalidateRosterForUser(userId, ...dto.memberships.map((m) => m.organisationId))
 
   const user = await prisma.user.findUnique({ where: { id: userId }, select: USER_VIEW })
   return { user, created, hadPassword }
@@ -262,6 +268,7 @@ export async function setMembership(
 
   await applyMembership(userId, input, opts.grantedById, opts.allowPlatformRoles ?? false)
   await invalidateSubject(userId)
+  await invalidateRosterForUser(userId, input.organisationId)
   return listMemberships(userId)
 }
 
@@ -293,6 +300,10 @@ export async function revokeMembership(
   })
 
   await invalidateSubject(userId)
+  // The membership is already revoked, so this organisation no longer resolves
+  // from the user row — it has to be named, or the roster it just left keeps
+  // showing them.
+  await invalidateRosterForUser(userId, organisationId)
   return listMemberships(userId)
 }
 

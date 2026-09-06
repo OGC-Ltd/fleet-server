@@ -26,6 +26,7 @@ import { env } from '../../config/env.js'
 import {
   mintPasswordToken, findLiveToken, consumeToken, revokeLiveTokens, hasRecentToken,
 } from './tokens.service.js'
+import { invalidateRosterForUser } from '../users/roster.cache.js'
 
 /** Same cost as provisioning.service.ts — one number for the whole codebase. */
 const BCRYPT_ROUNDS = 12
@@ -115,6 +116,9 @@ export async function changeOwnPassword(
     passwordChangedEmail({ fullName: user.fullName, when: new Date(), ip: ctx.ip ?? undefined }),
   )
 
+  // The roster shows when a password last changed and how many times.
+  await invalidateRosterForUser(userId)
+
   return session
 }
 
@@ -173,6 +177,10 @@ export async function completeSetup(raw: string, password: string, ctx: SessionC
 
   const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS)
   await consumeToken(token.id, token.userId, passwordHash)
+  // The roster reads this as the difference between 'invited' and
+  // 'activated', so setting a password for the first time is a change an
+  // administrator is waiting to see.
+  await invalidateRosterForUser(token.userId)
 
   // Any OTHER pending link for this account is now stale.
   await revokeLiveTokens(token.userId, token.purpose, 'password set')
