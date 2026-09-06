@@ -35,9 +35,18 @@ router.get('/:userId', requirePermission('user:read'), ctrl.getOne)
 // Which organisations this person may reach, and how much of each fleet.
 // Scoped to the path organisation: an admin here cannot read or alter what the
 // same person holds anywhere else.
+//
+// The two writes are STRICT, unlike most of this file. They are what the
+// administration page's edit form calls to add an organisation, take one away,
+// or change the roles held in it — so under shadow mode a caller without
+// user:assign_role would have the change logged as "WOULD DENY" and then
+// applied. requireRealAuth for the same reason it guards the routes below: an
+// AUTH_BYPASS deployment must not hand out memberships to an unauthenticated
+// caller. The GET stays as it was; reading who has access is already gated by
+// user:read and org reach.
 router.get('/:userId/memberships', requirePermission('user:read'), ctrl.listUserMemberships)
-router.put('/:userId/memberships', requirePermission('user:assign_role'), validateBody(setMembershipSchema), ctrl.putMembership)
-router.delete('/:userId/memberships', requirePermission('user:assign_role'), ctrl.deleteMembership)
+router.put('/:userId/memberships', requireRealAuth, requirePermissionStrict('user:assign_role'), validateBody(setMembershipSchema), ctrl.putMembership)
+router.delete('/:userId/memberships', requireRealAuth, requirePermissionStrict('user:assign_role'), ctrl.deleteMembership)
 router.patch('/:userId', requirePermission('user:update'), validateBody(updateUserSchema), ctrl.update)
 router.delete('/:userId', requirePermission('user:delete'), ctrl.remove)
 

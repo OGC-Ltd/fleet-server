@@ -7,12 +7,13 @@ import { prisma } from '../../lib/prisma.js'
 import type { CreateUserDto, UpdateUserDto, ListUserQuery, AssignRoleDto,
               ProvisionUserDto, OrgProvisionUserDto, SetMembershipDto,
               SetUserStatusDto, SetUserRoleDto } from './user.schema.js'
-import { ORG_ROLE_SLUGS } from '../../lib/permissions.js'
+import { ASSIGNABLE_ROLE_SLUGS } from '../../lib/permissions.js'
 import { NotFoundError, BadRequestError, ForbiddenError } from '../../core/errors/errors.js'
 import { resolveSubject, can, canReachOrg } from '../../lib/authz/subject.js'
 import { forgetUser } from '../../middleware/auth.js'
 import * as authService from '../auth/auth.service.js'
 import { invalidateSubject } from '../../lib/authz/subject.js'
+import { invalidateRosterForUser } from './roster.cache.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -235,15 +236,47 @@ export const deleteMembership: RequestHandler = async (req, res, next) => {
 export const listAssignableRoles: RequestHandler = async (req, res, next) => {
   try {
     const orgId = p(req, 'orgId')
-    const roles = await prisma.role.findMany({
-      where:   { organisationId: orgId },
-      select:  { id: true, slug: true, name: true },
-      orderBy: { name: 'asc' },
-    })
+
+    /**
+     * What an administrator may hand out here.
+     *
+     * Two sources, unioned, and the second one matters more than it looks:
+     *
+     *   - the catalogue in lib/permissions, which is the list the operator
+     *     named, in the order they named it;
+     *   - any role somebody in this organisation ACTUALLY HOLDS, catalogue or
+     *     not.
+     *
+     * The second arm exists because the edit form sends the complete set of
+     * roles a person should have, and the server revokes whatever is missing
+     * from it. A role held by somebody but absent from the picker could not be
+     * re-sent, so opening their row and saving anything at all would silently
+     * strip it. Offering it keeps the form honest about what it is about to
+     * write.
+     *
+     * It also keeps the ~40 legacy seeded roles out of the picker while
+     * nobody holds them, which is the whole reason the catalogue is narrower
+     * than the roles table.
+     */
+    const [catalogue, inUse] = await Promise.all([
+      prisma.role.findMany({
+        where:  { organisationId: orgId, slug: { in: ASSIGNABLE_ROLE_SLUGS } },
+        select: { id: true, slug: true, name: true },
+      }),
+      prisma.role.findMany({
+        where: {
+          organisationId: orgId,
+          userRoles: { some: { revokedAt: null, user: { deletedAt: null } } },
+        },
+        select: { id: true, slug: true, name: true },
+      }),
+    ])
+
+    const roles = [...new Map([...catalogue, ...inUse].map((r) => [r.id, r])).values()]
 
     const rank = (slug: string) => {
-      const i = ORG_ROLE_SLUGS.indexOf(slug)
-      return i === -1 ? ORG_ROLE_SLUGS.length : i
+      const i = ASSIGNABLE_ROLE_SLUGS.indexOf(slug)
+      return i === -1 ? ASSIGNABLE_ROLE_SLUGS.length : i
     }
     roles.sort((a, b) => rank(a.slug) - rank(b.slug) || a.name.localeCompare(b.name))
 
@@ -280,6 +313,9 @@ export const resendInvite: RequestHandler = async (req, res, next) => {
       org?.name ?? 'your organisation',
       { createdById: req.user?.id ?? null, ip: req.ip ?? null },
     )
+    // The roster shows when an invitation was last sent and whether it is
+    // still live, so a resend changes what it should be displaying.
+    await invalidateRosterForUser(userId, orgId)
     sendSuccess(res, { invite }, 200)
   } catch (err) { next(err) }
 }
@@ -294,6 +330,7 @@ export const resendInvite: RequestHandler = async (req, res, next) => {
  */
 export const setUserStatus: RequestHandler = async (req, res, next) => {
   try {
+    const orgId  = p(req, 'orgId')
     const userId = p(req, 'userId')
     const { status } = req.body as SetUserStatusDto
 
@@ -319,6 +356,9 @@ export const setUserStatus: RequestHandler = async (req, res, next) => {
     }
     forgetUser(existing.email)
     await invalidateSubject(userId)
+    // Status is the column the roster leads with; an admin who suspends
+    // somebody and still sees ACTIVE will do it again.
+    await invalidateRosterForUser(userId, orgId)
 
     sendSuccess(res, { user }, 200)
   } catch (err) { next(err) }

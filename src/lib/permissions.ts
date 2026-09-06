@@ -175,7 +175,7 @@ export type RoleDefinition = {
 export const ROLE_DEFINITIONS: RoleDefinition[] = [
   // ── Platform ─────────────────────────────────────────────────────────────
   {
-    slug: 'super_admin', name: 'Super Administrator', platform: true, vehicleScopable: false,
+    slug: 'super_admin', name: 'Super Admin', platform: true, vehicleScopable: false,
     description: 'Every organisation. All data and all administration.',
     // The wildcard, deliberately alone: enumerating permissions here would mean
     // a permission added later is one the super admin silently lacks.
@@ -193,7 +193,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
 
   // ── Organisation administration ──────────────────────────────────────────
   {
-    slug: 'admin', name: 'Organisation Administrator', platform: false, vehicleScopable: false,
+    slug: 'admin', name: 'Admin', platform: false, vehicleScopable: false,
     description: 'Full access within this organisation, including its users.',
     permissions: [
       ...ORG_EVERYTHING,
@@ -214,6 +214,44 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     permissions: [...ORG_EVERYTHING],
   },
 
+  // ── Fleet operations ─────────────────────────────────────────────────────
+  {
+    slug: 'fleet_manager', name: 'Fleet Manager', platform: false, vehicleScopable: false,
+    description: 'The whole fleet: vehicles, trips, routes, dispatch and fuel. Not its people.',
+    // Manager minus the people: an organisation's fleet lead runs the units and
+    // the work, and has no business reading or editing the user list.
+    permissions: ORG_EVERYTHING.filter((pm) => !pm.startsWith('user:') && !pm.startsWith('role:')),
+  },
+
+  // ── Security ─────────────────────────────────────────────────────────────
+  // NOT SPECIFIED by the operator beyond the two names, so seeded from what
+  // the job needs to watch a fleet — tracking, replay, geofences and fuel
+  // theft — and expected to be corrected in the role editor. The assistant is
+  // the same watch with nothing that writes.
+  {
+    slug: 'head_of_security', name: 'Head of Security', platform: false, vehicleScopable: false,
+    description: 'Watching the fleet: live tracking, journey replay, geofences and fuel theft.',
+    permissions: [
+      ...TRACKING, ...MAP_TOOLS, 'map:playback',
+      'dashboard:read', 'trip:read', 'sensor:read',
+      'geofence:read', 'geofence:create', 'geofence:update',
+      'fuel_theft:read', 'fuel_theft:create', 'fuel_filling:read',
+      'driver:read',
+      'report:read', 'report:export', 'report:operations',
+    ],
+  },
+  {
+    slug: 'asst_head_of_security', name: 'Assistant Head of Security', platform: false, vehicleScopable: false,
+    description: 'The same watch, read-only — nothing here creates or amends a record.',
+    permissions: [
+      ...TRACKING, ...MAP_TOOLS, 'map:playback',
+      'dashboard:read', 'trip:read', 'sensor:read',
+      'geofence:read', 'fuel_theft:read', 'fuel_filling:read',
+      'driver:read',
+      'report:read', 'report:operations',
+    ],
+  },
+
   // ── Fleet-scoped operations ──────────────────────────────────────────────
   // These two see the units assigned to them, and one report: the four-section
   // operations summary. Denied analytics, drivers and maintenance on paper.
@@ -228,7 +266,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     ],
   },
   {
-    slug: 'dispatcher', name: 'Dispatcher', platform: false, vehicleScopable: true,
+    slug: 'dispatcher', name: 'Dispatch Manager', platform: false, vehicleScopable: true,
     description: 'The units assigned to them, and the operations report.',
     permissions: [
       ...TRACKING, ...MAP_TOOLS, 'map:playback',
@@ -265,7 +303,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
 
   // ── Back office ──────────────────────────────────────────────────────────
   {
-    slug: 'hr', name: 'Human Resources', platform: false, vehicleScopable: false,
+    slug: 'hr', name: 'Human Resources (HR)', platform: false, vehicleScopable: false,
     description: 'People: drivers, their records and their reports. No tracking.',
     permissions: [
       'dashboard:read',
@@ -275,7 +313,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     ],
   },
   {
-    slug: 'accountant', name: 'Accountant', platform: false, vehicleScopable: false,
+    slug: 'accountant', name: 'Finance Manager', platform: false, vehicleScopable: false,
     description: 'Money: fuel spend, refills and trip totals. No tracking.',
     permissions: [
       'dashboard:read', 'trip:read', 'vehicle:read',
@@ -302,6 +340,36 @@ export const PLATFORM_ROLE_SLUGS: string[] =
  */
 export const ORG_ROLE_SLUGS: string[] =
   ROLE_DEFINITIONS.filter((r) => !r.platform).map((r) => r.slug)
+
+/**
+ * The roles an administrator is offered, in the order they are offered.
+ *
+ * Named explicitly by the operator, so this is a list rather than a filter,
+ * and the order is theirs rather than alphabetical.
+ *
+ * It is deliberately NARROWER than ROLE_DEFINITIONS: `hos` and
+ * `logistics_manager` are still seeded and still work for the people who hold
+ * them, but they are not on the operator's list and are not offered for new
+ * grants. Nothing is deleted — revoking a role people hold is a decision for
+ * the role editor, not a side effect of renaming a picker.
+ *
+ * Presentation only. What actually stops a grant is applyMembership refusing
+ * platform roles on an organisation-scoped call.
+ */
+export const ASSIGNABLE_ROLE_SLUGS: string[] = [
+  'hr',
+  'admin',
+  'super_admin',
+  'fleet_manager',
+  'dispatcher',
+  'manager',
+  'director',
+  'accountant',
+  'head_of_security',
+  'asst_head_of_security',
+  'supervisor',
+  'operator',
+]
 
 export const VEHICLE_SCOPABLE_ROLE_SLUGS: string[] =
   ROLE_DEFINITIONS.filter((r) => r.vehicleScopable).map((r) => r.slug)
