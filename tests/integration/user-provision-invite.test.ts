@@ -41,16 +41,28 @@ vi.mock('../../src/middleware/authorize.ts', () => authorizeMock())
 // resolveSubject is called directly by assertCanGrantOrgs (not through the
 // authorize middleware, which is mocked above). Granting everything here means
 // the cross-org check passes and the test reaches the guard it is about.
+// A settable override, because two callers have to be told apart here and the
+// difference between them IS the security property: an organisation admin and
+// a System Administrator get different answers from the same route.
+const asPlatformAdmin = vi.hoisted(() => ({ on: false }))
+
 vi.mock('../../src/lib/authz/subject.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  resolveSubject: vi.fn(async () => ({
-    userId: 'usr_admin', isPlatform: false,
-    platformPermissions: new Set<string>(),
-    orgs: new Map([
-      [TEST_ORG_ID, { permissions: new Set(['user:create']), vehicleIds: null }],
-      ['org_two', { permissions: new Set(['user:create']), vehicleIds: null }],
-    ]),
-  })),
+  resolveSubject: vi.fn(async () =>
+    asPlatformAdmin.on
+      ? {
+          userId: 'usr_root', isPlatform: true,
+          platformPermissions: new Set(['platform:admin']),
+          orgs: new Map(),
+        }
+      : {
+          userId: 'usr_admin', isPlatform: false,
+          platformPermissions: new Set<string>(),
+          orgs: new Map([
+            [TEST_ORG_ID, { permissions: new Set(['user:create']), vehicleIds: null }],
+            ['org_two', { permissions: new Set(['user:create']), vehicleIds: null }],
+          ]),
+        }),
   invalidateSubject: vi.fn(async () => {}),
 }))
 
@@ -236,6 +248,45 @@ describe('granting more than one organisation', () => {
   })
 })
 
+describe('GET / — the organisations an administrator may see', () => {
+  // The requirement: an admin sees the people in the organisations they were
+  // added to. All of those, and only those.
+  const OTHER_ORG = 'org_somebody_elses'
+  const OTHER_BASE = `/api/v1/organisations/${OTHER_ORG}/users`
+
+  it('refuses an organisation the caller was not added to', async () => {
+    setTestSubject({ permissions: ['user:read'], orgs: [TEST_ORG_ID] })
+    prismaMock.$transaction.mockResolvedValue([[], 0] as never)
+
+    const res = await request(app).get(`${OTHER_BASE}?access=system`)
+
+    // 403, not an empty list. This only holds because the route is STRICT:
+    // requireOrgAccess runs in shadow mode while AUTHZ_ENFORCE is false, so it
+    // would log "WOULD DENY" and serve the other organisation's roster.
+    expect(res.status).toBe(403)
+    expect(prismaMock.user.findMany).not.toHaveBeenCalled()
+  })
+
+  it('serves every organisation the caller WAS added to', async () => {
+    // The other half, and the one a naive "lock it down" fix breaks: being
+    // added to two organisations means both, not just the home one.
+    setTestSubject({ permissions: ['user:read'], orgs: [TEST_ORG_ID, OTHER_ORG] })
+    prismaMock.$transaction.mockResolvedValue([[], 0] as never)
+
+    for (const base of [BASE, OTHER_BASE]) {
+      const res = await request(app).get(`${base}?access=system`)
+      expect(res.status).toBe(200)
+    }
+  })
+
+  it('refuses a caller who can reach the organisation but holds no user:read', async () => {
+    setTestSubject({ permissions: ['vehicle:read'], orgs: [TEST_ORG_ID] })
+
+    const res = await request(app).get(`${BASE}?access=system`)
+    expect(res.status).toBe(403)
+  })
+})
+
 describe('GET / — who counts as a user', () => {
   const whereOf = () =>
     (prismaMock.user.findMany.mock.calls[0]![0]! as { where: Record<string, unknown> }).where
@@ -295,21 +346,55 @@ describe('GET / — who counts as a user', () => {
 })
 
 describe('GET /assignable-roles', () => {
-  it('never offers a platform role', async () => {
+  it('never offers a platform role to an organisation administrator', async () => {
+    // The important half. However complete their power inside their own
+    // tenant, an org admin must not be able to appoint a System Administrator
+    // — and must not even be shown the option.
     setTestSubject({ permissions: ['user:assign_role'] })
     prismaMock.role.findMany.mockResolvedValue([
-      { id: 'r1', slug: 'dispatcher', name: 'Dispatcher' },
-      { id: 'r2', slug: 'admin', name: 'Organisation Administrator' },
+      { id: 'r1', slug: 'dispatcher', name: 'Dispatch Manager' },
+      { id: 'r2', slug: 'admin', name: 'Admin' },
     ] as never)
 
     const res = await request(app).get(`${BASE}/assignable-roles`)
 
     expect(res.status).toBe(200)
-    // The query is what guarantees it: a platform role has organisationId
-    // NULL and cannot match an equality filter on this org.
-    const where = prismaMock.role.findMany.mock.calls[0]![0]!.where as Record<string, unknown>
-    expect(where['organisationId']).toBe(TEST_ORG_ID)
     expect(res.body.data.roles.map((r: { slug: string }) => r.slug)).not.toContain('super_admin')
+    // Every query it ran was scoped to THIS organisation; none asked for the
+    // organisation-less rows where platform roles live.
+    for (const call of prismaMock.role.findMany.mock.calls) {
+      const where = call[0]!.where as Record<string, unknown>
+      expect(where['organisationId']).not.toBeNull()
+    }
+  })
+
+  it('offers platform roles to a caller who already holds platform:admin', async () => {
+    asPlatformAdmin.on = true
+    // A System Administrator appointing another. Without this the role is
+    // absent from every organisation's picker, because it belongs to none of
+    // them — which is exactly why it never appeared.
+    setTestSubject({ permissions: ['*'], orgs: '*' })
+    prismaMock.role.findMany
+      .mockResolvedValueOnce([{ id: 'r1', slug: 'dispatcher', name: 'Dispatch Manager' }] as never)
+      .mockResolvedValueOnce([] as never)
+      .mockResolvedValueOnce([{ id: 'r_super', slug: 'super_admin', name: 'System Administrator' }] as never)
+
+    const res = await request(app).get(`${BASE}/assignable-roles`)
+
+    expect(res.status).toBe(200)
+    const roles = res.body.data.roles as { slug: string; platform: boolean }[]
+    expect(roles.map((r) => r.slug)).toContain('super_admin')
+    // Flagged, so the picker can say what it is: a grant made inside one
+    // organisation that reaches all of them.
+    expect(roles.find((r) => r.slug === 'super_admin')?.platform).toBe(true)
+    expect(roles.find((r) => r.slug === 'dispatcher')?.platform).toBe(false)
+
+    const platformQuery = prismaMock.role.findMany.mock.calls
+      .map((c) => c[0]!.where as Record<string, unknown>)
+      .find((w) => w['organisationId'] === null)
+    expect(platformQuery).toBeDefined()
+
+    asPlatformAdmin.on = false
   })
 
   it('offers the named catalogue, plus any role somebody actually holds', async () => {
