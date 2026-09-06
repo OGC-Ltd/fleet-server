@@ -175,8 +175,8 @@ export type RoleDefinition = {
 export const ROLE_DEFINITIONS: RoleDefinition[] = [
   // ── Platform ─────────────────────────────────────────────────────────────
   {
-    slug: 'super_admin', name: 'Super Admin', platform: true, vehicleScopable: false,
-    description: 'Every organisation. All data and all administration.',
+    slug: 'super_admin', name: 'System Administrator', platform: true, vehicleScopable: false,
+    description: 'Every organisation. All data and all administration. The super admin.',
     // The wildcard, deliberately alone: enumerating permissions here would mean
     // a permission added later is one the super admin silently lacks.
     permissions: ['platform:admin'],
@@ -221,6 +221,30 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     // Manager minus the people: an organisation's fleet lead runs the units and
     // the work, and has no business reading or editing the user list.
     permissions: ORG_EVERYTHING.filter((pm) => !pm.startsWith('user:') && !pm.startsWith('role:')),
+  },
+
+  {
+    slug: 'fleet_analyst', name: 'Fleet Analyst', platform: false, vehicleScopable: false,
+    description: 'Reads the fleet and reports on it. Changes nothing.',
+    // Read and export, and not one verb that writes — the point of the role is
+    // to answer questions about the fleet, and an analyst who can amend a trip
+    // is an analyst whose figures nobody can trust.
+    //
+    // NOT vehicleScopable, deliberately, and for the reason spelled out on
+    // `supervisor`: the analytics endpoints compute ORG-WIDE aggregates that
+    // are not vehicle-scoped, so narrowing this role to a subset of the fleet
+    // would quietly hand its holder figures for every vehicle through a screen
+    // that looks like it is showing them their own.
+    permissions: [
+      ...TRACKING, ...MAP_TOOLS, 'map:playback',
+      'dashboard:read', 'trip:read', 'sensor:read',
+      'analytics:read', 'analytics:export',
+      'report:read', 'report:export', 'report:operations',
+      'driver:read', 'driver:export',
+      'fuel_filling:read', 'fuel_theft:read',
+      'weighbridge:read', 'weighbridge:export',
+      'geofence:read', 'route:read', 'dispatch:read',
+    ],
   },
 
   // ── Security ─────────────────────────────────────────────────────────────
@@ -361,6 +385,7 @@ export const ASSIGNABLE_ROLE_SLUGS: string[] = [
   'admin',
   'super_admin',
   'fleet_manager',
+  'fleet_analyst',
   'dispatcher',
   'manager',
   'director',
