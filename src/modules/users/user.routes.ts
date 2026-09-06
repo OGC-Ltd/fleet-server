@@ -11,8 +11,27 @@ const router = Router({ mergeParams: true })
 
 router.use(authenticate, requireOrgAccess)
 
-router.get('/', requirePermission('user:read'), validateQuery(listUserQuerySchema), ctrl.list)
-router.post('/', requirePermission('user:create'), validateBody(createUserSchema), ctrl.create)
+// ── Who may see and administer people ───────────────────────────────────────
+//
+// STRICT, all of them. An administrator sees the people in the organisations
+// they were added to — all of those, and only those — and `requireOrgAccess`
+// alone cannot deliver that half of it: it runs in shadow mode while
+// AUTHZ_ENFORCE is false, so it logs "WOULD DENY" and lets the request
+// through. An admin at one site could read and edit another site's roster by
+// changing the id in the URL.
+//
+// requirePermissionStrict performs canReachOrg AND the permission check
+// itself, and always throws. That is what makes the scope real rather than
+// observed. Reaching several organisations still works exactly as before —
+// each is checked on its own request, so an admin added to A and B passes for
+// both and for nothing else.
+//
+// The blast radius is contained: dash reaches these routes from one component
+// (the User Accounts panel via api/users.js), so no screen that works today
+// starts failing. What stops working is the thing that should never have
+// worked.
+router.get('/', requirePermissionStrict('user:read'), validateQuery(listUserQuerySchema), ctrl.list)
+router.post('/', requireRealAuth, requirePermissionStrict('user:create'), validateBody(createUserSchema), ctrl.create)
 // BEFORE the /:userId routes — a literal path must be declared ahead of the
 // parameter that would otherwise swallow it, the same ordering constraint
 // app.ts documents for telemetry vs vehicles.
@@ -30,7 +49,7 @@ router.post('/provision', requireRealAuth, requirePermissionStrict('user:create'
 // Also before /:userId — a literal must beat the parameter that would swallow it.
 router.get('/assignable-roles', requirePermissionStrict('user:assign_role'), ctrl.listAssignableRoles)
 
-router.get('/:userId', requirePermission('user:read'), ctrl.getOne)
+router.get('/:userId', requirePermissionStrict('user:read'), ctrl.getOne)
 
 // Which organisations this person may reach, and how much of each fleet.
 // Scoped to the path organisation: an admin here cannot read or alter what the
@@ -44,19 +63,19 @@ router.get('/:userId', requirePermission('user:read'), ctrl.getOne)
 // AUTH_BYPASS deployment must not hand out memberships to an unauthenticated
 // caller. The GET stays as it was; reading who has access is already gated by
 // user:read and org reach.
-router.get('/:userId/memberships', requirePermission('user:read'), ctrl.listUserMemberships)
+router.get('/:userId/memberships', requirePermissionStrict('user:read'), ctrl.listUserMemberships)
 router.put('/:userId/memberships', requireRealAuth, requirePermissionStrict('user:assign_role'), validateBody(setMembershipSchema), ctrl.putMembership)
 router.delete('/:userId/memberships', requireRealAuth, requirePermissionStrict('user:assign_role'), ctrl.deleteMembership)
-router.patch('/:userId', requirePermission('user:update'), validateBody(updateUserSchema), ctrl.update)
-router.delete('/:userId', requirePermission('user:delete'), ctrl.remove)
+router.patch('/:userId', requireRealAuth, requirePermissionStrict('user:update'), validateBody(updateUserSchema), ctrl.update)
+router.delete('/:userId', requireRealAuth, requirePermissionStrict('user:delete'), ctrl.remove)
 
 // ── Administration of an existing person, all strictly gated ────────────────
 router.post('/:userId/resend-invite', requireRealAuth, requirePermissionStrict('user:create'), ctrl.resendInvite)
 router.patch('/:userId/status', requireRealAuth, requirePermissionStrict('user:update'), validateBody(setUserStatusSchema), ctrl.setUserStatus)
 router.patch('/:userId/role', requireRealAuth, requirePermissionStrict('user:assign_role'), validateBody(setUserRoleSchema), ctrl.setUserRole)
 
-router.post('/:userId/roles', requirePermission('user:assign_role'), validateBody(assignRoleSchema), ctrl.assignRole)
-router.delete('/:userId/roles/:roleId', requirePermission('user:assign_role'), ctrl.revokeRole)
+router.post('/:userId/roles', requireRealAuth, requirePermissionStrict('user:assign_role'), validateBody(assignRoleSchema), ctrl.assignRole)
+router.delete('/:userId/roles/:roleId', requireRealAuth, requirePermissionStrict('user:assign_role'), ctrl.revokeRole)
 
 
 export default router

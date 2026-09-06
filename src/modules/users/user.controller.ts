@@ -7,7 +7,7 @@ import { prisma } from '../../lib/prisma.js'
 import type { CreateUserDto, UpdateUserDto, ListUserQuery, AssignRoleDto,
               ProvisionUserDto, OrgProvisionUserDto, SetMembershipDto,
               SetUserStatusDto, SetUserRoleDto } from './user.schema.js'
-import { ASSIGNABLE_ROLE_SLUGS } from '../../lib/permissions.js'
+import { ASSIGNABLE_ROLE_SLUGS, WILDCARD } from '../../lib/permissions.js'
 import { NotFoundError, BadRequestError, ForbiddenError } from '../../core/errors/errors.js'
 import { resolveSubject, can, canReachOrg } from '../../lib/authz/subject.js'
 import { forgetUser } from '../../middleware/auth.js'
@@ -39,6 +39,25 @@ async function assertCanGrantOrgs(userId: string, orgIds: string[]): Promise<voi
   }
 }
 
+
+
+/**
+ * May this caller hand out a PLATFORM role?
+ *
+ * A platform role (organisation_id NULL) reaches every tenant, so granting one
+ * is not an organisation-level act. Only somebody who already holds
+ * `platform:admin` may do it — a System Administrator appointing another. An
+ * organisation administrator, however complete their power inside their own
+ * tenant, cannot, and is never even shown the option.
+ *
+ * Deliberately checks the permission rather than `subject.isPlatform`:
+ * `director` is also a platform role and must not be able to appoint a System
+ * Administrator.
+ */
+async function callerMayGrantPlatformRoles(userId: string | undefined, orgId: string): Promise<boolean> {
+  if (!userId) return false
+  return can(await resolveSubject(userId), orgId, WILDCARD)
+}
 
 export const list: RequestHandler = async (req, res, next) => {
   try {
@@ -146,6 +165,8 @@ export const provisionInOrg: RequestHandler = async (req, res, next) => {
     // administer would let them grant access to one they do not.
     if (extras.length) await assertCanGrantOrgs(req.user!.id, extras.map((m) => m.organisationId))
 
+    const allowPlatformRoles = await callerMayGrantPlatformRoles(req.user?.id, orgId)
+
     // No `password` — an org admin invites rather than setting a password for
     // somebody else. See orgProvisionUserSchema for why that field is gone.
     const { user, created, hadPassword } = await provisioning.provisionUser(
@@ -156,13 +177,16 @@ export const provisionInOrg: RequestHandler = async (req, res, next) => {
       // No restrictToOrgId when extra organisations are in play: the check
       // above has already established the caller may grant each of them, and
       // the single-org restriction would refuse them all.
-      // allowPlatformRoles is absent (false) on BOTH branches: this route may
-      // never hand out a platform role, and dropping restrictToOrgId for the
-      // multi-org case must not quietly change that. Each extra organisation
-      // is authorised separately by assertCanGrantOrgs above.
+      //
+      // allowPlatformRoles is an EXPLICIT capability, never inferred from
+      // restrictToOrgId — that inference was a real hole once, because the
+      // multi-org branch has to drop restrictToOrgId and silently re-permitted
+      // platform roles by doing so. It is true here only for a caller who
+      // already holds platform:admin, so a System Administrator can appoint
+      // another and an organisation administrator cannot.
       extras.length
-        ? { grantedById: req.user?.id }
-        : { restrictToOrgId: orgId, grantedById: req.user?.id },
+        ? { grantedById: req.user?.id, allowPlatformRoles }
+        : { restrictToOrgId: orgId, grantedById: req.user?.id, allowPlatformRoles },
     )
     const memberships = await provisioning.listMemberships(user!.id)
 
@@ -202,7 +226,13 @@ export const putMembership: RequestHandler = async (req, res, next) => {
     const result = await provisioning.setMembership(
       p(req, 'userId'),
       { organisationId: orgId, ...b },
-      { restrictToOrgId: orgId, grantedById: req.user?.id },
+      {
+        restrictToOrgId: orgId,
+        grantedById: req.user?.id,
+        // Same rule as provisioning: only a platform:admin may grant a role
+        // that reaches every organisation.
+        allowPlatformRoles: await callerMayGrantPlatformRoles(req.user?.id, orgId),
+      },
     )
     sendSuccess(res, result)
   } catch (err) { next(err) }
@@ -258,7 +288,15 @@ export const listAssignableRoles: RequestHandler = async (req, res, next) => {
      * nobody holds them, which is the whole reason the catalogue is narrower
      * than the roles table.
      */
-    const [catalogue, inUse] = await Promise.all([
+    // A platform role belongs to NO organisation, so it can never match the
+    // org-scoped queries below — which is why System Administrator was absent
+    // from every picker. It is offered here only to a caller who already holds
+    // platform:admin, and `platform: true` travels with it so the UI can say
+    // what it is: a grant that reaches every organisation, made from inside
+    // one of them.
+    const mayGrantPlatform = await callerMayGrantPlatformRoles(req.user?.id, orgId)
+
+    const [catalogue, inUse, platform] = await Promise.all([
       prisma.role.findMany({
         where:  { organisationId: orgId, slug: { in: ASSIGNABLE_ROLE_SLUGS } },
         select: { id: true, slug: true, name: true },
@@ -270,9 +308,17 @@ export const listAssignableRoles: RequestHandler = async (req, res, next) => {
         },
         select: { id: true, slug: true, name: true },
       }),
+      mayGrantPlatform
+        ? prisma.role.findMany({
+            where:  { organisationId: null, slug: { in: ASSIGNABLE_ROLE_SLUGS } },
+            select: { id: true, slug: true, name: true },
+          })
+        : Promise.resolve([]),
     ])
 
-    const roles = [...new Map([...catalogue, ...inUse].map((r) => [r.id, r])).values()]
+    const platformIds = new Set(platform.map((r) => r.id))
+    const roles = [...new Map([...catalogue, ...inUse, ...platform].map((r) => [r.id, r])).values()]
+      .map((r) => ({ ...r, platform: platformIds.has(r.id) }))
 
     const rank = (slug: string) => {
       const i = ASSIGNABLE_ROLE_SLUGS.indexOf(slug)
@@ -389,7 +435,11 @@ export const setUserRole: RequestHandler = async (req, res, next) => {
       // and passing a narrower scope here would silently widen or clear a
       // vehicle restriction set elsewhere. Vehicle scope has its own route.
       { organisationId: orgId, roleSlugs, allVehicles: true, vehicleIds: [], vehicleGroupIds: [] },
-      { restrictToOrgId: orgId, grantedById: req.user?.id },
+      {
+        restrictToOrgId: orgId,
+        grantedById: req.user?.id,
+        allowPlatformRoles: await callerMayGrantPlatformRoles(req.user?.id, orgId),
+      },
     )
     sendSuccess(res, { memberships }, 200)
   } catch (err) { next(err) }
