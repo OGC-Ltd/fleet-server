@@ -72,8 +72,14 @@ export async function sweepSensorFaults(orgId: string, now = new Date()): Promis
   // calling the builder would pay for it in full every single time while the
   // cache sat unused beside it. Ten minutes of staleness is nothing against
   // faults measured in hours.
-  const report = await getProbeReport(orgId)
-  const rows = (report as { rows?: unknown[] })?.rows ?? []
+  // `getProbeReport` resolves to the ROWS — `ProbeReportRow[]` — not to a
+  // report object wrapping them. This read them as `report.rows`, which on an
+  // array is `undefined`, so every sweep since the feature landed reconciled
+  // against an empty desired state: nothing to open, and nothing kept alive
+  // either. It logged `opened:0 closed:0 skipped:0` and looked like a quiet
+  // fleet. The `as` cast is what hid it — it asserted a shape the function
+  // never returns, so the compiler had nothing to object to.
+  const rows = await getProbeReport(orgId)
 
   const openEpisodes = await prisma.sensorFaultEpisode.findMany({
     where:  { organisationId: orgId, recoveredAt: null },

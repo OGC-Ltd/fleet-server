@@ -48,14 +48,20 @@ export async function speedingSummary(
 ): Promise<{ rows: SpeedingSummaryRow[]; hasNextPage: boolean }> {
   // Ordering is applied in SQL, not in JS: a page sorted client-side would be
   // fifty of six hundred units presented as "the worst offenders".
+  //
+  // EVERY key here must name an OUTPUT column of the SELECT below, and the
+  // camelCase ones must be quoted. ORDER BY resolves an output alias first and
+  // an input column second, which is what made this fail in two different ways
+  // in production: `last_at` matched neither and errored 42703, while
+  // `peak_kmh` skipped past the `"peakKmh"` alias, matched the raw column, and
+  // errored 42803 — it is not in the GROUP BY. That one took out the DEFAULT
+  // sort as well as "Most severe", so the Speed tab 500ed on open.
   const orderBy = {
-    count:    Prisma.sql`incidents DESC, peak_kmh DESC`,
-    peak:     Prisma.sql`peak_kmh DESC, incidents DESC`,
+    count:    Prisma.sql`incidents DESC, "peakKmh" DESC`,
+    peak:     Prisma.sql`"peakKmh" DESC, incidents DESC`,
     duration: Prisma.sql`total_seconds DESC, incidents DESC`,
-    // See the note on the fault summary's sort map: the alias is "lastAt", and
-    // unquoted `last_at` is not a column on speeding_incidents either.
     recent:   Prisma.sql`"lastAt" DESC`,
-  }[opts.sort] ?? Prisma.sql`incidents DESC, peak_kmh DESC`
+  }[opts.sort] ?? Prisma.sql`incidents DESC, "peakKmh" DESC`
 
   const rows = await prisma.$queryRaw<Array<SpeedingSummaryRow & { incidents: bigint; days: bigint; total_seconds: bigint; total_distance_m: bigint }>>(Prisma.sql`
     SELECT s.vehicle_id                                   AS "vehicleId",
@@ -284,9 +290,8 @@ export async function faultSummary(
     count:    Prisma.sql`episodes DESC, total_seconds DESC`,
     peak:     Prisma.sql`longest_seconds DESC`,
     duration: Prisma.sql`total_seconds DESC, episodes DESC`,
-    // Quoted, because the SELECT alias is "lastAt". Unquoted `last_at` folds to
-    // lowercase and matches neither that alias nor any column on the table, so
-    // "Most recent" answered 500 rather than sorting — on both ledgers.
+    // Quoted, because the SELECT alias is "lastAt" — see the speeding summary's
+    // sort map for the whole class of bug this belongs to.
     recent:   Prisma.sql`"lastAt" DESC`,
   }[opts.sort] ?? Prisma.sql`episodes DESC, total_seconds DESC`
 
