@@ -150,60 +150,116 @@ const lastMovingAt = new Map<string, number>()
  * is a different question, and it depends on assignment: a vehicle is only
  * accountable to the zones someone actually attached to it.
  */
-const assignmentCache = new Map<string, Set<string>>()
-let assignmentsLoadedAt = 0
+/**
+ * orgId → (vehicleId → the geofence ids bound to it).
+ *
+ * KEYED BY ORG, like zoneCache beside it. It used to be one flat map with a
+ * single `assignmentsLoadedAt` stamp, loaded from a per-org query: the first
+ * org to poll filled it, every other org's call then returned early on
+ * "cache is fresh and non-empty" and read ITS OWN vehicles out of a map that
+ * only ever held the first org's — and five minutes later, whichever org
+ * happened to reload next called `.clear()` on everyone else's. Vehicle ids are
+ * globally unique so nothing was ever mixed up, but a vehicle simply MISSING
+ * from the cache is treated as accountable to every zone, which is a different
+ * breach answer arrived at by accident of polling order.
+ */
+const assignmentCache = new Map<string, { byVehicle: Map<string, Set<string>>; loadedAt: number }>()
 
 async function getAssignments(orgId: string): Promise<void> {
-  if (Date.now() - assignmentsLoadedAt < ZONE_TTL_MS && assignmentCache.size > 0) return
+  const hit = assignmentCache.get(orgId)
+  if (hit && Date.now() - hit.loadedAt < ZONE_TTL_MS) return
+
   const rows = await prisma.vehicleGeofence.findMany({
     where:  { vehicle: { organisationId: orgId } },
     select: { vehicleId: true, geofenceId: true },
   })
-  assignmentCache.clear()
+  const byVehicle = new Map<string, Set<string>>()
   for (const r of rows) {
-    let set = assignmentCache.get(r.vehicleId)
-    if (!set) { set = new Set(); assignmentCache.set(r.vehicleId, set) }
+    let set = byVehicle.get(r.vehicleId)
+    if (!set) { set = new Set(); byVehicle.set(r.vehicleId, set) }
     set.add(r.geofenceId)
   }
-  assignmentsLoadedAt = Date.now()
-  logger.debug({ orgId, vehicles: assignmentCache.size, rows: rows.length }, 'Geofence assignment cache loaded')
+  assignmentCache.set(orgId, { byVehicle, loadedAt: Date.now() })
+  logger.debug({ orgId, vehicles: byVehicle.size, rows: rows.length }, 'Geofence assignment cache loaded')
 }
 
 export interface AssignedZoneStatus {
-  /** Assigned zones this vehicle is currently inside. */
-  inside: Array<{ id: string; name: string; enforced: boolean }>
-  /** Inside at least one ENFORCED assigned keep-out zone. */
+  /**
+   * EVERY named zone this vehicle is currently inside — context, not policy.
+   *
+   * `enforced` is the zone's own status (active keep-out). `assigned` is
+   * whether anyone bound this vehicle to it; only an assigned, enforced zone
+   * raises `breach`.
+   *
+   * `area` separates a PLACE (polygon or circle — a yard, a workshop, a farm
+   * block) from a CORRIDOR (a road, a drain, a river). Standing in the first is
+   * being somewhere; standing on the second is being stopped ON THE WAY
+   * somewhere, which is the more urgent thing. Anything asking "is this unit
+   * accounted for" has to be able to tell the two apart.
+   */
+  inside: Array<{ id: string; name: string; enforced: boolean; assigned: boolean; area: boolean }>
+  /** Inside at least one ENFORCED zone this vehicle is accountable to. */
   breach: boolean
   /** False when we have not evaluated this vehicle yet (no fix seen). */
   known: boolean
 }
 
 /**
- * Which of a vehicle's ASSIGNED zones it is currently inside.
+ * Which named zones this vehicle is currently inside.
  *
  * Every geofence in this deployment is a BLOCKLIST (keep-out) zone, so being
- * inside one is a violation rather than a reassurance — but only 8 of 107 are
- * `isActive`. The rest were bulk-imported from Wialon and never switched on,
- * so they are reported as context (`enforced: false`) and do not raise
- * `breach`. Treating them as live would flood the UI with warnings nobody has
- * chosen to enforce.
+ * inside an ENFORCED one is a violation rather than a reassurance — but only 8
+ * of 107 are `isActive`. The rest were bulk-imported from Wialon and never
+ * switched on, so they are reported as context (`enforced: false`) and do not
+ * raise `breach`. Treating them as live would flood the UI with warnings
+ * nobody has chosen to enforce.
+ *
+ * ## Containment is not accountability — the bug this used to have
+ *
+ * This filtered `inside` down to the vehicle's ASSIGNED zones, which made the
+ * field answer a policy question while every one of its consumers was asking a
+ * containment one. Measured on Mufindi 2026-09-07: 107 fences, 210 evaluated
+ * vehicles, and `inside: []` for every single one — while point-in-polygon over
+ * the same geometry put 195 of them inside a named zone. "MUFINDI: 012" sits in
+ * FARM #215, Nursery A, Staff residence2 and Workshop A at once and reported as
+ * nowhere.
+ *
+ * The cause: `geofence:assign` binds the fleet to water infrastructure only
+ * (rivers and drains, the one keep-out policy anyone agreed), so every vehicle
+ * HAS assignment rows — and the filter then discarded every containing zone
+ * that was not a drain. VehicleStatsCard's own GeofenceRow has been asking for
+ * exactly those since it was written: it splits `inside` into enforced
+ * (breach) and unenforced (`◇ Inside FARM #215 · not enforced`), and the second
+ * branch could never fire.
+ *
+ * So `inside` is now every containing zone, each carrying whether it is
+ * enforced and whether this vehicle is accountable to it. `breach` keeps its
+ * old meaning exactly — enforced AND assigned AND contained — including the
+ * rule that a vehicle with no assignment rows at all is accountable to
+ * everything, which is what the previous `assigned && …` skip did.
  */
 export function assignedZoneStatus(orgId: string, vehicleId: string): AssignedZoneStatus {
   const current = presence.get(vehicleId)
   if (!current) return { inside: [], breach: false, known: false }
 
-  const assigned = assignmentCache.get(vehicleId)
+  const assigned = assignmentCache.get(orgId)?.byVehicle.get(vehicleId)
   const zones = zoneCache.get(orgId)?.zones ?? []
 
   const inside: AssignedZoneStatus['inside'] = []
   for (const z of zones) {
     if (!current.has(z.id)) continue
-    // No assignment row means the vehicle is not accountable to this zone.
-    if (assigned && !assigned.has(z.id)) continue
-    inside.push({ id: z.id, name: z.name, enforced: z.keepOut })
+    // No assignment rows at all means nobody has narrowed what this vehicle
+    // answers for, so it answers for everything — the previous behaviour.
+    inside.push({
+      id: z.id,
+      name: z.name,
+      enforced: z.keepOut,
+      assigned: !assigned || assigned.has(z.id),
+      area: z.geometry.type !== 'LINE',
+    })
   }
 
-  return { inside, breach: inside.some(z => z.enforced), known: true }
+  return { inside, breach: inside.some(z => z.enforced && z.assigned), known: true }
 }
 
 // A vehicle hovering on a boundary would otherwise flap enter/exit every few
@@ -568,6 +624,14 @@ export async function resolveEstatePlaces(
 
 /** Drop cached zones for an org — call after a geofence sync. */
 export function invalidateZoneCache(orgId?: string): void {
-  if (orgId) zoneCache.delete(orgId)
-  else zoneCache.clear()
+  if (orgId) {
+    zoneCache.delete(orgId)
+    // Bindings are edited through the same screens as the fences themselves, so
+    // dropping the geometry while keeping a five-minute-old assignment list
+    // leaves `breach` answering from a policy that has already changed.
+    assignmentCache.delete(orgId)
+  } else {
+    zoneCache.clear()
+    assignmentCache.clear()
+  }
 }
