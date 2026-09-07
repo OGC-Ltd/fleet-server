@@ -7,6 +7,8 @@ import { startDbFollower } from './lib/db-follower.js'
 import { startTelemetryWorker }     from './lib/workers/telemetry.worker.js'
 import { startNotificationWorker }  from './lib/workers/notification.worker.js'
 import { startAlertsWorker }        from './lib/workers/alerts.worker.js'
+import { startSpeedingWorker }      from './lib/workers/speeding.worker.js'
+import { startSensorFaultsWorker }  from './lib/workers/sensor-faults.worker.js'
 import { startSimEventsWorker }     from './lib/workers/sim-events.worker.js'
 import { stopPushDispatcher }       from './lib/push-dispatcher.js'
 import { startCacheWarmer } from './lib/warm-cache.js'
@@ -33,6 +35,8 @@ async function main() {
   const stopTelemetryWorker    = startTelemetryWorker()
   const stopNotificationWorker = startNotificationWorker()
   const stopAlertsWorker       = startAlertsWorker()
+  const stopSpeedingWorker     = startSpeedingWorker()
+  const stopSensorFaultsWorker = startSensorFaultsWorker()
   const stopSimEventsWorker    = startSimEventsWorker()
   // Keep the analytics/maintenance read caches hot so those pages never wait
   // on the remote database (each pooler round trip costs ~1s) — see
@@ -103,6 +107,8 @@ async function main() {
     stopTelemetryWorker()
     stopNotificationWorker()
     stopAlertsWorker()
+    stopSpeedingWorker()
+    stopSensorFaultsWorker()
     stopSimEventsWorker()
     stopCacheWarmer()
     stopAiInsightWarmer()
