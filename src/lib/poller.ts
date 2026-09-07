@@ -35,6 +35,8 @@ import { emitDashboardNotice }   from './sse.js'
 import { startPollLoop }         from './poll-loop.js'
 import type { PollLoopHandle }   from './poll-loop.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
+import { noteSpeedFrame, sweepStaleEpisodes, flushEpisodes } from './speeding-episodes.js'
+import { noteFaultFrame, noteAlive } from './sensor-faults.js'
 import { deriveAlertFlags } from './derived-alerts.js'
 
 // Minimum gap before the SAME vehicle+alert is allowed to notify again. The
@@ -232,6 +234,27 @@ class TelemetryPoller {
         if (v) (frame.flags as Record<string, unknown>)[k] = true
       }
 
+      // The same frames, watched as EPISODES rather than per-frame flags.
+      //
+      // Here rather than inside deriveAlertFlags, which is documented as
+      // returning flags and nothing else and is also driven by db-follower on
+      // API-only instances — capture belongs behind the POLL_ENABLED gate that
+      // makes this the single writer. Costs one Map lookup; the write is
+      // published to speeding.worker, never awaited in a frame's turn.
+      noteSpeedFrame(frame, {
+        orgId:       meta.orgId,
+        vehicleId:   meta.vehicleId,
+        vehicleType: meta.vehicleType,
+        driverId:    meta.driverId,
+        driverName:  meta.driverName,
+      })
+
+      // Sensor contradictions this frame proves on its own, and the fact that a
+      // frame arrived at all — which is what closes a signal_lost the sweep
+      // opened, accurate to the ping rather than to the next 15-minute grid.
+      noteFaultFrame(frame, { orgId: meta.orgId, vehicleId: meta.vehicleId })
+      noteAlive(frame, { orgId: meta.orgId, vehicleId: meta.vehicleId })
+
       try {
         // 1. Persist to DB + emit per-vehicle SSE (existing ingest pipeline).
         //    Pre-resolved {vehicleId, driverId} from the device cache skips
@@ -398,6 +421,11 @@ class TelemetryPoller {
       }
     })
 
+    // A unit that stops reporting mid-episode never produces a falling edge, so
+    // its episode would stay open forever. Iterates only units currently
+    // speeding — single digits on these fleets.
+    sweepStaleEpisodes()
+
     logger.info(
       {
         provider:   this.provider.name,
@@ -451,6 +479,10 @@ export function startPoller(provider: TelemetryProvider, opts: StartPollerOption
       loop.stop()
     },
     async flush() {
+      // Close open speeding episodes at their real last over-limit frame — NOT
+      // at `now`, which would claim the unit was speeding until the process
+      // died. See flushEpisodes.
+      flushEpisodes()
       // Persist the latest simulation state so a restart resumes from here.
       const p = provider as TelemetryProvider & { persist?: () => Promise<void> }
       if (typeof p.persist === 'function') {

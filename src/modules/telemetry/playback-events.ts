@@ -24,6 +24,7 @@
  */
 
 import { prisma } from '../../lib/prisma.js'
+import { overspeedLimitFor } from '../../lib/derived-alerts.js'
 import type { PlaybackPoint } from './telemetry.repository.js'
 import { STATIONARY_KMH } from '../../lib/simplify-path.js'
 
@@ -79,6 +80,18 @@ const MIN_STOP_MS = 3 * 60_000
  * flagging a tractor for being a tractor.
  */
 export const SPEEDING_KMH = 80
+
+/**
+ * The limit a REPLAY judges against.
+ *
+ * The 80 above was a measured choice made when nothing else in the system
+ * asserted a limit. Now `overspeedLimitFor` is the one authority — it is what
+ * the live flag, the feed sentence and the incident ledger all read — and
+ * playback is per-vehicle, so the type is in hand. The constant stays as the
+ * fallback for a replay of a unit whose type is unknown.
+ */
+export const playbackLimitFor = (vehicleType: string | null): number =>
+  overspeedLimitFor(vehicleType) || SPEEDING_KMH
 
 /**
  * A speeding run has to last this long to be reported.
@@ -311,8 +324,16 @@ function labelOfNotification(type: string | null): string {
 export async function buildPlaybackEvents(
   vehicleId: string, from: Date, to: Date, points: PlaybackPoint[],
 ): Promise<{ events: PlaybackEvent[]; truncatedEvents: boolean }> {
-  const logged = await readLoggedEvents(vehicleId, from, to)
-  const all = [...logged, ...deriveStops(points), ...deriveSpeeding(points)]
+  // The unit's own limit, so a replay judges by the same number the live flag,
+  // the feed and the incident ledger use. One extra lookup on a user-initiated
+  // action — playback already queries for its logged events — rather than a
+  // fourth hardcoded 80 drifting away from OVERSPEED_LIMIT_BY_TYPE.
+  const [logged, vehicle] = await Promise.all([
+    readLoggedEvents(vehicleId, from, to),
+    prisma.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleType: true } }),
+  ])
+  const limitKmh = playbackLimitFor(vehicle?.vehicleType ?? null)
+  const all = [...logged, ...deriveStops(points), ...deriveSpeeding(points, limitKmh)]
 
   const truncatedEvents = all.length > MAX_EVENTS
   const kept = truncatedEvents

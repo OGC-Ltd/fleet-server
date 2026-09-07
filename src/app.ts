@@ -29,6 +29,7 @@ import cargoRoutes from './modules/cargo/cargo.routes.js'
 import dispatchRoutes from './modules/dispatches/dispatch.routes.js'
 import apiKeyRoutes from './modules/api-keys/api-key.routes.js'
 import analyticsRoutes from './modules/analytics/analytics.routes.js'
+import incidentsRoutes     from './modules/incidents/incidents.routes.js'
 import dashboardRoutes from './modules/dashboard/dashboard.routes.js'
 import { notificationsOrgRouter } from './modules/notifications/notifications.router.js'
 import * as notificationsCtrl from './modules/notifications/notifications.controller.js'
@@ -217,6 +218,7 @@ export function createApp() {
   app.use(`${orgBase}/dispatches`, dispatchRoutes)
   app.use(`${orgBase}/api-keys`, apiKeyRoutes)
   app.use(`${orgBase}/analytics`, analyticsRoutes)
+  app.use(`${orgBase}/incidents`, incidentsRoutes)
   app.use(`${orgBase}/dashboard`, dashboardRoutes)
 
   // Org-wide dashboard SSE stream + push subscription management

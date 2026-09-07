@@ -10,6 +10,8 @@
 import { EventEmitter } from 'node:events'
 import type { VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
 import type { SimEvents } from './simulation.persistence.js'
+import type { ClosedEpisode } from './speeding-episodes.js'
+import type { FaultObservation, FaultResolution } from './sensor-faults.js'
 
 // ─── event payload types ───────────────────────────────────────────────────
 
@@ -129,6 +131,13 @@ type EventMap = {
   'alerts:sync':         AlertsSyncEvent
   'simEvents:persist':   SimEventsPersistEvent
   'provider:alert':      ProviderAlertEvent
+  /** A completed overspeeding episode, ready to be written to the ledger.
+   *  Published from the poll loop so the write never blocks a frame's turn. */
+  'speeding:closed':     ClosedEpisode
+  /** A sensor fault episode to open (or extend) / to close. Published from both
+   *  detectors — the poll loop and the 15-minute sweep. */
+  'sensorFault:open':    FaultObservation
+  'sensorFault:close':   FaultResolution
 }
 
 // ─── typed wrapper ─────────────────────────────────────────────────────────

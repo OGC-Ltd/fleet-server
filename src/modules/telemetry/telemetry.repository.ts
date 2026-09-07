@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma.js'
+import { overspeedLimitFor } from '../../lib/derived-alerts.js'
 import { Prisma } from '../../../generated/prisma/client.js'
 import { ALERT_SOURCE } from '../../lib/alerts.js'
 import { logger } from '../../lib/logger.js'
@@ -913,6 +914,12 @@ export async function findFleetSnapshot(orgId: string) {
         plate:          v.registrationPlate,
         name:           v.name,
         vehicleType:    v.vehicleType,
+        // The limit this unit is actually judged against, resolved by the one
+        // function that owns it. Sent so the browser stops carrying its own
+        // copy of 80: vehicleMap, playback and two cards each had one, and a
+        // per-TYPE limit set here would have left every one of them wrong.
+        // A Map lookup on a string parsed once at boot — free.
+        speedLimitKmh:  overspeedLimitFor(v.vehicleType),
         driver:             v.assignments[0]?.user.fullName          ?? null,
         driverRatingScore:  v.assignments[0]?.user.driverRatingScore ?? null,
         lat:            ping?.lat          ?? null,

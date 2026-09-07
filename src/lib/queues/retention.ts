@@ -82,6 +82,8 @@ import { syncSensorInventory } from '../../modules/fuel/sensor-inventory.service
 import { sweepProbeHealth } from '../../modules/fuel/fuel-probe-health.service.js'
 import { recordFuelTrendsWithCatchUp } from '../../modules/fuel/fuel-trend.service.js'
 import { recordVehicleDailyStats } from '../../modules/analytics/vehicle-daily-stats.service.js'
+import { recordIncidentDailyStats } from '../../modules/analytics/incident-daily-stats.service.js'
+import { sweepAllOrgs } from '../../modules/telemetry/sensor-fault-sweep.service.js'
 import { deriveFuelRates } from '../../modules/fuel/fuel-rate.service.js'
 import { persistMeasuredBurnRates } from '../../modules/fuel/fuel-burn-rate.service.js'
 
@@ -148,6 +150,8 @@ const RATE_JOB = 'fuel:consumption-rates'
  * done this instead.
  */
 const STATS_JOB = 'vehicle:daily-stats'
+const INCIDENT_STATS_JOB = 'vehicle:incident-daily-stats'
+const SENSOR_FAULT_JOB   = 'sensor:fault-sweep'
 
 /**
  * The last instant of the fleet day that has just finished.
@@ -245,6 +249,61 @@ export const RETENTION_TARGETS: RetentionTarget[] = [
       })
       if (doomed.length === 0) return 0
       const { count } = await prisma.vehicleAlert.deleteMany({
+        where: { id: { in: doomed.map(d => d.id) } },
+      })
+      return count
+    },
+  },
+  {
+    name: 'speeding_incidents',
+    days: env.INCIDENT_RETENTION_DAYS,
+    // Write-once rows, so there is no open/closed distinction to respect here —
+    // unlike vehicle_alerts, every incident in this table is already finished.
+    prune: async (cutoff, limit) => {
+      const doomed = await prisma.speedingIncident.findMany({
+        where:  { startedAt: { lt: cutoff } },
+        select: { id: true },
+        take:   limit,
+      })
+      if (doomed.length === 0) return 0
+      const { count } = await prisma.speedingIncident.deleteMany({
+        where: { id: { in: doomed.map(d => d.id) } },
+      })
+      return count
+    },
+  },
+  {
+    name: 'sensor_fault_episodes',
+    days: env.INCIDENT_RETENTION_DAYS,
+    // Only RECOVERED episodes age out, for the same reason vehicle_alerts keeps
+    // its open rows: an episode still open after 90 days is a sensor that has
+    // been dead for 90 days, and this row is the only record of it.
+    prune: async (cutoff, limit) => {
+      const doomed = await prisma.sensorFaultEpisode.findMany({
+        where:  { startedAt: { lt: cutoff }, recoveredAt: { not: null } },
+        select: { id: true },
+        take:   limit,
+      })
+      if (doomed.length === 0) return 0
+      const { count } = await prisma.sensorFaultEpisode.deleteMany({
+        where: { id: { in: doomed.map(d => d.id) } },
+      })
+      return count
+    },
+  },
+  {
+    name: 'vehicle_incident_daily_stats',
+    days: env.INCIDENT_ROLLUP_RETENTION_DAYS,
+    // The whole point of the rollup is to outlive the detail, so this window is
+    // deliberately four times the others'.
+    prune: async (cutoff, limit) => {
+      const doomed = await prisma.vehicleIncidentDailyStat.findMany({
+        where:  { day: { lt: cutoff } },
+        select: { id: true },
+        take:   limit,
+      })
+      if (doomed.length === 0) return 0
+      const { count } = await prisma.vehicleIncidentDailyStat.deleteMany({
         where: { id: { in: doomed.map(d => d.id) } },
       })
       return count
@@ -538,6 +597,30 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
+  if (rollups) await queue.add(INCIDENT_STATS_JOB, {}, {
+    // 21:50 UTC — ten minutes after the daily stats job, same fleet day, same
+    // one-at-a-time worker. This one is a GROUP BY over two small tables rather
+    // than a telemetry scan, so it is cheap; the spacing is about keeping the
+    // ordering obvious, not about load.
+    repeat:            { pattern: '50 21 * * *' },
+    removeOnComplete:  { count: 30 },
+    removeOnFail:      { count: 30 },
+    attempts:          3,
+    backoff:           { type: 'exponential', delay: 60_000 },
+  })
+
+  if (rollups) await queue.add(SENSOR_FAULT_JOB, {}, {
+    // Every fifteen minutes, not nightly: this is the ONLY detector that can
+    // see a silent tracker or a dead channel, and an operator asking "what is
+    // broken right now" should not be reading an answer from last night. It
+    // reads a warm 10-minute cache and a small index, so the cost is trivial.
+    repeat:            { pattern: '*/15 * * * *' },
+    removeOnComplete:  { count: 20 },
+    removeOnFail:      { count: 20 },
+    attempts:          2,
+    backoff:           { type: 'exponential', delay: 30_000 },
+  })
+
   if (rollups) await queue.add(RATE_JOB, {}, {
     // 02:40 UTC on SUNDAY. Weekly because a consumption rate moves over weeks,
     // and clear of every daily job above — this one sorts the whole
@@ -568,6 +651,8 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     // it.
     if (job.name === TREND_JOB) return recordFuelTrendsWithCatchUp(lastCompleteFleetDay())
     if (job.name === STATS_JOB) return recordVehicleDailyStats(lastCompleteFleetDay())
+    if (job.name === INCIDENT_STATS_JOB) return recordIncidentDailyStats(lastCompleteFleetDay())
+    if (job.name === SENSOR_FAULT_JOB) return sweepAllOrgs()
     // Both figures refresh together, so a row never carries a fresh derivation
     // beside a stale balance. The measured half only ever updates rows the
     // derivation created, so it must run second.

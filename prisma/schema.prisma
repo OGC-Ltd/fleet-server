@@ -214,6 +214,8 @@ model Organisation {
   ingestApiKeys        IngestApiKey[]
   pushSubscriptions    PushSubscription[]
   alerts               VehicleAlert[]
+  speedingIncidents    SpeedingIncident[]
+  sensorFaultEpisodes  SensorFaultEpisode[]
   silos                Silo[]
   providerAlerts       ProviderAlert[]
   notifications        Notification[]
@@ -333,6 +335,7 @@ model User {
   trips              Trip[]              @relation("TripDriver")
   fuelThefts         FuelTheft[]         @relation("TheftDriver")
   geofenceViolations GeofenceViolation[] @relation("ViolationDriver")
+  speedingIncidents  SpeedingIncident[]  @relation("SpeedingDriver")
 
   // Audit — who assigned/unassigned
   assignmentsGranted   VehicleAssignment[] @relation("AssignedByUser")
@@ -624,6 +627,9 @@ model Vehicle {
   geofences          VehicleGeofence[]
   geofenceViolations GeofenceViolation[]
   alerts             VehicleAlert[]
+  speedingIncidents  SpeedingIncident[]
+  sensorFaults       SensorFaultEpisode[]
+  incidentDailyStats VehicleIncidentDailyStat[]
   providerAlerts     ProviderAlert[]
   notifications      Notification[]
   dispatches         Dispatch[]
@@ -845,7 +851,201 @@ model VehicleAlert {
 
   @@index([organisationId, resolvedAt])
   @@index([vehicleId, type, resolvedAt])
+  /// Date-RANGED reads: findMaintenanceHistory (telemetry.repository) and the
+  /// driver-conduct query both filter this exact pair and had no index for it.
+  @@index([organisationId, triggeredAt])
   @@map("vehicle_alerts")
+}
+
+// ---------------------------------------------------------------------------
+// INCIDENT LEDGERS — what happened, as opposed to what is happening
+// ---------------------------------------------------------------------------
+//
+// Three stores overlap with `vehicle_alerts` above and the difference is the
+// thing to understand before touching any of them:
+//
+//   vehicle_alerts             "is this unit in trouble RIGHT NOW" — opened and
+//                              closed every poll cycle by syncFrameAlerts,
+//                              drives markers, the live feed and SSE.
+//   speeding_incidents         "what happened, once, in full" — written ONCE
+//                              when an episode ends, never updated.
+//   sensor_fault_episodes      "when did it break and when did it come back".
+//   vehicle_incident_daily_stats  month-over-month, after the detail is gone.
+//
+// The enrichment lives here rather than on vehicle_alerts because
+// syncFrameAlerts closes every alert type in ONE updateMany: per-type columns
+// would carve an exception into the single place alert state is reconciled. And
+// an alert that never resolves would never be enriched at all, while a ledger
+// needs a closed interval by construction.
+
+/// One completed overspeeding episode.
+///
+/// Written on the FALLING edge by lib/speeding-episodes, via a worker, so the
+/// 2-second poll loop never waits on a write.
+model SpeedingIncident {
+  id             String  @id @default(cuid())
+  organisationId String  @map("organisation_id")
+  vehicleId      String  @map("vehicle_id")
+  vehicleType    String? @map("vehicle_type")
+
+  /// From the ACTIVE assignment at capture time (poller's DeviceMeta), not
+  /// reconstructed by joining Trip on vehicle+time the way analytics does —
+  /// that can only attribute incidents falling inside a BUILT trip and silently
+  /// drops the rest. Both id and name are kept: the id to join on, the name
+  /// because assignments change and the report must say who was driving THEN.
+  driverId   String? @map("driver_id")
+  driverName String? @map("driver_name")
+
+  /// The FIRST over-limit frame, not the third. The debounce decides whether an
+  /// episode is real; it does not decide when it began.
+  startedAt   DateTime @map("started_at")
+  /// The LAST over-limit frame. Both ends are observed fixes, so durationSec is
+  /// a LOWER BOUND on the real episode, never an overstatement.
+  endedAt     DateTime @map("ended_at")
+  durationSec Int      @map("duration_sec")
+
+  /// The peak OBSERVED. The median gap between fixes is 28 s, so the true peak
+  /// between two of them is unknowable and the UI must not claim otherwise.
+  peakKmh     Float  @map("peak_kmh")
+  avgKmh      Float? @map("avg_kmh")
+  /// The limit that was broken, resolved once at capture by overspeedLimitFor.
+  /// STORED rather than re-derived at read time: OVERSPEED_LIMIT_BY_TYPE is a
+  /// deploy-time string, and re-reading it would silently restate history after
+  /// somebody changes it.
+  limitKmh    Float  @map("limit_kmh")
+  /// 'type' when OVERSPEED_LIMIT_BY_TYPE matched, 'fleet' for the default.
+  limitSource String @map("limit_source")
+  /// peakKmh - limitKmh, stored so "worst offender" needs no expression index.
+  overByKmh   Float  @map("over_by_kmh")
+  /// Over-limit frames in the episode — the confidence column, shown in the UI.
+  /// Three frames at a 28 s cadence is about a minute of evidence.
+  frames      Int
+
+  /// Haversine along the over-limit fixes. NULL when a fix lacked coordinates
+  /// or a gap exceeded EPISODE_MAX_GAP_MS — a distance measured across a
+  /// twenty-minute hole is fiction, and a null the UI renders as "—" is better
+  /// than a plausible lie.
+  distanceM Int?   @map("distance_m")
+  startLat  Float? @map("start_lat")
+  startLng  Float? @map("start_lng")
+  peakLat   Float? @map("peak_lat")
+  peakLng   Float? @map("peak_lng")
+  endLat    Float? @map("end_lat")
+  endLng    Float? @map("end_lng")
+
+  /// fleetDayKey(startedAt) — the FLEET day, same convention as
+  /// vehicle_daily_stats.day. Lets the rollup be a plain GROUP BY and keeps the
+  /// month filter off date_trunc(… AT TIME ZONE) in the hot path.
+  day       DateTime @db.Date
+  /// { closedBy: 'falling-edge' | 'timeout' | 'shutdown', gapped, driverSource }
+  meta      Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  vehicle      Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  driver       User?        @relation("SpeedingDriver", fields: [driverId], references: [id])
+
+  /// Idempotency. startedAt is the provider's capturedAt, so two writers
+  /// processing the same frame compute an identical value and the second write
+  /// is a no-op rather than a duplicate row.
+  @@unique([vehicleId, startedAt])
+  @@index([organisationId, startedAt]) // the glance list
+  @@index([vehicleId, startedAt]) // the per-unit detail table
+  @@index([organisationId, day]) // the rollup job
+  @@index([driverId, startedAt]) // driver conduct
+  @@map("speeding_incidents")
+}
+
+/// One sensor fault, from the moment the data showed it to the moment it
+/// cleared.
+///
+/// This is the only durable record of a fault anywhere in the system: the live
+/// detector (dash/src/hooks/useSensorHealth) is a browser memo whose
+/// `detectedAt` is when the PAGE RENDERED, and connection-state is deliberately
+/// an in-memory map. Neither can answer "when did it start".
+model SensorFaultEpisode {
+  id             String @id @default(cuid())
+  organisationId String @map("organisation_id")
+  vehicleId      String @map("vehicle_id")
+
+  /// transit_no_engine | speed_no_engine | frozen_gps | low_accuracy |
+  /// signal_lost | gps_not_reporting | ignition_not_reporting |
+  /// odometer_not_reporting | engine_hours_not_reporting | fuel_probe_dead
+  kind     String
+  severity String
+  /// 'poller' (frame-driven) or 'sweep' (absence-driven). Decides which
+  /// detector may close the episode — a silent unit emits no frames at all, so
+  /// only a sweep can open its signal_lost, and only a frame can close it.
+  source   String
+
+  /// What the DATA shows, never sweep time: movement.since for
+  /// transit_no_engine, lastReportedAt for signal_lost, that channel's own
+  /// lastSeenAt for a channel death.
+  startedAt   DateTime  @map("started_at")
+  /// First observation that no longer shows the fault. Null = still open.
+  recoveredAt DateTime? @map("recovered_at")
+  /// Last observation that still SAW it — the watchdog clock, so a unit that
+  /// vanishes mid-episode can be closed honestly rather than left open forever.
+  lastSeenAt  DateTime  @map("last_seen_at")
+  durationSec Int?      @map("duration_sec")
+
+  detail       String
+  observations Int      @default(1)
+  /// { speedKmh, movingSinceMs, accuracyM, channel, lastValueAt }
+  evidence     Json?
+  day          DateTime @db.Date
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  vehicle      Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@unique([vehicleId, kind, startedAt])
+  @@index([organisationId, startedAt])
+  @@index([vehicleId, startedAt])
+  /// "what is broken right now" — the tab badge.
+  @@index([organisationId, kind, recoveredAt])
+  @@index([organisationId, day])
+  @@map("sensor_fault_episodes")
+}
+
+/// Per-unit-per-day incident counts, so month-over-month survives the 90-day
+/// detail retention.
+///
+/// Deliberately NOT columns on vehicle_daily_stats: that table is rebuilt
+/// destructively (deleteMany by day, then createMany), so sharing it would
+/// force the two rollups into one job or let them clobber each other.
+model VehicleIncidentDailyStat {
+  id             String   @id @default(cuid())
+  vehicleId      String   @map("vehicle_id")
+  /// Denormalised so the month query needs no join to vehicles.
+  organisationId String   @map("organisation_id")
+  day            DateTime @db.Date
+
+  speedingCount     Int    @default(0) @map("speeding_count")
+  speedingPeakKmh   Float? @map("speeding_peak_kmh")
+  /// Sum of episode durationSec.
+  ///
+  /// This does NOT break vehicle_daily_stats' "counts, never durations" rule.
+  /// That rule is about durations INFERRED from irregular sampling (fixes times
+  /// an assumed interval), which once produced 103 idle hours inside a 24-hour
+  /// day. This is the sum of measured intervals between two real fixes — exact
+  /// as far as it goes, and an understatement of the true time over the limit.
+  speedingSeconds   Int    @default(0) @map("speeding_seconds")
+  speedingDistanceM Int    @default(0) @map("speeding_distance_m")
+
+  faultCount   Int   @default(0) @map("fault_count")
+  faultSeconds Int   @default(0) @map("fault_seconds")
+  /// { transit_no_engine: 2, signal_lost: 1 }
+  faultByKind  Json? @map("fault_by_kind")
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  /// One row per unit per day — the job upserts on it, so a re-run repairs a
+  /// day rather than doubling it.
+  @@unique([vehicleId, day])
+  /// The report reads a date RANGE across one org, so org+day leads.
+  @@index([organisationId, day])
+  @@map("vehicle_incident_daily_stats")
 }
 
 // ---------------------------------------------------------------------------

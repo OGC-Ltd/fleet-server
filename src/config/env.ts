@@ -298,6 +298,22 @@ const schema = z.object({
    */
   OVERSPEED_MIN_FRAMES: z.coerce.number().optional().default(3),
 
+  /** Master switch for incident capture (speeding episodes, sensor faults).
+   *  Off by default so the schema can ship a deploy ahead of the writes. */
+  INCIDENT_CAPTURE_ENABLED: z.coerce.boolean().optional().default(false),
+  /** How long the detail ledgers keep an incident. Matches alerts at 90 d. */
+  INCIDENT_RETENTION_DAYS: z.coerce.number().optional().default(90),
+  /** The rollup outlives the detail: 400 d = thirteen months plus slack, so
+   *  "vs last month" has an answer at any point in the year. */
+  INCIDENT_ROLLUP_RETENTION_DAYS: z.coerce.number().optional().default(400),
+  /** A speeding episode with no new over-limit frame for this long is closed
+   *  by the end-of-cycle sweep — the unit went silent mid-episode and will
+   *  never produce a falling edge. */
+  EPISODE_MAX_GAP_MS: z.coerce.number().optional().default(10 * 60_000),
+  /** Frames a sensor fault must persist for before it opens or closes, so one
+   *  noisy fix neither raises nor clears an episode. */
+  SENSOR_FAULT_MIN_FRAMES: z.coerce.number().optional().default(2),
+
   /** Tank percentage at or below which `lowFuel` rises. Needs a known tank. */
   LOW_FUEL_PCT: z.coerce.number().optional().default(10),
 
