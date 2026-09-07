@@ -15,7 +15,7 @@ vi.mock('../../src/lib/notifications/notification.store.js', () => ({
 vi.mock('../../src/lib/prisma.js', () => ({ prisma: { geofence: { findMany: vi.fn() }, vehicleGeofence: { findMany: vi.fn() } } }))
 
 const { prisma } = await import('../../src/lib/prisma.js')
-const { trackZonePresence, invalidateZoneCache } = await import('../../src/lib/zone-presence.js')
+const { trackZonePresence, invalidateZoneCache, assignedZoneStatus } = await import('../../src/lib/zone-presence.js')
 
 // A 0.1° box is ~11 km; the workshop is a 0.01° box inside its south-west corner.
 const ring = (lat: number, lng: number, size: number): [number, number][] =>
@@ -38,9 +38,9 @@ let clock = Date.UTC(2026, 7, 2, 6, 0, 0)
 const tick = (mins: number) => { clock += mins * MIN; return new Date(clock).toISOString() }
 
 let seq = 0
-async function ping(vehicleId: string, lat: number, lng: number, atIso: string) {
+async function ping(vehicleId: string, lat: number, lng: number, atIso: string, orgId = 'org') {
   await trackZonePresence({
-    orgId: 'org', vehicleId, plate: 'MUFINDI: EX 24', driverName: null, lat, lng, capturedAt: atIso,
+    orgId, vehicleId, plate: 'MUFINDI: EX 24', driverName: null, lat, lng, capturedAt: atIso,
   })
 }
 
@@ -160,5 +160,128 @@ describe('a keep-out breach is not delayed and not folded in', () => {
     for (let i = 0; i < 5; i++) await ping(v, -4.0, 30.05, tick(1))
 
     expect(published.filter(n => n.alertType === 'GEOFENCE_BREACH')).toHaveLength(1)
+  })
+})
+
+
+/**
+ * Containment, which is NOT the same question as accountability.
+ *
+ * This is where the field went wrong in production. `assignedZoneStatus` used
+ * to filter `inside` down to the vehicle's ASSIGNED zones, so on a fleet bound
+ * to water infrastructure only — which is the one keep-out policy anyone ever
+ * agreed — every farm, workshop and yard a machine was standing in reported as
+ * nothing at all. Measured on Mufindi 2026-09-07: 107 fences, 210 evaluated
+ * vehicles, `inside: []` for all of them, while the same geometry put 195 of
+ * them inside a named zone.
+ */
+describe('assignedZoneStatus — containment is not accountability', () => {
+  it('reports EVERY containing zone, not just the assigned ones', async () => {
+    // The regression, in one assertion. The drain binding is what used to make
+    // the farm, the workshop and the VES circle vanish from the answer.
+    ;(prisma.vehicleGeofence.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { vehicleId: `veh-contain-${seq}`, geofenceId: 'drain' },
+    ])
+    const v = `veh-contain-${seq}`
+    await ping(v, IN_SHOP.lat, IN_SHOP.lng, tick(0))
+
+    const status = assignedZoneStatus('org', v)
+    expect(status.known).toBe(true)
+    expect(status.inside.map(z => z.id).sort()).toEqual(['farm', 'ves', 'workshop'])
+  })
+
+  it('marks which of them the vehicle is actually accountable to', async () => {
+    ;(prisma.vehicleGeofence.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { vehicleId: `veh-acct-${seq}`, geofenceId: 'workshop' },
+    ])
+    const v = `veh-acct-${seq}`
+    await ping(v, IN_SHOP.lat, IN_SHOP.lng, tick(0))
+
+    const byId = Object.fromEntries(assignedZoneStatus('org', v).inside.map(z => [z.id, z]))
+    expect(byId.workshop!.assigned).toBe(true)
+    expect(byId.farm!.assigned).toBe(false)
+    expect(byId.ves!.assigned).toBe(false)
+  })
+
+  it('treats a vehicle with no bindings at all as accountable to everything', async () => {
+    // Preserves the previous behaviour exactly: the old code skipped the filter
+    // when the vehicle had no assignment rows.
+    ;(prisma.vehicleGeofence.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([])
+    const v = `veh-unbound-${seq}`
+    await ping(v, IN_SHOP.lat, IN_SHOP.lng, tick(0))
+
+    expect(assignedZoneStatus('org', v).inside.every(z => z.assigned)).toBe(true)
+  })
+
+  it('is not known until a fix has been seen', () => {
+    expect(assignedZoneStatus('org', `veh-never-${seq}`)).toEqual({ inside: [], breach: false, known: false })
+  })
+})
+
+describe('assignedZoneStatus — breach keeps its old meaning', () => {
+  it('raises on an enforced zone the vehicle is bound to', async () => {
+    ;(prisma.vehicleGeofence.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { vehicleId: `veh-b1-${seq}`, geofenceId: 'drain' },
+    ])
+    const v = `veh-b1-${seq}`
+    await ping(v, -4.0, 30.05, tick(0))          // on the drain centre-line
+
+    const status = assignedZoneStatus('org', v)
+    expect(status.inside.find(z => z.id === 'drain')?.enforced).toBe(true)
+    expect(status.breach).toBe(true)
+  })
+
+  it('does NOT raise on an enforced zone the vehicle is not bound to', async () => {
+    // The drain still appears in `inside` — it is a fact about where the unit
+    // is — but nobody made this vehicle answer for it, so it is not a breach.
+    ;(prisma.vehicleGeofence.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { vehicleId: `veh-b2-${seq}`, geofenceId: 'workshop' },
+    ])
+    const v = `veh-b2-${seq}`
+    await ping(v, -4.0, 30.05, tick(0))
+
+    const status = assignedZoneStatus('org', v)
+    expect(status.inside.some(z => z.id === 'drain')).toBe(true)
+    expect(status.breach).toBe(false)
+  })
+
+  it('does not raise on unenforced zones, however many are containing', async () => {
+    ;(prisma.vehicleGeofence.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([])
+    const v = `veh-b3-${seq}`
+    await ping(v, IN_SHOP.lat, IN_SHOP.lng, tick(0))
+
+    const status = assignedZoneStatus('org', v)
+    expect(status.inside).toHaveLength(3)
+    expect(status.breach).toBe(false)
+  })
+})
+
+describe('the assignment cache is per-ORG', () => {
+  it('does not answer one org from the bindings of another', async () => {
+    // The cache was one flat map with a single freshness stamp: the first org
+    // to poll filled it and every other org read its own vehicles out of a map
+    // that never held them, so a bound vehicle looked unbound — and answered
+    // for every zone instead of its own.
+    const a = `veh-orgA-${seq}`
+    const b = `veh-orgB-${seq}`
+
+    ;(prisma.vehicleGeofence.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { vehicleId: a, geofenceId: 'workshop' },
+    ])
+    await ping(a, IN_SHOP.lat, IN_SHOP.lng, tick(0), 'orgA')
+
+    ;(prisma.vehicleGeofence.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { vehicleId: b, geofenceId: 'drain' },
+    ])
+    await ping(b, IN_SHOP.lat, IN_SHOP.lng, tick(0), 'orgB')
+
+    // B is bound to the drain only, so nothing it is standing in is assigned.
+    const byIdB = Object.fromEntries(assignedZoneStatus('orgB', b).inside.map(z => [z.id, z]))
+    expect(byIdB.workshop!.assigned).toBe(false)
+
+    // A is bound to the workshop, and A's own answer is unchanged by B's load.
+    const byIdA = Object.fromEntries(assignedZoneStatus('orgA', a).inside.map(z => [z.id, z]))
+    expect(byIdA.workshop!.assigned).toBe(true)
+    expect(byIdA.farm!.assigned).toBe(false)
   })
 })
