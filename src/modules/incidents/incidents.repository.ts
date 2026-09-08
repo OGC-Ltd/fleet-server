@@ -16,6 +16,8 @@
 
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
+import { MOVING_THRESHOLD_KMH } from '../../lib/movement-state.js'
+import { cachedPlace, reverseGeocode } from '../../lib/geocode.js'
 
 /** Same constant as feed-events and notification.store — the fleet's calendar. */
 const FLEET_TZ = 'Africa/Nairobi'
@@ -237,6 +239,16 @@ export interface FaultSummaryRow {
   firstAt:        Date
   lastAt:         Date
   kinds:          string
+  /** Position, speed and movement where this unit's sensors last worked — see
+   *  the FILTERed aggregates in the query, and the columns' own note on the
+   *  model. All null for an episode opened before this was captured, or one
+   *  whose telemetry had already aged out of the 30-day window. */
+  lastFixAt:      Date | null
+  lastLat:        number | null
+  lastLng:        number | null
+  lastSpeedKmh:   number | null
+  lastMoving:     boolean | null
+  lastPlace:      string | null
 }
 
 /**
@@ -281,6 +293,75 @@ const clippedSeconds = (r: Range) => Prisma.sql`
     - GREATEST(e.started_at, ${r.from}::timestamptz)
   )))`
 
+/**
+ * Fill in a position for episodes that were written without one.
+ *
+ * Every episode opened from now on copies the fix behind it (see the worker),
+ * but the ledger already holds rows from before that existed, and those would
+ * render three empty columns forever. So for any row still missing a position
+ * we take the unit's OWN last known fix.
+ *
+ * For the kind that dominates this ledger that is not an approximation, it is
+ * the same fix: a tracker that went silent has not reported since, so its
+ * latest telemetry IS where it was when it went offline. For a unit still
+ * reporting with one dead channel it means "where the unit is now" rather than
+ * where it was when that channel died — weaker, and the reason the capture
+ * exists at all. Rows that carry a stored fix are never touched.
+ *
+ * Beyond the 30-day telemetry window there is nothing to find, and those rows
+ * stay blank. That is honest: the position was not recorded and cannot be
+ * reconstructed.
+ *
+ * The place label comes from the geocoder's CACHE only. Awaiting the real
+ * lookup would put its 1.1s-per-miss rate limiter inside a page load; instead
+ * an uncached cell is warmed in the background, so the next read has it.
+ */
+type Positionable = {
+  vehicleId:     string
+  lastFixAt?:    Date | null
+  lastLat:       number | null
+  lastLng:       number | null
+  lastSpeedKmh:  number | null
+  lastMoving:    boolean | null
+  lastPlace:     string | null
+}
+
+async function fillMissingPositions(rows: Positionable[]): Promise<void> {
+  const missing = rows.filter(r => r.lastLat == null)
+  if (missing.length) {
+    const ids = [...new Set(missing.map(r => r.vehicleId))]
+    const fixes = await prisma.$queryRaw<Array<{
+      vehicleId: string; lat: number; lng: number; speedKmh: number | null; capturedAt: Date
+    }>>(Prisma.sql`
+      SELECT DISTINCT ON (t.vehicle_id)
+             t.vehicle_id  AS "vehicleId",
+             t.lat         AS lat,
+             t.lng         AS lng,
+             t.speed_kmh   AS "speedKmh",
+             t.captured_at AS "capturedAt"
+        FROM vehicle_telemetries t
+       WHERE t.vehicle_id = ANY(${ids}) AND t.lat IS NOT NULL
+       ORDER BY t.vehicle_id, t.captured_at DESC
+    `)
+    const byId = new Map(fixes.map(f => [f.vehicleId, f]))
+    for (const r of missing) {
+      const f = byId.get(r.vehicleId)
+      if (!f) continue
+      r.lastFixAt    = f.capturedAt
+      r.lastLat      = f.lat
+      r.lastLng      = f.lng
+      r.lastSpeedKmh = f.speedKmh
+      r.lastMoving   = f.speedKmh == null ? null : f.speedKmh >= MOVING_THRESHOLD_KMH
+    }
+  }
+
+  for (const r of rows) {
+    if (r.lastPlace || r.lastLat == null || r.lastLng == null) continue
+    r.lastPlace = cachedPlace(r.lastLat, r.lastLng)
+    if (!r.lastPlace) void reverseGeocode(r.lastLat, r.lastLng).catch(() => {})
+  }
+}
+
 export async function faultSummary(
   orgId: string,
   r: Range,
@@ -309,7 +390,19 @@ export async function faultSummary(
            COALESCE(MAX(${clippedSeconds(r)}), 0)::int    AS longest_seconds,
            MIN(e.started_at)                     AS "firstAt",
            MAX(e.started_at)                     AS "lastAt",
-           STRING_AGG(DISTINCT e.kind, ',')      AS kinds
+           STRING_AGG(DISTINCT e.kind, ',')      AS kinds,
+           -- Where this unit's sensors were last working, taken from its most
+           -- recent episode THAT HAS A POSITION. The same FILTER on all five,
+           -- so they are five facts about one moment rather than coordinates
+           -- from one episode beside a speed from another. last_place is
+           -- filled asynchronously, so it can still be null here while the
+           -- coordinates beside it are not — unresolved, not elsewhere.
+           (ARRAY_AGG(e.last_fix_at    ORDER BY e.started_at DESC) FILTER (WHERE e.last_lat IS NOT NULL))[1] AS "lastFixAt",
+           (ARRAY_AGG(e.last_lat       ORDER BY e.started_at DESC) FILTER (WHERE e.last_lat IS NOT NULL))[1] AS "lastLat",
+           (ARRAY_AGG(e.last_lng       ORDER BY e.started_at DESC) FILTER (WHERE e.last_lat IS NOT NULL))[1] AS "lastLng",
+           (ARRAY_AGG(e.last_speed_kmh ORDER BY e.started_at DESC) FILTER (WHERE e.last_lat IS NOT NULL))[1] AS "lastSpeedKmh",
+           (ARRAY_AGG(e.last_moving    ORDER BY e.started_at DESC) FILTER (WHERE e.last_lat IS NOT NULL))[1] AS "lastMoving",
+           (ARRAY_AGG(e.last_place     ORDER BY e.started_at DESC) FILTER (WHERE e.last_lat IS NOT NULL))[1] AS "lastPlace"
       FROM sensor_fault_episodes e
       JOIN vehicles v ON v.id = e.vehicle_id
      WHERE e.organisation_id = ${orgId}
@@ -324,16 +417,19 @@ export async function faultSummary(
   const hasNextPage = rows.length > opts.limit
   if (hasNextPage) rows.pop()
 
-  return {
-    hasNextPage,
-    rows: rows.map(r2 => ({
-      ...r2,
-      episodes:       Number(r2.episodes),
-      openNow:        Number(r2.open_now),
-      totalSeconds:   Number(r2.total_seconds),
-      longestSeconds: r2.longest_seconds ?? 0,
-    })) as FaultSummaryRow[],
-  }
+  const mapped = rows.map(r2 => ({
+    ...r2,
+    episodes:       Number(r2.episodes),
+    openNow:        Number(r2.open_now),
+    totalSeconds:   Number(r2.total_seconds),
+    longestSeconds: r2.longest_seconds ?? 0,
+  })) as FaultSummaryRow[]
+
+  // Only ever the page being returned, so the cost is bounded by the page size
+  // rather than by the size of the ledger.
+  await fillMissingPositions(mapped)
+
+  return { hasNextPage, rows: mapped }
 }
 
 export async function faultList(
@@ -358,6 +454,9 @@ export async function faultList(
   })
   const hasNextPage = items.length > q.limit
   if (hasNextPage) items.pop()
+  // The detail table shows the same three columns, so it gets the same repair
+  // — otherwise opening a unit would empty columns the list beside it filled.
+  await fillMissingPositions(items)
   return { data: items, cursor: items.at(-1)?.id ?? null, hasNextPage }
 }
 

@@ -114,6 +114,19 @@ function composeLabel(addr: NominatimAddress): string | null {
 
 // ── public API ──────────────────────────────────────────────────────────────
 
+/**
+ * The label for this cell IF it is already cached — never queues a fetch.
+ *
+ * For read paths that must answer now. `reverseGeocode` is correct but it is
+ * serialised at one request per 1.1s by Nominatim's usage policy, so awaiting
+ * it for a page of fifty rows is a minute of latency on a cache-cold fleet.
+ * This returns what is already known and null otherwise, leaving the caller to
+ * warm the cell in the background if it wants the next read to have it.
+ */
+export function cachedPlace(lat: number, lng: number): string | null {
+  return memory.get(keyOf(lat, lng)) ?? null
+}
+
 /** Nearest named place for a coordinate, or null when unresolvable. */
 export async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
   const key = keyOf(lat, lng)
