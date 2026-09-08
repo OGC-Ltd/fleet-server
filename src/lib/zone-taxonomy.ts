@@ -20,21 +20,54 @@
 export type ZoneCategory =
   | 'farm' | 'nursery' | 'commercial' | 'rainfed' | 'factory'
   | 'logistics' | 'facility' | 'wetland' | 'water' | 'drain' | 'road'
-  | 'sample' | 'other'
+  | 'restricted' | 'sample' | 'other'
 
+/**
+ * These rules were written against ONE account's vocabulary and have now met
+ * three more.
+ *
+ * Kasulu's zones come from a surveyor and read like a survey — "Factory site
+ * Location", "Logistic centre1", "Rainfed Area". Sukari, Menengai and West
+ * Kenya name theirs the way an operator types them: "Naitiri Factory",
+ * "KABRAS FACTORY -WKS", "Menengai Yard NEW". Measured against production,
+ * every one of their twelve zones fell to `other` and drew in the fallback
+ * grey — three fleets whose map said nothing about their own ground while
+ * Kasulu's showed eleven land uses.
+ *
+ * So `factory` stops requiring the word "site", and a YARD is recognised as
+ * the logistics area it is. Both are widenings of an existing rule rather than
+ * new vocabulary, and neither reclassifies anything on Kasulu.
+ */
 export function categorise(name: string): ZoneCategory {
   const n = name.toLowerCase()
   if (n.startsWith('ves'))                          return 'sample'
+  /* First, and before any land use: a keep-out is the one zone whose colour
+     must not be the same grey as "we could not tell". It outranks whatever
+     else the name says, because "NO GO ZONES -SUKARI" is a prohibition before
+     it is a place. */
+  if (n.includes('no go') || n.includes('no-go') || n.includes('nogo')
+    || n.includes('keep out') || n.includes('keep-out')
+    || n.includes('restricted'))                    return 'restricted'
   if (n.includes('farm') || n.includes('ha area'))  return 'farm'
   if (n.includes('nursery'))                        return 'nursery'
   if (n.includes('commercial'))                     return 'commercial'
   if (n.includes('rainfed') || n.includes('rain fed')) return 'rainfed'
-  if (n.includes('factory site'))                   return 'factory'
-  if (n.includes('logistic'))                       return 'logistics'
+  /* Roads are settled BEFORE the factory, and that ordering is load-bearing.
+     Kasulu has a corridor called "Main Haulage road from  Factory to Zone3" —
+     a road named for where it goes. While the factory rule demanded the word
+     "site" the two could not collide; widening it to the plain word put a
+     haulage road in the factory's colour, which the existing test caught. A
+     name that says both is the road. */
+  if (n.includes('road') || n.includes('haulage'))  return 'road'
+  // Was 'factory site' — the surveyor's phrasing. Three fleets write the plain
+  // word and meant exactly the same thing.
+  if (n.includes('factory'))                        return 'factory'
+  // A yard or depot is where units are kept and turned around, which is what
+  // this category already means for Kasulu's "Logistic centre".
+  if (n.includes('logistic') || n.includes('yard') || n.includes('depot')) return 'logistics'
   if (n.includes('swamp') || n.includes('wet'))     return 'wetland'
   if (n.includes('river'))                          return 'water'
   if (n.includes('drain'))                          return 'drain'
-  if (n.includes('road') || n.includes('haulage'))  return 'road'
   if (n.includes('workshop') || n.includes('residence') || n.includes('dispensary')
     || n.includes('lab') || n.includes('reservoir') || n.includes('camp')) return 'facility'
   return 'other'
