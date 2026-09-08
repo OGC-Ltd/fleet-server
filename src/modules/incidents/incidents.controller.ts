@@ -1,6 +1,9 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
-import * as service from './incidents.service.js'
+/* Reads go through the cache, which fronts the service with the same
+   signatures and falls through to it for anything it declines to hold — see
+   incidents.cache. */
+import * as service from './incidents.cache.js'
 import type { SummaryQuery, ListQuery, InsightsQuery } from './incidents.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
