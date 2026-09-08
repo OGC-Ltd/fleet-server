@@ -21,33 +21,43 @@
 // one entry per screen, the cursor arithmetic and the month-over-month
 // composition included, and the service keeps a clean boundary to test against.
 //
-// ## Deliberately NOT warmed
+// ## Keys, and why the window is normalised
 //
-// None of these declares `warmKeysFor`, so none is registered with the central
-// warmer — `registry.push` is gated on that option. This is not an oversight.
-// The warmer is O(orgs x caches) and walks orgs sequentially; warm-cache.ts
-// records what happened the day the platform went from two organisations to
-// four — the sweep stopped fitting inside its own interval and ran back to
-// back, 151 slow builds in 28 minutes on a two-vCPU box that also runs a
-// 2-second telemetry poll. More swept keys per org is a cost paid on every
-// sweep for every organisation, to save one operator the first request of
-// their session.
-//
-// Warming is a reasonable thing to add LATER, once there is a canonical day
-// key to warm: the window arrives here as two instants chosen by the browser,
-// and the warmer would have to reproduce that string exactly or spend its
-// sweep on a key nobody asks for. Until then, stale-while-revalidate already
-// gives us the part that matters — one database round trip per key per
-// refresh, not one per request.
-//
-// ## Keys
-//
-// `orgId|...`, pipe-separated because ISO instants contain colons and
+// `orgId|window|...`, pipe-separated because ISO instants contain colons and
 // `orgOfKey` splits on the first of either. The org must lead, or the cache
 // cannot tell which organisation an entry belongs to, and `lastRead` — which
 // decides whose data is kept warm — would be recorded against a timestamp.
+//
+// The window token is the part that took thought. A request carries two
+// INSTANTS chosen by the browser, and a key built from them can only be
+// guessed at by a warmer: reproduce the string to the millisecond, or spend
+// the sweep computing a key nobody asks for. So a window that is exactly one
+// fleet day collapses to `d:YYYY-MM-DD` — a name the warmer can produce from
+// the clock — and anything else keeps its instants as `i:<from>~<to>`. Both
+// are cached; only the first is nameable in advance, and that is what makes
+// the warming below possible at all.
+//
+// The day form is deliberately strict (see `fleetDayOf`). A window that starts
+// at fleet midnight but ends at 23:00 is NOT the day, and answering it with
+// one would hand back an hour nobody asked for.
+//
+// ## What is warmed, and what that costs
+//
+// One key per cache per org: today's fleet day, default sort, default page
+// size — the request every reader makes on opening the tab, and the one that
+// measured 2.7s cold against the production ledger.
+//
+// Four keys per org, and only for organisations read in the last fifteen
+// minutes (ACTIVE_ORG_MS), so in practice it is four keys for whoever is
+// actually looking. That restraint is the point: warm-cache.ts records what
+// happened the day the platform went from two organisations to four — the
+// sweep stopped fitting inside its own interval and ran back to back, 151 slow
+// builds in 28 minutes on a two-vCPU box that also runs a 2-second telemetry
+// poll. Warming every sort, or every recent day, would put this cache back in
+// that territory for readers who mostly never leave the default view.
 
 import { createWarmCache } from '../../lib/warm-cache.js'
+import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import * as service from './incidents.service.js'
 import type { SummaryQuery, InsightsQuery } from './incidents.schema.js'
 
@@ -55,13 +65,51 @@ import type { SummaryQuery, InsightsQuery } from './incidents.schema.js'
  *  of staleness cannot hide a fault for longer than the sweep already does. */
 const REFRESH_MS = 60_000
 
+const DAY_MS = 86_400_000
 const iso = (d: Date) => d.toISOString()
 
-/** Windows arrive as instants; everything else in a key is a short token. */
+/** Today's fleet day, as the warmer names it. */
+const todayKey = () => fleetDayKey(new Date()).toISOString().slice(0, 10)
+
+/**
+ * `YYYY-MM-DD` when this window is exactly one fleet day, else null.
+ *
+ * Strict at both ends on purpose. The start must BE fleet midnight, not merely
+ * fall inside the day, and the end must reach its last minute — the dash sends
+ * 23:59:59 local. A window that starts at midnight and stops at 23:00 is a
+ * slice, and answering it with a whole day would hand back an hour nobody
+ * asked for. Anything failing either test keeps its instants instead.
+ */
+function fleetDayOf(from: Date, to: Date): string | null {
+  const start = fleetDayStart(from)
+  if (from.getTime() !== start.getTime()) return null
+  const end = start.getTime() + DAY_MS
+  if (to.getTime() >= end || to.getTime() < end - 60_000) return null
+  return fleetDayKey(from).toISOString().slice(0, 10)
+}
+
+/** The instants a day token stands for. Noon UTC lands inside the intended day
+ *  whichever way the offset nudges it — the same anchor the migrations use. */
+const dayWindow = (day: string) => {
+  const from = fleetDayStart(new Date(day + 'T12:00:00Z'))
+  return { from, to: new Date(from.getTime() + DAY_MS - 1_000) }
+}
+
+const windowToken = (from: Date, to: Date) => {
+  const day = fleetDayOf(from, to)
+  return day ? 'd:' + day : 'i:' + iso(from) + '~' + iso(to)
+}
+
+const windowOf = (token: string) => {
+  if (token.startsWith('d:')) return dayWindow(token.slice(2))
+  const [from, to] = token.slice(2).split('~')
+  return { from: new Date(from!), to: new Date(to!) }
+}
+
 const summaryKey = (orgId: string, q: SummaryQuery) =>
-  [orgId, iso(q.from), iso(q.to), q.sort, q.limit, q.kind ?? ''].join('|')
+  [orgId, windowToken(q.from, q.to), q.sort, q.limit, q.kind ?? ''].join('|')
 const insightsKey = (orgId: string, q: InsightsQuery) =>
-  [orgId, iso(q.from), iso(q.to)].join('|')
+  [orgId, windowToken(q.from, q.to)].join('|')
 
 /**
  * Rebuilding the query from its key rather than closing over it.
@@ -70,41 +118,55 @@ const insightsKey = (orgId: string, q: InsightsQuery) =>
  * in the background long after the request that created it has gone.
  */
 const summaryQuery = (key: string) => {
-  const [, from, to, sort, limit, kind] = key.split('|')
+  const [, token, sort, limit, kind] = key.split('|')
   return {
-    from: new Date(from!), to: new Date(to!),
+    ...windowOf(token!),
     sort: sort as SummaryQuery['sort'], limit: Number(limit),
     kind: kind || undefined,
   } as SummaryQuery
 }
 const insightsQuery = (key: string) => {
-  const [, from, to] = key.split('|')
-  return { from: new Date(from!), to: new Date(to!) } as InsightsQuery
+  const [, token] = key.split('|')
+  return windowOf(token!) as InsightsQuery
 }
 const orgOf = (key: string) => key.split('|')[0]!
+
+/* The one key each cache warms: today, default sort, default page size — the
+   request every reader makes on opening the tab. WARM_SORT and WARM_LIMIT must
+   track incidents.schema's defaults, or the warmer heats a key nobody asks
+   for and every real request still pays the cold price. */
+const WARM_SORT  = 'count'
+const WARM_LIMIT = 50
+const warmSummaryKey  = (orgId: string) =>
+  [orgId, 'd:' + todayKey(), WARM_SORT, WARM_LIMIT, ''].join('|')
+const warmInsightsKey = (orgId: string) => [orgId, 'd:' + todayKey()].join('|')
 
 const speedingSummaryCache = createWarmCache<Awaited<ReturnType<typeof service.speedingSummary>>>({
   name: 'incident-speeding-summary',
   refreshMs: REFRESH_MS,
   compute: (key) => service.speedingSummary(orgOf(key), summaryQuery(key)),
+  warmKeysFor: (orgId) => [warmSummaryKey(orgId)],
 })
 
 const speedingInsightsCache = createWarmCache<Awaited<ReturnType<typeof service.speedingInsights>>>({
   name: 'incident-speeding-insights',
   refreshMs: REFRESH_MS,
   compute: (key) => service.speedingInsights(orgOf(key), insightsQuery(key)),
+  warmKeysFor: (orgId) => [warmInsightsKey(orgId)],
 })
 
 const faultSummaryCache = createWarmCache<Awaited<ReturnType<typeof service.faultSummary>>>({
   name: 'incident-fault-summary',
   refreshMs: REFRESH_MS,
   compute: (key) => service.faultSummary(orgOf(key), summaryQuery(key)),
+  warmKeysFor: (orgId) => [warmSummaryKey(orgId)],
 })
 
 const faultInsightsCache = createWarmCache<Awaited<ReturnType<typeof service.faultInsights>>>({
   name: 'incident-fault-insights',
   refreshMs: REFRESH_MS,
   compute: (key) => service.faultInsights(orgOf(key), insightsQuery(key)),
+  warmKeysFor: (orgId) => [warmInsightsKey(orgId)],
 })
 
 /* ── public surface ───────────────────────────────────────────────────────── */
