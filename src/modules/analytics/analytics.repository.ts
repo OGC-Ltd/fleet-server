@@ -2,6 +2,10 @@
 import { getSimFleetVehicleIds } from '../../lib/sim-fleet.js'
 import { env } from '../../config/env.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
+// The SHARED distance measurement, for the day the rollup has not closed
+// yet — machine-operations reaches for the same one, and a second copy is
+// how two cards on one page start disagreeing about how far a fleet went.
+import { coveredSince } from '../dispatches/dispatch.repository.js'
 import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics.schema.js'
 import { calculateDriverRating } from './driver-rating.js'
 import type { FuelEventVerdict } from '../../../generated/prisma/client.js'
@@ -94,6 +98,95 @@ export async function deliveriesAnalytics(
     orderBy: { beganAt: 'asc' },
   })
 
+  /**
+   * Distance comes from TELEMETRY, not from trips.
+   *
+   * It used to be `sum(trip.mileageKm)`, which defines the fleet's ground
+   * covered in terms of a pipeline two of the four organisations do not have
+   * yet: Menengai and West Kenya Sugar build no trips, so their Distance
+   * covered read a flat zero — not "we did not measure it" but "you did not
+   * move", which is a different and false claim.
+   *
+   * `fuel_daily_trends.distance_m` is integrated from the fixes themselves and
+   * needs no trips at all. It is the same column machine-operations already
+   * reports its distances from, so the Analytics headline and the Machine
+   * Operations card can no longer disagree about how far a fleet went.
+   *
+   * This CHANGES the number on fleets that do have trips: integrated fix
+   * distance and summed trip mileage are different measurements, and trip
+   * mileage only ever counted ground covered inside a built trip. The new
+   * figure is the larger and the more complete of the two.
+   *
+   * `to_char` rather than returning the date and formatting it here: `day` is
+   * a bare DATE, and handing it back as a timestamp to be re-formatted through
+   * a +03:00 formatter is how a day lands on its neighbour.
+   */
+  const fromDay = windowDays[0]!
+  const lastDay = windowDays[windowDays.length - 1]!
+  const distanceRows = await prisma.$queryRaw<Array<{ day: string; metres: bigint }>>`
+    SELECT to_char(t.day, 'YYYY-MM-DD')           AS day,
+           coalesce(sum(t.distance_m), 0)::bigint AS metres
+      FROM fuel_daily_trends t
+      JOIN vehicles v ON v.id = t.vehicle_id
+     WHERE v.organisation_id = ${orgId}
+       AND v.is_active
+       AND t.day >= ${fromDay}::date
+       AND t.day <= ${lastDay}::date
+       ${vehicleSql(vehicleIds)}
+     GROUP BY 1`
+  const kmByDay = new Map(distanceRows.map(r => [r.day, Number(r.metres) / 1000]))
+
+  /**
+   * TODAY IS A DAY.
+   *
+   * `fuel_daily_trends` records days that have ENDED — the rollup runs at
+   * 21:20 — so on any window containing the current fleet day the query above
+   * returns nothing for it. Measured on the box: a seven-day window came back
+   * with six days for all four organisations, every one of them missing today.
+   * Left alone, "Distance covered" would quietly stop at midnight and a fleet
+   * that had been running since dawn would read as having gone nowhere.
+   *
+   * So today is integrated live from the fixes, through the same
+   * `coveredSince` machine-operations uses — jitter floor and implausible-hop
+   * rejection included, because a distance that counts GPS noise is not a
+   * smaller lie than one that stops at midnight.
+   */
+  const todayKey = fleetDayKey(fleetDayStart())
+  if (windowDays.includes(todayKey)) {
+    const units = await prisma.vehicle.findMany({
+      where: {
+        organisationId: orgId, isActive: true,
+        ...(vehicleIds == null ? {} : { id: { in: vehicleIds } }),
+      },
+      select: { id: true },
+    })
+    const since = fleetDayStart()
+    const covered = await coveredSince(units.map(v => ({ vehicleId: v.id, since })))
+    const liveKm = [...covered.values()].reduce((a, r) => a + r.coveredM, 0) / 1000
+    // Set, not add: the rollup has no row for today, so there is nothing here
+    // to double-count. If it ever gains one, the live figure is the fresher.
+    kmByDay.set(todayKey, liveKm)
+  }
+
+  const telemetryKm = [...kmByDay.values()].reduce((a, b) => a + b, 0)
+  /* Days the fleet actually covered ground, which is the honest denominator
+     for a per-day mean. The trip-based `activeDays` below counts days that saw
+     a TRIP, and on a fleet with no trip pipeline that is zero. */
+  const movingDays = [...kmByDay.values()].filter(km => km > 0).length
+
+  /**
+   * Whether trips are PENDING rather than absent.
+   *
+   * An organisation whose trip pipeline has never produced a row is not an
+   * organisation that made no deliveries — it is one nobody has built trips
+   * for yet, and rendering that as a confident zero is the same error the
+   * distance figure was making. One indexed lookup, and the screen says so.
+   */
+  const everBuiltTrips = await prisma.trip.findFirst({
+    where:  { vehicle: { organisationId: orgId } },
+    select: { id: true },
+  })
+
   const products  = new Map<string, { trips: number; kg: number }>()
   const depots    = new Map<string, { trips: number; kg: number }>()
   const byDay     = new Map<string, { trips: number; kg: number; km: number; timely: number }>()
@@ -136,14 +229,19 @@ export async function deliveriesAnalytics(
   // zero-filled series below is presentation, not activity.
   const activeDays = byDay.size
   const perDayKm   = totalKm / (activeDays || 1)
+  /* The distance mean divides by days the fleet MOVED, not days it delivered:
+     on a fleet with no trip pipeline the latter is zero. */
+  const telemetryPerDayKm = telemetryKm / (movingDays || 1)
 
   return {
     totals: {
       trips:      trips.length,
       tonnes:     t1(totalKg),
-      distanceKm: Math.round(totalKm),
+      distanceKm: Math.round(telemetryKm),
       windowDays: q.days,
       activeDays,
+      /** Null-shaped, not zero-shaped: see `everBuiltTrips`. */
+      tripsPending: everBuiltTrips == null,
     },
     products: [...products].map(([product, v]) => ({ product, trips: v.trips, tonnes: t1(v.kg) }))
       .sort((a, b) => b.tonnes - a.tonnes),
@@ -153,15 +251,20 @@ export async function deliveriesAnalytics(
     // charts always plot exactly `windowDays` days.
     byDay: windowDays.map((day) => {
       const v = byDay.get(day)
-      return { day, trips: v?.trips ?? 0, tonnes: t1(v?.kg ?? 0), distanceKm: Math.round(v?.km ?? 0), timely: v?.timely ?? 0 }
+      return {
+        day, trips: v?.trips ?? 0, tonnes: t1(v?.kg ?? 0), timely: v?.timely ?? 0,
+        // From the telemetry series, so the sparkline under the headline is
+        // measuring the same thing the headline is.
+        distanceKm: Math.round(kmByDay.get(day) ?? 0),
+      }
     }),
     byWeekday: byWeekday.map((trips, weekday) => ({ weekday, trips })), // weekday 0=Sun
     deliveries: { total: trips.length, timely: trips.length - interrupted, interrupted },
     distance: {
-      totalKm:    Math.round(totalKm),
-      perDayKm:   Math.round(perDayKm),
-      perWeekKm:  Math.round(perDayKm * 7),
-      perMonthKm: Math.round(perDayKm * 30),
+      totalKm:    Math.round(telemetryKm),
+      perDayKm:   Math.round(telemetryPerDayKm),
+      perWeekKm:  Math.round(telemetryPerDayKm * 7),
+      perMonthKm: Math.round(telemetryPerDayKm * 30),
     },
   }
 }
