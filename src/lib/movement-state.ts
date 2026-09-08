@@ -37,7 +37,7 @@
  * differ, a vehicle can be "in transit" on the card while its run row reports
  * it idling.
  */
-const MOVING_THRESHOLD_KMH = 1
+export const MOVING_THRESHOLD_KMH = 1
 
 /** A stop shorter than this does not end a journey. */
 const STOP_GRACE_MS = 3 * 60_000

@@ -993,6 +993,29 @@ model SensorFaultEpisode {
   observations Int      @default(1)
   /// { speedKmh, movingSinceMs, accuracyM, channel, lastValueAt }
   evidence     Json?
+
+  /// Where the unit was when this sensor was last working — the last fix at or
+  /// before `startedAt`, copied here at open time. Null when no fix survives:
+  /// vehicle_telemetries is swept at 30 days and a unit dark since last year
+  /// has none left, which is exactly why the position is copied rather than
+  /// looked up at read time.
+  /// When that fix was taken. NOT a copy of `startedAt`: they coincide for a
+  /// silent tracker, and for a channel death the newest position at or before
+  /// the fault can be minutes older than the fault itself.
+  lastFixAt    DateTime? @map("last_fix_at")
+  lastLat      Float?   @map("last_lat")
+  lastLng      Float?   @map("last_lng")
+  /// Speed at that fix, and the MOVING verdict taken there. Stored rather than
+  /// re-derived, so a later change to MOVING_THRESHOLD_KMH cannot restate what
+  /// was true at the time — the same rule speeding_incidents applies to
+  /// limit_kmh.
+  lastSpeedKmh Float?   @map("last_speed_kmh")
+  lastMoving   Boolean? @map("last_moving")
+  /// Reverse-geocoded label for that fix, filled asynchronously — the geocoder
+  /// is rate-limited and must not sit in the path of fault capture. Null means
+  /// unresolved, never "nowhere".
+  lastPlace    String?  @map("last_place")
+
   day          DateTime @db.Date
   createdAt    DateTime @default(now()) @map("created_at")
 
