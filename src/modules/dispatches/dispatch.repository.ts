@@ -41,6 +41,7 @@ import { prisma } from '../../lib/prisma.js'
 import { arrivalRadiusM, YARD_RADIUS_M, type Point } from '../../lib/dispatch-trip.js'
 import { PLAUSIBLE_KMH, JITTER_FLOOR_M } from '../../lib/fix-plausibility.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
+import { factoryOf, bagsFromTonnes } from '../webhooks/factory-map.js'
 
 const OPEN_STATUSES = ['DISPATCHED', 'OVERDUE']
 
@@ -118,6 +119,21 @@ export interface OpenTrip {
   /** Median spread of that measurement, and how many trips it came from. */
   destinationSpreadM: number
   destinationSamples: number
+  /**
+   * What is on the bed right now, for a SALES run.
+   *
+   * The Current Cargo card had no source for this and always read "Empty · 0
+   * TONNES": it is fed from `vehicle_telemetry.cargo_weight_kg`, and this fleet
+   * has no load cells — wialon.adapter hardcodes the channel null on every
+   * frame. The sales office knows the weight, so the OPEN RUN is where the card
+   * can learn it, exactly as the driver name is already taken from the run
+   * rather than from the stale assignment.
+   *
+   * All three are null on a cane run, which carries no declared weight.
+   */
+  cargoTonnes: number | null
+  cargoBags:   number | null
+  cargoName:   string | null
   /** First moment this run was seen at the destination. Null = not yet. */
   arrivedAt: string | null
   /** Newest fix at or after the dispatch clock. Null = silent since dispatch. */
@@ -164,6 +180,7 @@ export async function findOpenTripsByVehicle(organisationId: string): Promise<Ma
     select: {
       externalId: true, vehicleId: true, driverName: true, destination: true,
       status: true, dispatchedAt: true, expectedReturnAt: true,
+      kind: true, tonnageT: true, factoryCode: true,
     },
   })
   if (open.length === 0) return new Map()
@@ -303,6 +320,13 @@ export async function findOpenTripsByVehicle(organisationId: string): Promise<Ma
       destinationLng:     place?.lng ?? null,
       destinationSpreadM: place?.spreadM ?? 0,
       destinationSamples: place?.samples ?? 0,
+      // The load, named by the factory it left. A cane run declares no weight,
+      // so these stay null and the card falls back to telemetry as before.
+      cargoTonnes: d.kind === 'SALES' ? d.tonnageT : null,
+      cargoBags:   d.kind === 'SALES' ? bagsFromTonnes(d.tonnageT) : null,
+      cargoName:   d.kind === 'SALES'
+        ? (d.factoryCode ? factoryOf(d.factoryCode)?.commodity ?? null : null)
+        : null,
       arrivedAt: f?.arrivedAt?.toISOString() ?? null,
       lastFixAt: f?.lastFixAt?.toISOString() ?? null,
       // Null, not 0, with fewer than two fixes: "we have heard nothing today"

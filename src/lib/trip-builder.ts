@@ -34,6 +34,7 @@ import { logger } from './logger.js'
 import { getOrCreatePeriodFor } from './reporting-period.js'
 import { haversineM } from './dispatch-trip.js'
 import { PLAUSIBLE_KMH, JITTER_FLOOR_M as SHARED_JITTER_FLOOR_M } from './fix-plausibility.js'
+import { factoryOf, bagsFromTonnes, BAG_KG } from '../modules/webhooks/factory-map.js'
 
 /**
  * Consecutive fixes closer than this are treated as the vehicle standing still.
@@ -171,6 +172,8 @@ export async function buildTripsForOrg(
     select: {
       id: true, vehicleId: true, driverName: true, destination: true,
       dispatchedAt: true, actualReturnAt: true,
+      // The sales lifecycle: what the run carried, and which gate it left from.
+      kind: true, tonnageT: true, factoryCode: true,
     },
     orderBy: { actualReturnAt: 'asc' },
     ...(opts.limit ? { take: opts.limit } : {}),
@@ -231,11 +234,22 @@ export async function buildTripsForOrg(
      */
     const avgSpeedKmh     = movingAvgSpeedKmh(fixes)
 
+    // Fuel burned across the run, when the tank can answer honestly. Null is a
+    // normal outcome and NOT a zero — see tripFuelMl.
+    const consumedMl = await tripFuelMl(d.vehicleId!, beganAt, endedAt)
+
+    // Where the run actually began. The provider records only a destination, so
+    // this used to be the owning organisation's name unconditionally — which is
+    // wrong for precisely the runs the sales work exists for: a Menengai truck
+    // loading at Naitiri starts 250 km from Menengai's yard, and labelling that
+    // trip "Menengai Oil Refineries Ltd" misstates where it went from.
+    const factory = d.factoryCode ? factoryOf(d.factoryCode) : null
+
     out.built++
     if (!opts.apply) continue
 
     try {
-      await prisma.trip.create({
+      const trip = await prisma.trip.create({
         data: {
           vehicleId:         d.vehicleId!,
           dispatchId:        d.id,
@@ -243,16 +257,16 @@ export async function buildTripsForOrg(
           reportingPeriodId: await getOrCreatePeriodFor(orgId, beganAt),
           beganAt,
           endedAt,
-          // The provider records a destination and never an origin; every run on
-          // this fleet starts at the org's own yard.
-          initialLocation:   org?.name ?? null,
+          initialLocation:   factory?.label ?? org?.name ?? null,
           finalLocation:     d.destination,
           durationSeconds,
           mileageKm,
           avgSpeedKmh,
           maxSpeedKmh,
+          consumedMl,
         },
       })
+      await writeManifest(trip.id, d.kind, d.tonnageT, factory)
     } catch (err) {
       // P2002 on dispatchId: the repeatable job and a hand-run backfill both
       // saw this dispatch before either had written it. The unique index is
@@ -324,4 +338,129 @@ export async function recomputeTripSpeeds(
 
   logger.info({ orgId, ...out, trips: trips.length }, 'Trip speed recompute complete')
   return out
+}
+
+/**
+ * Settled tank level at each end of a run, and the difference between them.
+ *
+ * ## Why this is allowed to return null, often
+ *
+ * `Trip.consumedMl` is nullable and a blank here is a real answer, not a
+ * failure. The alternative — writing 0 when the tank cannot be read — puts a
+ * fabricated figure into the consumption charts and drags every fleet average
+ * towards zero, which is the same mistake `mileageKm` refuses to make by
+ * skipping unmeasurable dispatches outright.
+ *
+ * ## A run containing a refuel cannot be measured this way
+ *
+ * `initial − final` is what the TANK did, not what the engine burned: on a run
+ * where the driver filled up, fuel went in as well as out and the difference
+ * understates the burn by however much went in. fuel-tank-state makes exactly
+ * this point about its daily column, and it matters more here — KCP 134P
+ * refuels roughly every other day at Busia-Mumias, in 100–200 L lots.
+ *
+ * A filling the adjudicator put down to SENSOR_FAULT does not count. That
+ * verdict means the probe failed rather than the tank filling, so no fuel went
+ * in and there is nothing to confound the difference — blanking the trip for it
+ * would discard a measurable run on the strength of a dead sensor. Every other
+ * verdict, PENDING included, is treated as fuel that may really have gone in:
+ * undecided is not the same as disproved, and the cost of being wrong is a
+ * fabricated burn figure.
+ *
+ * ## Both ends are medians
+ *
+ * A single reading at either boundary puts that reading's error straight into
+ * the trip's consumption. This fleet's 99th-percentile ping-to-ping jump is
+ * about 5 L on a probe whose median step is zero, so one sample is not a level.
+ * Same defence, and the same window, as `closingLevel`.
+ */
+const FUEL_EDGE_MINUTES = 15
+/** Fewer readings than this either side and the boundary is one opinion. */
+const MIN_EDGE_READINGS = 2
+
+function medianMl(rows: readonly { fuelLevelMl: number }[]): number | null {
+  if (rows.length === 0) return null
+  const v = rows.map(r => r.fuelLevelMl).sort((a, b) => a - b)
+  const mid = Math.floor(v.length / 2)
+  return v.length % 2 ? v[mid]! : Math.round((v[mid - 1]! + v[mid]!) / 2)
+}
+
+export async function tripFuelMl(
+  vehicleId: string,
+  beganAt:   Date,
+  endedAt:   Date,
+): Promise<number | null> {
+  // A refuel inside the window makes the difference meaningless. Checked first:
+  // it is one indexed read and it short-circuits the level query entirely.
+  const refuelled = await prisma.fuelFilling.findFirst({
+    where:  { vehicleId, filledAt: { gte: beganAt, lte: endedAt }, verdict: { not: 'SENSOR_FAULT' } },
+    select: { id: true },
+  })
+  if (refuelled) return null
+
+  const rows = await prisma.vehicleTelemetry.findMany({
+    where:   { vehicleId, capturedAt: { gte: beganAt, lte: endedAt }, fuelLevelMl: { not: null } },
+    select:  { capturedAt: true, fuelLevelMl: true },
+    orderBy: { capturedAt: 'asc' },
+  })
+  if (rows.length < MIN_EDGE_READINGS * 2) return null
+
+  const levels  = rows as { capturedAt: Date; fuelLevelMl: number }[]
+  const startBy = levels[0]!.capturedAt.getTime() + FUEL_EDGE_MINUTES * 60_000
+  const endFrom = levels[levels.length - 1]!.capturedAt.getTime() - FUEL_EDGE_MINUTES * 60_000
+
+  const head = levels.filter(r => r.capturedAt.getTime() <= startBy)
+  const tail = levels.filter(r => r.capturedAt.getTime() >= endFrom)
+  if (head.length < MIN_EDGE_READINGS || tail.length < MIN_EDGE_READINGS) return null
+
+  const opening = medianMl(head)
+  const closing = medianMl(tail)
+  if (opening == null || closing == null) return null
+
+  const burned = opening - closing
+  // A tank that finished fuller than it started, with no filling on the ledger,
+  // is a probe disagreeing with itself — most often a sloshing sender settling.
+  // There is no burn to report and inventing 0 would say the run was free.
+  return burned > 0 ? burned : null
+}
+
+/**
+ * Record what a completed run carried.
+ *
+ * Only SALES runs have a weight to record. The provider sends none on a cane
+ * dispatch — there is no waybill in that flow — so writing an empty manifest
+ * for one would add a row asserting nothing.
+ *
+ * The tonnage goes in `declaredWeightKg`, NOT `arrivalWeightKg`. That is a
+ * provenance statement and it is worth being strict about: the figure is what
+ * the sales office entered on the run, which is exactly what the waybill field
+ * means, while the arrival column is documented as a load-cell reading at trip
+ * end. This fleet has no load cells — wialon.adapter hardcodes cargoWeightKg
+ * null on every frame — so putting an office figure there would make a
+ * measurement out of a declaration, and nothing downstream could tell them
+ * apart again.
+ *
+ * The bag count is written into `description` rather than a column of its own
+ * because it is a restatement of the tonnage in the unit the yard counts in,
+ * not an independent fact — one number, two ways of saying it.
+ */
+export async function writeManifest(
+  tripId:   string,
+  kind:     'CANE' | 'SALES',
+  tonnageT: number | null,
+  factory:  { commodity: string; cargoType: 'BULK' | 'PACKAGED' } | null,
+): Promise<void> {
+  if (kind !== 'SALES') return
+  const bags = bagsFromTonnes(tonnageT)
+  if (bags == null || tonnageT == null) return
+
+  const commodity = factory?.commodity ?? 'Sugar'
+  await prisma.cargoManifest.create({
+    data: {
+      tripId,
+      description:      `${commodity} — ${bags.toLocaleString('en-GB')} × ${BAG_KG} kg bags`,
+      cargoType:        factory?.cargoType ?? 'PACKAGED',
+      declaredWeightKg: tonnageT * 1000,
+    },
+  })
 }

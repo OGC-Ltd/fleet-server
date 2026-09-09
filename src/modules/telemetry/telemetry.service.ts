@@ -465,6 +465,20 @@ export async function getFleetSnapshot(orgId: string, vehicleIds: Set<string> | 
       // names the driver who took the keys, for the trip being displayed.
       driver: open?.driverName ?? v.driver,
       driverSource: open ? 'dispatch' : (v.driver ? 'assignment' : null),
+      // The declared load WINS over the telemetry channel, for the same reason
+      // the dispatch driver does — and more decisively, because there is no
+      // competing measurement at all. `cargo_weight_kg` is a load-cell channel
+      // and nothing on this fleet fills it (wialon.adapter hardcodes it null),
+      // so the Current Cargo card has read "Empty · 0 TONNES" for every real
+      // vehicle since it was built. The sales office knows the tonnage; an open
+      // SALES run is where the card can learn it.
+      //
+      // Falls through untouched for a cane run or an idle unit, so a fleet with
+      // real load cells would keep using them.
+      cargoWeightKg: open?.cargoTonnes != null ? open.cargoTonnes * 1000 : v.cargoWeightKg,
+      cargoDesc:     open?.cargoName ?? v.cargoDesc,
+      /** 50 kg bags in the declared load — the unit the yard actually counts. */
+      cargoBags:     open?.cargoBags ?? null,
       trip,
       connectionOnline:    conn?.online    ?? null,
       connectionCheckedAt: conn?.checkedAt ?? null,
