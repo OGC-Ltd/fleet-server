@@ -74,40 +74,49 @@ export async function findLatestPerVehicle(orgId: string): Promise<FleetRow[]> {
 }
 
 /**
- * Two numbers for the whole platform: how many vehicles there are, and how many
- * are moving right now.
+ * The platform's fleet, reduced to what the pulse needs to grade it.
  *
- * COUNTS ONLY, and deliberately. This is the one query in the codebase whose
- * result is served to callers with no session, so it returns no plate, no
- * name, no position and no organisation — there is nothing in the result set to
- * attribute to anybody. A `findLatestPerVehicle` without its org filter would
- * have been three lines shorter and would have put the entire platform's fleet
+ * NOTHING ATTRIBUTABLE LEAVES THE SERVER. This feeds the one endpoint served to
+ * callers with no session, and the caller turns these rows into two integers —
+ * no plate, no name, no position, no organisation ever reaches the wire. The
+ * `deviceId` here is read only to look up the provider's connection verdict and
+ * is discarded in the same function; a `findLatestPerVehicle` without its org
+ * filter would have been shorter and would have put the entire platform's fleet
  * on an unauthenticated wire.
  *
- * The moving test is the DASHBOARD'S OWN — `engine_on AND speed > 0` — so the
- * figure on the sign-in screen and the figure in the header mean the same
- * thing rather than two things with one name.
+ * ## Why rows rather than a COUNT
  *
- * One addition to it: a freshness window. The header's count is read by
- * somebody who knows their own fleet and can see a unit's last ping beside it;
- * this one says "right now" to a stranger, and without the window a vehicle
- * whose final ping three days ago had the engine running would be reported as
- * in transit forever. `capturedAt` older than the window counts as parked.
+ * This used to count in SQL — `engine_on AND speed > 0 AND captured_at` inside
+ * a freshness window — and it could not do otherwise, because the test the
+ * dashboard actually applies is not expressible here. "In transit" on the
+ * dashboard means the PROVIDER says the tracker is connected, and that verdict
+ * lives in an in-memory map fed by the reconcile sweep (lib/connection-state),
+ * deliberately never persisted. No SQL can join it.
+ *
+ * So the freshness window stood in for it, and a window is a measurably
+ * different question. Against the live Kasulu account a 15-minute window
+ * disagreed with Wialon's own verdict on 28 of 224 units — 25 of them units
+ * Wialon called OFFLINE while the window called them online. That is the gap
+ * the sign-in number carried: it counted units the dashboard would not.
  *
  * The lateral join through `vehicle_telemetry_raws` is kept from
  * findLatestPerVehicle rather than dropped for speed: it is part of what that
  * query means by "latest telemetry", and a cheaper definition here would make
  * the two numbers disagree for reasons nobody could see.
  */
-export async function countFleetPulse(freshMs: number): Promise<{ total: number; inTransit: number }> {
-  const rows = await prisma.$queryRaw<{ total: number; inTransit: number }[]>`
+export interface PulseRow {
+  /** The provider's unit id, for the connection lookup. Never leaves the server. */
+  deviceId: string | null
+  speedKmh: number | null
+  engineOn: boolean | null
+}
+
+export async function findFleetPulseRows(): Promise<PulseRow[]> {
+  return prisma.$queryRaw<PulseRow[]>`
     SELECT
-      COUNT(*)::int AS "total",
-      COUNT(*) FILTER (
-        WHERE COALESCE(t.engine_on, false)
-          AND COALESCE(t.speed_kmh, 0) > 0
-          AND t.captured_at > NOW() - (${freshMs} || ' milliseconds')::interval
-      )::int AS "inTransit"
+      v.device_id                  AS "deviceId",
+      t.speed_kmh                  AS "speedKmh",
+      COALESCE(t.engine_on, false) AS "engineOn"
     FROM vehicles v
     LEFT JOIN LATERAL (
       SELECT tt.speed_kmh, tt.engine_on, tt.captured_at
@@ -119,5 +128,4 @@ export async function countFleetPulse(freshMs: number): Promise<{ total: number;
     ) t ON true
     WHERE v.is_active = true
   `
-  return rows[0] ?? { total: 0, inTransit: 0 }
 }
