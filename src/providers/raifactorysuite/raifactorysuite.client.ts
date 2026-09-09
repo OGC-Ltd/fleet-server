@@ -46,6 +46,22 @@ export interface RaiFactorySuiteDispatchRow {
   actualReturnTime?:     string | null
 }
 
+/** A sales run. `tonnage` is the only weight this integration receives from
+ *  anywhere — see Dispatch.tonnageT. */
+export interface RaiFactorySuiteSaleRow {
+  id:                 string
+  factoryCode:        string
+  vehicleNumberPlate: string
+  driverName?:        string | null
+  tonnage?:           number | null
+  destination?:       string | null
+  status?:            string | null
+  signOutTime?:       string | null
+  signOutPhotoUrl?:   string | null
+  returnTime?:        string | null
+  returnPhotoUrl?:    string | null
+}
+
 export class RaiFactorySuiteClient {
   constructor(
     private readonly baseUrl: string = raiFactorySuiteApi.url,
@@ -81,6 +97,28 @@ export class RaiFactorySuiteClient {
 
   async listDispatches(limit = 500): Promise<RaiFactorySuiteDispatchRow[]> {
     return this.get<RaiFactorySuiteDispatchRow>(`/dispatches?limit=${limit}`)
+  }
+
+  /**
+   * Sales runs — finished sugar leaving for a customer.
+   *
+   * Undocumented when this was written; the shape below was read off the live
+   * endpoint on 2026-09-09. Two quirks worth knowing before adding a filter:
+   *
+   *   • `status` is ACCEPTED AND IGNORED. Every value returns the full set, so
+   *     there is no "give me only the open ones" — the caller reconciles the
+   *     whole window and decides for itself. (`/dispatches` has the same
+   *     disease with `offset`.)
+   *   • `factoryCode` IS honoured, and an unknown one is a hard error rather
+   *     than an empty list: `{"error":"Unknown factory code: ZZZZ"}`. So it is
+   *     only ever sent from FACTORIES, never from a provider-supplied string.
+   *
+   * There is no `/sales/{id}` — that 404s — so enrichment means re-reading the
+   * collection.
+   */
+  async listSales(factoryCode?: string, limit = 500): Promise<RaiFactorySuiteSaleRow[]> {
+    const q = factoryCode ? `factoryCode=${encodeURIComponent(factoryCode)}&limit=${limit}` : `limit=${limit}`
+    return this.get<RaiFactorySuiteSaleRow>(`/sales?${q}`)
   }
 
   /** Cheap liveness probe used when a reconcile run fails, to tell apart
