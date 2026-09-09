@@ -150,3 +150,84 @@ export async function revokeRole(userId: string, roleId: string) {
     data: { revokedAt: new Date() },
   })
 }
+
+/**
+ * Everything about this person that a permanent delete would take with them.
+ *
+ * Read BEFORE the delete, and read as counts rather than rows, because it is
+ * the answer to a question the administrator is entitled to ask first: what am
+ * I about to destroy. Two of these lists are checked and the rest are only
+ * reported — see `purge` for which, and why.
+ */
+export async function countBelongings(userId: string) {
+  const [
+    orgIds, roles, sessions, invites, assignments,
+    trips, thefts, violations, speeding, pushes,
+  ] = await Promise.all([
+    prisma.user.findUnique({
+      where:  { id: userId },
+      select: {
+        organisationId: true,
+        memberships: { where: { revokedAt: null }, select: { organisationId: true } },
+      },
+    }),
+    prisma.userRole.count({ where: { userId } }),
+    prisma.authSession.count({ where: { userId } }),
+    prisma.passwordToken.count({ where: { userId } }),
+    prisma.vehicleAssignment.count({ where: { userId } }),
+    prisma.trip.count({ where: { driverId: userId } }),
+    prisma.fuelTheft.count({ where: { driverId: userId } }),
+    prisma.geofenceViolation.count({ where: { driverId: userId } }),
+    prisma.speedingIncident.count({ where: { driverId: userId } }),
+    prisma.pushSubscription.count({ where: { userId } }),
+  ])
+
+  return {
+    organisationIds: orgIds
+      ? [orgIds.organisationId, ...orgIds.memberships.map((m) => m.organisationId)]
+      : [],
+    roles, sessions, invites, assignments,
+    trips, thefts, violations, speeding, pushes,
+    // What makes this person a DRIVER rather than a dashboard account. These
+    // rows outlive the person on purpose — a trip that happened, happened —
+    // and their foreign keys are nullable so the database would happily blank
+    // the driver out of every one of them. The service refuses instead.
+    operational: trips + thefts + violations + speeding + assignments,
+  }
+}
+
+/**
+ * Delete the person and the access that only exists to describe them.
+ *
+ * ## What goes, and why it goes in this order
+ *
+ * Four tables hold a REQUIRED reference to a user, so Postgres refuses the
+ * delete while any row survives — role grants, organisation memberships,
+ * sign-in sessions, and (through a cascade) invitation tokens and push
+ * subscriptions. All four are statements about who this account is; none of
+ * them is a record of something that happened in the fleet. They are deleted
+ * first, in one transaction, so a failure half way leaves the account intact
+ * rather than stripped of its access and still there.
+ *
+ * Rows that merely NAME this person as an actor — who granted a membership,
+ * who created an API key, who assigned a geofence — carry a nullable key and
+ * are blanked by the database's own ON DELETE SET NULL. That is the right
+ * outcome: the grant still happened, and "granted by somebody since deleted"
+ * is the honest reading of it.
+ *
+ * ## Why this is not `deleteMany` on the user
+ *
+ * `where: { id, organisationId }` scopes the delete to the organisation the
+ * caller is administering. A person's HOME organisation is the only one this
+ * can be, which is checked in the service — deleting somebody through an org
+ * they are merely a guest of would be deleting them everywhere from a page
+ * that says one site's name at the top.
+ */
+export async function purge(orgId: string, userId: string) {
+  return prisma.$transaction(async (tx) => {
+    await tx.userRole.deleteMany({ where: { userId } })
+    await tx.orgMembership.deleteMany({ where: { userId } })
+    await tx.authSession.deleteMany({ where: { userId } })
+    return tx.user.delete({ where: { id: userId, organisationId: orgId } })
+  })
+}

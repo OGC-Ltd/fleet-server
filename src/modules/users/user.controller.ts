@@ -91,6 +91,20 @@ export const remove: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+/**
+ * Destroy the account, rather than stamping it deleted.
+ *
+ * A body, not a 204: the roster page reports what was actually removed, and
+ * "the account, its 2 role grants and its 1 session" is the sentence that
+ * makes a permanent delete legible after the fact. There is nothing else left
+ * to look at.
+ */
+export const purge: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await service.purgeUser(p(req, 'orgId'), p(req, 'userId'), req.user?.id))
+  } catch (err) { next(err) }
+}
+
 export const assignRole: RequestHandler = async (req, res, next) => {
   try {
     const result = await service.assignRoleToUser(p(req, 'orgId'), p(req, 'userId'), req.body as AssignRoleDto, req.user?.id)
