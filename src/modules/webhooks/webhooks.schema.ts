@@ -7,6 +7,11 @@ import { z } from 'zod'
  *   dispatch.created  — a unit went out with a driver
  *   movement.created  — a movement/position record
  *
+ * That is the whole list of NAMES, and it is shorter than the list of things
+ * that arrive: the sales lifecycle has no name of its own and is delivered
+ * under the latter two. The name therefore identifies the CALLBACK, not the
+ * payload — see `looksLikeSale`, which is what actually sorts them.
+ *
  * Their envelope shape is not published, and rejecting a delivery we don't
  * fully understand costs us the event: their sender retries a few times and
  * then drops it. So the receiver validates only what it must — that the body
@@ -50,6 +55,69 @@ export const raiFactorySuiteDispatchSchema = z.object({
   expectedReturnTime:   z.string().nullish(),
   actualReturnTime:     z.string().nullish(),
 })
+
+/**
+ * A SALES dispatch — finished sugar leaving for a customer.
+ *
+ * A different lifecycle from `/dispatches`, not a variant of it. The sales
+ * office raises the run (tonnage + destination + unit + driver); the gate guard
+ * then signs the unit OUT, and signs it back IN when it returns. So one row
+ * mutates through three states and the same `id` is delivered more than once
+ * with different fields populated — which is why the handler narrates on
+ * TRANSITIONS rather than on first sight the way handleDispatch does.
+ *
+ * `tonnage` is the only weight anywhere in this integration. Everything the bag
+ * count says comes from it.
+ *
+ * Every field past the identity is nullish on purpose: a run that has been
+ * created but not yet signed out has no `signOutTime`, and rejecting it would
+ * cost us the event (their sender retries a few times, then drops).
+ */
+export const raiFactorySuiteSaleSchema = z.object({
+  id:                 z.string().min(1),
+  factoryCode:        z.string().min(1),
+  vehicleNumberPlate: z.string().min(1),
+  driverName:         z.string().nullish(),
+  /** Tonnes. Coerced because the provider has sent it as both 29 and "29.0". */
+  tonnage:            z.coerce.number().nullish(),
+  destination:        z.string().nullish(),
+  /** Observed: RETURNED. The vocabulary is not published and the `status`
+   *  query parameter is IGNORED by the endpoint, so this is recorded, never
+   *  relied on — the timestamps below are what say where the run has got to. */
+  status:             z.string().nullish(),
+  signOutTime:        z.string().nullish(),
+  signOutPhotoUrl:    z.string().nullish(),
+  returnTime:         z.string().nullish(),
+  returnPhotoUrl:     z.string().nullish(),
+})
+
+export type RaiFactorySuiteSaleInput = z.infer<typeof raiFactorySuiteSaleSchema>
+
+/**
+ * Does this payload look like a sale, whatever the sender called the event?
+ *
+ * There is no sales event name to check. Confirmed 2026-09-09: the provider
+ * delivers a sales sign-out under `dispatch.created` and `movement.created` —
+ * the same names the cane flow uses — so the envelope cannot discriminate and
+ * the controller consults this BEFORE the name, not after.
+ *
+ * Getting that order wrong is not a near-miss. A sales payload satisfies the
+ * dispatch schema outright (id, factoryCode, vehicleNumberPlate and driverName
+ * are all present; `dispatchTime` is optional), so a name-first controller
+ * files it as a cane dispatch, drops the tonnage, and stamps it with a
+ * dispatch time taken from the receive clock.
+ *
+ * The three fields below are decisive in both directions, which is what makes
+ * running this first safe: none of them appears on a cane dispatch or a
+ * movement. Note in particular that a dispatch's return field is
+ * `actualReturnTime` — loosening this to match "some kind of return time"
+ * would start swallowing closed cane dispatches.
+ */
+export function looksLikeSale(item: unknown): boolean {
+  if (!item || typeof item !== 'object') return false
+  const o = item as Record<string, unknown>
+  return 'vehicleNumberPlate' in o && ('tonnage' in o || 'signOutTime' in o || 'returnTime' in o)
+}
 
 /** A gate movement — a unit crossing the factory gate. Carries NO coordinates:
  *  this is a checkpoint crossing, not GPS. */

@@ -1,5 +1,5 @@
 /**
- * RaiFactorySuite operational events — dispatches and gate movements.
+ * RaiFactorySuite operational events — dispatches, gate movements and sales.
  *
  *   dispatch.created — a unit left with a driver. Same shape as the REST
  *                      /dispatches resource, so this and `sync:drivers`
@@ -11,19 +11,30 @@
  *                      it carries NO coordinates — this is a checkpoint
  *                      crossing, not GPS, so it cannot move map markers.
  *
- * Both are narrated into the Live Feed. Alerts live in
+ *   (sales)          — a SALES dispatch: finished sugar leaving for a
+ *                      customer, raised by the sales office and then signed
+ *                      out and back in by the gate guard. Carries a TONNAGE,
+ *                      which nothing else in this integration does. See
+ *                      handleSale for why it narrates differently.
+ *
+ * All are narrated into the Live Feed. Alerts live in
  * raifactorysuite-alerts.service.ts.
+ *
+ * ## Every one of these routes by the UNIT, not by the factory
+ *
+ * A factory is a place; the organisation that should see the event is the one
+ * that OWNS the truck. Naitiri is a West Kenya Sugar factory where Menengai
+ * units load, and routing on `factoryCode` put those on the West Kenya Sugar
+ * feed and nowhere else. `resolveEventOrg` is the correction — see
+ * factory-map.ts, which also explains why asking the provider about the unit
+ * cannot fix it.
  */
 
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { eventBus } from '../../lib/event-bus.js'
 import { parseProviderTime, parseProviderTimeOr } from '../../lib/provider-time.js'
-import { resolveOrgId, skipUnmappedFactory } from './factory-map.js'
-
-
-const norm = (s: string | null | undefined): string =>
-  (s ?? '').trim().toUpperCase().replace(/\s+/g, ' ')
+import { resolveEventOrg, skipUnmappedFactory, type EventOrg } from './factory-map.js'
 
 /**
  * Narrate an event into the Live Feed via the bus (notification.worker owns the
@@ -79,8 +90,10 @@ export async function handleDispatch(
   d: DispatchEvent,
   { narrate = true, source = 'webhook' }: { narrate?: boolean; source?: string } = {},
 ): Promise<boolean> {
-  const organisationId = await resolveOrgId(d.factoryCode)
-  if (!organisationId) {
+  // Routed by the UNIT, not by the factory. A vehicle from another
+  // organisation loading here belongs to ITS owner's feed — see factory-map.
+  const org = await resolveEventOrg(d.factoryCode, d.vehicleNumberPlate)
+  if (!org) {
     // Was a bare `return false`, and that was the bug. The controller counts
     // the false as "nothing happened" and its summary log line is gated on the
     // counters, so an entire factory's dispatches arrived, parsed, and left no
@@ -88,14 +101,12 @@ export async function handleDispatch(
     skipUnmappedFactory(d.factoryCode, 'dispatch', d.id)
     return false
   }
+  const { organisationId } = org
 
   // Provider timestamps are offsetless EAT — see lib/provider-time.
   const when = parseProviderTimeOr(d.dispatchTime)
 
-  const vehicle = await prisma.vehicle.findFirst({
-    where: { organisationId, registrationPlate: norm(d.vehicleNumberPlate) },
-    select: { id: true },
-  })
+  const vehicle = org.vehicleId ? { id: org.vehicleId } : null
 
   // The dispatch ITSELF, kept whether or not the plate and driver resolve.
   //
@@ -106,8 +117,9 @@ export async function handleDispatch(
   // provider's window moves past it.
   const row = {
     organisationId,
+    kind:             'CANE' as const,
     vehicleId:        vehicle?.id ?? null,
-    plate:            norm(d.vehicleNumberPlate),
+    plate:            org.plate,
     driverName:       d.driverName.trim(),
     destination:      d.destinationOrPurpose?.trim() || null,
     status:           (d.status ?? 'DISPATCHED').toUpperCase(),
@@ -251,11 +263,13 @@ const ARRIVAL_ECHO_MS = 10 * 60_000
  * the provider's line where it actually has something better to say.
  */
 export async function handleMovement(m: MovementEvent): Promise<boolean> {
-  const organisationId = await resolveOrgId(m.factoryCode)
-  if (!organisationId) {
+  // By the unit, not the gate it crossed — see handleDispatch above.
+  const org = await resolveEventOrg(m.factoryCode, m.vehicleNumberPlate)
+  if (!org) {
     skipUnmappedFactory(m.factoryCode, 'movement', m.id)
     return false
   }
+  const { organisationId } = org
 
   const when = parseProviderTimeOr(m.timestamp)
 
@@ -263,7 +277,7 @@ export async function handleMovement(m: MovementEvent): Promise<boolean> {
   if (exiting) {
     const echoed = await prisma.dispatch.findFirst({
       where: {
-        plate:        m.vehicleNumberPlate,
+        plate:        org.plate,
         dispatchedAt: {
           gte: new Date(when.getTime() - DISPATCH_ECHO_MS),
           lte: new Date(when.getTime() + DISPATCH_ECHO_MS),
@@ -287,7 +301,7 @@ export async function handleMovement(m: MovementEvent): Promise<boolean> {
     const measured = await prisma.notification.findFirst({
       where: {
         organisationId: organisationId,
-        plate:          m.vehicleNumberPlate,
+        plate:          org.plate,
         alertType:      'MOVEMENT_ENTRY',
         source:         'telemetry',
         occurredAt: {
@@ -317,4 +331,209 @@ export async function handleMovement(m: MovementEvent): Promise<boolean> {
     plate:     m.vehicleNumberPlate,
   })
   return true
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// SALES
+// ───────────────────────────────────────────────────────────────────────────
+
+export interface SaleEvent {
+  id: string; factoryCode: string; vehicleNumberPlate: string
+  driverName?: string | null; tonnage?: number | null; destination?: string | null
+  status?: string | null
+  signOutTime?: string | null; signOutPhotoUrl?: string | null
+  returnTime?:  string | null; returnPhotoUrl?:  string | null
+}
+
+/** Kilograms in the bags this fleet counts sugar in. */
+const BAG_KG = 50
+
+/**
+ * Bags of sugar in a load, or null when there is no weight to divide.
+ *
+ * Deliberately refuses a zero or negative tonnage rather than reporting "0
+ * bags": the provider models `tonnage` as optional and a run whose weight has
+ * not been entered yet is not a run carrying nothing.
+ */
+export function bagsFromTonnes(tonnage: number | null | undefined): number | null {
+  if (tonnage == null || !Number.isFinite(tonnage) || tonnage <= 0) return null
+  return Math.round((tonnage * 1000) / BAG_KG)
+}
+
+/** "29.0t (580 × 50 kg bags)", or nothing at all. */
+function loadPhrase(tonnage: number | null | undefined): string {
+  const bags = bagsFromTonnes(tonnage)
+  if (bags == null) return ''
+  return `${tonnage!.toFixed(1)}t (${bags.toLocaleString('en-GB')} × ${BAG_KG} kg bags)`
+}
+
+/**
+ * A sales run: sugar out of the factory gate and back.
+ *
+ * ## Why this cannot reuse handleDispatch's narration rule
+ *
+ * A cane dispatch is narrated the first time it is seen and never again, and
+ * that is right because it tells one story: the paperwork was raised. A SALES
+ * row tells two, at different times, and the same `id` is delivered for both —
+ * the guard signs the unit out, and later signs it back in. Narrating on first
+ * sight would announce the departure and then stay silent on the return, which
+ * is the half the weighbridge is waiting for.
+ *
+ * So the guard here is a TRANSITION check: what did we already hold for this
+ * run, and what does this delivery add? Each of the two moments is narrated
+ * exactly once however many times the row is re-offered — which the reconciler
+ * relies on, because `/sales` ignores its own `status` filter and there is no
+ * way to ask it for only what changed.
+ *
+ * ## The timestamps decide the state, not `status`
+ *
+ * `status` is recorded but never branched on. Its vocabulary is not published,
+ * the only value observed is RETURNED, and the endpoint IGNORES `status` as a
+ * query parameter — so a run's state is read off `signOutTime` and `returnTime`,
+ * which are unambiguous.
+ *
+ * ## Nothing is stored before sign-out
+ *
+ * A sale that exists on paper but has not left has no `signOutTime`, and
+ * `dispatches.dispatched_at` is NOT NULL for a good reason: every consumer of
+ * that column means "when did this unit go". Inventing a time so the row can be
+ * written would put a truck on the map that is standing in the yard. It is
+ * skipped, and picked up on the delivery that signs it out.
+ */
+export async function handleSale(
+  s: SaleEvent,
+  { narrate = true, source = 'webhook' }: { narrate?: boolean; source?: string } = {},
+): Promise<boolean> {
+  const org = await resolveEventOrg(s.factoryCode, s.vehicleNumberPlate)
+  if (!org) {
+    skipUnmappedFactory(s.factoryCode, 'sale', s.id)
+    return false
+  }
+
+  const signedOutAt = parseProviderTime(s.signOutTime)
+  if (!signedOutAt) {
+    logger.debug(
+      { sale: s.id, plate: org.plate, status: s.status },
+      'Sales run not signed out yet — nothing to place on the map; will store when the guard signs it out',
+    )
+    return false
+  }
+  const returnedAt = parseProviderTime(s.returnTime)
+
+  const row = {
+    organisationId:   org.organisationId,
+    kind:             'SALES' as const,
+    vehicleId:        org.vehicleId,
+    plate:            org.plate,
+    driverName:       s.driverName?.trim() || 'Unassigned',
+    destination:      s.destination?.trim() || null,
+    // Mapped into the vocabulary the rest of the system already speaks, so a
+    // sales run shows up in the open-runs query and the duration statistics
+    // without either of them learning a second set of words. OPEN_STATUSES in
+    // dispatches/dispatch.repository is what these have to line up with.
+    status:           returnedAt ? 'COMPLETED' : 'DISPATCHED',
+    dispatchedAt:     signedOutAt,
+    // The sales office sets no due-back commitment, so there is nothing honest
+    // to put here. Left null; the tooltip falls through to the measured median
+    // for the destination once one exists.
+    expectedReturnAt: null,
+    actualReturnAt:   returnedAt,
+    tonnageT:         s.tonnage ?? null,
+    signOutPhotoUrl:  s.signOutPhotoUrl ?? null,
+    returnPhotoUrl:   s.returnPhotoUrl ?? null,
+    source,
+  }
+
+  // What we held BEFORE this delivery — the two booleans that decide which of
+  // the run's two moments are new. Read before the upsert, because afterwards
+  // the row carries the new state and the transition is unrecoverable.
+  const before = await prisma.dispatch.findUnique({
+    where:  { externalId: s.id },
+    select: { id: true, actualReturnAt: true },
+  })
+  const departureIsNew = before == null
+  const returnIsNew    = returnedAt != null && before?.actualReturnAt == null
+
+  await prisma.dispatch.upsert({
+    where:  { externalId: s.id },
+    create: { externalId: s.id, ...row },
+    update: row,
+  })
+
+  await linkSaleDriver(s, org, signedOutAt, returnedAt)
+
+  if (!narrate) return true
+
+  const who  = `${org.plate} · ${row.driverName}`
+  const at   = org.factory ? ` at ${org.factory.label}` : ''
+  const load = loadPhrase(s.tonnage)
+  const dest = row.destination ? ` bound for ${row.destination}` : ''
+
+  if (departureIsNew) {
+    // The guard's sign-out IS the departure — same reasoning as the cane
+    // sign-out line above. No ETA: the destination of a sales run is a customer
+    // site, not one of the measured cane zones, so there is no median to quote
+    // until the fleet has driven the route enough times for sync:destinations
+    // to place it. Quoting a distance from the owning org's hub would be worse
+    // than silence — for a Menengai unit that hub is ~250 km from this gate.
+    feed(
+      org.organisationId, `sl-${s.id}`, signedOutAt, 'info',
+      `${who} signed out${at}${load ? ` with ${load}` : ''}${dest} — left the premises.`,
+      { alertType: 'SALE_DISPATCH', plate: org.plate, vehicleId: org.vehicleId },
+    )
+  }
+
+  if (returnIsNew) {
+    feed(
+      org.organisationId, `sl-${s.id}-ret`, returnedAt!, 'success',
+      `${who} signed back in${at} — sales run${dest} complete.`,
+      { alertType: 'SALE_RETURN', plate: org.plate, vehicleId: org.vehicleId },
+    )
+  }
+
+  return true
+}
+
+/**
+ * Attach the driver to the vehicle for the duration of the run.
+ *
+ * Same name-only identification, and the same refusal to guess, as the cane
+ * path: the provider sends no driver id on a sale either. The marker differs
+ * (`controltech:sale:<id>`) so a sales run and a cane dispatch can never
+ * collapse onto one assignment row.
+ */
+async function linkSaleDriver(
+  s: SaleEvent,
+  org: EventOrg,
+  from: Date,
+  to: Date | null,
+): Promise<void> {
+  const name = s.driverName?.trim()
+  if (!org.vehicleId || !name) return
+
+  const drivers = await prisma.user.findMany({
+    where:  { organisationId: org.organisationId, fullName: name, deletedAt: null },
+    select: { id: true },
+    take:   2,
+  })
+  if (drivers.length !== 1) {
+    logger.debug(
+      { plate: org.plate, driver: name, driverMatches: drivers.length },
+      'Sales run could not be linked to a unique driver',
+    )
+    return
+  }
+
+  const marker   = `controltech:sale:${s.id}`
+  const existing = await prisma.vehicleAssignment.findFirst({ where: { notes: marker }, select: { id: true } })
+  const payload  = {
+    vehicleId:      org.vehicleId,
+    userId:         drivers[0]!.id,
+    assignmentType: 'PRIMARY' as const,
+    assignedAt:     from,
+    unassignedAt:   to,
+    notes:          marker,
+  }
+  if (existing) await prisma.vehicleAssignment.update({ where: { id: existing.id }, data: payload })
+  else          await prisma.vehicleAssignment.create({ data: payload })
 }

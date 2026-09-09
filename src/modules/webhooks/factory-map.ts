@@ -1,5 +1,6 @@
 /**
- * Which RaiFactorySuite factory belongs to which of our organisations.
+ * Which RaiFactorySuite factory belongs to which of our organisations — and,
+ * more importantly, why the factory is NOT how an event gets routed.
  *
  * ## Why this file exists rather than the two copies it replaces
  *
@@ -20,24 +21,86 @@
  * leaving nothing behind to find. `skipUnmappedFactory` below is the fix — one
  * warning per factory code, not one per event, so a misconfiguration is loud
  * on the first delivery and silent on the next ten thousand.
+ *
+ * ## A factory is a PLACE, not an owner
+ *
+ * This is the correction of 2026-09-09, and it is the whole reason
+ * `resolveEventOrg` exists below.
+ *
+ * Naitiri is a West Kenya Sugar factory, so `NAITIRI → WESTSUGAR` reads as
+ * obviously right and was used as the routing key for every dispatch, movement
+ * and sale the site produced. It is wrong, because units from OTHER
+ * organisations load there. KCP 134P is a Menengai truck that collects sugar at
+ * Naitiri; every event it produced was stamped WESTSUGAR and broadcast to the
+ * West Kenya Sugar feed, where it does not belong, while Menengai — whose truck
+ * it is, and whose operator is waiting for it — saw nothing at all.
+ *
+ * The provider cannot help us here, and this is worth being precise about
+ * because the obvious fix is to ask it. Its `/vehicles` registry lists KCP 134P
+ * as `factoryCode: NAITIRI` (measured 2026-09-09: of 625 vehicles, 624 are
+ * NDHIWA and that one is NAITIRI). It has no concept of Menengai. So fetching
+ * the unit from the provider when an event lands returns the SAME wrong answer
+ * the factory code does — the ownership we need exists only in our own
+ * `vehicles` table, put there by the Wialon sync.
+ *
+ * Hence: resolve by PLATE against our registry, and fall back to the factory
+ * only for a unit we do not hold.
  */
 
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
+import { normalisePlate } from '../../providers/wialon/wialon.unit-name.js'
 
 /**
- * Provider factoryCode → our organisation `code`.
+ * A factory the provider serves: who runs it, what to call it in a sentence,
+ * and where it is.
  *
- * The provider serves two factories. NDHIWA has been here since this
- * integration was written; NAITIRI is a West Kenya Sugar factory and had never
- * been added, so every dispatch, gate movement and alert it produced was
- * discarded on arrival — half the provider's traffic, for as long as the
- * integration has run.
+ * The coordinates are not decoration. A sale leaving Naitiri for a customer
+ * starts at NAITIRI — not at the owning organisation's hub, which for a
+ * Menengai unit is the Nakuru refinery ~250 km away. Anything measuring how far
+ * this run has to go must start from here, so the point belongs next to the
+ * routing rather than in whichever module happened to need it first.
+ *
+ * Measured, not looked up: these are the densest 1.1 km cell of each site's
+ * fixes on 2026-08-31, the same derivation behind dashboard.weather's location
+ * list (which is where they lived until this file needed them too).
  */
-export const FACTORY_TO_ORG: Record<string, string> = {
-  NDHIWA:  'SUKARI',
-  NAITIRI: 'WESTSUGAR',
+export interface Factory {
+  /** Our organisation `code` — the factory's OPERATOR, not the owner of any
+   *  particular unit that visits it. */
+  orgCode: string
+  /** How the factory is named in a feed line: "loaded at Naitiri". */
+  label:   string
+  lat:     number
+  lng:     number
 }
+
+/**
+ * Provider factoryCode → the factory.
+ *
+ * The provider serves two. NDHIWA has been here since this integration was
+ * written; NAITIRI is a West Kenya Sugar factory and had never been added, so
+ * every dispatch, gate movement and alert it produced was discarded on arrival
+ * — half the provider's traffic, for as long as the integration has run.
+ */
+export const FACTORIES: Record<string, Factory> = {
+  NDHIWA:  { orgCode: 'SUKARI',    label: 'Ndhiwa',  lat:  0.3358, lng: 34.4928 },
+  NAITIRI: { orgCode: 'WESTSUGAR', label: 'Naitiri', lat:  0.7821, lng: 34.8776 },
+}
+
+/**
+ * Kept as the operator-of-record mapping the alerts path still uses.
+ *
+ * An alert names a factory and sometimes a plate inside free text; it is a
+ * statement about the SITE, so it routes to the site's operator. Only the
+ * events that name a unit outright (dispatch, movement, sale) go through
+ * `resolveEventOrg`.
+ */
+export const FACTORY_TO_ORG: Record<string, string> =
+  Object.fromEntries(Object.entries(FACTORIES).map(([code, f]) => [code, f.orgCode]))
+
+export const factoryOf = (factoryCode: string): Factory | null =>
+  FACTORIES[factoryCode] ?? null
 
 /**
  * Cached because it is asked once per event on a hot path and the answer
@@ -62,6 +125,136 @@ export async function resolveOrgId(factoryCode: string): Promise<string | null> 
   return org?.id ?? null
 }
 
+export interface EventOrg {
+  organisationId: string
+  /** Our vehicle row, when the plate resolved. Null when we do not hold it. */
+  vehicleId:      string | null
+  /** The plate in its stored, written form — use this for every downstream
+   *  lookup so the provider's spacing never decides whether a query matches. */
+  plate:          string
+  /** The factory the event happened AT, for the narration. Null if unmapped. */
+  factory:        Factory | null
+  /** True when the org came from our vehicle registry rather than the factory. */
+  viaPlate:       boolean
+}
+
+/**
+ * Who should see an event about this unit at this factory.
+ *
+ * The plate decides. `Vehicle.registrationPlate` is globally UNIQUE, so this is
+ * one indexed lookup and there is no organisation to scope it by — which is the
+ * point, since scoping it by the factory's operator is exactly the bug.
+ *
+ * Matched on the normalised form because the provider's spelling is not stable
+ * ("KCP 134P" and "KCP134P" both occur) while the column holds the written form
+ * ("KCP 134P"). Comparing raw text would miss, fall through to the factory, and
+ * silently reinstate the misrouting for precisely the units this exists for —
+ * so the comparison is done on `normalisePlate` and the WRITTEN form is what
+ * gets returned and stored.
+ *
+ * Falls back to the factory's operator for a unit we do not hold. That is not a
+ * guess: a plate absent from our registry is a vehicle we do not track, and the
+ * site that reported it is the only organisation with any claim on the event.
+ */
+export async function resolveEventOrg(
+  factoryCode: string,
+  rawPlate:    string,
+): Promise<EventOrg | null> {
+  const factory = factoryOf(factoryCode)
+  const wanted  = normalisePlate(rawPlate)
+
+  // Normalised comparison against a column that stores the written form. There
+  // are only hundreds of vehicles per org and this is indexed on the plate, but
+  // the index cannot serve a REPLACE() on the column — so match the exact
+  // written form first (the overwhelmingly common case, and an index hit) and
+  // only fall back to the normalised scan when the provider's spacing differs.
+  const vehicle =
+    (await prisma.vehicle.findFirst({
+      where:  { registrationPlate: rawPlate.trim().toUpperCase().replace(/\s+/g, ' ') },
+      select: { id: true, organisationId: true, registrationPlate: true },
+    })) ??
+    (await findByNormalisedPlate(wanted))
+
+  if (vehicle) {
+    // The unit's owner and the factory's operator disagreeing is the NORMAL
+    // case this function exists for, not an error — but it is worth a line the
+    // first time each unit does it, because it is also what a plate collision
+    // looks like. Three West Sugar machines share a registration with Sukari
+    // plant (see prisma/fix-plate-format.ts); the UNIQUE column means one row
+    // won, and if it won wrongly this log is the only place that shows.
+    const operatorId = await resolveOrgId(factoryCode)
+    if (operatorId && operatorId !== vehicle.organisationId) noteVisitor(rawPlate, factoryCode)
+
+    return {
+      organisationId: vehicle.organisationId,
+      vehicleId:      vehicle.id,
+      plate:          vehicle.registrationPlate,
+      factory,
+      viaPlate:       true,
+    }
+  }
+
+  const organisationId = await resolveOrgId(factoryCode)
+  if (!organisationId) return null
+  return {
+    organisationId,
+    vehicleId: null,
+    plate:     rawPlate.trim().toUpperCase().replace(/\s+/g, ' '),
+    factory,
+    viaPlate:  false,
+  }
+}
+
+/**
+ * The spacing-insensitive fallback.
+ *
+ * Separate from the equality above so the common path stays a plain index hit
+ * and the cost of this one is visible where it is paid. It is a sequential scan
+ * — no index can serve a function of the column — but it runs only when the
+ * provider spelled the plate differently from the way we store it, and the
+ * table is a few thousand rows.
+ *
+ * The expression mirrors `normalisePlate` exactly (strip everything that is not
+ * A-Z0-9, uppercase). If that function's definition ever changes, this changes
+ * with it or the fallback silently stops matching.
+ */
+async function findByNormalisedPlate(wanted: string) {
+  if (!wanted) return null
+  const rows = await prisma.$queryRaw<
+    { id: string; organisationId: string; registrationPlate: string }[]
+  >`
+    SELECT id,
+           organisation_id    AS "organisationId",
+           registration_plate AS "registrationPlate"
+      FROM vehicles
+     WHERE UPPER(REGEXP_REPLACE(registration_plate, '[^A-Za-z0-9]', '', 'g')) = ${wanted}
+     LIMIT 2
+  `
+  // More than one row means two vehicles differ only by punctuation — a
+  // collision the UNIQUE column does not catch. Refuse rather than pick: which
+  // organisation owns the unit is not a question a tie-break gets to answer.
+  if (rows.length > 1) {
+    logger.warn({ plate: wanted, matches: rows.map(r => r.registrationPlate) },
+      'Plate matches two vehicles once punctuation is ignored — not routing by plate')
+    return null
+  }
+  return rows[0] ?? null
+}
+
+/** Units already noted as visiting a factory their owner does not operate, so
+ *  the log carries one line per unit rather than one per event. */
+const visitors = new Set<string>()
+
+function noteVisitor(plate: string, factoryCode: string): void {
+  const key = `${normalisePlate(plate)}@${factoryCode}`
+  if (visitors.has(key)) return
+  visitors.add(key)
+  logger.info(
+    { plate, factoryCode },
+    'Unit belongs to a different organisation than the factory it is at — routing to its OWNER',
+  )
+}
+
 /** Factory codes already warned about, so the log carries one line per factory
  *  rather than one per event. Reset only by a restart, which is when a changed
  *  table would take effect anyway. */
@@ -78,7 +271,7 @@ export function skipUnmappedFactory(factoryCode: string, what: string, id?: stri
   if (warned.has(factoryCode)) return
   warned.add(factoryCode)
   logger.warn(
-    { factoryCode, event: what, sampleId: id, mapped: Object.keys(FACTORY_TO_ORG) },
-    'Provider event for an unmapped factory — DISCARDED. Add it to FACTORY_TO_ORG to keep it.',
+    { factoryCode, event: what, sampleId: id, mapped: Object.keys(FACTORIES) },
+    'Provider event for an unmapped factory — DISCARDED. Add it to FACTORIES to keep it.',
   )
 }
