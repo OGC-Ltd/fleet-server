@@ -420,7 +420,14 @@ describe('GET /assignable-roles', () => {
     // filters by live grants instead, which is what lets it find the rest.
     const first  = prismaMock.role.findMany.mock.calls[0]![0]!.where as Record<string, unknown>
     const second = prismaMock.role.findMany.mock.calls[1]![0]!.where as Record<string, unknown>
-    expect(first['slug']).toEqual({ in: expect.arrayContaining(['hr', 'admin', 'super_admin', 'operator']) })
+    expect(first['slug']).toEqual({ in: expect.arrayContaining(['hr', 'admin', 'operator']) })
+    // `super_admin` is deliberately NOT on this list any more. It is a PLATFORM
+    // role, and the platform arm of this handler queries `organisationId: null`
+    // filtered by the same array — so its presence here is what put "System
+    // Administrator · all orgs" in every organisation's picker. Asserting its
+    // ABSENCE is what stops it being added back by someone reading the list as
+    // an inventory of roles rather than as a per-organisation offer.
+    expect(first['slug']).not.toEqual({ in: expect.arrayContaining(['super_admin']) })
     expect(second['slug']).toBeUndefined()
     expect(second['userRoles']).toEqual({ some: { revokedAt: null, user: { deletedAt: null } } })
   })
