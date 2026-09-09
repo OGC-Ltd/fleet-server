@@ -254,7 +254,11 @@ async function buildSampledTrack(
     // `gap_before` must survive thinning — it belongs to the next point
     // actually drawn, exactly as in findTrack.
     if (prev && !r.gap_before && metresBetween(prev.lat, prev.lng, r.lat, r.lng) < q.minSpacingM) continue
-    points.push(r.gap_before ? { t, lat: r.lat, lng: r.lng, gapBefore: true } : { t, lat: r.lat, lng: r.lng })
+    points.push({
+      t, lat: r.lat, lng: r.lng,
+      spd: r.speed_kmh, hdg: r.heading_deg, eng: r.engine_on,
+      ...(r.gap_before ? { gapBefore: true as const } : {}),
+    })
   }
 
   return {
