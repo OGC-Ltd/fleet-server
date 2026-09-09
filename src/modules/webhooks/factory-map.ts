@@ -73,6 +73,22 @@ export interface Factory {
   label:   string
   lat:     number
   lng:     number
+  /**
+   * What leaves this gate on a SALES run, named the way an operator would.
+   *
+   * A property of the SITE, not of the load: the provider's `/sales` payload
+   * carries a tonnage and a destination and never says what the tonnage is of.
+   * Naitiri is a sugar factory, so a sales run out of it is processed sugar —
+   * that is the only place the fact is known, so it is recorded here rather
+   * than guessed at the point of display.
+   *
+   * Read by the Current Cargo card and written onto the trip's CargoManifest.
+   */
+  commodity: string
+  /** How that commodity travels. Processed sugar leaves in 50 kg bags, so it is
+   *  PACKAGED; cane is tipped loose and is BULK. Written onto the manifest so
+   *  analytics can group by it without re-deriving from the name. */
+  cargoType: 'BULK' | 'PACKAGED'
 }
 
 /**
@@ -84,8 +100,27 @@ export interface Factory {
  * — half the provider's traffic, for as long as the integration has run.
  */
 export const FACTORIES: Record<string, Factory> = {
-  NDHIWA:  { orgCode: 'SUKARI',    label: 'Ndhiwa',  lat:  0.3358, lng: 34.4928 },
-  NAITIRI: { orgCode: 'WESTSUGAR', label: 'Naitiri', lat:  0.7821, lng: 34.8776 },
+  NDHIWA:  { orgCode: 'SUKARI',    label: 'Ndhiwa',  lat: 0.3358, lng: 34.4928,
+             commodity: 'Raw Sugarcane',   cargoType: 'BULK' },
+  NAITIRI: { orgCode: 'WESTSUGAR', label: 'Naitiri', lat: 0.7821, lng: 34.8776,
+             commodity: 'Processed Sugar', cargoType: 'PACKAGED' },
+}
+
+/** Kilograms in the bags this fleet counts sugar in. */
+export const BAG_KG = 50
+
+/**
+ * Bags in a load, or null when there is no weight to divide.
+ *
+ * Refuses a zero or negative tonnage rather than reporting "0 bags": the
+ * provider models `tonnage` as optional, and a run whose weight has not been
+ * entered yet is not a run carrying nothing. Every surface that shows a bag
+ * count derives it here, so the feed line, the cargo card and the persisted
+ * manifest cannot disagree about what 29 tonnes comes to.
+ */
+export function bagsFromTonnes(tonnage: number | null | undefined): number | null {
+  if (tonnage == null || !Number.isFinite(tonnage) || tonnage <= 0) return null
+  return Math.round((tonnage * 1000) / BAG_KG)
 }
 
 /**
