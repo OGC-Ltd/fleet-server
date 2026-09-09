@@ -154,6 +154,27 @@ enum FenceMode {
 }
 
 /// Structured cargo classification — prevents free-text inconsistency.
+/// Which lifecycle produced a `dispatches` row.
+///
+/// CANE  — the original RaiFactorySuite `/dispatches` resource. A unit signs
+///         out to a cane zone and comes back; the dispatcher raises the
+///         paperwork and the provider tracks DISPATCHED → COMPLETED.
+///
+/// SALES — the `/sales` resource (Naitiri, live 2026-09-09). Finished sugar
+///         leaving for a customer. The SALES OFFICE creates the run with a
+///         tonnage and a destination, then the GATE GUARD signs the unit out
+///         and signs it back in — so the row mutates through three states and
+///         carries a weight, which a cane dispatch never does.
+///
+/// One table because the map tooltip, the trip linking in lib/dispatch-trip and
+/// the per-destination duration statistics all key off `dispatches`, and a
+/// sales run wants every one of them. The discriminator is what lets a query
+/// that must see only one population say so.
+enum DispatchKind {
+  CANE
+  SALES
+}
+
 enum CargoType {
   BULK
   PACKAGED
@@ -2037,6 +2058,12 @@ model Dispatch {
   /// Provider's dispatch UUID — dedupe key across webhook, reconciler and backfill.
   externalId       String    @unique @map("external_id")
   organisationId   String    @map("organisation_id")
+  /// Which lifecycle produced this row. See DispatchKind.
+  ///
+  /// The organisation is the UNIT'S OWNER, not the factory's operator — a
+  /// Menengai truck collecting sugar at Naitiri belongs to MENENGAI here. See
+  /// modules/webhooks/factory-map's `resolveEventOrg` for why.
+  kind             DispatchKind @default(CANE)
   /// NULL when the plate does not resolve to our registry.
   vehicleId        String?   @map("vehicle_id")
   plate            String
@@ -2054,11 +2081,27 @@ model Dispatch {
   /// 'webhook' when pushed, 'reconciler' on the safety-net poll, 'backfill' from sync:dispatches.
   source           String    @default("webhook")
 
+  // ── SALES only ────────────────────────────────────────────────────────────
+  /// Load in tonnes, as the sales office recorded it. The ONLY weight the
+  /// integration has ever carried: the provider sends none on a cane dispatch
+  /// or a gate movement, Wialon's adapter hardcodes `cargoWeightKg: null`, and
+  /// CargoManifest is written only by the simulator and the manual API. Bag
+  /// counts are derived from this and nothing else.
+  tonnageT         Float?    @map("tonnage_t")
+  /// The guard's photo at sign-out / sign-in. Null on every row observed so
+  /// far (2026-09-09) — the provider models the fields but is not populating
+  /// them yet.
+  signOutPhotoUrl  String?   @map("sign_out_photo_url")
+  returnPhotoUrl   String?   @map("return_photo_url")
+
   organisation Organisation @relation(fields: [organisationId], references: [id])
   vehicle      Vehicle?     @relation(fields: [vehicleId], references: [id])
 
   // "what is open right now for this org" — the hot query behind the tooltip.
   @@index([organisationId, actualReturnAt, dispatchedAt])
+  // The same question narrowed to one lifecycle. Without `kind` leading, a
+  // sales query on a mostly-cane fleet scans the cane rows to discard them.
+  @@index([organisationId, kind, dispatchedAt])
   @@index([vehicleId, dispatchedAt])
   // Duration statistics per destination, over completed trips only.
   @@index([organisationId, destination, actualReturnAt])

@@ -23,4 +23,13 @@ export function resetPrismaMock() {
         ? Promise.all(input as Promise<unknown>[])
         : (input as (tx: unknown) => unknown)(prismaMock),
   )
+  // Raw queries default to NO ROWS, not to undefined. Postgres always answers a
+  // SELECT with a result set, so `undefined` is a shape the real client can
+  // never produce — leaving it unset made every caller that does the obvious
+  // `rows.length` blow up in tests for a reason that could not happen in
+  // production, and pushed defensive `?? []` into code that does not need it.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(prismaMock.$queryRaw as any).mockResolvedValue([])
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(prismaMock.$queryRawUnsafe as any).mockResolvedValue([])
 }
