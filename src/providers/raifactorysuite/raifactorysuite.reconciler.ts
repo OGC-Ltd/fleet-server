@@ -35,7 +35,8 @@ import { env } from '../../config/env.js'
 import { startPollLoop, type PollLoopHandle } from '../../lib/poll-loop.js'
 import { RaiFactorySuiteClient } from './raifactorysuite.client.js'
 import { ingestAlerts } from '../../modules/webhooks/raifactorysuite-alerts.service.js'
-import { handleDispatch } from '../../modules/webhooks/raifactorysuite-events.service.js'
+import { handleDispatch, handleSale } from '../../modules/webhooks/raifactorysuite-events.service.js'
+import { FACTORIES } from '../../modules/webhooks/factory-map.js'
 
 /**
  * How many alerts to re-read each pass. Only genuinely new ones are written or
@@ -59,6 +60,23 @@ const ALERT_WINDOW = 200
  * So take the whole window the endpoint allows. It is one request either way.
  */
 const DISPATCH_WINDOW = 1000
+
+/**
+ * Sales window, per factory.
+ *
+ * Asked per factory rather than once, because `/sales` requires a KNOWN
+ * factoryCode — an unrecognised one is a hard error, not an empty list — and
+ * because the unfiltered call is not documented to stay unfiltered. Two
+ * requests every five minutes against a table that held five rows on the day
+ * this was written.
+ *
+ * Sized like the dispatch window rather than measured: sales are new at Naitiri
+ * (five rows total on 2026-09-09, four of them test traffic) so there is no
+ * daily rate to size against yet. Revisit once the site has run a real week —
+ * if this window ever stops covering the gap between two reconcile passes, a
+ * run that closes inside it loses its return line permanently.
+ */
+const SALES_WINDOW = 500
 
 export interface ReconcilerHandle {
   stop: () => void
@@ -90,6 +108,7 @@ class RaiFactorySuiteReconciler {
     const t0 = Date.now()
     let alertsCreated = 0
     let dispatchesSeen = 0
+    let salesSeen = 0
     let failed = false
 
     // Alerts and dispatches are reconciled independently: one endpoint
@@ -139,6 +158,28 @@ class RaiFactorySuiteReconciler {
       this.logFailure('dispatches', err)
     }
 
+    // Sales, per factory. Independent of the two above for the same reason
+    // they are independent of each other: one endpoint failing must not cost
+    // the others.
+    //
+    // `primed` gates narration exactly as it does for dispatches — a restart
+    // re-reads the whole window, and without it every sales run in it would be
+    // replayed into the feed as though it had just happened. Unlike the
+    // dispatch path, though, a re-offered sales run can legitimately produce a
+    // NEW line: handleSale narrates on transitions, so the pass that first sees
+    // a `returnTime` says so even though the run itself is old news.
+    for (const factoryCode of Object.keys(FACTORIES)) {
+      try {
+        const sales = await this.client.listSales(factoryCode, SALES_WINDOW)
+        for (const s of sales) {
+          if (await handleSale(s, { narrate: this.primed, source: 'reconciler' })) salesSeen++
+        }
+      } catch (err) {
+        failed = true
+        this.logFailure(`sales:${factoryCode}`, err)
+      }
+    }
+
     if (failed) {
       this.consecutiveFailures++
     } else {
@@ -150,7 +191,7 @@ class RaiFactorySuiteReconciler {
     }
 
     logger.info(
-      { durationMs: Date.now() - t0, alertsCreated, dispatchesSeen, primed: this.primed },
+      { durationMs: Date.now() - t0, alertsCreated, dispatchesSeen, salesSeen, primed: this.primed },
       'RaiFactorySuite reconcile complete',
     )
   }

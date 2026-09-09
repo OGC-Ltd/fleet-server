@@ -2,13 +2,15 @@ import type { Request, Response, NextFunction } from 'express'
 import { logger } from '../../lib/logger.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { ingestAlerts, type RaiFactorySuiteAlert } from './raifactorysuite-alerts.service.js'
-import { handleDispatch, handleMovement } from './raifactorysuite-events.service.js'
+import { handleDispatch, handleMovement, handleSale } from './raifactorysuite-events.service.js'
 import { ingestWialonNotifications } from './wialon-notifications.service.js'
 import {
   raiFactorySuiteAlertSchema,
   raiFactorySuiteDispatchSchema,
   raiFactorySuiteMovementSchema,
+  raiFactorySuiteSaleSchema,
   wialonNotificationSchema,
+  looksLikeSale,
   unwrapEvent,
 } from './webhooks.schema.js'
 
@@ -34,6 +36,7 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
     const unmapped: unknown[] = []
     let dispatches = 0
     let movements  = 0
+    let sales      = 0
 
     const wialonNotifications: Parameters<typeof ingestWialonNotifications>[0] = []
 
@@ -44,6 +47,28 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
       if (wn.success && (kind.startsWith('wialon') || !kind)) {
         wialonNotifications.push(wn.data)
         continue
+      }
+
+      // SALES FIRST, and by SHAPE rather than by name.
+      //
+      // The provider reuses `dispatch.created` and `movement.created` for the
+      // sales lifecycle — it does not mint an event name of its own — so the
+      // declared name cannot tell the two apart. Leaving the dispatch branch
+      // first was actively wrong: a sales payload parses CLEANLY against the
+      // dispatch schema (it carries id/factoryCode/plate/driverName, and
+      // `dispatchTime` is merely optional), so it would have been stored as a
+      // cane dispatch with the tonnage dropped and a dispatch time invented
+      // from the receive clock.
+      //
+      // The shape is decisive in the other direction too, which is what makes
+      // this safe to put first: `tonnage`, `signOutTime` and `returnTime`
+      // appear on no other payload the provider sends. A real cane dispatch
+      // carries `dispatchTime`/`actualReturnTime` and none of these three, and
+      // a movement carries none of them either — so neither can be captured
+      // here by mistake.
+      if (looksLikeSale(item)) {
+        const sl = raiFactorySuiteSaleSchema.safeParse(item)
+        if (sl.success) { if (await handleSale(sl.data)) sales++; continue }
       }
 
       // Prefer the declared event name; fall back to shape-sniffing so a
@@ -74,9 +99,9 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
         'Webhook event received that we do not map yet',
       )
     }
-    if (result || dispatches || movements || wialon) {
+    if (result || dispatches || movements || sales || wialon) {
       logger.info(
-        { event, dispatches, movements, wialon, ...(result ?? {}) },
+        { event, dispatches, movements, sales, wialon, ...(result ?? {}) },
         'Provider webhook processed',
       )
     }
@@ -87,6 +112,7 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
       alerts:   alerts.length,
       dispatches,
       movements,
+      sales,
       wialonNotifications: wialon?.created ?? 0,
       ignored:  unmapped.length,
       ...(result ?? {}),

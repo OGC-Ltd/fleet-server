@@ -79,10 +79,63 @@ All return a **bare JSON array** — no envelope, no pagination metadata.
 |---|---|---|
 | `GET /vehicles?limit=2000` | 598 | `{id, factoryCode, type, numberPlate, make, model, status, active}` |
 | `GET /drivers?limit=2000` | 550 | `{id, factoryCode, driverType, name, staffId, licenseNumber, phoneNumber, status, active, …}` |
-| `GET /dispatches?limit=2000` | **capped at 1000** | ignores `offset`/`page`/`skip` — only ~4 days visible |
+| `GET /dispatches?limit=2000` | **capped at 1000** | ignores `offset`/`page`/`skip` — only ~4 days visible. Also returns `driverChangeReason`, `exitChecklist`, `returnChecklist` (2026-09-09), which we do not model — zod strips them. |
 | `GET /alerts?limit=500` | 257 | `{id, factoryCode, type, message, relatedId, acknowledged, createdAt}` |
+| `GET /sales?factoryCode=NAITIRI&limit=500` | 5 | `{id, factoryCode, vehicleNumberPlate, driverName, tonnage, destination, status, signOutTime, signOutPhotoUrl, returnTime, returnPhotoUrl}` |
+| `GET /movements?factoryCode=…&limit=500` | — | `{id, factoryCode, vehicleNumberPlate, driverName, direction, destination, timestamp}` — gate crossings. **Exists but is NOT reconciled**: the client has no `listMovements`, so a `movement.created` lost to a failed webhook delivery is gone for good. |
 
-`factoryCode` is `NDHIWA` for everything → maps to org `SUKARI`.
+`factoryCode` is `NDHIWA` for almost everything → maps to org `SUKARI`. `NAITIRI`
+appeared on 2026-09-09: 1 vehicle and 5 sales rows, against NDHIWA's 624.
+
+### 3.1.1 `/sales` — a second dispatch lifecycle
+
+**Not a variant of `/dispatches`.** The sales office raises a run (tonnage +
+destination + unit + driver); the **gate guard** then signs the unit OUT and
+signs it back IN. So one row mutates through three states and the same `id` is
+delivered more than once with different fields filled in.
+
+`tonnage` is the **only weight this integration receives from anywhere** — the
+provider sends none on a cane dispatch or a movement, `wialon.adapter` hardcodes
+`cargoWeightKg: null`, and `CargoManifest` is written only by the simulator and
+the manual API. The 50 kg bag count on the feed is derived from it and nothing
+else.
+
+Three traps, measured 2026-09-09:
+
+1. **`status` is accepted and IGNORED.** `DISPATCHED`, `PENDING`, `CANCELLED`
+   and `RETURNED` all return the identical full set. There is no "only the open
+   ones" — read the window and decide locally. (Same disease as `/dispatches`
+   ignoring `offset`.) `handleSale` therefore branches on the TIMESTAMPS, never
+   on `status`.
+2. **`factoryCode` is validated, and an unknown one is a hard error** —
+   `{"error":"Unknown factory code: ZZZZ"}`, not an empty list. Only ever send a
+   code from `FACTORIES`.
+3. **There is no `GET /sales/{id}`** — it 404s. Enrichment means re-reading the
+   collection.
+
+Both photo URLs were null on every row observed; the provider models the fields
+but is not populating them yet. Four of the five rows had sign-out→return gaps
+of 19–50 seconds and are someone exercising the flow, not trips — so there is no
+usable duration history for a sales destination yet, which is why the feed line
+quotes no ETA.
+
+### 3.1.2 Events route by the UNIT, not by the factory
+
+A factory is a **place**; the organisation that should see an event is the one
+that **owns the truck**. Naitiri is a West Kenya Sugar factory where **Menengai**
+units load — KCP 134P is one — and routing on `factoryCode` put every one of its
+events on the West Kenya Sugar feed and nowhere else.
+
+The provider cannot resolve this, and the obvious fix is to ask it: its
+`/vehicles` registry lists KCP 134P as `factoryCode: NAITIRI`. It has no concept
+of Menengai. Ownership exists **only in our `vehicles` table**, put there by
+`sync:wialon`.
+
+So `modules/webhooks/factory-map.resolveEventOrg` resolves by **plate** against
+our own registry (globally unique, matched on the normalised form because the
+provider's spacing wanders), and falls back to the factory's operator only for a
+unit we do not hold. `dispatches.kind` (`CANE` | `SALES`) tells the two
+lifecycles apart in the one table.
 
 ### 3.2 Sync commands
 
@@ -120,6 +173,25 @@ Three event types arrive:
 | `alert.created` | `{id, factoryCode, type, message, relatedId, acknowledged, createdAt}` | persisted to `provider_alerts` + Live Feed |
 | `dispatch.created` | same shape as REST `/dispatches` | writes a `vehicle_assignments` row + Live Feed |
 | `movement.created` | `{id, factoryCode, vehicleNumberPlate, driverName, direction, destination, timestamp}` | Live Feed only |
+| *(sales)* | same shape as REST `/sales` | persisted to `dispatches` (`kind=SALES`) + Live Feed |
+
+**There is no sales event name.** Confirmed 2026-09-09: a sales sign-out arrives
+under `dispatch.created` and `movement.created` — the same two names the cane
+flow uses. So the controller **cannot dispatch on the event name**, and must not
+try: a sales payload parses CLEANLY against the dispatch schema (it carries
+id/factoryCode/vehicleNumberPlate/driverName, and `dispatchTime` is merely
+optional), so a name-first controller stores it as a cane dispatch with the
+tonnage dropped and a dispatch time invented from the receive clock.
+
+Discrimination is therefore **by shape, before the name is consulted at all**:
+`tonnage`, `signOutTime` and `returnTime` appear on no other payload the
+provider sends, and a cane dispatch's return field is `actualReturnTime`, not
+`returnTime`. See `looksLikeSale` and tests/unit/webhook-event-discrimination.
+
+Note the two lifecycles run side by side at Naitiri and do NOT mirror each
+other: on 2026-09-09 `/dispatches` held 2 rows (14:07, 14:08, both CANCELLED)
+while `/sales` held 5 (09:58–19:55), with no overlap. A sales run does not
+produce a `/dispatches` row.
 
 **Two traps already hit — don't reintroduce them:**
 
