@@ -175,7 +175,16 @@ export type RoleDefinition = {
 export const ROLE_DEFINITIONS: RoleDefinition[] = [
   // ── Platform ─────────────────────────────────────────────────────────────
   {
-    slug: 'super_admin', name: 'System Administrator', platform: true, vehicleScopable: false,
+    /* Renamed from "System Administrator", which is now the name of the
+     * ORG-SCOPED role above. Two roles cannot both be called that: the account
+     * page prints this one as "System Administrator · applies in every
+     * organisation" directly above a list of organisations each showing their
+     * own, and no reading of that tells you which one you actually hold or
+     * which one somebody should be given.
+     *
+     * The slug is untouched for the reason the rename above gives — every
+     * grant is joined on it. */
+    slug: 'super_admin', name: 'Platform Administrator', platform: true, vehicleScopable: false,
     description: 'Every organisation. All data and all administration. The super admin.',
     // The wildcard, deliberately alone: enumerating permissions here would mean
     // a permission added later is one the super admin silently lacks.
@@ -192,8 +201,25 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
   },
 
   // ── Organisation administration ──────────────────────────────────────────
+  /**
+   * The system administrator OF ONE ORGANISATION.
+   *
+   * Renamed from "Admin". The name was the whole problem: the roster offered
+   * both this and the PLATFORM role, whose name is also System Administrator,
+   * and an operator reading a picker containing "Admin" and "System
+   * Administrator · all orgs" reasonably concluded that their organisation did
+   * not have a system administrator role — only a lesser "Admin" — and that the
+   * real one was the cross-tenant grant. It was the other way round: this is
+   * the role that administers an organisation, and it is seeded into every one
+   * of them.
+   *
+   * The SLUG stays `admin`. Slugs are the key every grant, every seed run and
+   * every permission row is joined on; changing it would orphan the grants of
+   * everybody who already holds it and silently strip their access. A rename is
+   * a display change and must stay one.
+   */
   {
-    slug: 'admin', name: 'Admin', platform: false, vehicleScopable: false,
+    slug: 'admin', name: 'System Administrator', platform: false, vehicleScopable: false,
     description: 'Full access within this organisation, including its users.',
     permissions: [
       ...ORG_EVERYTHING,
@@ -383,7 +409,23 @@ export const ORG_ROLE_SLUGS: string[] =
 export const ASSIGNABLE_ROLE_SLUGS: string[] = [
   'hr',
   'admin',
-  'super_admin',
+  /* `super_admin` was here, and being here is what put "System Administrator ·
+   * all orgs" in EVERY organisation's picker: the platform arm of
+   * listAssignableRoles queries `organisationId: null` filtered by this same
+   * list. Removing it from the list removes the option from every organisation
+   * at once, which is exactly the scope of the change asked for.
+   *
+   * The role DEFINITION stays, and so does every grant of it. That is
+   * deliberate and it is not a half-measure — platform-only surface exists and
+   * needs somebody: `requirePermission` on a route with no :orgId is satisfied
+   * ONLY by `subject.isPlatform`, so with nobody holding a platform role the
+   * organisation list itself becomes unadministrable. What changes here is that
+   * a cross-tenant grant can no longer be made from inside one tenant's user
+   * page, which is where it never belonged.
+   *
+   * `director` is still offered and carries the same "all orgs" badge for the
+   * same reason. It was not part of the request, so it is left alone rather
+   * than swept up — say the word and it goes the same way. */
   'fleet_manager',
   'fleet_analyst',
   'dispatcher',
