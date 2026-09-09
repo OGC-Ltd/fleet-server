@@ -34,6 +34,7 @@ router.get('/vehicle-categories', requirePermission('analytics:read'),   ctrl.ve
 router.get('/excavator-area', requirePermission('analytics:read'),       ctrl.excavatorArea)
 router.get('/excavator-area-days', requirePermission('analytics:read'),  ctrl.excavatorAreaByDay)
 router.get('/fuel-rate-days', requirePermission('analytics:read'),       ctrl.fuelRateDays)
+router.get('/sugar-hauls', requirePermission('analytics:read'),          ctrl.sugarHauls)
 router.get('/speeding', requirePermission('analytics:read'),             validateQuery(speedingQuerySchema),   ctrl.speeding)
 router.get('/violation-heatmap', requirePermission('analytics:read'),    validateQuery(analyticsRangeSchema), ctrl.violationHeatmap)
 

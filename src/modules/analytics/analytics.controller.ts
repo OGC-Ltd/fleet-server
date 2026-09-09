@@ -3,6 +3,7 @@ import { earlyStartsByCategory, operatingHoursByCategory, fleetWeekSummary } fro
 import { getFleetState } from './fleet-state.service.js'
 import { getExcavatorArea, getAreaByDay } from './excavator-area.service.js'
 import { getFuelRateSeries } from './fuel-rate-series.service.js'
+import { getSugarHauls } from './sugar-hauls.service.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { env } from '../../config/env.js'
 import * as repo from './analytics.repository.js'
@@ -171,6 +172,23 @@ export const fuelRateDays: RequestHandler = async (req, res, next) => {
     sendSuccess(res, await getFuelRateSeries(p(req, 'orgId'), days,
       to && !Number.isNaN(to.getTime()) ? to : undefined,
       parseCategories(req.query['categories'])))
+  } catch (err) { next(err) }
+}
+
+/** Sales hauls out of the factory — tonnage per day and per unit. See
+ *  sugar-hauls.service for why the tonnage is summed over dispatches and the
+ *  distance over trips. */
+export const sugarHauls: RequestHandler = async (req, res, next) => {
+  try {
+    const asked = Number(req.query['days'])
+    const days = Number.isFinite(asked) ? Math.min(90, Math.max(1, Math.trunc(asked))) : 30
+    const toRaw = String(req.query['to'] ?? '')
+    const to = toRaw ? new Date(toRaw) : undefined
+    sendSuccess(res, await getSugarHauls(
+      p(req, 'orgId'), days,
+      to && !Number.isNaN(to.getTime()) ? to : undefined,
+      await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories']),
+    ))
   } catch (err) { next(err) }
 }
 
