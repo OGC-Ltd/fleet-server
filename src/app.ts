@@ -31,6 +31,7 @@ import apiKeyRoutes from './modules/api-keys/api-key.routes.js'
 import analyticsRoutes from './modules/analytics/analytics.routes.js'
 import incidentsRoutes     from './modules/incidents/incidents.routes.js'
 import dashboardRoutes from './modules/dashboard/dashboard.routes.js'
+import * as dashboard from './modules/dashboard/dashboard.service.js'
 import { notificationsOrgRouter } from './modules/notifications/notifications.router.js'
 import * as notificationsCtrl from './modules/notifications/notifications.controller.js'
 import { authenticate, requireOrgAccess } from './middleware/auth.js'
@@ -116,6 +117,30 @@ export function createApp() {
     if (Number.isNaN(lat) || Number.isNaN(lng)) return sendError(res, 400, 'lat/lng required')
     const place = await reverseGeocode(lat, lng)
     sendSuccess(res, { place })
+  })
+
+  // The platform's live pulse — total units and how many are moving, for the
+  // sign-in screen, which renders before there is a session and so can only
+  // read something public.
+  //
+  // NO AUTH, and the shape is the justification: two integers, a percentage and
+  // a timestamp. No organisation, no vehicle, no position, nothing attributable
+  // to a customer. It sits beside sim-clock, road-path and reverse-geocode,
+  // which are public for the same reason — and deliberately NOT beside
+  // /bootstrap, which was open once, returned every tenant's id and code, and
+  // is authenticated now. This must never grow a breakdown.
+  //
+  // The service caches it for 30s and collapses concurrent recomputes into one,
+  // so polling this cannot reach the database more than twice a minute however
+  // hard anybody tries.
+  app.get(`${v1}/fleet-pulse`, async (_req, res) => {
+    try {
+      sendSuccess(res, await dashboard.getFleetPulse())
+    } catch {
+      // A number nobody can see is not worth a 500 on the sign-in path — the
+      // client already treats an absent pulse as "show the static card".
+      sendError(res, 503, 'Fleet pulse unavailable')
+    }
   })
 
   // Bootstrap — returns the full organisation roster (for the dashboard's
