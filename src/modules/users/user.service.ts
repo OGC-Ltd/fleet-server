@@ -120,11 +120,22 @@ export async function purgeUser(orgId: string, userId: string, actorId?: string)
     )
   }
 
-  // Before the delete, while the memberships that answer "which rosters" still
-  // exist. Afterwards there is nothing left to resolve them from.
+  // Twice, and both are necessary.
+  //
+  // BEFORE, because the memberships that answer "which rosters is this person
+  // in" are about to be deleted and there is nothing left to resolve them from
+  // afterwards. `held.organisationIds` is that answer, read while it existed.
+  //
+  // AFTER, because the delete is not instantaneous and a roster read landing
+  // between the two would re-warm the cache from a database that still holds
+  // the row — leaving a cached list containing somebody who no longer exists,
+  // with nothing to expire it but its own TTL. The second call needs no new
+  // query: it re-uses the ids captured before.
   await invalidateRoster(...held.organisationIds, orgId)
 
   const deleted = await repo.purge(orgId, userId)
+
+  await invalidateRoster(...held.organisationIds, orgId)
 
   // Their resolved permissions are cached under their id and would otherwise
   // outlive them — a stale subject for a user who no longer exists.
