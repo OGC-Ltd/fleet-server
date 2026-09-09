@@ -19,19 +19,8 @@ import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { eventBus } from '../../lib/event-bus.js'
 import { parseProviderTime, parseProviderTimeOr } from '../../lib/provider-time.js'
+import { resolveOrgId, skipUnmappedFactory } from './factory-map.js'
 
-/** Provider factoryCode → our organisation code (mirrors the sync scripts). */
-const FACTORY_TO_ORG: Record<string, string> = { NDHIWA: 'SUKARI' }
-
-const orgIdCache = new Map<string, string | null>()
-async function resolveOrgId(factoryCode: string): Promise<string | null> {
-  if (orgIdCache.has(factoryCode)) return orgIdCache.get(factoryCode) ?? null
-  const code = FACTORY_TO_ORG[factoryCode]
-  if (!code) { orgIdCache.set(factoryCode, null); return null }
-  const org = await prisma.organisation.findUnique({ where: { code }, select: { id: true } })
-  orgIdCache.set(factoryCode, org?.id ?? null)
-  return org?.id ?? null
-}
 
 const norm = (s: string | null | undefined): string =>
   (s ?? '').trim().toUpperCase().replace(/\s+/g, ' ')
@@ -91,7 +80,14 @@ export async function handleDispatch(
   { narrate = true, source = 'webhook' }: { narrate?: boolean; source?: string } = {},
 ): Promise<boolean> {
   const organisationId = await resolveOrgId(d.factoryCode)
-  if (!organisationId) return false
+  if (!organisationId) {
+    // Was a bare `return false`, and that was the bug. The controller counts
+    // the false as "nothing happened" and its summary log line is gated on the
+    // counters, so an entire factory's dispatches arrived, parsed, and left no
+    // record anywhere that they had ever been offered.
+    skipUnmappedFactory(d.factoryCode, 'dispatch', d.id)
+    return false
+  }
 
   // Provider timestamps are offsetless EAT — see lib/provider-time.
   const when = parseProviderTimeOr(d.dispatchTime)
@@ -256,7 +252,10 @@ const ARRIVAL_ECHO_MS = 10 * 60_000
  */
 export async function handleMovement(m: MovementEvent): Promise<boolean> {
   const organisationId = await resolveOrgId(m.factoryCode)
-  if (!organisationId) return false
+  if (!organisationId) {
+    skipUnmappedFactory(m.factoryCode, 'movement', m.id)
+    return false
+  }
 
   const when = parseProviderTimeOr(m.timestamp)
 

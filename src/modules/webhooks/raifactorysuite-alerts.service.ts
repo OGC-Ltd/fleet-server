@@ -26,11 +26,7 @@ import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { eventBus } from '../../lib/event-bus.js'
 import { parseProviderTimeOr } from '../../lib/provider-time.js'
-
-/** Provider factoryCode → our organisation code (mirrors the sync scripts). */
-const FACTORY_TO_ORG: Record<string, string> = {
-  NDHIWA: 'SUKARI',
-}
+import { resolveOrgId } from './factory-map.js'
 
 /** Alert type → live-feed severity. Unknown types default to `info`. */
 const SEVERITY_BY_TYPE: Record<string, 'info' | 'warning' | 'critical'> = {
@@ -62,17 +58,6 @@ export function extractPlate(message: string): string | null {
 
 export function severityOf(type: string): 'info' | 'warning' | 'critical' {
   return SEVERITY_BY_TYPE[type] ?? 'info'
-}
-
-const orgIdCache = new Map<string, string | null>()
-
-async function resolveOrgId(factoryCode: string): Promise<string | null> {
-  if (orgIdCache.has(factoryCode)) return orgIdCache.get(factoryCode) ?? null
-  const code = FACTORY_TO_ORG[factoryCode]
-  if (!code) { orgIdCache.set(factoryCode, null); return null }
-  const org = await prisma.organisation.findUnique({ where: { code }, select: { id: true } })
-  orgIdCache.set(factoryCode, org?.id ?? null)
-  return org?.id ?? null
 }
 
 export interface IngestResult {
