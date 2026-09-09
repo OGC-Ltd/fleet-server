@@ -52,11 +52,27 @@ const TRACK_SCAN_CAP = 5000
  */
 const TRACK_HOLE_MS = 6 * 60_000
 
-/** A drawn point. `gapBefore` means the unit went quiet before reaching it. */
+/**
+ * A drawn point. `gapBefore` means the unit went quiet before reaching it.
+ *
+ * `spd`/`hdg`/`eng` are here for the time marks the map hangs off this track —
+ * a dot the operator clicks answers "where was it at 13:07" and is expected to
+ * read out the same three channels playback does. They ride on rows this query
+ * already fetches (engineOn was being read for engineOffSinceMs regardless), so
+ * the cost is two columns on the wire per KEPT point — a few hundred over a
+ * window, not per fix — and no extra query. A sampled track fills them the same
+ * way; see findSampledFixes.
+ */
 export interface TrackPoint {
   t: number
   lat: number
   lng: number
+  /** km/h at the fix, null where the unit sent none. */
+  spd?: number | null
+  /** Compass bearing 0-360, null where the unit sent none. */
+  hdg?: number | null
+  /** Ignition at the fix. Absent, not false, when the source did not read it. */
+  eng?: boolean
   gapBefore?: true
 }
 
@@ -104,11 +120,13 @@ export async function findTrack(vehicleId: string, orgId: string, q: TrackQuery)
     },
     orderBy: { capturedAt: 'desc' },
     take: TRACK_SCAN_CAP + 1,
-    // engineOn rides along for engineOffSinceMs below. It is one more column on
-    // rows already being read, not another query, and it never reaches the
-    // caller per-point — the thinning would drop it exactly where it matters
-    // (a unit standing still with the key out emits fixes that go nowhere).
-    select: { capturedAt: true, lat: true, lng: true, engineOn: true },
+    // engineOn rides along for engineOffSinceMs below, and all three motion
+    // channels ride along for the per-point readouts (see TrackPoint). They are
+    // three more columns on rows already being read, not another query.
+    select: {
+      capturedAt: true, lat: true, lng: true,
+      engineOn: true, speedKmh: true, headingDeg: true,
+    },
   })
 
   const truncated = rows.length > TRACK_SCAN_CAP
@@ -144,7 +162,11 @@ export async function findTrack(vehicleId: string, orgId: string, q: TrackQuery)
     if (prev && metresBetween(prev.lat, prev.lng, r.lat, r.lng) < q.minSpacingM) continue
     // The hole belongs to the next point actually drawn, so it survives however
     // many thinned-away fixes follow it.
-    points.push(holeBefore ? { t, lat: r.lat, lng: r.lng, gapBefore: true } : { t, lat: r.lat, lng: r.lng })
+    points.push({
+      t, lat: r.lat, lng: r.lng,
+      spd: r.speedKmh, hdg: r.headingDeg, eng: r.engineOn,
+      ...(holeBefore ? { gapBefore: true as const } : {}),
+    })
     holeBefore = false
   }
 
@@ -155,7 +177,11 @@ export async function findTrack(vehicleId: string, orgId: string, q: TrackQuery)
     const last = points[points.length - 1]
     const t = lastRow.capturedAt.getTime()
     if (!last || last.t !== t) {
-      points.push(holeBefore ? { t, lat: lastRow.lat, lng: lastRow.lng, gapBefore: true } : { t, lat: lastRow.lat, lng: lastRow.lng })
+      points.push({
+        t, lat: lastRow.lat, lng: lastRow.lng,
+        spd: lastRow.speedKmh, hdg: lastRow.headingDeg, eng: lastRow.engineOn,
+        ...(holeBefore ? { gapBefore: true as const } : {}),
+      })
     }
   }
 
@@ -429,6 +455,12 @@ export interface SampledFix {
   lat: number
   lng: number
   engine_on: boolean
+  /** km/h at the sampled fix. Carried so a sampled track's time marks read out
+   *  the same channels a full-fidelity one's do — a bucket probe already
+   *  fetches the heap row, so the two columns are free. */
+  speed_kmh: number | null
+  /** Compass bearing 0-360 at the sampled fix. */
+  heading_deg: number | null
   /** The bucket before this one held no fix at all — real reporting silence. */
   gap_before: boolean
 }
@@ -456,10 +488,12 @@ export async function findSampledFixes(vehicleId: string, from: Date, to: Date) 
                            make_interval(secs => ${bucketSec}::int)) AS b
     ),
     picked AS (
-      SELECT b.bucket_start, t.captured_at, t.lat, t.lng, t.engine_on
+      SELECT b.bucket_start, t.captured_at, t.lat, t.lng, t.engine_on,
+             t.speed_kmh, t.heading_deg
       FROM buckets b
       LEFT JOIN LATERAL (
-        SELECT t."captured_at", t."lat", t."lng", t."engine_on"
+        SELECT t."captured_at", t."lat", t."lng", t."engine_on",
+               t."speed_kmh", t."heading_deg"
         FROM "vehicle_telemetries" t
         WHERE t."vehicle_id"  = ${vehicleId}
           AND t."captured_at" >= b.bucket_start
@@ -475,13 +509,13 @@ export async function findSampledFixes(vehicleId: string, from: Date, to: Date) 
       -- level would not work: WHERE runs before window functions, so lag()
       -- would only ever see buckets that found a fix and no gap could be
       -- detected at all.
-      SELECT captured_at, lat, lng, engine_on,
+      SELECT captured_at, lat, lng, engine_on, speed_kmh, heading_deg,
              -- The PREVIOUS bucket came back empty, and this one did not.
              (lag(captured_at)   OVER (ORDER BY bucket_start) IS NULL
               AND lag(bucket_start) OVER (ORDER BY bucket_start) IS NOT NULL) AS gap_before
       FROM picked
     )
-    SELECT captured_at, lat, lng, engine_on, gap_before
+    SELECT captured_at, lat, lng, engine_on, speed_kmh, heading_deg, gap_before
     FROM flagged
     WHERE captured_at IS NOT NULL
     ORDER BY captured_at

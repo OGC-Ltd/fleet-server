@@ -104,7 +104,7 @@ describe('track window governance', () => {
   it('reports `fixes: null` when sampling, rather than passing off the sample count', async () => {
     vi.mocked(findSampledFixes).mockResolvedValue({
       rows: [
-        { captured_at: new Date(1000), lat: -0.36, lng: 35.28, engine_on: true, gap_before: false },
+        { captured_at: new Date(1000), lat: -0.36, lng: 35.28, engine_on: true, speed_kmh: 12, heading_deg: 90, gap_before: false },
       ],
       bucketSec: 600,
     })
@@ -154,9 +154,9 @@ describe('track window governance', () => {
     // would erase the evidence that the unit went quiet.
     vi.mocked(findSampledFixes).mockResolvedValue({
       rows: [
-        { captured_at: new Date(1000), lat: -0.36, lng: 35.28, engine_on: true, gap_before: false },
-        { captured_at: new Date(2000), lat: -0.36, lng: 35.28, engine_on: true, gap_before: false },
-        { captured_at: new Date(9000), lat: -0.36, lng: 35.28, engine_on: true, gap_before: true },
+        { captured_at: new Date(1000), lat: -0.36, lng: 35.28, engine_on: true, speed_kmh: 12, heading_deg: 90, gap_before: false },
+        { captured_at: new Date(2000), lat: -0.36, lng: 35.28, engine_on: true, speed_kmh: 12, heading_deg: 90, gap_before: false },
+        { captured_at: new Date(9000), lat: -0.36, lng: 35.28, engine_on: true, speed_kmh: 12, heading_deg: 90, gap_before: true },
       ],
       bucketSec: 600,
     })
