@@ -8,8 +8,10 @@
  * whole fleet), so the endpoint stays fast even polled every 30 s.
  */
 
-import { findSilos, findLatestPerVehicle, countFleetPulse } from './dashboard.repository.js'
-import type { FleetRow } from './dashboard.repository.js'
+import { findSilos, findLatestPerVehicle, findFleetPulseRows } from './dashboard.repository.js'
+import { connectionStatus } from '../../lib/connection-state.js'
+import { MOVING_THRESHOLD_KMH } from '../../lib/movement-state.js'
+import type { FleetRow, PulseRow } from './dashboard.repository.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
 
 // Sugar-logistics carriers: tractors haul raw cane, lorries/canters processed sugar.
@@ -88,6 +90,47 @@ type FleetPulse = { total: number; inTransit: number; share: number; asOf: strin
 let pulseCache: { value: FleetPulse; at: number } | null = null
 let pulseInFlight: Promise<FleetPulse> | null = null
 
+/**
+ * How many of these units are in transit RIGHT NOW.
+ *
+ * This is the dashboard's own test, applied to the whole platform, and it has
+ * to stay that way — the sign-in screen and the header say "units in transit"
+ * and must mean one thing by it. The dash's `isInTransit` (lib/vehicleMap) is
+ * the definition being mirrored:
+ *
+ *     connectionOnline === true  AND  engine on  AND  round(speed) >= 1
+ *
+ * Two of those three were previously approximated here and both approximations
+ * inflated the number.
+ *
+ * CONNECTION was a five-minute freshness window on the newest ping. That is a
+ * different question with a similar shape: "sent a message recently" is not "is
+ * connected" — a unit can post a queued frame and be gone, and a tracker
+ * configured to report every thirty minutes is not offline at minute six.
+ * Measured on the live Kasulu account, a window disagreed with Wialon's own
+ * verdict on 28 of 224 units, 25 of them units Wialon called offline. Those 25
+ * were counted here and not on the dashboard.
+ *
+ * SPEED was `> 0` against the dash's `>= 1` on the ROUNDED value, so anything
+ * drifting between 0 and 0.5 km/h counted here and nowhere else.
+ *
+ * Consequence worth knowing, and it is the honest one: where the poller is not
+ * running, no unit has a connection verdict, so this reports zero in transit —
+ * exactly as the dashboard reports the whole fleet offline in that state. A
+ * figure that disagreed with the dashboard in order to look busier would be
+ * worse than a zero that matches it.
+ */
+export function countPulse(rows: PulseRow[]): { total: number; inTransit: number } {
+  let inTransit = 0
+  for (const r of rows) {
+    if (!r.engineOn) continue
+    if (Math.round(r.speedKmh ?? 0) < MOVING_THRESHOLD_KMH) continue
+    if (connectionStatus(r.deviceId)?.online !== true) continue
+    inTransit++
+  }
+  return { total: rows.length, inTransit }
+}
+
 export async function getFleetPulse(): Promise<FleetPulse> {
   const now = Date.now()
   if (pulseCache && now - pulseCache.at < PULSE_TTL_MS) return pulseCache.value
@@ -98,7 +141,7 @@ export async function getFleetPulse(): Promise<FleetPulse> {
 
   pulseInFlight = (async () => {
     try {
-      const { total, inTransit } = await countFleetPulse(FRESH_MS)
+      const { total, inTransit } = countPulse(await findFleetPulseRows())
       const value: FleetPulse = {
         total,
         inTransit,
