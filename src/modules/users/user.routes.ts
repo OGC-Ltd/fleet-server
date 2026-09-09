@@ -68,6 +68,21 @@ router.put('/:userId/memberships', requireRealAuth, requirePermissionStrict('use
 router.delete('/:userId/memberships', requireRealAuth, requirePermissionStrict('user:assign_role'), ctrl.deleteMembership)
 router.patch('/:userId', requireRealAuth, requirePermissionStrict('user:update'), validateBody(updateUserSchema), ctrl.update)
 router.delete('/:userId', requireRealAuth, requirePermissionStrict('user:delete'), ctrl.remove)
+// Permanent, and therefore its own path rather than a flag on the one above.
+//
+// A query parameter that turns a reversible delete into an irreversible one is
+// a foot-gun in every client that ever forwards a request: `?hard=true` typoed
+// into a script, or carried along by a proxy, destroys an account through an
+// endpoint whose name says it only marks one. A distinct URL cannot be reached
+// by accident, and it reads as what it is in an access log.
+//
+// Same permission as the soft delete on purpose. `user:delete` already means
+// "may remove people"; a second permission would have to be granted to
+// somebody, and the roles that hold user:delete are the two administrator
+// roles, which is exactly the audience. The protection that matters is in the
+// service — self, guests, and anybody with operations history are refused —
+// and in the client, which asks for the address to be typed out.
+router.delete('/:userId/permanent', requireRealAuth, requirePermissionStrict('user:delete'), ctrl.purge)
 
 // ── Administration of an existing person, all strictly gated ────────────────
 router.post('/:userId/resend-invite', requireRealAuth, requirePermissionStrict('user:create'), ctrl.resendInvite)
