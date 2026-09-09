@@ -1345,11 +1345,35 @@ export async function operationsToday(orgId: string, vehicleIds: string[] | null
       select:  { id: true, plate: true, driverName: true, destination: true, dispatchedAt: true },
       orderBy: { dispatchedAt: 'asc' },
     }),
+    // Truck runs today. "Truck" is answered two ways on purpose.
+    //
+    // The registry type is the obvious test and it is the one that works for
+    // SUKARI, whose 67 trucks are typed. It cannot work for MENENGAI or WEST
+    // KENYA: those fleets arrive through sync:wialon, which sets no type at
+    // all, so 241 of Menengai's 244 active units and 485 of West Kenya's 486
+    // are UNSPECIFIED. A type-only filter therefore reports zero truck runs for
+    // those orgs FOREVER, however many sugar hauls they run — which is exactly
+    // what this card was doing for the Naitiri → Raiply traffic.
+    //
+    // A SALES run answers it from the other direction, and answers it better:
+    // the lifecycle itself says what the run is. Finished sugar leaving a
+    // factory for a customer is a haulage run by definition — the sales office
+    // does not dispatch a tractor to Raiply — so the kind is evidence about the
+    // journey where the registry has none about the vehicle.
+    //
+    // Fixing the registry types would be the deeper repair and is worth doing
+    // separately; it needs the provider's own `type` field, which sync:wialon
+    // does not read today. This is not a workaround for that so much as the
+    // more direct question: the card counts haulage runs, and a sales run is
+    // one whatever the vehicle row happens to say.
     prisma.dispatch.findMany({
       where: {
         organisationId: orgId,
         dispatchedAt:   { gte: dayStart },
-        vehicle:        { vehicleType: 'TRUCK' },
+        OR: [
+          { vehicle: { vehicleType: 'TRUCK' } },
+          { kind: 'SALES' },
+        ],
         ...vehicleWhere,
       },
       select:  { plate: true, driverName: true, destination: true, dispatchedAt: true },
