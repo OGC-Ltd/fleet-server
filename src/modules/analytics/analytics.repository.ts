@@ -93,7 +93,7 @@ export async function deliveriesAnalytics(
     select: {
       beganAt: true, finalLocation: true, mileageKm: true,
       durationSeconds: true, avgSpeedKmh: true,
-      cargoManifest: { select: { description: true, arrivalWeightKg: true } },
+      cargoManifest: { select: { description: true, arrivalWeightKg: true, declaredWeightKg: true } },
     },
     orderBy: { beganAt: 'asc' },
   })
@@ -200,7 +200,7 @@ export async function deliveriesAnalytics(
 
   for (const t of trips) {
     const product = t.cargoManifest?.description ?? 'Unspecified'
-    const kg      = t.cargoManifest?.arrivalWeightKg ?? 0
+    const kg      = manifestKg(t.cargoManifest)
     const km      = t.mileageKm ?? 0
     // Dispatchers type the destination freehand and the casing wanders, so group
     // on the same UPPER(TRIM()) key ai-insight and dispatch.repository use. This
@@ -337,6 +337,26 @@ export async function fuelEfficiency(orgId: string, q: AnalyticsRange) {
  * they asked for.
  */
 /** @param vehicleIds see deliveriesAnalytics — same filter, same semantics. */
+/**
+ * What a trip carried, in kilograms.
+ *
+ * MEASURED first, DECLARED second. `arrivalWeightKg` is a load-cell reading at
+ * trip end and is the better number wherever it exists — but nothing on this
+ * fleet produces one (wialon.adapter hardcodes `cargoWeightKg: null` on every
+ * frame), so in practice every figure here is the declared weight the sales
+ * office entered on the run.
+ *
+ * The two are kept in separate columns rather than merged on write precisely so
+ * this precedence can exist: the day load cells appear, they take over and the
+ * history stays honest about which trips were weighed and which were declared.
+ *
+ * Returns 0, not null, because every caller is summing — a trip with no manifest
+ * contributed no tonnage, and that IS zero for a total.
+ */
+function manifestKg(m: { arrivalWeightKg?: number | null; declaredWeightKg?: number | null } | null | undefined): number {
+  return m?.arrivalWeightKg ?? m?.declaredWeightKg ?? 0
+}
+
 export async function fuelConsumption(
   orgId: string, q: DeliveriesQuery, vehicleIds: string[] | null = null,
 ) {
@@ -822,7 +842,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
         driverId: true, vehicleId: true, beganAt: true, endedAt: true,
         mileageKm: true, durationSeconds: true, finalLocation: true,
         route:         { select: { name: true, originName: true, destinationName: true } },
-        cargoManifest: { select: { arrivalWeightKg: true } },
+        cargoManifest: { select: { arrivalWeightKg: true, declaredWeightKg: true } },
       },
       orderBy: { beganAt: 'asc' },
     }),
@@ -992,7 +1012,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     let lifetimeKm = 0, lifetimeKg = 0
     for (const t of dTrips) {
       lifetimeKm += t.mileageKm ?? 0
-      lifetimeKg += t.cargoManifest?.arrivalWeightKg ?? 0
+      lifetimeKg += manifestKg(t.cargoManifest)
     }
 
     const latestTripAt = dTrips.reduce<Date | null>((latest, t) => {
@@ -1043,7 +1063,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     let heaviest: { kg: number; date: Date; route: string } | null = null
 
     for (const t of windowTrips) {
-      const kg = t.cargoManifest?.arrivalWeightKg ?? 0
+      const kg = manifestKg(t.cargoManifest)
       const km = t.mileageKm ?? 0
       totalKm += km; totalKg += kg; totalSeconds += t.durationSeconds ?? 0
 
@@ -1144,7 +1164,7 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
       vehicleId: true, beganAt: true, endedAt: true, mileageKm: true, durationSeconds: true,
       maxSpeedKmh: true, finalLocation: true,
       route:         { select: { name: true, originName: true, destinationName: true } },
-      cargoManifest: { select: { arrivalWeightKg: true } },
+      cargoManifest: { select: { arrivalWeightKg: true, declaredWeightKg: true } },
     },
     orderBy: { beganAt: 'asc' },
   })
@@ -1154,7 +1174,7 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
   let heaviest: { kg: number; date: Date; route: string } | null = null
 
   for (const t of trips) {
-    const kg = t.cargoManifest?.arrivalWeightKg ?? 0
+    const kg = manifestKg(t.cargoManifest)
     const km = t.mileageKm ?? 0
     totalKm += km; totalKg += kg; totalSeconds += t.durationSeconds ?? 0
 
@@ -1199,7 +1219,7 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
         baseScore: driver.driverRatingScore ?? 5,
         trips: trips.length,
         mileageKm: trips.reduce((sum, t) => sum + (t.mileageKm ?? 0), 0),
-        tonnes: toTonnes(trips.reduce((sum, t) => sum + (t.cargoManifest?.arrivalWeightKg ?? 0), 0)),
+        tonnes: toTonnes(trips.reduce((sum, t) => sum + manifestKg(t.cargoManifest), 0)),
         incentiveBonus: 0,
         fuelTheftCases,
         overspeedingCases,
@@ -1325,11 +1345,35 @@ export async function operationsToday(orgId: string, vehicleIds: string[] | null
       select:  { id: true, plate: true, driverName: true, destination: true, dispatchedAt: true },
       orderBy: { dispatchedAt: 'asc' },
     }),
+    // Truck runs today. "Truck" is answered two ways on purpose.
+    //
+    // The registry type is the obvious test and it is the one that works for
+    // SUKARI, whose 67 trucks are typed. It cannot work for MENENGAI or WEST
+    // KENYA: those fleets arrive through sync:wialon, which sets no type at
+    // all, so 241 of Menengai's 244 active units and 485 of West Kenya's 486
+    // are UNSPECIFIED. A type-only filter therefore reports zero truck runs for
+    // those orgs FOREVER, however many sugar hauls they run — which is exactly
+    // what this card was doing for the Naitiri → Raiply traffic.
+    //
+    // A SALES run answers it from the other direction, and answers it better:
+    // the lifecycle itself says what the run is. Finished sugar leaving a
+    // factory for a customer is a haulage run by definition — the sales office
+    // does not dispatch a tractor to Raiply — so the kind is evidence about the
+    // journey where the registry has none about the vehicle.
+    //
+    // Fixing the registry types would be the deeper repair and is worth doing
+    // separately; it needs the provider's own `type` field, which sync:wialon
+    // does not read today. This is not a workaround for that so much as the
+    // more direct question: the card counts haulage runs, and a sales run is
+    // one whatever the vehicle row happens to say.
     prisma.dispatch.findMany({
       where: {
         organisationId: orgId,
         dispatchedAt:   { gte: dayStart },
-        vehicle:        { vehicleType: 'TRUCK' },
+        OR: [
+          { vehicle: { vehicleType: 'TRUCK' } },
+          { kind: 'SALES' },
+        ],
         ...vehicleWhere,
       },
       select:  { plate: true, driverName: true, destination: true, dispatchedAt: true },
