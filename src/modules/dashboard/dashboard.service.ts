@@ -8,7 +8,7 @@
  * whole fleet), so the endpoint stays fast even polled every 30 s.
  */
 
-import { findSilos, findLatestPerVehicle } from './dashboard.repository.js'
+import { findSilos, findLatestPerVehicle, countFleetPulse } from './dashboard.repository.js'
 import type { FleetRow } from './dashboard.repository.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
 
@@ -53,6 +53,71 @@ const summaryCache = createWarmCache<Awaited<ReturnType<typeof computeDashboardS
   compute: (orgId) => computeDashboardSummary(orgId),
   warmKeysFor: (orgId) => [orgId],
 })
+
+/**
+ * The platform's live pulse — total units, and how many are moving.
+ *
+ * Served to callers with NO SESSION, which is the fact that shapes everything
+ * about it:
+ *
+ *   · It is two integers and a timestamp. No organisation is named, no vehicle
+ *     is identified, nothing here can be attributed to a customer. `/bootstrap`
+ *     on this server used to be open and returned every tenant's id and code;
+ *     it is authenticated now, and this route exists on the understanding that
+ *     it must never grow into that.
+ *
+ *   · It is cached for a fixed window and every caller shares the cache. An
+ *     unauthenticated endpoint that ran a lateral join over every vehicle in
+ *     the platform per request is a database outage anybody could trigger with
+ *     a for-loop. Polling it a thousand times a second costs one query a
+ *     minute; the rate limiter is then only a courtesy rather than the thing
+ *     standing between this and the fleet.
+ *
+ *   · The cached value is served STALE on a failure rather than surfacing an
+ *     error, and an empty platform reports zero rather than throwing. Nobody
+ *     should be unable to reach a sign-in form because a count did not come
+ *     back.
+ *
+ * The window is 30s. Shorter buys nothing — the pollers write telemetry on a
+ * slower cycle than that, so a fresher cache would return the same numbers
+ * having asked again.
+ */
+const PULSE_TTL_MS = 30_000
+
+type FleetPulse = { total: number; inTransit: number; share: number; asOf: string }
+let pulseCache: { value: FleetPulse; at: number } | null = null
+let pulseInFlight: Promise<FleetPulse> | null = null
+
+export async function getFleetPulse(): Promise<FleetPulse> {
+  const now = Date.now()
+  if (pulseCache && now - pulseCache.at < PULSE_TTL_MS) return pulseCache.value
+  // One recompute at a time. Without this, the first request after the window
+  // expires is joined by every other request that arrives while it runs, and
+  // each of them starts its own copy of the same query.
+  if (pulseInFlight) return pulseInFlight
+
+  pulseInFlight = (async () => {
+    try {
+      const { total, inTransit } = await countFleetPulse(FRESH_MS)
+      const value: FleetPulse = {
+        total,
+        inTransit,
+        share: total > 0 ? round((inTransit / total) * 100) : 0,
+        asOf: new Date().toISOString(),
+      }
+      pulseCache = { value, at: Date.now() }
+      return value
+    } catch (err) {
+      // Stale beats an error on a page whose job is to show a sign-in form.
+      if (pulseCache) return pulseCache.value
+      throw err
+    } finally {
+      pulseInFlight = null
+    }
+  })()
+
+  return pulseInFlight
+}
 
 export async function getDashboardSummary(orgId: string) {
   return summaryCache.get(orgId)
