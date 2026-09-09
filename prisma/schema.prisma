@@ -2070,6 +2070,20 @@ model Dispatch {
   driverName       String    @map("driver_name")
   /// Free text, verbatim from the provider. Never parsed into coordinates.
   destination      String?
+  /// The provider factory this run STARTED from (see webhooks/factory-map).
+  ///
+  /// The provider records a destination and never an origin, and until this
+  /// column existed the origin was assumed to be the owning organisation's own
+  /// yard. That assumption breaks exactly where the routing fix bites: a
+  /// Menengai truck loading at Naitiri starts its run 250 km from Menengai's
+  /// hub, so a trip measured from the hub would be measured from the wrong
+  /// place and labelled with the wrong name.
+  ///
+  /// Also the only way to know WHAT a sales load is — the payload carries a
+  /// tonnage and never says of what, and the commodity is a property of the
+  /// site (Naitiri ships processed sugar). NULL for rows written before this
+  /// column, and for any source that does not name a factory.
+  factoryCode      String?   @map("factory_code")
   /// DISPATCHED | OVERDUE | COMPLETED | CANCELLED, as the provider reports it.
   status           String
   dispatchedAt     DateTime  @map("dispatched_at")

@@ -34,7 +34,9 @@ import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { eventBus } from '../../lib/event-bus.js'
 import { parseProviderTime, parseProviderTimeOr } from '../../lib/provider-time.js'
-import { resolveEventOrg, skipUnmappedFactory, type EventOrg } from './factory-map.js'
+import {
+  resolveEventOrg, skipUnmappedFactory, bagsFromTonnes, BAG_KG, type EventOrg,
+} from './factory-map.js'
 
 /**
  * Narrate an event into the Live Feed via the bus (notification.worker owns the
@@ -118,6 +120,7 @@ export async function handleDispatch(
   const row = {
     organisationId,
     kind:             'CANE' as const,
+    factoryCode:      d.factoryCode,
     vehicleId:        vehicle?.id ?? null,
     plate:            org.plate,
     driverName:       d.driverName.trim(),
@@ -345,20 +348,10 @@ export interface SaleEvent {
   returnTime?:  string | null; returnPhotoUrl?:  string | null
 }
 
-/** Kilograms in the bags this fleet counts sugar in. */
-const BAG_KG = 50
-
-/**
- * Bags of sugar in a load, or null when there is no weight to divide.
- *
- * Deliberately refuses a zero or negative tonnage rather than reporting "0
- * bags": the provider models `tonnage` as optional and a run whose weight has
- * not been entered yet is not a run carrying nothing.
- */
-export function bagsFromTonnes(tonnage: number | null | undefined): number | null {
-  if (tonnage == null || !Number.isFinite(tonnage) || tonnage <= 0) return null
-  return Math.round((tonnage * 1000) / BAG_KG)
-}
+/** Re-exported so callers that already import the bag maths from the sales
+ *  handler keep working; the single definition lives with the factory table,
+ *  beside the commodity it counts. */
+export { bagsFromTonnes } from './factory-map.js'
 
 /** "29.0t (580 × 50 kg bags)", or nothing at all. */
 function loadPhrase(tonnage: number | null | undefined): string {
@@ -423,6 +416,7 @@ export async function handleSale(
   const row = {
     organisationId:   org.organisationId,
     kind:             'SALES' as const,
+    factoryCode:      s.factoryCode,
     vehicleId:        org.vehicleId,
     plate:            org.plate,
     driverName:       s.driverName?.trim() || 'Unassigned',
