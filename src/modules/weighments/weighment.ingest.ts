@@ -48,13 +48,12 @@ const CENTRE_NAMES = new Map<number, string>([
   [104, 'NYAONDO'],
 ])
 
-/** Every centre we know of, for the page's tab strip. Ordered with the factory
- *  first because that is where two thirds of the tickets are. */
-export function knownCentres(): { code: number; name: string }[] {
-  return [...CENTRE_NAMES.entries()]
-    .map(([code, name]) => ({ code, name }))
-    .sort((a, b) => a.code - b.code)
-}
+// There is deliberately no `knownCentres()` export any more. It existed to
+// seed the page's tab strip, and a hardcoded list is the wrong authority for
+// WHOSE bridges these are — see `findOrgCentres` in the repository, which asks
+// the organisation's own tickets. The map below survives for the one job it is
+// genuinely the authority on: naming the centre a TRANSFER refers to by code,
+// since a transfer payload carries `centerFrom` and no name at all.
 
 /** Record a code→name pair seen on a delivery row, so a new bridge names
  *  itself the first time it weighs anything rather than waiting for a deploy. */

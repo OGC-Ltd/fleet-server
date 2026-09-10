@@ -73,6 +73,40 @@ export async function findCapturedRange(organisationId: string): Promise<{ first
   return first && last ? { first, last } : null
 }
 
+/**
+ * The bridges THIS organisation actually weighs at.
+ *
+ * Derived from its own tickets rather than from a list in the code. The list
+ * was `knownCentres()` — the four Sukari sites, hardcoded — and it is the
+ * right thing for NAMING a centre a transfer refers to by code, but the wrong
+ * thing for deciding whose bridges these are. Seeded that way, any second
+ * organisation that ever weighed anything would inherit Sukari's four names,
+ * which is a claim about someone else's yard.
+ *
+ * Reads the whole history, not the day, so a bridge that is closed today still
+ * has a tab — that distinction (quiet today vs. not ours) is the entire reason
+ * the tab strip is built from a separate query instead of from the day's rows.
+ *
+ * `groupBy` over an indexed column on a table that holds hundreds of rows per
+ * org per day; it is one small aggregate, not a scan of the ticket history.
+ */
+export async function findOrgCentres(organisationId: string): Promise<{ code: number; name: string }[]> {
+  const rows = await prisma.weighment.groupBy({
+    by:      ['centerCode', 'centerName'],
+    where:   { organisationId },
+    orderBy: { centerCode: 'asc' },
+  })
+  // A centre RENAMED upstream appears twice — same code, two names. Keep the
+  // newest spelling rather than showing the site twice: the tickets carry the
+  // name that was current when each was weighed, and the tab strip is about
+  // the place, not about its history of labels.
+  const byCode = new Map<number, string>()
+  for (const r of rows) byCode.set(r.centerCode, r.centerName)
+  return [...byCode.entries()]
+    .map(([code, name]) => ({ code, name }))
+    .sort((a, b) => a.code - b.code)
+}
+
 /** How many tickets we hold in total, per category — for the empty state,
  *  which has to tell "no tickets today" apart from "the feed has never run". */
 export async function countByCategory(organisationId: string): Promise<Record<WeighmentCategory, number>> {
