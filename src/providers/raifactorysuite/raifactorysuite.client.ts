@@ -62,6 +62,82 @@ export interface RaiFactorySuiteSaleRow {
   returnPhotoUrl?:    string | null
 }
 
+/**
+ * A cane-delivery ticket: one lorry, one token, weighed empty and loaded at a
+ * single bridge.
+ *
+ * `*Time` fields are HHMM INTEGERS, not minutes — `1138` is 11:38 and `2` is
+ * 00:02. Read as minutes past midnight they look plausible for half the day
+ * and then quietly exceed 24 h (`1641` would be 27:21), which is the kind of
+ * wrong that produces a chart rather than an error. The matching `*Date` is
+ * always midnight; the two are recombined in `weighmentAt`.
+ */
+export interface RaiFactorySuiteCaneDeliveryRow {
+  category:            'CANE_DELIVERY'
+  tokenNumber:         number
+  tokenDate:           string
+  tokenTime:           number
+  vehicleNo:           string
+  driverName:          string
+  grossDate?:          string | null
+  grossTime?:          number | null
+  grossOperator?:      string | null
+  grossWeight?:        number | null
+  grossWeighbridgeNo?: number | null
+  tareDate?:           string | null
+  tareTime?:           number | null
+  tareOperator?:       string | null
+  tareWeight?:         number | null
+  tareWeighbridgeNo?:  number | null
+  netWeight?:          number | null
+  /** 101 FACTORY · 102 OPAPO · 103 OYANI · 104 NYAONDO, measured 2026-09-10. */
+  centerCode:          number
+  centerName:          string
+  /** Null on all 729 rows measured — modelled upstream, not populated. */
+  productCode?:        string | null
+  productName?:        string | null
+}
+
+/**
+ * A cane-transfer ticket: weighed at an outstation, carried in, weighed again
+ * at the factory. Four weighings on one token.
+ *
+ * It names its origin as `centerFrom` — a CODE with no name beside it, unlike
+ * a delivery. The name comes from the delivery feed's own code→name mapping.
+ */
+export interface RaiFactorySuiteCaneTransferRow {
+  category:                 'CANE_TRANSFER'
+  tokenNumber:              number
+  tokenDate:                string
+  tokenTime:                number
+  vehicleNo:                string
+  driverName:               string
+  centerTareDate?:          string | null
+  centerTareTime?:          number | null
+  centerTareOperator?:      string | null
+  centerTareWeight?:        number | null
+  centerTareWeighbridgeNo?: number | null
+  centerGrossDate?:         string | null
+  centerGrossTime?:         number | null
+  centerGrossOperator?:     string | null
+  centerGrossWeight?:       number | null
+  centerGrossWeighbridgeNo?: number | null
+  centerNetWeight?:         number | null
+  factoryGrossDate?:        string | null
+  factoryGrossTime?:        number | null
+  factoryGrossOperator?:    string | null
+  factoryGrossWeight?:      number | null
+  factoryGrossWeighbridgeNo?: number | null
+  factoryTareDate?:         string | null
+  factoryTareTime?:         number | null
+  factoryTareOperator?:     string | null
+  factoryTareWeight?:       number | null
+  factoryTareWeighbridgeNo?: number | null
+  factoryNetWeight?:        number | null
+  /** The outstation the load came from, as a code. Never 101 (the factory). */
+  centerFrom:               number
+}
+
 export class RaiFactorySuiteClient {
   constructor(
     private readonly baseUrl: string = raiFactorySuiteApi.url,
@@ -119,6 +195,39 @@ export class RaiFactorySuiteClient {
   async listSales(factoryCode?: string, limit = 500): Promise<RaiFactorySuiteSaleRow[]> {
     const q = factoryCode ? `factoryCode=${encodeURIComponent(factoryCode)}&limit=${limit}` : `limit=${limit}`
     return this.get<RaiFactorySuiteSaleRow>(`/sales?${q}`)
+  }
+
+  /**
+   * Weighbridge tickets, one endpoint per flow.
+   *
+   * Both take `from`/`to` as `YYYY-MM-DD`, and all three things you would
+   * assume about that window are wrong. Measured 2026-09-10:
+   *
+   *   • **`to` is EXCLUSIVE.** `from=09-09&to=09-09` returns zero rows, not a
+   *     day's worth. A caller asking for "today" must pass tomorrow as `to`.
+   *   • **Both are required** — omitting either is a bare `400` with no
+   *     message, which is indistinguishable from a bad key until you try it.
+   *   • **They do not filter on the ticket's own date.** Asking for
+   *     `09-09 → 09-11` returns rows dated 09-08, and asking for a nine-day
+   *     window returns exactly the same 729 rows a one-day window does. What
+   *     comes back is the provider's recent set — about two days — whatever
+   *     you ask for. Windows wider than 31 days are refused outright
+   *     (`{"error":"Date range too wide …"}`).
+   *
+   * The consequence is the whole reason `weighments` is a table: history
+   * cannot be re-fetched, so every row seen must be stored, and a gap in our
+   * polling is a permanent hole rather than a backfill job.
+   */
+  async listCaneDeliveries(from: string, to: string): Promise<RaiFactorySuiteCaneDeliveryRow[]> {
+    return this.get<RaiFactorySuiteCaneDeliveryRow>(
+      `/weighment/cane-delivery?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    )
+  }
+
+  async listCaneTransfers(from: string, to: string): Promise<RaiFactorySuiteCaneTransferRow[]> {
+    return this.get<RaiFactorySuiteCaneTransferRow>(
+      `/weighment/cane-transfer?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    )
   }
 
   /** Cheap liveness probe used when a reconcile run fails, to tell apart

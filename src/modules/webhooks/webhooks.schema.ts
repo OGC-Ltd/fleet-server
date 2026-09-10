@@ -119,6 +119,45 @@ export function looksLikeSale(item: unknown): boolean {
   return 'vehicleNumberPlate' in o && ('tonnage' in o || 'signOutTime' in o || 'returnTime' in o)
 }
 
+/**
+ * A weighbridge ticket, delivered as `weighment.created` / `weighment.updated`.
+ *
+ * Loose on purpose, and looser than the REST types in the provider client.
+ * Everything except the four fields that IDENTIFY a ticket is `nullish`,
+ * because an `updated` event is the scale correcting one number — a re-weigh,
+ * a fixed plate — and rejecting a payload that omits the rest would drop
+ * exactly the deliveries that carry news. A 4xx here is not a retry: their
+ * sender tries a few times and then discards the event, and this feed cannot
+ * be backfilled (the provider keeps about two days), so a dropped weighment is
+ * gone from our history for good.
+ *
+ * `category` is what routes it, and it is the provider's own field rather than
+ * something inferred from the shape — unlike sales, which had to be sniffed
+ * because the provider reuses `dispatch.created` for them.
+ */
+export const raiFactorySuiteWeighmentSchema = z.object({
+  category:    z.enum(['CANE_DELIVERY', 'CANE_TRANSFER']),
+  tokenNumber: z.number(),
+  tokenDate:   z.string().min(1),
+  tokenTime:   z.number().nullish(),
+  vehicleNo:   z.string().min(1),
+  driverName:  z.string().nullish(),
+}).passthrough()
+
+/**
+ * Does this payload look like a weighbridge ticket, whatever it was called?
+ *
+ * `category` plus `tokenNumber` appear on nothing else the provider sends, so
+ * this is decisive in both directions — a dispatch, a movement and a sale all
+ * fail it. Consulted only as a FALLBACK, after the `weighment.*` name, so a
+ * renamed event still lands rather than falling through to the unmapped log.
+ */
+export function looksLikeWeighment(item: unknown): boolean {
+  if (!item || typeof item !== 'object') return false
+  const o = item as Record<string, unknown>
+  return 'tokenNumber' in o && (o['category'] === 'CANE_DELIVERY' || o['category'] === 'CANE_TRANSFER')
+}
+
 /** A gate movement — a unit crossing the factory gate. Carries NO coordinates:
  *  this is a checkpoint crossing, not GPS. */
 export const raiFactorySuiteMovementSchema = z.object({

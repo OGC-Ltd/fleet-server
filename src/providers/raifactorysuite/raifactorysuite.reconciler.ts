@@ -36,7 +36,9 @@ import { startPollLoop, type PollLoopHandle } from '../../lib/poll-loop.js'
 import { RaiFactorySuiteClient } from './raifactorysuite.client.js'
 import { ingestAlerts } from '../../modules/webhooks/raifactorysuite-alerts.service.js'
 import { handleDispatch, handleSale } from '../../modules/webhooks/raifactorysuite-events.service.js'
+import { handleWeighment } from '../../modules/weighments/weighment.ingest.js'
 import { FACTORIES } from '../../modules/webhooks/factory-map.js'
+import { fleetDayKey } from '../../lib/provider-time.js'
 
 /**
  * How many alerts to re-read each pass. Only genuinely new ones are written or
@@ -78,6 +80,30 @@ const DISPATCH_WINDOW = 1000
  */
 const SALES_WINDOW = 500
 
+/**
+ * How many days of weighbridge tickets to ask for each pass.
+ *
+ * Not a lookback we chose — it is the whole window the provider has. Measured
+ * 2026-09-10: a nine-day request and a one-day request return the identical
+ * 729 rows, dated the last two days, because `from`/`to` filter on the
+ * provider's own recency and not on the ticket date. Asking for more buys
+ * nothing; asking for less would still return the same set.
+ *
+ * Three matters only for the boundary: a pass at 00:05 must still be able to
+ * see last night's tickets, and `to` is EXCLUSIVE so tomorrow is what makes
+ * today visible at all. Nothing here can be backfilled later — a ticket that
+ * ages out of the provider's window while we are down is gone — which is why
+ * this runs on the same five-minute loop as the rest rather than nightly.
+ */
+const WEIGHMENT_LOOKBACK_DAYS = 3
+
+/** `YYYY-MM-DD` for a day offset from now, in the fleet's own clock — the one
+ *  the scale software stamps its tickets with. */
+function weighmentDayKey(offsetDays: number): string {
+  const d = new Date(Date.now() + offsetDays * 86_400_000)
+  return fleetDayKey(d).toISOString().slice(0, 10)
+}
+
 export interface ReconcilerHandle {
   stop: () => void
 }
@@ -109,6 +135,7 @@ class RaiFactorySuiteReconciler {
     let alertsCreated = 0
     let dispatchesSeen = 0
     let salesSeen = 0
+    let weighmentsSeen = 0
     let failed = false
 
     // Alerts and dispatches are reconciled independently: one endpoint
@@ -180,6 +207,31 @@ class RaiFactorySuiteReconciler {
       }
     }
 
+    // Weighbridge tickets. Both feeds, independently of each other and of
+    // everything above, for the same reason: one endpoint failing must not
+    // cost the others.
+    //
+    // No `primed` gate and no narration. These do not reach the Live Feed —
+    // 787 tickets a day would drown it, and a weighing is not an event anyone
+    // needs pushed at them — so there is no backlog to suppress on a restart.
+    // Every pass simply re-upserts what the provider still holds, which is
+    // also the repair for a ticket edited at the scale after we first saw it.
+    const from = weighmentDayKey(-WEIGHMENT_LOOKBACK_DAYS)
+    const to   = weighmentDayKey(1)   // EXCLUSIVE: tomorrow is what makes today visible
+    for (const feed of ['cane-delivery', 'cane-transfer'] as const) {
+      try {
+        const rows = feed === 'cane-delivery'
+          ? await this.client.listCaneDeliveries(from, to)
+          : await this.client.listCaneTransfers(from, to)
+        for (const row of rows) {
+          if (await handleWeighment(row, { source: 'reconciler' })) weighmentsSeen++
+        }
+      } catch (err) {
+        failed = true
+        this.logFailure(`weighments:${feed}`, err)
+      }
+    }
+
     if (failed) {
       this.consecutiveFailures++
     } else {
@@ -191,7 +243,7 @@ class RaiFactorySuiteReconciler {
     }
 
     logger.info(
-      { durationMs: Date.now() - t0, alertsCreated, dispatchesSeen, salesSeen, primed: this.primed },
+      { durationMs: Date.now() - t0, alertsCreated, dispatchesSeen, salesSeen, weighmentsSeen, primed: this.primed },
       'RaiFactorySuite reconcile complete',
     )
   }

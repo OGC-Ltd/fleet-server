@@ -83,6 +83,8 @@ All return a **bare JSON array** — no envelope, no pagination metadata.
 | `GET /alerts?limit=500` | 257 | `{id, factoryCode, type, message, relatedId, acknowledged, createdAt}` |
 | `GET /sales?factoryCode=NAITIRI&limit=500` | 5 | `{id, factoryCode, vehicleNumberPlate, driverName, tonnage, destination, status, signOutTime, signOutPhotoUrl, returnTime, returnPhotoUrl}` |
 | `GET /movements?factoryCode=…&limit=500` | — | `{id, factoryCode, vehicleNumberPlate, driverName, direction, destination, timestamp}` — gate crossings. **Exists but is NOT reconciled**: the client has no `listMovements`, so a `movement.created` lost to a failed webhook delivery is gone for good. |
+| `GET /weighment/cane-delivery?from=&to=` | 729 | Weighbridge tickets weighed at one bridge. `{category, tokenNumber, tokenDate, tokenTime, vehicleNo, driverName, gross*/tare* (date, time, operator, weight, weighbridgeNo), netWeight, centerCode, centerName, product*}`. See §3.1.2. |
+| `GET /weighment/cane-transfer?from=&to=` | 58 | The same ticket weighed FOUR times — `centerTare*`, `centerGross*`, `centerNet`, then `factoryGross*`, `factoryTare*`, `factoryNet` — plus `centerFrom` (a bare code, no name). |
 
 `factoryCode` is `NDHIWA` for almost everything → maps to org `SUKARI`. `NAITIRI`
 appeared on 2026-09-09: 1 vehicle and 5 sales rows, against NDHIWA's 624.
@@ -118,6 +120,47 @@ but is not populating them yet. Four of the five rows had sign-out→return gaps
 of 19–50 seconds and are someone exercising the flow, not trips — so there is no
 usable duration history for a sales destination yet, which is why the feed line
 quotes no ETA.
+
+### 3.1.2 `/weighment/*` — the bridges, and a window that is not a window
+
+Measured against the live endpoints 2026-09-10. Four sites report:
+**101 FACTORY, 102 OPAPO, 103 OYANI, 104 NYAONDO** (570 / 103 / 22 / 34
+delivery tickets on 2026-09-09). Transfers only ever originate at 102–104 —
+the factory is where they arrive.
+
+Everything you would assume about `from`/`to` is wrong, and each part of it
+was measured:
+
+1. **Both are REQUIRED.** Omitting either is a bare `400` with no message,
+   which is indistinguishable from a bad key until you try it.
+2. **`to` is EXCLUSIVE.** `from=2026-09-09&to=2026-09-09` returns zero rows.
+   Asking for "today" means passing tomorrow.
+3. **They do not filter on the ticket date.** `from=09-09&to=09-11` returns
+   rows dated 09-08, and a nine-day window returns the identical 729 rows a
+   one-day window does. What comes back is the provider's recent set — about
+   two days — whatever you ask for.
+4. Windows over 31 days are refused: `{"error":"Date range too wide …"}`.
+
+**So this feed cannot be backfilled.** A ticket that ages out while we are
+down is gone from every system we can reach, which is why `weighments` is a
+table of our own, why the reconciler upserts everything it sees on every pass
+rather than only new rows, and why the `weighment.*` webhook matters more here
+than anywhere else in this integration.
+
+Two payload conventions worth stating plainly, because both read plausibly
+when parsed wrongly:
+
+* **The clock is an HHMM INTEGER, not minutes.** `1138` is 11:38; read as
+  minutes it is 18:58, and it stays believable until it produces `1641` →
+  27:21. The date beside it is always midnight. See `weighmentAt`.
+* **A transfer names its origin as `centerFrom`, a code with no name.** The
+  name has to come from the delivery feed's own `centerCode`/`centerName`
+  pairing — see `CENTRE_NAMES` in modules/weighments/weighment.ingest.
+
+`netWeight` agreed with `grossWeight - tareWeight` on all 729 rows, and a
+transfer's factory net differs from its centre net (26,540 against 26,800 on
+the first one measured) — which is the point of weighing it twice, not an
+error to reconcile away.
 
 ### 3.1.2 Events route by the UNIT, not by the factory
 
@@ -166,13 +209,14 @@ Authentication accepts either scheme, constant-time compared:
 **Unset secret ⇒ every delivery rejected** (fail closed). HMAC needs the raw
 body, captured by `express.json({ verify })` in `app.ts`.
 
-Three event types arrive:
+These event types arrive:
 
 | Event | Payload | Handling |
 |---|---|---|
 | `alert.created` | `{id, factoryCode, type, message, relatedId, acknowledged, createdAt}` | persisted to `provider_alerts` + Live Feed |
 | `dispatch.created` | same shape as REST `/dispatches` | writes a `vehicle_assignments` row + Live Feed |
 | `movement.created` | `{id, factoryCode, vehicleNumberPlate, driverName, direction, destination, timestamp}` | Live Feed only |
+| `weighment.created` / `weighment.updated` | same shape as REST `/weighment/*` | upserted into `weighments` on `(category, tokenNumber)`. **Not narrated** — nearly 800 tickets a day would bury the Live Feed, and a weighing is something you go and look at rather than something that must interrupt you. |
 | *(sales)* | same shape as REST `/sales` | persisted to `dispatches` (`kind=SALES`) + Live Feed |
 
 **There is no sales event name.** Confirmed 2026-09-09: a sales sign-out arrives
