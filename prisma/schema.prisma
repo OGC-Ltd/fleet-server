@@ -242,6 +242,7 @@ model Organisation {
   notifications        Notification[]
   dispatches           Dispatch[]
   dispatchDestinations DispatchDestination[]
+  weighments           Weighment[]
 
   @@map("organisations")
 }
@@ -654,6 +655,7 @@ model Vehicle {
   providerAlerts     ProviderAlert[]
   notifications      Notification[]
   dispatches         Dispatch[]
+  weighments         Weighment[]
 
   @@index([organisationId])
   @@index([vehicleGroupId])
@@ -2214,4 +2216,155 @@ model Notification {
   /// Serves the retention sweep, which scans by age ACROSS organisations.
   @@index([occurredAt])
   @@map("notifications")
+}
+
+/// One weighbridge TICKET, as the factory's scale software issued it.
+///
+/// A row here is a TOKEN, not a single trip across a scale. Every ticket
+/// involves at least two weighings — the unit crosses empty (tare) and loaded
+/// (gross), in whichever order the yard works that day — and the provider
+/// delivers them as one record with both stamps on it. Counting tickets is
+/// what "how many weighments today" means to the people who run these bridges,
+/// and it is the only count under which "how many did THIS lorry do" has an
+/// answer.
+///
+/// ## Why the same table holds two very different shapes
+///
+/// `/weighment/cane-delivery` is cane arriving at a bridge — one place, two
+/// weighings. `/weighment/cane-transfer` is cane already weighed at an
+/// outstation being carried in to the factory, so it is weighed FOUR times:
+/// tare and gross at the centre, then gross and tare again at the factory. The
+/// two are one subject — a lorry, a token, a load of cane over a scale — and
+/// splitting them into two tables would mean every stat, every filter and
+/// every grid on the weighbridge page was written twice and could disagree.
+///
+/// So the four shared columns (`grossAt`/`tareAt`/weights/`netWeightKg`) hold
+/// the weighing that HAPPENED AT `centerCode` — the delivery's own pair, or a
+/// transfer's CENTRE pair — and a transfer additionally fills the `factory*`
+/// columns with its second half. A delivery leaves those null, which is a fact
+/// about the ticket rather than missing data: nothing weighed it at the
+/// factory.
+///
+/// ## The provider keeps about two days
+///
+/// Measured 2026-09-10: a request for any window inside the last month returns
+/// only the last two days of tickets, and `from`/`to` filter on the provider's
+/// own recency rather than on the ticket date (asking for 2026-09-09→11
+/// returns 2026-09-08 rows). So this table is the ONLY history there will ever
+/// be — nothing can be re-fetched once it ages out, which is why the
+/// reconciler upserts every row it sees rather than only new ones, and why the
+/// webhook (`weighment.created` / `weighment.updated`) matters more here than
+/// it does for dispatches.
+model Weighment {
+  id             String            @id @default(uuid())
+  organisationId String            @map("organisation_id")
+  /// CANE_DELIVERY | CANE_TRANSFER — the endpoint that produced it, which is
+  /// also what the badge on the grid reads. The provider states it in the
+  /// payload (`category`) rather than leaving it to be inferred.
+  category       WeighmentCategory
+  /// The scale software's own ticket number. Unique WITHIN a category and not
+  /// across them — deliveries run in the 1,000,000,000s and transfers in the
+  /// 1,000,000s, and nothing promises those ranges stay apart.
+  tokenNumber    BigInt            @map("token_number")
+  /// When the ticket was raised. The provider sends the date and the time as
+  /// separate fields — a midnight timestamp and an HHMM integer (`1138` is
+  /// 11:38, NOT 1,138 minutes) — recombined on the way in.
+  tokenAt        DateTime          @map("token_at")
+
+  /// The plate exactly as the scale operator typed it, kept verbatim because
+  /// it is what the paper ticket says.
+  vehicleNo      String            @map("vehicle_no")
+  /// The same plate through `normalisePlate`, which is what a search matches
+  /// and what joins to our own registry.
+  vehiclePlate   String            @map("vehicle_plate")
+  /// Our vehicle, when the plate matches one. NULL is common and is not an
+  /// error: cane is hauled by contractors' lorries and farmers' tractors that
+  /// carry no tracker and appear in no fleet we hold.
+  vehicleId      String?           @map("vehicle_id")
+  /// The driver as the ticket names them. There is no drivers table to point
+  /// at — the integration has never had one — so this is the name and nothing
+  /// more.
+  driverName     String            @map("driver_name")
+
+  /// Where the weighing happened: 101 FACTORY, 102 OPAPO, 103 OYANI,
+  /// 104 NYAONDO (measured 2026-09-10; the four bridges Sukari operates).
+  centerCode     Int               @map("center_code")
+  /// The provider's name for that centre. Denormalised deliberately: a
+  /// transfer payload carries only `centerFrom`, so the name has to come from
+  /// the delivery feed's own mapping, and a ticket must still read correctly
+  /// years later if a code is ever reassigned.
+  centerName     String            @map("center_name")
+
+  // ── the weighing at `centerCode` ──────────────────────────────────────────
+  /// Loaded weight, kg, and when the scale took it.
+  grossWeightKg  Float?            @map("gross_weight_kg")
+  grossAt        DateTime?         @map("gross_at")
+  /// The operator's initials, as recorded at the scale.
+  grossOperator  String?           @map("gross_operator")
+  /// WHICH physical scale. A centre can run several — five distinct numbers
+  /// across the four sites — and a dispute about a weight starts here.
+  grossBridgeNo  Int?              @map("gross_bridge_no")
+  tareWeightKg   Float?            @map("tare_weight_kg")
+  tareAt         DateTime?         @map("tare_at")
+  tareOperator   String?           @map("tare_operator")
+  tareBridgeNo   Int?              @map("tare_bridge_no")
+  /// Gross − tare, as the provider computed it. Stored rather than derived:
+  /// it is the number on the ticket, and it is what the farmer is paid on.
+  /// (It agreed with gross − tare on all 729 rows measured 2026-09-10, which
+  /// is a reason to trust it, not a reason to recompute it.)
+  netWeightKg    Float?            @map("net_weight_kg")
+
+  // ── CANE_TRANSFER only: the second weighing, at the factory ───────────────
+  factoryGrossWeightKg Float?      @map("factory_gross_weight_kg")
+  factoryGrossAt       DateTime?   @map("factory_gross_at")
+  factoryGrossOperator String?     @map("factory_gross_operator")
+  factoryGrossBridgeNo Int?        @map("factory_gross_bridge_no")
+  factoryTareWeightKg  Float?      @map("factory_tare_weight_kg")
+  factoryTareAt        DateTime?   @map("factory_tare_at")
+  factoryTareOperator  String?     @map("factory_tare_operator")
+  factoryTareBridgeNo  Int?        @map("factory_tare_bridge_no")
+  /// The factory's own net for the same load. It differs from `netWeightKg` —
+  /// 26,800 against 26,540 on the first transfer measured — and that
+  /// difference is the point of weighing twice, so both are kept and neither
+  /// is treated as a correction of the other.
+  factoryNetWeightKg   Float?      @map("factory_net_weight_kg")
+
+  /// What the load was, when the provider says. Null on every delivery row
+  /// observed so far (729 of 729) — the columns exist upstream and are not
+  /// being filled.
+  productCode    String?           @map("product_code")
+  productName    String?           @map("product_name")
+
+  /// When we first stored it, and when we last saw a change. Neither is the
+  /// ticket's own clock — `tokenAt` is — and both are here to make a stalled
+  /// feed visible.
+  receivedAt     DateTime          @default(now()) @map("received_at")
+  updatedAt      DateTime          @updatedAt @map("updated_at")
+  /// 'webhook' when pushed, 'reconciler' on the poll that backstops it.
+  source         String            @default("reconciler")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  vehicle      Vehicle?     @relation(fields: [vehicleId], references: [id])
+
+  /// The ticket's identity at the provider. Upserts key on this, so a webhook
+  /// and the reconciler delivering the same ticket converge instead of
+  /// doubling it.
+  @@unique([category, tokenNumber])
+  /// The page's own query: one centre, one day, newest first.
+  @@index([organisationId, centerCode, tokenAt])
+  /// The stats strip and the all-centres view, which do not narrow by centre.
+  @@index([organisationId, tokenAt])
+  /// "every ticket this lorry did today", which is what the turnaround gaps
+  /// between weighments are computed from.
+  @@index([organisationId, vehiclePlate, tokenAt])
+  @@map("weighments")
+}
+
+/// Which weighbridge flow a ticket came from — the provider's own `category`.
+enum WeighmentCategory {
+  /// Cane delivered straight to a bridge and weighed there once, in and out.
+  CANE_DELIVERY
+  /// Cane weighed at an outstation and weighed again on arrival at the
+  /// factory, so the ticket carries two complete pairs.
+  CANE_TRANSFER
 }

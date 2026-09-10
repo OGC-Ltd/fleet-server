@@ -3,24 +3,30 @@ import { logger } from '../../lib/logger.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { ingestAlerts, type RaiFactorySuiteAlert } from './raifactorysuite-alerts.service.js'
 import { handleDispatch, handleMovement, handleSale } from './raifactorysuite-events.service.js'
+import { handleWeighment } from '../weighments/weighment.ingest.js'
 import { ingestWialonNotifications } from './wialon-notifications.service.js'
 import {
   raiFactorySuiteAlertSchema,
   raiFactorySuiteDispatchSchema,
   raiFactorySuiteMovementSchema,
   raiFactorySuiteSaleSchema,
+  raiFactorySuiteWeighmentSchema,
   wialonNotificationSchema,
   looksLikeSale,
+  looksLikeWeighment,
   unwrapEvent,
 } from './webhooks.schema.js'
 
 /**
  * POST /webhook/rai
  *
- * RaiFactorySuite posts three event types here:
- *   alert.created     → operational alert (persisted + Live Feed)
- *   dispatch.created  → driver↔vehicle assignment (persisted + Live Feed)
- *   movement.created  → gate crossing (Live Feed only; carries no coordinates)
+ * RaiFactorySuite posts these event types here:
+ *   alert.created      → operational alert (persisted + Live Feed)
+ *   dispatch.created   → driver↔vehicle assignment (persisted + Live Feed)
+ *   dispatch.updated   → the same run, changed
+ *   movement.created   → gate crossing (Live Feed only; carries no coordinates)
+ *   weighment.created  → weighbridge ticket (persisted; NOT narrated — see below)
+ *   weighment.updated  → the same ticket, re-weighed or corrected
  *
  * A 4xx makes their sender retry a few times and then DROP the event, so an
  * unrecognised shape must never fail the request: acknowledge it, log the
@@ -37,6 +43,7 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
     let dispatches = 0
     let movements  = 0
     let sales      = 0
+    let weighments = 0
 
     const wialonNotifications: Parameters<typeof ingestWialonNotifications>[0] = []
 
@@ -71,6 +78,29 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
         if (sl.success) { if (await handleSale(sl.data)) sales++; continue }
       }
 
+      // WEIGHMENTS, before the dispatch branch and for a weaker version of
+      // the same reason sales go first: a ticket carries `vehicleNo` and
+      // `driverName`, and while it fails the dispatch schema today (no `id`,
+      // no `factoryCode`) that is a coincidence of shape rather than a
+      // guarantee. Routing on the provider's own `category` is decisive, so
+      // put it where nothing else can claim it first.
+      //
+      // Unlike a dispatch, a ticket is NOT narrated into the Live Feed. Nearly
+      // 800 tickets crossed these four bridges on the day this was written; a
+      // feed line each would bury every other event on the board, and a
+      // weighing is something you go and look at rather than something that
+      // has to interrupt you. It is persisted and the weighbridge page reads
+      // it — see modules/weighments.
+      if (kind.startsWith('weighment') || looksLikeWeighment(item)) {
+        const w = raiFactorySuiteWeighmentSchema.safeParse(item)
+        if (w.success) {
+          // The zod object is passthrough, so the un-modelled leg fields are
+          // still on it — the ingest reads them off the original shape.
+          if (await handleWeighment(item as Parameters<typeof handleWeighment>[0], { source: 'webhook' })) weighments++
+          continue
+        }
+      }
+
       // Prefer the declared event name; fall back to shape-sniffing so a
       // renamed event still lands somewhere sensible.
       if (kind.startsWith('dispatch')) {
@@ -99,9 +129,9 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
         'Webhook event received that we do not map yet',
       )
     }
-    if (result || dispatches || movements || sales || wialon) {
+    if (result || dispatches || movements || sales || weighments || wialon) {
       logger.info(
-        { event, dispatches, movements, sales, wialon, ...(result ?? {}) },
+        { event, dispatches, movements, sales, weighments, wialon, ...(result ?? {}) },
         'Provider webhook processed',
       )
     }
@@ -113,6 +143,7 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
       dispatches,
       movements,
       sales,
+      weighments,
       wialonNotifications: wialon?.created ?? 0,
       ignored:  unmapped.length,
       ...(result ?? {}),
