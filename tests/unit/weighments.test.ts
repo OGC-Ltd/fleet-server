@@ -57,7 +57,17 @@ function ticket(over: Record<string, unknown> = {}): never {
 beforeEach(() => {
   vi.clearAllMocks()
   token = 1_000_000_000
-  vi.mocked(findCapturedRange).mockResolvedValue(null)
+  // A captured span by default, because every test below that supplies a
+  // ticket implies one: a row cannot exist in an organisation whose history is
+  // empty. The default used to be `null`, which let a test assert the tab strip
+  // of a fleet that had simultaneously weighed something and never weighed
+  // anything — and that impossible pair is what hid the real bug, where the
+  // four bridge names were seeded onto companies that own no bridges. The
+  // no-history case sets it back to null explicitly.
+  vi.mocked(findCapturedRange).mockResolvedValue({
+    first: new Date('2026-09-08T00:02:00+03:00'),
+    last:  new Date('2026-09-09T19:31:00+03:00'),
+  } as never)
 })
 
 describe('weighmentAt — the provider sends the date and the clock apart', () => {
@@ -129,6 +139,41 @@ describe('the day s stats describe every bridge, not the one on screen', () => {
     expect(res.centres.map(c => c.name)).toEqual(['FACTORY', 'OPAPO', 'OYANI', 'NYAONDO'])
     expect(res.centres.find(c => c.name === 'OYANI')?.count).toBe(0)
     expect(res.centres.find(c => c.name === 'FACTORY')?.count).toBe(1)
+  })
+})
+
+describe('an organisation with no weighbridges at all', () => {
+  it('offers no centre tabs, rather than four bridges that were never its own', async () => {
+    // The tab exists on every fleet in the platform; the bridges belong to one.
+    // Seeding the four names unconditionally put FACTORY · OPAPO · OYANI ·
+    // NYAONDO on the screen of a company that has never owned a weighbridge,
+    // each reading 0 — which says "your bridges have stopped reporting" about
+    // bridges that were never theirs. Caught in production 2026-09-10 on the
+    // Menengai company.
+    vi.mocked(findDay).mockResolvedValue([] as never)
+    vi.mocked(findCapturedRange).mockResolvedValue(null)
+
+    const res = await getWeighmentDay(ORG, { day: DAY })
+
+    expect(res.centres).toEqual([])
+    expect(res.captured).toBeNull()
+    expect(res.stats.weighments).toBe(0)
+  })
+
+  it('still lists a quiet bridge for an organisation that HAS history', async () => {
+    // The distinction the test above exists for: no history is not the same as
+    // a quiet day, and a fleet with bridges keeps its tabs when they are idle.
+    vi.mocked(findDay).mockResolvedValue([] as never)
+    vi.mocked(findCapturedRange).mockResolvedValue({
+      first: new Date('2026-09-08T00:02:00+03:00'),
+      last:  new Date('2026-09-09T19:31:00+03:00'),
+    } as never)
+
+    const res = await getWeighmentDay(ORG, { day: DAY })
+
+    expect(res.centres.map(c => c.name)).toEqual(['FACTORY', 'OPAPO', 'OYANI', 'NYAONDO'])
+    expect(res.centres.every(c => c.count === 0)).toBe(true)
+    expect(res.captured).not.toBeNull()
   })
 })
 

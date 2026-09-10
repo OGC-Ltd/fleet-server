@@ -218,12 +218,24 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
     totalNetKg,
   }
 
+  // Has this organisation EVER had a ticket? The answer changes what an empty
+  // day means, so it is read before the tabs are built rather than after.
+  const captured = await repo.findCapturedRange(organisationId)
+
   // Every centre we know of appears, including the ones that weighed nothing:
   // a bridge with no tickets today is information — it is closed, or its feed
   // has stopped — and a tab that vanishes on a quiet day cannot say so.
+  //
+  // But ONLY for an organisation that has weighbridges. The bridges belong to
+  // one fleet, and the tab exists on every fleet in the platform, so seeding
+  // the four names unconditionally put FACTORY · OPAPO · OYANI · NYAONDO on
+  // the screen of an operator whose company has never owned a weighbridge —
+  // four tabs reading 0, which says "your bridges have stopped reporting"
+  // about bridges that were never theirs. No history, no tabs; the client says
+  // so in words instead.
   const counts = new Map<number, number>()
   const names  = new Map<number, string>()
-  for (const c of knownCentres()) { counts.set(c.code, 0); names.set(c.code, c.name) }
+  if (captured) for (const c of knownCentres()) { counts.set(c.code, 0); names.set(c.code, c.name) }
   for (const row of all) {
     counts.set(row.centerCode, (counts.get(row.centerCode) ?? 0) + 1)
     names.set(row.centerCode, row.centerName)
@@ -254,7 +266,6 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
     .map(r => toDto(r, seqOf.get(r.id) ?? 1, ticketsOf.get(r.id) ?? 1, gapOf.get(r.id) ?? null))
     .reverse()
 
-  const captured = await repo.findCapturedRange(organisationId)
 
   return {
     day,
