@@ -11,10 +11,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 vi.mock('../../src/modules/weighments/weighment.repository.js', () => ({
   findDay:            vi.fn(),
   findCapturedRange:  vi.fn(),
+  findOrgCentres:     vi.fn(),
   countByCategory:    vi.fn(),
 }))
 
-import { findDay, findCapturedRange } from '../../src/modules/weighments/weighment.repository.js'
+import { findDay, findCapturedRange, findOrgCentres } from '../../src/modules/weighments/weighment.repository.js'
 import { getWeighmentDay } from '../../src/modules/weighments/weighment.service.js'
 import { weighmentAt, normaliseWeighment } from '../../src/modules/weighments/weighment.ingest.js'
 import fixtures from '../fixtures/weighment-rows.json' with { type: 'json' }
@@ -68,6 +69,15 @@ beforeEach(() => {
     first: new Date('2026-09-08T00:02:00+03:00'),
     last:  new Date('2026-09-09T19:31:00+03:00'),
   } as never)
+  // The org's OWN bridges, as its own tickets report them. Sukari's four are
+  // the default here because these tests are about Sukari; nothing in the
+  // service knows that list any more.
+  vi.mocked(findOrgCentres).mockResolvedValue([
+    { code: 101, name: 'FACTORY' },
+    { code: 102, name: 'OPAPO' },
+    { code: 103, name: 'OYANI' },
+    { code: 104, name: 'NYAONDO' },
+  ] as never)
 })
 
 describe('weighmentAt — the provider sends the date and the clock apart', () => {
@@ -152,12 +162,43 @@ describe('an organisation with no weighbridges at all', () => {
     // Menengai company.
     vi.mocked(findDay).mockResolvedValue([] as never)
     vi.mocked(findCapturedRange).mockResolvedValue(null)
+    vi.mocked(findOrgCentres).mockResolvedValue([] as never)
 
     const res = await getWeighmentDay(ORG, { day: DAY })
 
     expect(res.centres).toEqual([])
     expect(res.captured).toBeNull()
     expect(res.stats.weighments).toBe(0)
+  })
+
+  it('lists the organisation s OWN bridges, never another fleet s', async () => {
+    // The tab strip is built from this org's own tickets. A second fleet with
+    // one bridge of its own must see that one — not Sukari's four, which is
+    // what a hardcoded list would have handed it the moment it weighed
+    // anything.
+    vi.mocked(findDay).mockResolvedValue([] as never)
+    vi.mocked(findOrgCentres).mockResolvedValue([{ code: 201, name: 'NAITIRI' }] as never)
+
+    const res = await getWeighmentDay(ORG, { day: DAY })
+
+    expect(res.centres).toEqual([{ code: 201, name: 'NAITIRI', count: 0 }])
+  })
+
+  it('counts a centre that appears in the day but not yet in the history read', async () => {
+    // A bridge that weighs its FIRST ticket today is in the day's rows before
+    // the two reads can agree about it. It must still get a tab and a count
+    // rather than being dropped for not being on the list.
+    vi.mocked(findOrgCentres).mockResolvedValue([{ code: 101, name: 'FACTORY' }] as never)
+    vi.mocked(findDay).mockResolvedValue([
+      ticket({ centerCode: 105, centerName: 'RANGWE' }),
+    ] as never)
+
+    const res = await getWeighmentDay(ORG, { day: DAY })
+
+    expect(res.centres).toEqual([
+      { code: 101, name: 'FACTORY', count: 0 },
+      { code: 105, name: 'RANGWE',  count: 1 },
+    ])
   })
 
   it('still lists a quiet bridge for an organisation that HAS history', async () => {

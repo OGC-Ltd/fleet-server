@@ -11,7 +11,6 @@
 
 import { BadRequestError } from '../../core/errors/errors.js'
 import { fleetDayBounds, fleetDayKey } from '../../lib/provider-time.js'
-import { knownCentres } from './weighment.ingest.js'
 import * as repo from './weighment.repository.js'
 import type { WeighmentRow } from './weighment.repository.js'
 import type { WeighmentQuery } from './weighment.schema.js'
@@ -218,24 +217,31 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
     totalNetKg,
   }
 
-  // Has this organisation EVER had a ticket? The answer changes what an empty
-  // day means, so it is read before the tabs are built rather than after.
-  const captured = await repo.findCapturedRange(organisationId)
+  // Has this organisation EVER had a ticket, and at which bridges? Both are
+  // read before the tabs are built rather than after.
+  const [captured, orgCentres] = await Promise.all([
+    repo.findCapturedRange(organisationId),
+    repo.findOrgCentres(organisationId),
+  ])
 
-  // Every centre we know of appears, including the ones that weighed nothing:
-  // a bridge with no tickets today is information — it is closed, or its feed
-  // has stopped — and a tab that vanishes on a quiet day cannot say so.
+  // The tab strip is THIS organisation's own bridges, taken from its own
+  // tickets — never from a list in the code.
   //
-  // But ONLY for an organisation that has weighbridges. The bridges belong to
-  // one fleet, and the tab exists on every fleet in the platform, so seeding
-  // the four names unconditionally put FACTORY · OPAPO · OYANI · NYAONDO on
-  // the screen of an operator whose company has never owned a weighbridge —
-  // four tabs reading 0, which says "your bridges have stopped reporting"
-  // about bridges that were never theirs. No history, no tabs; the client says
-  // so in words instead.
+  // It used to be seeded from `knownCentres()`, the four Sukari sites. Two
+  // things were wrong with that, one of them visible in production: the tab
+  // exists on every fleet in the platform, so a company that has never owned a
+  // weighbridge got FACTORY · OPAPO · OYANI · NYAONDO each reading 0 — which
+  // says "your bridges have stopped reporting" about bridges that were never
+  // theirs. And the moment a SECOND fleet weighs anything, it would inherit
+  // Sukari's four names, which is a claim about someone else's yard.
+  //
+  // Seeding from the org's whole history (not the day's rows) keeps the
+  // property the hardcoded list was there for: a bridge that is closed today
+  // still has a tab, because "quiet today" and "not ours" are different news
+  // and a tab that vanishes on a quiet day cannot tell them apart.
   const counts = new Map<number, number>()
   const names  = new Map<number, string>()
-  if (captured) for (const c of knownCentres()) { counts.set(c.code, 0); names.set(c.code, c.name) }
+  for (const c of orgCentres) { counts.set(c.code, 0); names.set(c.code, c.name) }
   for (const row of all) {
     counts.set(row.centerCode, (counts.get(row.centerCode) ?? 0) + 1)
     names.set(row.centerCode, row.centerName)
