@@ -37,7 +37,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
-import { vehicleSql, windowCacheKey, parseWindowCacheKey, categoriesKey, vehicleIdsForCategories } from './vehicle-filter.js'
+import { vehicleSql, windowCacheKey, parseWindowCacheKey, categoriesKey, vehiclesKey, vehicleIdsFor } from './vehicle-filter.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 
 /**
@@ -178,22 +178,27 @@ const areaCache = createWarmCache<Awaited<ReturnType<typeof excavatorAreaByDay>>
   name: 'excavator-area',
   refreshMs: AREA_REFRESH_MS,
   maxEntries: 200,
-  // Key: `${orgId}|${day}|${cats}` — only the default day, whole fleet, is warmed.
-  warmKeysFor: (orgId) => [`${orgId}|last|all`],
+  // Key: `${orgId}|${day}|${cats}|${units}` — only the default day, whole
+  // fleet, is warmed.
+  warmKeysFor: (orgId) => [`${orgId}|last|all|all`],
   compute: async (key) => {
-    const [orgId = '', day = 'last', cats = 'all'] = key.split('|')
+    const [orgId = '', day = 'last', cats = 'all', units = 'all'] = key.split('|')
     return excavatorAreaByDay(orgId, day === 'last' ? undefined : new Date(day),
-      await vehicleIdsForCategories(orgId, cats === 'all' ? null : cats.split(',')))
+      await vehicleIdsFor(orgId,
+        cats === 'all' ? null : cats.split(','),
+        units === 'all' ? null : units.split(',')))
   },
 })
 
 /** Filtered reads are cached too — see the note on summaryCache in
  *  machine-operations for why computing them live was the wrong call. */
 export async function getExcavatorArea(
-  orgId: string, day?: Date, categories: string[] | null = null,
+  orgId: string, day?: Date,
+  categories: string[] | null = null, vehicles: string[] | null = null,
 ) {
   return areaCache.get(
-    `${orgId}|${day ? day.toISOString().slice(0, 10) : 'last'}|${categoriesKey(categories)}`)
+    `${orgId}|${day ? day.toISOString().slice(0, 10) : 'last'}`
+    + `|${categoriesKey(categories)}|${vehiclesKey(vehicles)}`)
 }
 
 
@@ -277,13 +282,14 @@ const dayCache = createWarmCache<Awaited<ReturnType<typeof areaByDay>>>({
   // goes for every category selection anyone had ever ticked.
   warmKeysFor: (orgId) => [windowCacheKey(orgId, 31, undefined, null)],
   compute: async (key) => {
-    const { orgId, days, to, categories } = parseWindowCacheKey(key)
-    return areaByDay(orgId, days, to, await vehicleIdsForCategories(orgId, categories))
+    const { orgId, days, to, categories, vehicles } = parseWindowCacheKey(key)
+    return areaByDay(orgId, days, to, await vehicleIdsFor(orgId, categories, vehicles))
   },
 })
 
 export async function getAreaByDay(
-  orgId: string, days = 30, to?: Date, categories: string[] | null = null,
+  orgId: string, days = 30, to?: Date,
+  categories: string[] | null = null, vehicles: string[] | null = null,
 ) {
-  return dayCache.get(windowCacheKey(orgId, days, to, categories))
+  return dayCache.get(windowCacheKey(orgId, days, to, categories, vehicles))
 }

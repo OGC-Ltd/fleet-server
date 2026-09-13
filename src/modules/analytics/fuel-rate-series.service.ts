@@ -104,7 +104,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { createWarmCache } from '../../lib/warm-cache.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
-import { vehicleSql, windowCacheKey, parseWindowCacheKey, vehicleIdsForCategories } from './vehicle-filter.js'
+import { vehicleSql, windowCacheKey, parseWindowCacheKey, vehicleIdsFor } from './vehicle-filter.js'
 
 /**
  * Denominators below which a day's rate is arithmetic, not a measurement.
@@ -349,13 +349,14 @@ const cache = createWarmCache<FuelRateSeries>({
   maxEntries: 200,
   warmKeysFor: (orgId) => [windowCacheKey(orgId, 30, undefined, null)],
   compute: async (key) => {
-    const { orgId, days, to, categories } = parseWindowCacheKey(key)
-    return fuelRateByDay(orgId, days, to, await vehicleIdsForCategories(orgId, categories))
+    const { orgId, days, to, categories, vehicles } = parseWindowCacheKey(key)
+    return fuelRateByDay(orgId, days, to, await vehicleIdsFor(orgId, categories, vehicles))
   },
 })
 
 export async function getFuelRateSeries(
-  orgId: string, days = 30, to?: Date, categories: string[] | null = null,
+  orgId: string, days = 30, to?: Date,
+  categories: string[] | null = null, vehicles: string[] | null = null,
 ) {
-  return cache.get(windowCacheKey(orgId, days, to, categories))
+  return cache.get(windowCacheKey(orgId, days, to, categories, vehicles))
 }
