@@ -1,5 +1,14 @@
 /**
- * The Analytics page's VEHICLE TYPE filter, resolved to vehicle ids.
+ * The Analytics page's vehicle filter, resolved to vehicle ids.
+ *
+ * TWO SELECTIONS, ONE ANSWER. A TYPE selection ("EX,CTR") names machine
+ * families; a UNIT selection names vehicles outright, because "how did THIS
+ * lorry do" is a question about one plate and no category expresses it. They
+ * resolve to the same thing — a list of vehicle ids — and when both are set
+ * they INTERSECT: the units you picked, among the types you left ticked. That
+ * is the only reading under which the controls cannot contradict each other,
+ * and it means clearing either one widens the answer rather than changing its
+ * meaning.
  *
  * ## Why ids rather than a SQL predicate
  *
@@ -75,6 +84,36 @@ export function parseCategories(raw: unknown): string[] | null {
 }
 
 /**
+ * The most units one request may name.
+ *
+ * A guard on the query string, not a view about how many a person would pick:
+ * every id lands in a cache key and in a `= ANY()` parameter, and an unbounded
+ * list is an unbounded key. KASULU, the largest fleet here, carries 218 active
+ * units — so a selection at this ceiling is already "the whole fleet, listed
+ * out", which the empty selection expresses better and for free.
+ */
+export const MAX_VEHICLE_SELECTION = 300
+
+/**
+ * `?vehicles=cku1…,cku2…` → the ids, or null when the caller asked for
+ * everything.
+ *
+ * Absent and empty both mean the whole fleet, for the same reason they do for
+ * categories. Nothing here checks that an id EXISTS or belongs to the
+ * organisation — that is `vehicleIdsFor`'s job, and it does it by intersecting
+ * with the org's own fleet rather than by trusting the string.
+ */
+export function parseVehicleIds(raw: unknown): string[] | null {
+  if (raw == null) return null
+  const list = String(raw)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, MAX_VEHICLE_SELECTION)
+  return list.length > 0 ? [...new Set(list)] : null
+}
+
+/**
  * The vehicle ids behind a category selection, or null when unfiltered.
  *
  * Returns an EMPTY ARRAY, not null, when the selection matches nothing: those
@@ -82,21 +121,42 @@ export function parseCategories(raw: unknown): string[] | null {
  * asked for a category this fleet has none of", and the aggregates must then
  * return zeroes rather than the whole fleet.
  */
-export async function vehicleIdsForCategories(
-  orgId: string, categories: string[] | null,
+export const vehicleIdsForCategories = (orgId: string, categories: string[] | null) =>
+  vehicleIdsFor(orgId, categories, null)
+
+/**
+ * The ids behind BOTH selections, or null when neither narrows anything.
+ *
+ * The org's own active fleet is the universe, and every filter is an
+ * intersection with it. That is what makes a vehicle id from the query string
+ * safe to accept without a separate ownership check: an id belonging to another
+ * organisation — pasted, guessed, or left over from a company switch — is
+ * simply not in the fleet this reads, so it drops out. A request naming only
+ * such ids resolves to the empty array, which every aggregate answers with
+ * zeroes. It cannot resolve to null, which would quietly widen a refused
+ * selection into the whole fleet.
+ *
+ * One indexed read of the org's vehicles, and only on requests that filter.
+ */
+export async function vehicleIdsFor(
+  orgId: string, categories: string[] | null, vehicles: string[] | null,
 ): Promise<string[] | null> {
-  if (categories == null) return null
-  const wanted = new Set(categories)
+  if (categories == null && vehicles == null) return null
   const rows = await prisma.vehicle.findMany({
     where:  { organisationId: orgId, isActive: true },
     select: { id: true, registrationPlate: true },
   })
-  return rows.filter((v) => wanted.has(categoryOf(v.registrationPlate))).map((v) => v.id)
+  const wantedCats = categories == null ? null : new Set(categories)
+  const wantedIds  = vehicles == null ? null : new Set(vehicles)
+  return rows
+    .filter((v) => (wantedCats == null || wantedCats.has(categoryOf(v.registrationPlate)))
+                && (wantedIds  == null || wantedIds.has(v.id)))
+    .map((v) => v.id)
 }
 
 /** Resolve straight off the query string — what every controller here needs. */
-export const vehicleIdsFromQuery = (orgId: string, raw: unknown) =>
-  vehicleIdsForCategories(orgId, parseCategories(raw))
+export const vehicleIdsFromQuery = (orgId: string, rawCats: unknown, rawVehicles?: unknown) =>
+  vehicleIdsFor(orgId, parseCategories(rawCats), parseVehicleIds(rawVehicles))
 
 export interface VehicleCategory {
   /** The prefix itself — EX, CTR, `__unprefixed`. Labelling is the client's. */
@@ -180,6 +240,18 @@ export const categoriesKey = (categories: string[] | null): string =>
   categories?.length ? [...categories].sort().join(',') : 'all'
 
 /**
+ * A unit selection, canonically — sorted for the same reason, and separated
+ * from the category part of the key because the two narrow independently.
+ *
+ * Long, and deliberately not hashed: a key is also what a cache dump has to be
+ * read by when a figure looks wrong, and a digest turns "which selection is
+ * this entry" into a question nobody can answer. 300 cuids is 7 kB in the worst
+ * case, against payloads measured in hundreds of kilobytes.
+ */
+export const vehiclesKey = (vehicles: string[] | null): string =>
+  vehicles?.length ? [...vehicles].sort().join(',') : 'all'
+
+/**
  * The cache key for one windowed, optionally filtered read.
  *
  * FILTERED AND ANCHORED READS ARE CACHED, which reverses the original decision
@@ -200,18 +272,22 @@ export const categoriesKey = (categories: string[] | null): string =>
  * upper-case plate prefix or the `__unprefixed` sentinel.
  */
 export const windowCacheKey = (
-  orgId: string, days: number, to: Date | undefined, categories: string[] | null,
-): string => `${orgId}|${days}|${to ? to.toISOString() : 'now'}|${categoriesKey(categories)}`
+  orgId: string, days: number, to: Date | undefined,
+  categories: string[] | null, vehicles: string[] | null = null,
+): string => `${orgId}|${days}|${to ? to.toISOString() : 'now'}|`
+  + `${categoriesKey(categories)}|${vehiclesKey(vehicles)}`
 
 /** The inverse, for a cache's `compute`. */
 export function parseWindowCacheKey(key: string): {
-  orgId: string; days: number; to?: Date; categories: string[] | null
+  orgId: string; days: number; to?: Date
+  categories: string[] | null; vehicles: string[] | null
 } {
-  const [orgId = '', days = '0', anchor = 'now', cats = 'all'] = key.split('|')
+  const [orgId = '', days = '0', anchor = 'now', cats = 'all', units = 'all'] = key.split('|')
   return {
     orgId,
     days: Number(days),
     to: anchor === 'now' ? undefined : new Date(anchor),
     categories: cats === 'all' ? null : cats.split(','),
+    vehicles: units === 'all' ? null : units.split(','),
   }
 }

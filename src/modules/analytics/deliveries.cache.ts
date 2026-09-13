@@ -13,7 +13,7 @@
 
 import { createWarmCache } from '../../lib/warm-cache.js'
 import { deliveriesAnalytics } from './analytics.repository.js'
-import { windowCacheKey, parseWindowCacheKey, vehicleIdsForCategories } from './vehicle-filter.js'
+import { windowCacheKey, parseWindowCacheKey, vehicleIdsFor } from './vehicle-filter.js'
 
 /** The trailing windows the fleettrack Analytics page can request. */
 export const DELIVERY_WINDOWS_DAYS = [7, 30, 90]
@@ -24,9 +24,9 @@ const cache = createWarmCache<DeliveriesPayload>({
   name: 'deliveries',
   maxEntries: 200,
   compute: async (key) => {
-    const { orgId, days, to, categories } = parseWindowCacheKey(key)
+    const { orgId, days, to, categories, vehicles } = parseWindowCacheKey(key)
     return deliveriesAnalytics(orgId, { days, to },
-      await vehicleIdsForCategories(orgId, categories))
+      await vehicleIdsFor(orgId, categories, vehicles))
   },
   // Only the plain trailing windows over the whole fleet are warmed — a sweep
   // rebuilding one operator's ad-hoc selection would spend the box's budget on
@@ -36,7 +36,8 @@ const cache = createWarmCache<DeliveriesPayload>({
 })
 
 export function getDeliveriesAnalytics(
-  orgId: string, days: number, to?: Date, categories: string[] | null = null,
+  orgId: string, days: number, to?: Date,
+  categories: string[] | null = null, vehicles: string[] | null = null,
 ): Promise<DeliveriesPayload> {
-  return cache.get(windowCacheKey(orgId, days, to, categories))
+  return cache.get(windowCacheKey(orgId, days, to, categories, vehicles))
 }

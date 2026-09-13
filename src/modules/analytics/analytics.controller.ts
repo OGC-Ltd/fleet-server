@@ -13,7 +13,7 @@ import { getDeliveriesAnalytics } from './deliveries.cache.js'
 import { getFuelConsumption } from './fuel-cost.cache.js'
 import { priceFuelConsumption } from './fuel-pricing.js'
 import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery, FuelCostQuery } from './analytics.schema.js'
-import { vehicleIdsFromQuery, listCategories, parseCategories } from './vehicle-filter.js'
+import { vehicleIdsFromQuery, listCategories, parseCategories, parseVehicleIds } from './vehicle-filter.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -31,7 +31,8 @@ export const deliveries: RequestHandler = async (req, res, next) => {
     // window and selection — see deliveries.cache. They used to compute live,
     // which put a multi-second aggregate on every filter click.
     sendSuccess(res, await getDeliveriesAnalytics(
-      p(req, 'orgId'), q.days, q.to, parseCategories(q.categories)))
+      p(req, 'orgId'), q.days, q.to,
+      parseCategories(q.categories), parseVehicleIds(q.vehicles)))
   } catch (err) { next(err) }
 }
 
@@ -56,7 +57,8 @@ export const fuelCost: RequestHandler = async (req, res, next) => {
     const q = req.query as unknown as FuelCostQuery
     // Cached for every window and selection, same as `deliveries`.
     const data = await getFuelConsumption(
-      p(req, 'orgId'), q.days, q.to, parseCategories(q.categories))
+      p(req, 'orgId'), q.days, q.to,
+      parseCategories(q.categories), parseVehicleIds(q.vehicles))
     sendSuccess(res, priceFuelConsumption(data, {
       pricePerLitre: q.pricePerLitre ?? env.FUEL_PRICE_PER_LITRE,
       currency:      env.FUEL_CURRENCY,
@@ -112,7 +114,8 @@ export const machineSummary: RequestHandler = async (req, res, next) => {
     const to = toRaw ? new Date(toRaw) : undefined
     sendSuccess(res, await fleetWeekSummary(p(req, 'orgId'), days,
       to && !Number.isNaN(to.getTime()) ? to : undefined,
-      parseCategories(req.query['categories'])))
+      parseCategories(req.query['categories']),
+      parseVehicleIds(req.query['vehicles'])))
   } catch (err) { next(err) }
 }
 
@@ -145,7 +148,8 @@ export const excavatorArea: RequestHandler = async (req, res, next) => {
     const asked = String(req.query['day'] ?? '')
     const day = /^\d{4}-\d{2}-\d{2}$/.test(asked) ? new Date(`${asked}T00:00:00Z`) : undefined
     sendSuccess(res, await getExcavatorArea(p(req, 'orgId'), day,
-      parseCategories(req.query['categories'])))
+      parseCategories(req.query['categories']),
+      parseVehicleIds(req.query['vehicles'])))
   } catch (err) { next(err) }
 }
 
@@ -159,7 +163,8 @@ export const excavatorAreaByDay: RequestHandler = async (req, res, next) => {
     const to = toRaw ? new Date(toRaw) : undefined
     sendSuccess(res, await getAreaByDay(p(req, 'orgId'), days,
       to && !Number.isNaN(to.getTime()) ? to : undefined,
-      parseCategories(req.query['categories'])))
+      parseCategories(req.query['categories']),
+      parseVehicleIds(req.query['vehicles'])))
   } catch (err) { next(err) }
 }
 
@@ -172,7 +177,8 @@ export const fuelRateDays: RequestHandler = async (req, res, next) => {
     const to = toRaw ? new Date(toRaw) : undefined
     sendSuccess(res, await getFuelRateSeries(p(req, 'orgId'), days,
       to && !Number.isNaN(to.getTime()) ? to : undefined,
-      parseCategories(req.query['categories'])))
+      parseCategories(req.query['categories']),
+      parseVehicleIds(req.query['vehicles'])))
   } catch (err) { next(err) }
 }
 
@@ -188,7 +194,8 @@ export const sugarHauls: RequestHandler = async (req, res, next) => {
     sendSuccess(res, await getSugarHauls(
       p(req, 'orgId'), days,
       to && !Number.isNaN(to.getTime()) ? to : undefined,
-      await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories']),
+      await vehicleIdsFromQuery(
+        p(req, 'orgId'), req.query['categories'], req.query['vehicles']),
     ))
   } catch (err) { next(err) }
 }
@@ -212,7 +219,8 @@ export const stopClusters: RequestHandler = async (req, res, next) => {
 
 export const operationsToday: RequestHandler = async (req, res, next) => {
   try {
-    const vehicleIds = await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories'])
+    const vehicleIds = await vehicleIdsFromQuery(
+      p(req, 'orgId'), req.query['categories'], req.query['vehicles'])
     const data = await repo.operationsToday(p(req, 'orgId'), vehicleIds)
     const pricePerLitre = env.FUEL_PRICE_PER_LITRE
     sendSuccess(res, {

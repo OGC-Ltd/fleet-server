@@ -12,7 +12,7 @@
 
 import { createWarmCache } from '../../lib/warm-cache.js'
 import { fuelConsumption } from './analytics.repository.js'
-import { windowCacheKey, parseWindowCacheKey, vehicleIdsForCategories } from './vehicle-filter.js'
+import { windowCacheKey, parseWindowCacheKey, vehicleIdsFor } from './vehicle-filter.js'
 
 /** The trailing windows the Analytics page can request. Matches deliveries. */
 export const FUEL_COST_WINDOWS_DAYS = [7, 30, 90]
@@ -23,16 +23,17 @@ const cache = createWarmCache<FuelConsumptionPayload>({
   name: 'fuel-cost',
   maxEntries: 200,
   compute: async (key) => {
-    const { orgId, days, to, categories } = parseWindowCacheKey(key)
+    const { orgId, days, to, categories, vehicles } = parseWindowCacheKey(key)
     return fuelConsumption(orgId, { days, to },
-      await vehicleIdsForCategories(orgId, categories))
+      await vehicleIdsFor(orgId, categories, vehicles))
   },
   warmKeysFor: (orgId) =>
     FUEL_COST_WINDOWS_DAYS.map(d => windowCacheKey(orgId, d, undefined, null)),
 })
 
 export function getFuelConsumption(
-  orgId: string, days: number, to?: Date, categories: string[] | null = null,
+  orgId: string, days: number, to?: Date,
+  categories: string[] | null = null, vehicles: string[] | null = null,
 ): Promise<FuelConsumptionPayload> {
-  return cache.get(windowCacheKey(orgId, days, to, categories))
+  return cache.get(windowCacheKey(orgId, days, to, categories, vehicles))
 }

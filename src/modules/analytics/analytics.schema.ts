@@ -27,6 +27,12 @@ export const deliveriesQuerySchema = z.object({
   // Absent means the whole fleet, which is NOT the same as an empty selection —
   // see parseCategories.
   categories: z.string().optional(),
+  // Unit filter, comma separated vehicle ids. A string for the same reason,
+  // and unvalidated here for a stronger one: an id is only meaningful against
+  // THIS organisation's fleet, which is a database question. vehicleIdsFor
+  // answers it by intersection, so an id from another organisation narrows the
+  // answer to nothing rather than reaching its data.
+  vehicles: z.string().optional(),
 })
 
 // Fuel cost: the same trailing window as deliveries, plus the price to cost the

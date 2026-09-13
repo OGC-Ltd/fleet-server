@@ -56,7 +56,7 @@ import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import { machinePrefix } from '../fuel/fuel-theft-classifier.js'
 // The SHARED distance measurement — see vehicle-brief on why not a second copy.
 import { coveredSince } from '../dispatches/dispatch.repository.js'
-import { vehicleSql, notificationVehicleSql, windowCacheKey, parseWindowCacheKey, vehicleIdsForCategories } from './vehicle-filter.js'
+import { vehicleSql, notificationVehicleSql, windowCacheKey, parseWindowCacheKey, vehicleIdsFor } from './vehicle-filter.js'
 
 /**
  * How long a unit must have been idle for its next movement to count as
@@ -816,9 +816,9 @@ const summaryCache = createWarmCache<Awaited<ReturnType<typeof computeFleetWeekS
   maxEntries: 200,
   warmKeysFor: (orgId) => [windowCacheKey(orgId, 7, undefined, null)],
   compute: async (key) => {
-    const { orgId, days, to, categories } = parseWindowCacheKey(key)
+    const { orgId, days, to, categories, vehicles } = parseWindowCacheKey(key)
     return computeFleetWeekSummary(orgId, days, to,
-      await vehicleIdsForCategories(orgId, categories))
+      await vehicleIdsFor(orgId, categories, vehicles))
   },
 })
 
@@ -830,10 +830,13 @@ export async function operatingHoursByCategory(orgId: string, range: OperatingRa
   return hoursCache.get(`${orgId}|${range}`)
 }
 
-/** @param categories the vehicle-type selection; ids are resolved inside the
- *  cache's compute so the key stays small and stable. */
+/** @param categories the vehicle-TYPE selection
+ *  @param vehicles   the UNIT selection; both are resolved to ids inside the
+ *                    cache's compute, so the key stays the selection rather
+ *                    than a list that would differ whenever the fleet changes. */
 export async function fleetWeekSummary(
-  orgId: string, days = 7, to?: Date, categories: string[] | null = null,
+  orgId: string, days = 7, to?: Date,
+  categories: string[] | null = null, vehicles: string[] | null = null,
 ) {
-  return summaryCache.get(windowCacheKey(orgId, days, to, categories))
+  return summaryCache.get(windowCacheKey(orgId, days, to, categories, vehicles))
 }
