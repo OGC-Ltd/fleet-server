@@ -72,13 +72,40 @@ describe('weighbridge geography', () => {
 })
 
 describe('getWeighbridges', () => {
-  it('returns every known scale, even one that has weighed nothing', () => {
-    // A marker that vanishes on a quiet month is a map that looks broken. The
-    // pin stays; `last` is null and the page says so.
-    return getWeighbridges('org_1').then((out) => {
-      expect(out).toHaveLength(WEIGHBRIDGES.length)
-      expect(out.every(b => b.last === null)).toBe(true)
-    })
+  it('draws nothing for an organisation that weighs nowhere', async () => {
+    // Every scale we know belongs to one mill group. Handing them to whoever
+    // asks put six pins over somebody else's yards, a hundred kilometres from
+    // the asking fleet — and an empty array is what removes the switch
+    // entirely rather than leaving it to draw them.
+    expect(await getWeighbridges('org_1')).toEqual([])
+  })
+
+  it("keeps a yard's quiet scale beside its busy one", async () => {
+    // Factory runs two. One ticket on bridge 1 makes the whole yard this
+    // organisation's, so bridge 2 keeps its pin with `last` null — a scale
+    // idle for a month is not a scale that has moved away.
+    ;(prismaMock.weighment.findMany as any).mockResolvedValue([
+      ticket({ grossBridgeNo: 1, tareBridgeNo: 1 }),
+    ])
+    const out = await getWeighbridges('org_1')
+    expect(out.map(b => b.bridgeNo).sort()).toEqual([1, 2])
+    expect(of(out, 2).last).toBeNull()
+  })
+
+  it('scopes by the scale\'s own yard, not the ticket\'s', async () => {
+    // A transfer raised at Opapo is weighed again on the factory's scale. The
+    // ticket says centre 102; the second weighing happened at 101, and reading
+    // the centre off the ticket would claim the wrong yard for it.
+    ;(prismaMock.weighment.findMany as any).mockResolvedValue([
+      ticket({
+        category: 'CANE_TRANSFER', centerCode: 102, centerName: 'OPAPO',
+        grossBridgeNo: 3, tareBridgeNo: null,
+        factoryGrossBridgeNo: 1, factoryGrossAt: new Date('2026-09-11T09:00:00Z'),
+      }),
+    ])
+    const out = await getWeighbridges('org_1')
+    // Opapo's own scale, and both of the factory's.
+    expect(out.map(b => b.bridgeNo).sort()).toEqual([1, 2, 3])
   })
 
   it("keeps each centre's scales apart", async () => {
@@ -152,7 +179,9 @@ describe('getWeighbridges', () => {
     ])
     const out = await getWeighbridges('org_1')
     expect(out.some(b => b.bridgeNo === 7)).toBe(false)
-    expect(out.every(b => b.last === null)).toBe(true)
+    // And nothing else is claimed for this organisation on the strength of a
+    // ticket we could not place.
+    expect(out).toEqual([])
   })
 
   it('carries the vehicle link only when the plate resolves to one we track', async () => {
