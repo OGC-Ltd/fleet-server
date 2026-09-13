@@ -35,6 +35,9 @@ router.get('/excavator-area', requirePermission('analytics:read'),       ctrl.ex
 router.get('/excavator-area-days', requirePermission('analytics:read'),  ctrl.excavatorAreaByDay)
 router.get('/fuel-rate-days', requirePermission('analytics:read'),       ctrl.fuelRateDays)
 router.get('/sugar-hauls', requirePermission('analytics:read'),          ctrl.sugarHauls)
+// Where the fleet's units actually stop, and whether a busy stop is one place
+// or two. Telemetry-derived, so it needs no dispatch feed and no geofences.
+router.get('/stop-clusters', requirePermission('analytics:read'),       ctrl.stopClusters)
 router.get('/speeding', requirePermission('analytics:read'),             validateQuery(speedingQuerySchema),   ctrl.speeding)
 router.get('/violation-heatmap', requirePermission('analytics:read'),    validateQuery(analyticsRangeSchema), ctrl.violationHeatmap)
 

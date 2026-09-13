@@ -4,6 +4,7 @@ import { getFleetState } from './fleet-state.service.js'
 import { getExcavatorArea, getAreaByDay } from './excavator-area.service.js'
 import { getFuelRateSeries } from './fuel-rate-series.service.js'
 import { getSugarHauls } from './sugar-hauls.service.js'
+import { getStopClusters, STOP_WINDOWS_DAYS } from './stop-clusters.service.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { env } from '../../config/env.js'
 import * as repo from './analytics.repository.js'
@@ -189,6 +190,23 @@ export const sugarHauls: RequestHandler = async (req, res, next) => {
       to && !Number.isNaN(to.getTime()) ? to : undefined,
       await vehicleIdsFromQuery(p(req, 'orgId'), req.query['categories']),
     ))
+  } catch (err) { next(err) }
+}
+
+/**
+ * Where this fleet's units actually stop.
+ *
+ * The window is one of a fixed few rather than any integer: each one is a
+ * multi-second aggregate held in its own cache entry, and a free-form `days`
+ * would let a caller mint an unbounded number of them. Anything unrecognised
+ * falls to 7 rather than erroring — this is a chart, and a chart's answer to a
+ * strange query string is the default view, not a 400.
+ */
+export const stopClusters: RequestHandler = async (req, res, next) => {
+  try {
+    const asked = Number(req.query['days'])
+    const days = STOP_WINDOWS_DAYS.includes(asked) ? asked : 7
+    sendSuccess(res, await getStopClusters(p(req, 'orgId'), days))
   } catch (err) { next(err) }
 }
 
