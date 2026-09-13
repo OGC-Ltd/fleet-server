@@ -25,6 +25,28 @@
  * Those are folded in too, against their own `factory*BridgeNo`, because they
  * are weighings that physically happened on that scale.
  *
+ * ## The scales are the ORGANISATION's, not the country's
+ *
+ * Every scale this build knows about belongs to one mill group, and the layer
+ * used to hand all of them to whoever asked — so an organisation with no
+ * weighbridges of its own was offered a switch that painted six pins over
+ * somebody else's yards, a hundred kilometres from its own fleet. Measured on
+ * the box 2026-09-13: every weighment row in the database is Sukari's, and
+ * West Kenya's map was drawing all six of them.
+ *
+ * A scale belongs to the organisation whose tickets it has taken. That is read
+ * from the feed rather than written down here, so a centre that starts
+ * reporting for another mill appears on that mill's map by itself — and an
+ * organisation with none is handed an empty array, which is what removes the
+ * switch rather than leaving it to draw somebody else's scales.
+ *
+ * Scoped by CENTRE rather than by scale, and the centre is the one the BRIDGE
+ * belongs to rather than the one on the ticket: a transfer raised at Opapo is
+ * weighed again on the factory's own scale, so the ticket's centre is not
+ * where that second weighing happened. Widening from the matched scale to its
+ * whole yard is deliberate — a yard's second scale being idle for a month is
+ * not a reason to draw one of its two pins and hide the other.
+ *
  * ## A bridge we cannot place is reported, not guessed
  *
  * `weighbridge.geography` holds the six derived positions. A bridge number in
@@ -156,7 +178,14 @@ export async function getWeighbridges(orgId: string): Promise<WeighbridgeDto[]> 
     )
   }
 
-  return WEIGHBRIDGES.map((b): WeighbridgeDto => {
+  // The yards this organisation actually weighs in — see the note above.
+  const centres = new Set<number>()
+  for (const bridgeNo of best.keys()) {
+    const placed = bridgeOf(bridgeNo)
+    if (placed) centres.add(placed.centerCode)
+  }
+
+  return WEIGHBRIDGES.filter(b => centres.has(b.centerCode)).map((b): WeighbridgeDto => {
     const hit = best.get(b.bridgeNo)
     return {
       id:         `wb-${b.bridgeNo}`,
