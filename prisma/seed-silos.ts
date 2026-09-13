@@ -24,7 +24,7 @@ const SILOS: {
   lat: number; lng: number; capacityTonnes: number; storedTonnes: number;
   sugarType: 'RAW' | 'PROCESSED'
 }[] = [
-  { code: 'SILO-HQ-01', name: 'Sukari HQ Silo 1',  locationName: 'Sukari Industries, Kakamega', lat: 0.3358, lng: 34.4928, capacityTonnes: 5000, storedTonnes: 4120, sugarType: 'PROCESSED' },
+  { code: 'SILO-HQ-01', name: 'Sukari HQ Silo 1',  locationName: 'Sukari Industries, Ndhiwa', lat: -0.82340, lng: 34.38449, capacityTonnes: 5000, storedTonnes: 4120, sugarType: 'PROCESSED' },
   { code: 'SILO-HQ-02', name: 'Sukari HQ Silo 2',  locationName: 'Sukari Industries, Kakamega', lat: 0.3361, lng: 34.4931, capacityTonnes: 5000, storedTonnes: 4870, sugarType: 'PROCESSED' },
   { code: 'SILO-HQ-03', name: 'Sukari HQ Raw Bay', locationName: 'Sukari Industries, Kakamega', lat: 0.3354, lng: 34.4925, capacityTonnes: 8000, storedTonnes: 3200, sugarType: 'RAW' },
   { code: 'WH-KSM-01',  name: 'Kisumu Depot Store', locationName: 'Kisumu Depot',   lat: -0.0917, lng: 34.7679, capacityTonnes: 3000, storedTonnes: 1980, sugarType: 'PROCESSED' },
