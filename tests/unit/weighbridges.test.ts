@@ -50,7 +50,7 @@ describe('weighbridge geography', () => {
   it('numbers scales globally, not per centre', () => {
     // 1 and 2 are Factory's; 3 Opapo's; 4 and 8 Oyani's; 5 Nyaondo's. A bridge
     // number is unique on its own, which is what lets the service key on it.
-    const nos = WEIGHBRIDGES.map(b => b.bridgeNo)
+    const nos = WEIGHBRIDGES.map(b => b.bridgeNo).filter(n => n != null)
     expect(new Set(nos).size).toBe(nos.length)
     expect(bridgeOf(1)!.centerName).toBe('FACTORY')
     expect(bridgeOf(8)!.centerName).toBe('OYANI')
@@ -59,19 +59,88 @@ describe('weighbridge geography', () => {
     expect(bridgeOf(null)).toBeNull()
   })
 
-  it("places every scale in Sukari's own corner of the country", () => {
+  it('keeps unnumbered scales out of the provider numbering', () => {
+    // Kabras' two were measured from traffic, not read off a ticket, and
+    // nothing numbers them. If one ever got a number to make it look like the
+    // others, it would answer to a number that is already one of Sukari's —
+    // and `bridgeOf` would hand a ticket the wrong yard.
+    const unnumbered = WEIGHBRIDGES.filter(b => b.bridgeNo == null)
+    expect(unnumbered.length).toBeGreaterThan(0)
+    for (const b of unnumbered) {
+      expect(b.centerCode).toBeNull()
+      expect(b.label).not.toMatch(/Bridge/)
+      expect(WEIGHBRIDGES.filter(x => x.key === b.key)).toHaveLength(1)
+    }
+  })
+
+  it('gives every scale a key of its own', () => {
+    // The marker's identity. It used to be the bridge number, which stopped
+    // working the moment a scale without one could be drawn.
+    const keys = WEIGHBRIDGES.map(b => b.key)
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  it("places Sukari's scales in Sukari's own corner of the country", () => {
     // A sign slip on latitude would put these 180 km away and still look like a
     // coordinate. The fleet's own fixes sit at about -0.82 / 34.38.
-    for (const b of WEIGHBRIDGES) {
+    for (const b of WEIGHBRIDGES.filter(b => b.orgCode === 'SUKARI')) {
       expect(b.lat).toBeGreaterThan(-1.2)
       expect(b.lat).toBeLessThan(-0.5)
       expect(b.lng).toBeGreaterThan(34.2)
       expect(b.lng).toBeLessThan(34.8)
     }
   })
+
+  it('places the Kabras scales inside the Kabras site fence', () => {
+    // The site plan the dashboard draws spans 0.3761-0.3846 N, 34.8266-34.8400
+    // E. A scale outside it is not a scale at this mill, whatever produced the
+    // number — and these came from a clustering pass, which is exactly the kind
+    // of derivation that can land somewhere plausible and wrong.
+    const kabras = WEIGHBRIDGES.filter(b => b.orgCode === 'WESTSUGAR')
+    expect(kabras).toHaveLength(2)
+    for (const b of kabras) {
+      expect(b.lat).toBeGreaterThan(0.376144)
+      expect(b.lat).toBeLessThan(0.384550)
+      expect(b.lng).toBeGreaterThan(34.826559)
+      expect(b.lng).toBeLessThan(34.840029)
+    }
+  })
 })
 
 describe('getWeighbridges', () => {
+  it('gives an organisation the scales that will never send a ticket', async () => {
+    // Kabras' two report to nobody, so no amount of reading the ticket feed
+    // finds them. They are claimed by the org named on them and arrive with
+    // `last` null permanently — which is the truthful answer, not a gap.
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ code: 'WESTSUGAR' })
+    const out = await getWeighbridges('org_west')
+    expect(out.map(b => b.label).sort()).toEqual(['East scale', 'West scale'])
+    expect(out.every(b => b.last === null)).toBe(true)
+    expect(out.every(b => b.bridgeNo === null)).toBe(true)
+    // And not one of Sukari's, which have tickets and are a county away.
+    expect(out.every(b => b.centerName === 'KABRAS')).toBe(true)
+  })
+
+  it('does not hand one mill the other mill\'s unticketed scales', async () => {
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ code: 'SUKARI' })
+    ;(prismaMock.weighment.findMany as any).mockResolvedValue([
+      ticket({ grossBridgeNo: 1, tareBridgeNo: 1 }),
+    ])
+    const out = await getWeighbridges('org_1')
+    expect(out.every(b => b.centerName !== 'KABRAS')).toBe(true)
+  })
+
+  it('still scopes by tickets when the organisation cannot be resolved', async () => {
+    // An unresolvable org is a reason to return less, never a reason to guess:
+    // the ticket-derived scoping stands on its own.
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue(null)
+    ;(prismaMock.weighment.findMany as any).mockResolvedValue([
+      ticket({ grossBridgeNo: 1, tareBridgeNo: 1 }),
+    ])
+    const out = await getWeighbridges('org_1')
+    expect(out.map(b => b.bridgeNo).sort()).toEqual([1, 2])
+  })
+
   it('draws nothing for an organisation that weighs nowhere', async () => {
     // Every scale we know belongs to one mill group. Handing them to whoever
     // asks put six pins over somebody else's yards, a hundred kilometres from

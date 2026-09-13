@@ -33,6 +33,49 @@
  * right answer in both cases: adjacent scales at one gate, and two separate
  * ones at a spread-out yard.
  *
+ * ## Kabras, where there are no tickets to anchor on
+ *
+ * West Kenya's scales do not report to us at all — the provider feed is
+ * Sukari's entirely — so the derivation above has nothing to stand on: no
+ * ticket, no stamp, no bridge number. They were measured a second way,
+ * from the shape of the traffic rather than from a document.
+ *
+ * A lorry visiting a mill stops in many places. A scale is the stop that is
+ * SHORT and that almost every visiting unit makes. So: every stop of 45 s to
+ * 15 min made by a unit that comes and goes (under 30 % of its fixes inside
+ * the site — this excludes the loaders and tractors that live in the yard and
+ * would otherwise dominate), mean-shifted to its local density peak.
+ *
+ * The cluster that came out sits 4 m from the weighbridge the operations
+ * survey drew, with the tightest spread on the site — which is the check that
+ * matters, because the survey is an independent source and the two agree.
+ *
+ * That cluster is BIMODAL. Projected east-west in 3 m bins it has two peaks of
+ * 117 and 111 stops with a trough of 31 between them: two scales, 19 m apart,
+ * with the surveyed pin between them. The site's other busy stop — the main
+ * gate — was run through the same test as a control and is single-peaked
+ * (104, with only noise either side), so this is a property of the
+ * weighbridge's traffic and not of the method.
+ *
+ *     scale            stops   units   spread   dwell
+ *     KABRAS west       391      30      4.7 m   1.8 min
+ *     KABRAS east       425      29      5.1 m   1.6 min
+ *
+ * 24 of the 35 units that used the weighbridge used BOTH, which is what two
+ * lanes of one facility look like. The spreads are tighter than any of the six
+ * Sukari scales above; that is a consequence of the method, not of better
+ * positions — these are medians of stops rather than of single fixes.
+ *
+ * Measured on the box 2026-09-13. The caveat worth carrying: West Kenya's
+ * telemetry only begins in August 2026, so this is six weeks of one season,
+ * where Sukari's derivation had a ticket behind every point. If the mill moves
+ * a scale, nothing here will notice.
+ *
+ * These two carry no bridge number, because nothing numbers them. That is the
+ * honest shape and it is load-bearing: `bridgeOf` maps the PROVIDER's
+ * numbering, and a Kabras scale given a number would collide with a Sukari
+ * scale that really has one.
+ *
  * ## Bridge numbers are GLOBAL, not per-centre
  *
  * They do not restart at each site. Factory runs 1 and 2, Opapo 3, Oyani 4 and
@@ -55,16 +98,25 @@
  * number so it can be derived and added.
  */
 
-/** The provider's centre codes, as the scale software numbers them. */
-export const WEIGHBRIDGE_ORG = 'SUKARI'
-
 export interface Weighbridge {
-  /** Provider centre code — 101 FACTORY, 102 OPAPO, 103 OYANI, 104 NYAONDO. */
-  centerCode: number
+  /** A stable id for the scale. Not the bridge number: half of these have
+   *  none, and a marker needs a key either way. */
+  key:        string
+  /** The organisation whose yard this scale stands in. Scales are one mill
+   *  group's or another's, never the country's — see the service. */
+  orgCode:    string
+  /** Provider centre code — 101 FACTORY, 102 OPAPO, 103 OYANI, 104 NYAONDO —
+   *  or null for a yard the scale software does not number because the yard
+   *  does not report to it. */
+  centerCode: number | null
   /** The centre as the provider names it, and as the grid shows it. */
   centerName: string
-  /** The scale's own number, unique across all four centres. */
-  bridgeNo:   number
+  /** The scale's number in the PROVIDER's global numbering, or null for a
+   *  scale that has never appeared on a ticket. Null is not a gap to fill in:
+   *  it is the difference between a scale we read and a scale we measured. */
+  bridgeNo:   number | null
+  /** How an operator names this scale, for the marker's title. */
+  label:      string
   lat:        number
   lng:        number
   /**
@@ -78,16 +130,37 @@ export interface Weighbridge {
 }
 
 export const WEIGHBRIDGES: Weighbridge[] = [
-  { centerCode: 101, centerName: 'FACTORY', bridgeNo: 1, lat: -0.822727, lng: 34.383195, spreadM: 17.0, samples: 135 },
-  { centerCode: 101, centerName: 'FACTORY', bridgeNo: 2, lat: -0.822667, lng: 34.383260, spreadM: 17.2, samples: 169 },
-  { centerCode: 102, centerName: 'OPAPO',   bridgeNo: 3, lat: -0.666770, lng: 34.528205, spreadM: 24.9, samples: 162 },
-  { centerCode: 103, centerName: 'OYANI',   bridgeNo: 4, lat: -1.027548, lng: 34.586483, spreadM: 57.3, samples:  44 },
-  { centerCode: 103, centerName: 'OYANI',   bridgeNo: 8, lat: -1.027008, lng: 34.586879, spreadM: 15.6, samples:  23 },
-  { centerCode: 104, centerName: 'NYAONDO', bridgeNo: 5, lat: -0.910503, lng: 34.613405, spreadM: 18.6, samples:  41 },
+  { key: 'wb-1', orgCode: 'SUKARI', centerCode: 101, centerName: 'FACTORY', bridgeNo: 1, label: 'Bridge 1', lat: -0.822727, lng: 34.383195, spreadM: 17.0, samples: 135 },
+  { key: 'wb-2', orgCode: 'SUKARI', centerCode: 101, centerName: 'FACTORY', bridgeNo: 2, label: 'Bridge 2', lat: -0.822667, lng: 34.383260, spreadM: 17.2, samples: 169 },
+  { key: 'wb-3', orgCode: 'SUKARI', centerCode: 102, centerName: 'OPAPO',   bridgeNo: 3, label: 'Bridge 3', lat: -0.666770, lng: 34.528205, spreadM: 24.9, samples: 162 },
+  { key: 'wb-4', orgCode: 'SUKARI', centerCode: 103, centerName: 'OYANI',   bridgeNo: 4, label: 'Bridge 4', lat: -1.027548, lng: 34.586483, spreadM: 57.3, samples:  44 },
+  { key: 'wb-8', orgCode: 'SUKARI', centerCode: 103, centerName: 'OYANI',   bridgeNo: 8, label: 'Bridge 8', lat: -1.027008, lng: 34.586879, spreadM: 15.6, samples:  23 },
+  { key: 'wb-5', orgCode: 'SUKARI', centerCode: 104, centerName: 'NYAONDO', bridgeNo: 5, label: 'Bridge 5', lat: -0.910503, lng: 34.613405, spreadM: 18.6, samples:  41 },
+
+  // Kabras. Derived from the traffic rather than from tickets — see the note
+  // above — and named for where they stand, because nothing numbers them.
+  { key: 'kabras-w', orgCode: 'WESTSUGAR', centerCode: null, centerName: 'KABRAS', bridgeNo: null, label: 'West scale', lat: 0.376930, lng: 34.834102, spreadM: 4.7, samples: 391 },
+  { key: 'kabras-e', orgCode: 'WESTSUGAR', centerCode: null, centerName: 'KABRAS', bridgeNo: null, label: 'East scale', lat: 0.376854, lng: 34.834258, spreadM: 5.1, samples: 425 },
 ]
 
-const BY_NUMBER = new Map(WEIGHBRIDGES.map(b => [b.bridgeNo, b]))
+/* The PROVIDER's numbering only. A scale with no number was never in the
+   ticket feed, so putting it here would let a Kabras scale answer to a number
+   that belongs to one of Sukari's. */
+const BY_NUMBER = new Map(
+  WEIGHBRIDGES.filter(b => b.bridgeNo != null).map(b => [b.bridgeNo as number, b]),
+)
 
 /** The scale with this number, or null where we have never placed it. */
 export const bridgeOf = (bridgeNo: number | null | undefined): Weighbridge | null =>
   bridgeNo == null ? null : BY_NUMBER.get(bridgeNo) ?? null
+
+/**
+ * This organisation's scales that no ticket will ever mention.
+ *
+ * They cannot be found the way the ticketed ones are — there is no feed to
+ * scope them by — so they are claimed by the organisation named here. It is the
+ * one place an org name is written down, and it is written down because the
+ * alternative is a yard with two measured scales and no way to reach them.
+ */
+export const unticketedScalesOf = (orgCode: string | null | undefined): Weighbridge[] =>
+  orgCode == null ? [] : WEIGHBRIDGES.filter(b => b.orgCode === orgCode && b.bridgeNo == null)
