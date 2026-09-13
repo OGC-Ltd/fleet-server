@@ -64,6 +64,19 @@ import { normalisePlate } from '../../providers/wialon/wialon.unit-name.js'
  * Measured, not looked up: these are the densest 1.1 km cell of each site's
  * fixes on 2026-08-31, the same derivation behind dashboard.weather's location
  * list (which is where they lived until this file needed them too).
+ *
+ * NDHIWA was the exception and is corrected here (2026-09-13). It carried
+ * 0.3358 / 34.4928 — copied from the "Sukari HQ" entry in that weather list,
+ * which sits near Kakamega, on the WRONG SIDE OF THE EQUATOR and about 129 km
+ * from the mill. Two independent measurements put the site at roughly
+ * -0.820 / 34.384: the median of 268,032 SUKARI fixes (-0.82001 / 34.38443),
+ * and the factory's own two weighbridges, derived separately for
+ * weighments/weighbridge.geography (-0.8227 / 34.3832). Reverse-geocoded fixes
+ * for this fleet come back as Ndhiwa-Uriri Rd., which is the same place.
+ *
+ * Nothing read this yet, which is exactly why it survived: a coordinate with no
+ * consumer is never wrong out loud. The first thing to measure a distance from
+ * the Ndhiwa gate would have been 129 km short.
  */
 export interface Factory {
   /** Our organisation `code` — the factory's OPERATOR, not the owner of any
@@ -100,7 +113,7 @@ export interface Factory {
  * — half the provider's traffic, for as long as the integration has run.
  */
 export const FACTORIES: Record<string, Factory> = {
-  NDHIWA:  { orgCode: 'SUKARI',    label: 'Ndhiwa',  lat: 0.3358, lng: 34.4928,
+  NDHIWA:  { orgCode: 'SUKARI',    label: 'Ndhiwa',  lat: -0.8200, lng: 34.3844,
              commodity: 'Raw Sugarcane',   cargoType: 'BULK' },
   NAITIRI: { orgCode: 'WESTSUGAR', label: 'Naitiri', lat: 0.7821, lng: 34.8776,
              commodity: 'Processed Sugar', cargoType: 'PACKAGED' },
