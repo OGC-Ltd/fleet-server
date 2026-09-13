@@ -345,10 +345,27 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
   },
   {
     slug: 'operator', name: 'Operator', platform: false, vehicleScopable: true,
-    description: 'Tracking only, for the units assigned to them. No reports.',
-    // The narrowest role in the system. No dashboard, no analytics, no report
-    // of any kind, and no map tools — activity, and nothing else.
-    permissions: [...TRACKING],
+    description: 'The weighbridge, and the units assigned to them. No map, no reports.',
+    /*
+     * Changed 2026-09-14: the fleet off, the weighbridge on.
+     *
+     * `map:read` is gone, which is what closes the Fleet tab — the dash grades
+     * that button and the screen behind it on exactly this slug. `weighbridge:read`
+     * is in, which opens the Weighbridges tab and the /weighments feeds behind it.
+     *
+     * TELEMETRY:READ AND VEHICLE:READ STAY, and not as leftovers. The weighbridge
+     * screen reads the live snapshot (`telemetry:read`) to turn a ticket's plate
+     * into a unit we track; drop it and the screen loads with every row unresolved.
+     * That is the whole of what those two grant this role now: there is no map to
+     * put a position on.
+     *
+     * Still the narrowest role in the system otherwise — no dashboard, no
+     * analytics, no report of any kind, no map tools.
+     */
+    permissions: [
+      ...TRACKING.filter((pm) => pm !== 'map:read'),
+      'weighbridge:read',
+    ],
   },
 
   // ── Back office ──────────────────────────────────────────────────────────
