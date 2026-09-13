@@ -2,7 +2,7 @@
  * Where the factories are.
  *
  * A coordinate is the one kind of constant that cannot be reviewed by reading
- * it — 0.3358 and -0.8200 look equally like numbers, and NDHIWA carried the
+ * it — 0.3358 and -0.8234 look equally like numbers, and NDHIWA carried the
  * first of those for as long as this table has existed (it was the Kakamega
  * "Sukari HQ" point, 129 km and one hemisphere away). Nothing read the field,
  * so nothing complained.
@@ -19,8 +19,9 @@ import { FACTORIES } from '../../src/modules/webhooks/factory-map.js'
 
 describe('factory coordinates', () => {
   it('puts Ndhiwa in Homa Bay, south of the equator', () => {
-    // Median of 268,032 SUKARI fixes: -0.82001 / 34.38443. The mill's own two
-    // weighbridges, derived independently: -0.8227 / 34.3832.
+    // The gate as the operator states it: -0.82340 / 34.38449. Corroborated
+    // by the median of 268,032 SUKARI fixes (-0.82001 / 34.38443) and by the
+    // mill's own two weighbridges (-0.8227 / 34.3832).
     const f = FACTORIES.NDHIWA
     expect(f.lat).toBeGreaterThan(-0.9)
     expect(f.lat).toBeLessThan(-0.75)

@@ -16,9 +16,15 @@ interface Loc { name: string; lat: number; lng: number }
 
 // Route hubs per organisation — the org's plant/HQ plus the towns its fleet
 // delivers to. Keyed by org code; unknown orgs fall back to Sukari's set.
+//
+// The first entry was "Sukari HQ" at 0.3358 / 34.4928 until 2026-09-13, which
+// is near Kakamega and forecast weather for a town this fleet does not work in
+// — the factory is at Ndhiwa, 129 km south, where the operator says it is and
+// where 268,032 of the org's own fixes sit. Renamed as well as moved, because
+// "HQ" at the mill's coordinates would just be the same mislabel in reverse.
 const LOCATIONS_BY_ORG: Record<string, Loc[]> = {
   SUKARI: [
-    { name: 'Sukari HQ', lat:  0.3358, lng: 34.4928 },
+    { name: 'Sukari Factory', lat: -0.82340, lng: 34.38449 },
     { name: 'Kisumu',    lat: -0.0917, lng: 34.7679 },
     { name: 'Nakuru',    lat: -0.3031, lng: 36.0800 },
     { name: 'Nairobi',   lat: -1.2921, lng: 36.8219 },
