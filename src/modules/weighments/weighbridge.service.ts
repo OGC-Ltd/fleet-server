@@ -47,6 +47,24 @@
  * whole yard is deliberate — a yard's second scale being idle for a month is
  * not a reason to draw one of its two pins and hide the other.
  *
+ * ## And the scales that will never send a ticket
+ *
+ * Reading ownership off the feed is the right rule for a scale that reports,
+ * and says nothing at all about one that does not. Kabras runs two, measured
+ * from the traffic rather than from tickets (see `weighbridge.geography`), and
+ * no amount of reading this feed will ever turn them up.
+ *
+ * So they are claimed by the organisation named on them, and added to whatever
+ * the feed produced. They arrive with `last: null` permanently, which is the
+ * truthful answer: the map has a position for them and will never have a
+ * ticket. Nothing else changes — an organisation with neither still gets an
+ * empty array, and a scale that starts reporting still appears by itself.
+ *
+ * The organisation's CODE is looked up rather than passed in, because the
+ * route carries an id. When that lookup finds nothing the ticket-derived
+ * scoping still stands on its own; an unresolvable org is a reason to return
+ * less, never a reason to guess.
+ *
  * ## A bridge we cannot place is reported, not guessed
  *
  * `weighbridge.geography` holds the six derived positions. A bridge number in
@@ -69,7 +87,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
-import { WEIGHBRIDGES, bridgeOf } from './weighbridge.geography.js'
+import { WEIGHBRIDGES, bridgeOf, unticketedScalesOf } from './weighbridge.geography.js'
 
 /** How far back to look for a scale's last ticket. */
 const LOOKBACK_DAYS = 30
@@ -105,11 +123,18 @@ export interface WeighbridgeLast {
 }
 
 export interface WeighbridgeDto {
-  /** Stable id for the marker: the scale's own number is already unique. */
+  /** Stable id for the marker. Not the bridge number — half of the scales we
+   *  can place have never had one. */
   id:          string
-  centerCode:  number
+  /** Null at a yard the scale software does not number. */
+  centerCode:  number | null
   centerName:  string
-  bridgeNo:    number
+  /** The provider's number, or null for a scale that reports no tickets. A
+   *  client showing this must not print "Bridge null" — use `label`. */
+  bridgeNo:    number | null
+  /** How an operator names this scale: "Bridge 3", or "West scale" where
+   *  nothing numbers it. */
+  label:       string
   lat:         number
   lng:         number
   /** How tightly the fixes behind this position agreed, in metres, and how
@@ -182,16 +207,27 @@ export async function getWeighbridges(orgId: string): Promise<WeighbridgeDto[]> 
   const centres = new Set<number>()
   for (const bridgeNo of best.keys()) {
     const placed = bridgeOf(bridgeNo)
-    if (placed) centres.add(placed.centerCode)
+    if (placed?.centerCode != null) centres.add(placed.centerCode)
   }
 
-  return WEIGHBRIDGES.filter(b => centres.has(b.centerCode)).map((b): WeighbridgeDto => {
-    const hit = best.get(b.bridgeNo)
+  const org = await prisma.organisation.findUnique({
+    where:  { id: orgId },
+    select: { code: true },
+  })
+
+  const ticketed = WEIGHBRIDGES.filter(
+    b => b.centerCode != null && centres.has(b.centerCode),
+  )
+  const scales = [...ticketed, ...unticketedScalesOf(org?.code)]
+
+  return scales.map((b): WeighbridgeDto => {
+    const hit = b.bridgeNo == null ? undefined : best.get(b.bridgeNo)
     return {
-      id:         `wb-${b.bridgeNo}`,
+      id:         b.key,
       centerCode: b.centerCode,
       centerName: b.centerName,
       bridgeNo:   b.bridgeNo,
+      label:      b.label,
       lat:        b.lat,
       lng:        b.lng,
       spreadM:    b.spreadM,
