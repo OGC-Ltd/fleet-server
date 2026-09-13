@@ -138,6 +138,24 @@ export const factoryOf = (factoryCode: string): Factory | null =>
   FACTORIES[factoryCode] ?? null
 
 /**
+ * Gates whose OUTBOUND load is processed sugar.
+ *
+ * Derived from `cargoType` rather than listed, because that column already
+ * carries the fact: sugar leaves in 50 kg bags (PACKAGED), cane is tipped loose
+ * (BULK). A second hand-written list of "the sugar factories" would be a
+ * promise to keep two things in step that nothing checks.
+ *
+ * Read by analytics/sugar-hauls, which needs to know which gate's TRANSPORT
+ * dispatches are sugar going out rather than cane coming in. At Ndhiwa a cane
+ * dispatch is an inbound delivery and has no business in a sugar-haul table; at
+ * Naitiri there is no cane to deliver, so a run leaving that gate is sugar
+ * whichever office raised the paperwork.
+ */
+export const SUGAR_GATES: string[] = Object.entries(FACTORIES)
+  .filter(([, f]) => f.cargoType === 'PACKAGED')
+  .map(([code]) => code)
+
+/**
  * Cached because it is asked once per event on a hot path and the answer
  * cannot change without a deploy. A null is cached too: an unmapped factory
  * must not re-query for every one of its events.

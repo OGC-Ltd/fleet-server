@@ -7,6 +7,11 @@
  * it. Distance comes from TRIPS, because only a trip has been measured. The two
  * sets differ, and `runsMeasured` is what stops a reader assuming the kilometres
  * cover every run in the tonnage.
+ *
+ * The third population arrived later: runs raised by the TRANSPORT team rather
+ * than the sales office. Those leave the same gate carrying the same sugar and
+ * belong in the same table, but the provider sends no weight on them — so they
+ * count as runs and abstain from the tonnage, which `runsWeighed` states.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -23,9 +28,15 @@ const TO = new Date('2026-09-09T12:00:00.000Z')
 const run = (over: Record<string, unknown> = {}) => ({
   id: 'd1', plate: 'KCP 134P', driverName: 'Duncan Mwangi', destination: 'Raiply',
   dispatchedAt: new Date('2026-09-09T06:58:00.000Z'),
+  actualReturnAt: new Date('2026-09-09T11:30:00.000Z'),
+  status: 'COMPLETED', kind: 'SALES' as const,
   tonnageT: 29, factoryCode: 'NAITIRI', vehicleId: 'veh_1',
   ...over,
 })
+
+/** A transport-team run: same gate, same sugar, no weight on the payload. */
+const transportRun = (over: Record<string, unknown> = {}) =>
+  run({ id: 'd9', kind: 'CANE', tonnageT: null, ...over })
 
 beforeEach(() => {
   ;(prismaMock.dispatch.findMany as any).mockResolvedValue([run()])
@@ -33,9 +44,77 @@ beforeEach(() => {
 })
 
 describe('getSugarHauls', () => {
-  it('asks only for sales runs', async () => {
+  it('asks for both offices: any sales run, and transport runs out of a sugar gate', async () => {
+    // Not `kind: 'SALES'`, which reported the sales office's paperwork rather
+    // than the sugar that left. Not a bare kind widening either — that would
+    // drag Ndhiwa's inbound cane deliveries into a table about sugar going out.
     await getSugarHauls('org_1', 30, TO)
-    expect((prismaMock.dispatch.findMany as any).mock.calls[0][0].where.kind).toBe('SALES')
+    const { where } = (prismaMock.dispatch.findMany as any).mock.calls[0][0]
+
+    expect(where.kind).toBeUndefined()
+    expect(where.OR).toEqual([
+      { kind: 'SALES' },
+      { kind: 'CANE', factoryCode: { in: ['NAITIRI'] } },
+    ])
+  })
+
+  it('counts a transport run, and leaves its tonnage null rather than zero', async () => {
+    // A zero would hold the tonnage still while the run count climbed, and
+    // halve every tonnes-per-run a reader took off this table.
+    ;(prismaMock.dispatch.findMany as any).mockResolvedValue([transportRun()])
+
+    const out = await getSugarHauls('org_1', 30, TO)
+    const u = out.units[0]!
+    expect(u.runs).toBe(1)
+    expect(u.runsWeighed).toBe(0)
+    expect(u.tonnes).toBeNull()
+    expect(u.bags).toBeNull()
+    expect(out.totals.runs).toBe(1)
+    expect(out.totals.runsWeighed).toBe(0)
+    expect(out.totals.tonnes).toBeNull()
+  })
+
+  it('sums the weighed runs only, and says how many stood behind the figure', async () => {
+    ;(prismaMock.dispatch.findMany as any).mockResolvedValue([run(), transportRun()])
+
+    const out = await getSugarHauls('org_1', 30, TO)
+    const u = out.units[0]!
+    expect(u.runs).toBe(2)
+    expect(u.runsWeighed).toBe(1)
+    expect(u.tonnes).toBe(29)        // not 29 spread over two runs
+    expect(out.totals.runsWeighed).toBe(1)
+  })
+
+  it('carries each run, newest first, with both ends of its clock', async () => {
+    // The aggregate row can say how much a truck moved and never when. The
+    // history is what the page's per-run rows and its date filter read.
+    ;(prismaMock.dispatch.findMany as any).mockResolvedValue([
+      run({ id: 'd1' }),
+      run({ id: 'd2', dispatchedAt: new Date('2026-09-09T09:00:00.000Z'),
+            actualReturnAt: null, status: 'DISPATCHED' }),
+    ])
+
+    const out = await getSugarHauls('org_1', 30, TO)
+    const h = out.units[0]!.history
+    expect(h.map(r => r.id)).toEqual(['d2', 'd1'])
+    expect(h[1]!.dispatchedAt).toBe('2026-09-09T06:58:00.000Z')
+    expect(h[1]!.returnedAt).toBe('2026-09-09T11:30:00.000Z')
+    // Still out: null, not a timestamp standing in for one.
+    expect(h[0]!.returnedAt).toBeNull()
+    expect(h[0]!.driver).toBe('Duncan Mwangi')
+  })
+
+  it('puts a unit nobody weighed below one that was, not at the top', async () => {
+    // Descending by tonnage with a null in it: an unweighed unit is not the
+    // heaviest and it is not the lightest either — it is unranked, so it sorts
+    // to the tail on run count rather than leading on a null.
+    ;(prismaMock.dispatch.findMany as any).mockResolvedValue([
+      transportRun({ id: 'd9', plate: 'KCP 999P' }),
+      run({ id: 'd1', plate: 'KCP 134P' }),
+    ])
+
+    const out = await getSugarHauls('org_1', 30, TO)
+    expect(out.units.map(u => u.plate)).toEqual(['KCP 134P', 'KCP 999P'])
   })
 
   it('counts tonnage and bags per day, and names the gate', async () => {
