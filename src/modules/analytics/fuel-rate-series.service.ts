@@ -39,6 +39,46 @@
  * work", and `vehicles` carries the count so a reader can see the population
  * rather than assume it is the yard.
  *
+ * ## The tank ceiling is BORROWED when a unit has none, and only as a ceiling
+ *
+ * Two of the guards below need a tank size: a probe must not read more than its
+ * own tank, and a day must not burn more than two tankfuls. `tank_capacity_litres`
+ * is the only source of that, and it is not a field the provider sends — the
+ * operator writes the size into the Wialon fuel sensor's NAME ("Main Tank Fuel
+ * Level Qty (450L)") and `prisma/sync-wialon` reads it back out. So the column
+ * is populated exactly as well as that account is labelled.
+ *
+ * Measured on the box, 2026-09-13, over a 30-day window:
+ *
+ *     MENENGAI    244 active   208 in trends   194 ran an hour+   8 stated a tank
+ *     WESTSUGAR   486 active   280 in trends   257 ran an hour+ 295 stated a tank
+ *
+ * Requiring the unit's OWN capacity therefore threw away 99% of Menengai: the
+ * chart was drawn from 3 units and 15 vehicle-days against West Kenya's 194,
+ * while Menengai's trends carried 268,863 measured kilometres over the same
+ * window. Not a thin population — the wrong one.
+ *
+ * So a unit with no stated tank borrows the MEDIAN stated tank of its own
+ * organisation and vehicle type, and failing that its organisation's. This is a
+ * model, and the header above rejects modelled inputs — the distinction is that
+ * this one never enters an answer. It is a rejection threshold: the litres are
+ * still the tank's own balance and the kilometres are still integrated from the
+ * fixes, and a borrowed ceiling can only decide whether a day is admitted, not
+ * what that day says.
+ *
+ * The same measurement, with the fallback:
+ *
+ *     MENENGAI      3 units → 183     0.560 → 0.416 L/km
+ *     WESTSUGAR   194 units → 220     0.844 → 0.782 L/km
+ *
+ * West Kenya is the control: it barely needs the fallback (26 of its 220 units
+ * borrow), and the guards keep doing their job — the worst admitted day falls
+ * from 6,313 L to 440 L, because a borrowed ceiling still rejects an impossible
+ * balance where no ceiling at all would have let it through.
+ *
+ * The real repair is upstream — a tank size in every sensor name, or a provider
+ * field carrying it — and this does not remove the need for it.
+ *
  * Read the kilometre view knowing what is in it: plant that digs all day
  * reports almost no distance while burning, because position freezes at speed 0
  * on this telemetry. That fuel still lands in the numerator, so the kilometre
@@ -179,17 +219,43 @@ export async function fuelRateByDay(
   const rows = await prisma.$queryRaw<Array<{
     day: Date; vehicles: bigint; burn_l: number; km: number; ha: number
   }>>`
-    WITH t AS (
-      SELECT t.vehicle_id, t.day, v.tank_capacity_litres AS cap,
+    -- The ceiling a unit's day is sanity-checked against, where the unit has no
+    -- stated tank size of its own. The service header carries the argument and
+    -- the measurement behind it.
+    --
+    -- Median rather than mean: the stated capacities inside one org and type
+    -- are not clean (Sukari's range down to a litre), and a mean would let one
+    -- mis-typed sensor name move the ceiling for every unit borrowing it.
+    --
+    -- Scoped to the ORGANISATION and never to the vehicle filter: the ceiling is
+    -- a fact about what this fleet's tanks are, and it must not change because
+    -- an operator ticked a category on the filter bar.
+    WITH med_type AS (
+      SELECT mv.vehicle_type,
+             percentile_cont(0.5) WITHIN GROUP (ORDER BY mv.tank_capacity_litres) AS cap
+        FROM vehicles mv
+       WHERE mv.organisation_id = ${orgId} AND mv.is_active
+         AND mv.tank_capacity_litres > 0
+       GROUP BY 1
+    ),
+    med_org AS (
+      SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY mv.tank_capacity_litres) AS cap
+        FROM vehicles mv
+       WHERE mv.organisation_id = ${orgId} AND mv.is_active
+         AND mv.tank_capacity_litres > 0
+    ),
+    t AS (
+      SELECT t.vehicle_id, t.day,
+             coalesce(nullif(v.tank_capacity_litres, 0), med_type.cap, med_org.cap) AS cap,
              t.opening_ml, t.closing_ml, t.engine_seconds, t.distance_m,
              abs(coalesce(t.turbulence_ml, 0)) AS turb_ml
         FROM fuel_daily_trends t
         JOIN vehicles v ON v.id = t.vehicle_id
+        LEFT JOIN med_type ON med_type.vehicle_type = v.vehicle_type
+        CROSS JOIN med_org
        WHERE v.organisation_id = ${orgId} AND v.is_active
          AND t.day >= ${fromDay} AND t.day <= ${lastDay}
          AND t.engine_seconds >= ${MIN_ENGINE_SECONDS}
-         AND v.tank_capacity_litres > 0
-         AND t.opening_ml / 1000.0 <= v.tank_capacity_litres * ${OVER_TANK}
          ${vehicleSql(vehicleIds)}
     ),
     fills AS (
@@ -226,7 +292,12 @@ export async function fuelRateByDay(
       CROSS JOIN LATERAL (
         SELECT b.raw_l * greatest(0, least(1, 1 - ((t.turb_ml / 1000.0) / b.raw_l) ^ 2)) AS burn_l
       ) r
-     WHERE b.raw_l > 0
+     WHERE t.cap > 0
+       -- Moved down out of the t CTE, which could not see the borrowed
+       -- ceiling. Same guard, same threshold: a probe reading more than its own
+       -- tank is reporting a fault, not a level.
+       AND t.opening_ml / 1000.0 <= t.cap * ${OVER_TANK}
+       AND b.raw_l > 0
        AND b.raw_l <= t.cap * ${MAX_TANKFULS}
        AND t.turb_ml / 1000.0 < b.raw_l
      GROUP BY 1
