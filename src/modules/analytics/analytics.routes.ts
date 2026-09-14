@@ -34,6 +34,9 @@ router.get('/vehicle-categories', requirePermission('analytics:read'),   ctrl.ve
 router.get('/excavator-area', requirePermission('analytics:read'),       ctrl.excavatorArea)
 router.get('/excavator-area-days', requirePermission('analytics:read'),  ctrl.excavatorAreaByDay)
 router.get('/fuel-rate-days', requirePermission('analytics:read'),       ctrl.fuelRateDays)
+// One unit's own fuel history. Distinct from /fuel-rate-days, whose floors are
+// sized for a whole yard and reject most of a single unit's days.
+router.get('/vehicle-fuel-days', requirePermission('analytics:read'),    ctrl.vehicleFuelDays)
 router.get('/sugar-hauls', requirePermission('analytics:read'),          ctrl.sugarHauls)
 // Where the fleet's units actually stop, and whether a busy stop is one place
 // or two. Telemetry-derived, so it needs no dispatch feed and no geofences.

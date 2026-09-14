@@ -3,6 +3,7 @@ import { earlyStartsByCategory, operatingHoursByCategory, fleetWeekSummary } fro
 import { getFleetState } from './fleet-state.service.js'
 import { getExcavatorArea, getAreaByDay } from './excavator-area.service.js'
 import { getFuelRateSeries } from './fuel-rate-series.service.js'
+import { getVehicleFuelSeries } from './vehicle-fuel-days.service.js'
 import { getSugarHauls } from './sugar-hauls.service.js'
 import { getStopClusters, STOP_WINDOWS_DAYS } from './stop-clusters.service.js'
 import { sendSuccess } from '../../core/response/response.js'
@@ -176,6 +177,31 @@ export const fuelRateDays: RequestHandler = async (req, res, next) => {
     const toRaw = String(req.query['to'] ?? '')
     const to = toRaw ? new Date(toRaw) : undefined
     sendSuccess(res, await getFuelRateSeries(p(req, 'orgId'), days,
+      to && !Number.isNaN(to.getTime()) ? to : undefined,
+      parseCategories(req.query['categories']),
+      parseVehicleIds(req.query['vehicles'])))
+  } catch (err) { next(err) }
+}
+
+/**
+ * One unit's fuel history, day by day — km, hours, measured burn and the rates
+ * over both.
+ *
+ * Separate from `fuelRateDays` above and not a narrower call of it: that one is
+ * floored for a whole yard's denominator and deletes most of a single unit's
+ * days. See vehicle-fuel-days.service for the measurement.
+ *
+ * The vehicle filter is read the same way every other handler here reads it, so
+ * a selection of two units answers for two — the response carries the count per
+ * day and the client says which it is drawing rather than assuming one.
+ */
+export const vehicleFuelDays: RequestHandler = async (req, res, next) => {
+  try {
+    const asked = Number(req.query['days'])
+    const days = Number.isFinite(asked) ? Math.min(90, Math.max(1, Math.trunc(asked))) : 30
+    const toRaw = String(req.query['to'] ?? '')
+    const to = toRaw ? new Date(toRaw) : undefined
+    sendSuccess(res, await getVehicleFuelSeries(p(req, 'orgId'), days,
       to && !Number.isNaN(to.getTime()) ? to : undefined,
       parseCategories(req.query['categories']),
       parseVehicleIds(req.query['vehicles'])))
