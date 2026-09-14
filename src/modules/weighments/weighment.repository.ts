@@ -54,6 +54,42 @@ export async function findDay(organisationId: string, from: Date, to: Date): Pro
   })
 }
 
+/** The columns an aggregate needs, and not one more.
+ *
+ *  A day is read with ROW_SELECT because the grid renders every field on it.
+ *  A window is not rendered at all — it is summed — so a 90-day read pulling
+ *  the wide row would move tens of megabytes to count them. These seven are
+ *  what the per-day and per-centre figures stand on: when the ticket was
+ *  raised, where, which lorry, what it weighed, and the two stamps a
+ *  turnaround is the distance between. */
+const AGG_SELECT = {
+  tokenAt: true, centerCode: true, centerName: true, vehiclePlate: true,
+  netWeightKg: true, grossAt: true, tareAt: true,
+} satisfies Prisma.WeighmentSelect
+
+export type WeighmentAggRow = Prisma.WeighmentGetPayload<{ select: typeof AGG_SELECT }>
+
+/**
+ * Every ticket between two instants, oldest first.
+ *
+ * Served by `@@index([organisationId, tokenAt])`, which is why the window is
+ * expressed as a half-open instant range rather than as a list of fleet days:
+ * one indexed range scan instead of ninety point reads.
+ *
+ * Not paged, and the ceiling is the reason it does not need to be. The busiest
+ * day measured is 787 tickets across the four bridges, so a 90-day window has
+ * an upper bound around 70k narrow rows — large enough to be worth the narrow
+ * select above, small enough that streaming it would be machinery with nothing
+ * to do. The `days` bound in the schema is what keeps that ceiling a ceiling.
+ */
+export async function findRange(organisationId: string, from: Date, to: Date): Promise<WeighmentAggRow[]> {
+  return prisma.weighment.findMany({
+    where:   { organisationId, tokenAt: { gte: from, lt: to } },
+    orderBy: { tokenAt: 'asc' },
+    select:  AGG_SELECT,
+  })
+}
+
 /**
  * The days that actually hold tickets, newest first.
  *
