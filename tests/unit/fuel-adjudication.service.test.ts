@@ -205,7 +205,7 @@ describe('adjudicatePendingDrains', () => {
     // The operator's agreed phrase, and the ONLY cause permitted to use it.
     expect(item['text']).toContain('POSSIBLE THEFT: KDL 182X')
     expect(item['text']).toContain('Nyalulanga')
-    expect(item['text']).toContain('Tank now 160 L')
+    expect(item['text']).toContain('The tank now holds 160 L')
     // The event's own time, never the moment we got round to judging it.
     expect(item['at']).toEqual(BEGAN)
     // Still no claim that anyone has been sent, told or dispatched.

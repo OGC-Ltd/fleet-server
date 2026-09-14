@@ -30,7 +30,7 @@ describe('repeatClause', () => {
     }), false)
     expect(clause).toContain('6th flagged event on this unit in 30 days')
     expect(clause).toContain('417.7 L in total')
-    expect(clause).toContain('before this: 122.8 L, 112.5 L, 92.7 L')
+    expect(clause).toContain('the previous drops were 122.8 L, 112.5 L and 92.7 L')
   })
 
   it('will not call a mixed record theft', () => {

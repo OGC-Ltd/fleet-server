@@ -64,50 +64,62 @@ export function deriveFeedEvents(orgId: string, p: FeedSource): void {
   }
 
   const items: { type: 'info' | 'success' | 'warning' | 'critical'; text: string }[] = []
-  const who   = `${p.plate} · ${p.driverName ?? 'Unassigned'}`
+  // No "· Unassigned". A unit with no driver on it is a unit with no driver on
+  // it; naming the absence puts a word in every sentence that carries nothing.
+  const who   = p.driverName ? `${p.plate} · ${p.driverName}` : p.plate
   const now   = Date.parse(p.capturedAt) || Date.now()
   const at    = clock(now)
-  const from  = p.leg?.from ?? 'base'
-  const to    = p.leg?.to ?? 'destination'
-  const eta   = p.leg?.plannedArrivalMs ? ` ETA ${clock(p.leg.plannedArrivalMs)}.` : ''
+  // NULL when the leg does not name one, and every clause below is written to
+  // be absent rather than to fall back. The literals used to be 'base' and
+  // 'destination', which produced "detected at 95 km/h en route to
+  // destination" — a sentence that asserts a place and then declines to name
+  // it. Read off the live feed on 2026-09-14, 59 of them in one window.
+  const from  = p.leg?.from ?? null
+  const to    = p.leg?.to ?? null
+  const toward   = to   ? ` to ${to}`     : ''
+  const bound    = to   ? ` bound for ${to}` : ''
+  const arrivedAt = to  ? ` at ${to}`     : ''
+  const eta   = p.leg?.plannedArrivalMs
+    ? ` The estimated arrival is ${clock(p.leg.plannedArrivalMs)}.`
+    : ''
   const cargo = `${tonnes(p.cargoWeightKg)}${p.cargoDesc || 'cargo'}`
 
   // ── phase transitions ──────────────────────────────────────────────────
   if (st.phase && p.phase && p.phase !== st.phase) {
     switch (p.phase) {
       case 'TO_DEPOT':
-        items.push({ type: 'info', text: `${who} departed ${from}. Cargo: ${cargo} bound for ${to}.${eta}` })
+        items.push({ type: 'info', text: `${who} departed${from ? ` from ${from}` : ''} carrying ${cargo}${bound}.${eta}` })
         break
       case 'TO_FARM':
-        items.push({ type: 'info', text: `${who} dispatched to ${to} to collect raw sugarcane.${eta}` })
+        items.push({ type: 'info', text: `${who} was dispatched${toward} to collect raw sugarcane.${eta}` })
         break
       case 'LOADING':
-        items.push({ type: 'success', text: `${who} arrived at ${to} at ${at}. Loading raw sugarcane.` })
+        items.push({ type: 'success', text: `${who} arrived${arrivedAt} at ${at} and is loading raw sugarcane.` })
         break
       case 'OFFLOADING':
-        items.push({ type: 'success', text: `${who} arrived at ${to} at ${at}. Offloading ${cargo}.` })
+        items.push({ type: 'success', text: `${who} arrived${arrivedAt} at ${at} and is offloading ${cargo}.` })
         break
       case 'UNLOADING':
-        items.push({ type: 'success', text: `${who} arrived at ${to} at ${at}. Offloading ${tonnes(p.cargoWeightKg)}raw sugarcane.` })
+        items.push({ type: 'success', text: `${who} arrived${arrivedAt} at ${at} and is offloading ${tonnes(p.cargoWeightKg)}raw sugarcane.` })
         break
       case 'TO_INDUSTRY':
         items.push(st.phase === 'LOADING'
-          ? { type: 'info', text: `${who} loaded ${cargo} at ${from} — hauling to ${to}.${eta}` }
-          : { type: 'info', text: `${who} completed offloading — returning to ${to}.${eta}` })
+          ? { type: 'info', text: `${who} loaded ${cargo}${from ? ` at ${from}` : ''} and is hauling${toward}.${eta}` }
+          : { type: 'info', text: `${who} completed offloading and is returning${toward}.${eta}` })
         break
       case 'DWELL':
-        items.push({ type: 'info', text: `${who} offloading complete at ${to}. Driver rest stop before the return leg.` })
+        items.push({ type: 'info', text: `${who} completed offloading${arrivedAt}. The driver is resting before the return leg.` })
         break
       case 'TO_GARAGE':
-        items.push({ type: 'warning', text: `${who} redirected to ${to} — scheduled service due.` })
+        items.push({ type: 'warning', text: `${who} was redirected${toward}, where a scheduled service is due.` })
         break
       case 'FROM_GARAGE':
-        items.push({ type: 'success', text: `${who} service completed. Returning to base.` })
+        items.push({ type: 'success', text: `${who} has completed its service and is returning to base.` })
         break
       case 'AT_INDUSTRY':
       case 'AT_PARKING':
         if (st.phase === 'TO_INDUSTRY' || st.phase === 'TO_PARKING') {
-          items.push({ type: 'success', text: `${who} arrived back at ${to} at ${at}. Trip complete.` })
+          items.push({ type: 'success', text: `${who} arrived back${arrivedAt} at ${at}. The trip is complete.` })
         }
         break
     }
@@ -124,15 +136,18 @@ export function deriveFeedEvents(orgId: string, p: FeedSource): void {
       // sets OVERSPEED_LIMIT_BY_TYPE=TRACTOR:50 would otherwise be told a
       // tractor at 55 km/h broke an 80 limit, which is both wrong and the exact
       // figure someone would dispute the alert with.
-      text: `ALERT: ${who} detected at ${Math.round(p.speedKmh ?? 0)} km/h en route to ${to}. `
-          + `Speed limit ${overspeedLimitFor(p.vehicleType ?? null)} km/h.`,
+      text: `ALERT: ${who} was recorded at ${Math.round(p.speedKmh ?? 0)} km/h`
+          + `${to ? ` en route to ${to}` : ''}. `
+          + `The speed limit is ${overspeedLimitFor(p.vehicleType ?? null)} km/h.`,
     })
   }
   if (p.flags.fuelInconsistency && !st.fuelInconsistency) {
+    const near = from ?? to
     items.push({
       type: 'critical',
       // Same as above: no "Security alerted." until an escalation path exists.
-      text: `CRITICAL: ${who} — sudden fuel level drop detected near ${from === 'base' ? to : from}. Possible theft.`,
+      text: `CRITICAL: ${who} recorded a sudden fuel level drop`
+          + `${near ? ` near ${near}` : ''}. This may be theft.`,
     })
   }
 

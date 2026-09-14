@@ -269,7 +269,7 @@ async function announceArrival(p: YardDepartureInput): Promise<void> {
   const from = dispatch?.destination ? ` from ${dispatch.destination}` : ''
   const awayMs = dispatch ? at.getTime() - dispatch.dispatchedAt.getTime() : 0
   const away = awayMs >= 60_000
-    ? ` — out ${awayMs >= 3_600_000
+    ? `, having been out for ${awayMs >= 3_600_000
         ? `${(awayMs / 3_600_000).toFixed(1)} h`
         : `${Math.round(awayMs / 60_000)} min`}`
     : ''
@@ -321,11 +321,15 @@ async function announce(p: YardDepartureInput, st: VehicleState, precision: Prec
   const at   = new Date(p.capturedAt)
   const who  = p.driverName ? ` · ${p.driverName}` : ''
   const dest = dispatch.destination ? ` to ${dispatch.destination}` : ''
+  // "is clear of the yard to OYANI" does not read; "bound for" does. Same fact,
+  // and only the third branch below needs it — "cleared the gate to OYANI" is
+  // already a sentence.
+  const bound = dispatch.destination ? ` bound for ${dispatch.destination}` : ''
   // How long it actually stood in the yard after being signed out — the number
   // the provider's version could never carry, because it fired at zero.
   const waitedMs = at.getTime() - dispatch.dispatchedAt.getTime()
   const waited   = waitedMs >= 60_000
-    ? ` ${Math.round(waitedMs / 60_000)} min after sign-out`
+    ? `, ${Math.round(waitedMs / 60_000)} minutes after signing out`
     : ''
 
   // CONFIRMS the sign-out, and does not restate it. The feed already announced
@@ -340,7 +344,7 @@ async function announce(p: YardDepartureInput, st: VehicleState, precision: Prec
     // first fix we happened to receive as the crossing time would be exactly
     // the provider's mistake in a different costume. The departure itself is
     // not in doubt here; only its time is.
-    : `${p.plate}${who} is clear of the yard${dest} — departure time not observed (no fix at the gate).`
+    : `${p.plate}${who} is clear of the yard${bound}. The departure time was not observed, because there was no fix at the gate.`
 
   await publishNotification({
     orgId:     p.orgId,

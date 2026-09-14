@@ -372,7 +372,7 @@ export async function syncVehicleFuelEvents(
         // "Ndhiwa-Uriri, Riat Centre" says.
         text: `${vehicle.registrationPlate} refuelled ${L(f.filledMl)}`
           + (f.location ? ` at ${shortPlaceLabel(f.location)}` : '')
-          + (f.finalFuelLevelMl != null ? `. Tank now ${L(f.finalFuelLevelMl)}.` : '.'),
+          + (f.finalFuelLevelMl != null ? `. The tank now holds ${L(f.finalFuelLevelMl)}.` : '.'),
         at:        f.filledAt,
         plate:     vehicle.registrationPlate,
         vehicleId: vehicle.id,

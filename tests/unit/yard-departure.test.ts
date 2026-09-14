@@ -74,7 +74,7 @@ describe('trackYardDeparture', () => {
     expect(published()).toHaveLength(1)
     const item = published()[0]![0]
     expect(item['text']).toBe(
-      'KTCC 870B · AUGUSTINE OWINO NYAMWOK cleared the gate to kwoyo u k 27 min after sign-out.',
+      'KTCC 870B · AUGUSTINE OWINO NYAMWOK cleared the gate to kwoyo u k, 27 minutes after signing out.',
     )
     expect(item['alertType']).toBe('MOVEMENT_EXIT')
     expect(item['source']).toBe('telemetry')
@@ -126,7 +126,7 @@ describe('trackYardDeparture', () => {
 
     expect(published()).toHaveLength(1)
     expect(published()[0]![0]['text']).toBe(
-      'KTCC 870B · AUGUSTINE OWINO NYAMWOK is clear of the yard to kwoyo u k — departure time not observed (no fix at the gate).',
+      'KTCC 870B · AUGUSTINE OWINO NYAMWOK is clear of the yard bound for kwoyo u k. The departure time was not observed, because there was no fix at the gate.',
     )
   })
 

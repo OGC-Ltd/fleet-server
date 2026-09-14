@@ -135,11 +135,11 @@ export async function sweepProbeHealth(opts: ProbeSweepOptions): Promise<ProbeSw
     // probe is a workshop job, so it says the last good reading and when —
     // that dates the failure to a shift.
     const text = verdict.state === 'DIED'
-      ? `FUEL PROBE: ${probe.plate} — no reading for ${darkFor(probe.lastAliveAt!, now)}`
-        + ` (last read ${L(probe.peakMl ?? 0)} on ${probe.lastAliveAt!.toISOString().slice(0, 10)})`
-        + `${probe.recentMoving > 0 ? '; the machine has moved since' : ''}. Needs a workshop visit.`
-      : `FUEL PROBE: ${probe.plate} — has never reported a fuel level`
-        + ` in ${LOOKBACK_DAYS} days of telemetry. Needs a workshop visit.`
+      ? `FUEL PROBE: ${probe.plate} has had no reading for ${darkFor(probe.lastAliveAt!, now)}`
+        + `, the last being ${L(probe.peakMl ?? 0)} on ${probe.lastAliveAt!.toISOString().slice(0, 10)}`
+        + `${probe.recentMoving > 0 ? ', and the machine has moved since' : ''}. It needs a workshop visit.`
+      : `FUEL PROBE: ${probe.plate} has never reported a fuel level`
+        + ` in ${LOOKBACK_DAYS} days of telemetry. It needs a workshop visit.`
 
     const { published } = await publishNotificationDurable({
       orgId:     probe.orgId,

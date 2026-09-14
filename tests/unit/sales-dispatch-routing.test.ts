@@ -128,7 +128,7 @@ describe('sales run narration', () => {
     await handleSale(sale())
 
     expect(published()[0]![1]['text']).toBe(
-      'KCP 134P · Duncan Mwangi signed out at Naitiri with 29.0t (580 × 50 kg bags) bound for Raiply — left the premises.',
+      'KCP 134P · Duncan Mwangi signed out at Naitiri with 29.0t (580 × 50 kg bags) bound for Raiply and left the premises.',
     )
     expect(published()[0]![1]['alertType']).toBe('SALE_DISPATCH')
   })
@@ -152,7 +152,7 @@ describe('sales run narration', () => {
     expect(published()).toHaveLength(1)
     expect(published()[0]![1]['alertType']).toBe('SALE_RETURN')
     expect(published()[0]![1]['text']).toBe(
-      'KCP 134P · Duncan Mwangi signed back in at Naitiri — sales run bound for Raiply complete.',
+      'KCP 134P · Duncan Mwangi signed back in at Naitiri; the sales run bound for Raiply is complete.',
     )
   })
 
@@ -188,7 +188,7 @@ describe('sales run narration', () => {
     await handleSale(sale({ tonnage: null }))
 
     expect(published()[0]![1]['text']).toBe(
-      'KCP 134P · Duncan Mwangi signed out at Naitiri bound for Raiply — left the premises.',
+      'KCP 134P · Duncan Mwangi signed out at Naitiri bound for Raiply and left the premises.',
     )
   })
 

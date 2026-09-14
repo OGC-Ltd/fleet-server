@@ -511,10 +511,13 @@ function ordinal(n: number): string {
 export function repeatClause(h: IncidentHistory, allSiphons: boolean): string {
   if (h.totalCount < 2) return ''
   const what   = allSiphons ? 'possible theft' : 'flagged event'
-  const recent = h.recentMl.length
-    ? ` (before this: ${h.recentMl.map(ml => L(ml)).join(', ')})`
+  const drops = h.recentMl.map(ml => L(ml))
+  const recent = drops.length
+    ? `; the previous drops were ${drops.length > 1
+        ? `${drops.slice(0, -1).join(', ')} and ${drops[drops.length - 1]}`
+        : drops[0]}`
     : ''
-  return ` ${ordinal(h.totalCount)} ${what} on this unit in 30 days — ${L(h.totalMl)} in total${recent}.`
+  return ` This is the ${ordinal(h.totalCount)} ${what} on this unit in 30 days, ${L(h.totalMl)} in total${recent}.`
 }
 
 export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<AdjudicateOutcome> {
@@ -618,7 +621,7 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     const cause = verdict.cause
     const plate = t.vehicle.registrationPlate
     const where = t.initialLocation ? ` at ${t.initialLocation}` : ''
-    const tank  = t.finalFuelLevelMl != null ? `. Tank now ${L(t.finalFuelLevelMl)}.` : '.'
+    const tank  = t.finalFuelLevelMl != null ? `. The tank now holds ${L(t.finalFuelLevelMl)}.` : '.'
 
     // ONLY a SIPHON may say theft, and only qualified — "when we have
     // determined that truly it was a theft then we need to use the word
@@ -649,15 +652,18 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     const repeat = repeatClause(history, history.siphonCount === history.totalCount)
 
     const rate = cause.impliedLph != null ? `${Math.round(cause.impliedLph)} L/h` : null
+    // "PLATE — 22.1 L at 60 L/h" put a dash where the verb belonged. The event
+    // is a measured fall in the tank, which is the one word that covers a burn,
+    // a drain and a siphon alike, so it is the verb all four headlines take.
     const headline = mayUseTheftWording(cause.cause)
-      ? `POSSIBLE THEFT: ${plate} — ${L(t.stolenMl)} drawn off while parked${where}${tank}`
+      ? `POSSIBLE THEFT: ${plate} recorded a drop of ${L(t.stolenMl)}, drawn off while parked${where}${tank}`
       : cause.reason === 'drop-while-stationary'
-      ? `FUEL DOWN: ${plate} — ${L(t.stolenMl)} while stationary, nothing driven${where}${tank}`
+      ? `FUEL DOWN: ${plate} recorded a drop of ${L(t.stolenMl)} while stationary, with nothing driven${where}${tank}`
       : cause.reason === 'drop-exceeds-distance'
-      ? `FUEL DOWN: ${plate} — ${L(t.stolenMl)}, more than the distance driven accounts for${where}${tank}`
+      ? `FUEL DOWN: ${plate} recorded a drop of ${L(t.stolenMl)}, more than the distance driven accounts for${where}${tank}`
       : rate
-      ? `FUEL RATE: ${plate} — ${L(t.stolenMl)} at ${rate}, above what this machine is measured to burn${where}${tank}`
-      : `FUEL RATE: ${plate} — ${L(t.stolenMl)} above this machine's measured rate${where}${tank}`
+      ? `FUEL RATE: ${plate} recorded a drop of ${L(t.stolenMl)} at ${rate}, above what this machine is measured to burn${where}${tank}`
+      : `FUEL RATE: ${plate} recorded a drop of ${L(t.stolenMl)}, above this machine's measured rate${where}${tank}`
 
     const { published } = await publishNotificationDurable({
       orgId:     t.vehicle.organisationId,
