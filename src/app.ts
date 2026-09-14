@@ -17,6 +17,7 @@ import orgRoutes from './modules/organisations/organisation.routes.js'
 import userRoutes from './modules/users/user.routes.js'
 import roleRoutes from './modules/roles/role.routes.js'
 import vehicleRoutes from './modules/vehicles/vehicle.routes.js'
+import { lookup as vehicleLookup } from './modules/vehicles/vehicle-lookup.js'
 import tripRoutes from './modules/trips/trip.routes.js'
 import fuelRoutes from './modules/fuel/fuel.routes.js'
 import reportRoutes from './modules/reports/report.routes.js'
@@ -212,6 +213,12 @@ export function createApp() {
     validateBody(provisionUserSchema),
     userCtrl.provisionAcrossOrgs,
   )
+
+  // Cross-organisation unit lookup. NOT under :orgId, deliberately: it exists
+  // precisely for the case where the operator is in the wrong organisation and
+  // does not know it yet. It spans the caller's memberships and returns
+  // identity only — see vehicle-lookup.ts.
+  app.get(`${v1}/vehicle-lookup`, authenticate, vehicleLookup)
 
   // Web Push public key — no auth; called by Service Workers before subscribe
   app.get(`${v1}/notifications/vapid-key`, notificationsCtrl.getVapidKey)
