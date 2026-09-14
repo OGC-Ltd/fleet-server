@@ -71,14 +71,18 @@ describe('the Live Feed names our overlay, not the provider', () => {
     }
   })
 
-  it('leads with the most specific feature and names what contains it', async () => {
+  it('leads with the most specific feature, and says nothing about what contains it', async () => {
     const v = `veh-nest-${seq}`
     await ping(v, OUTSIDE.lat, OUTSIDE.lng, tick(0))
     for (let i = 0; i < 6; i++) await ping(v, IN_SHOP.lat, IN_SHOP.lng, tick(2))
 
     const arrival = published.find(n => n.alertType === 'ZONE_ENTRY')
+    // The containing feature used to ride along as "— inside FARM #215", and
+    // was dropped on 2026-09-15: the features nest, so the container is often
+    // the contained one said again, and the map is drawing all of it anyway.
     // The vehicle sits exactly on the VES 143 centre, so the reference reads 0 m.
-    expect(arrival?.text).toBe('MUFINDI: EX 24 arrived at Workshop A — inside FARM #215, near VES 143 (0 m).')
+    expect(arrival?.text).toBe('MUFINDI: EX 24 arrived at Workshop A, near VES 143 (0 m).')
+    expect(arrival?.text).not.toMatch(/inside/)
   })
 
   it('quotes the sample point in metres up close and kilometres further out', async () => {
@@ -118,7 +122,7 @@ describe('the Live Feed names our overlay, not the provider', () => {
     for (let i = 0; i < 4; i++) await ping(v, IN_FARM.lat, IN_FARM.lng, tick(2))
 
     const exit = published.find(n => n.alertType === 'ZONE_EXIT')
-    expect(exit?.text).toBe('MUFINDI: EX 24 left Workshop A — now in FARM #215.')
+    expect(exit?.text).toBe('MUFINDI: EX 24 left Workshop A and is now in FARM #215.')
   })
 })
 
@@ -151,7 +155,7 @@ describe('a keep-out breach is not delayed and not folded in', () => {
 
     const breach = published.find(n => n.alertType === 'GEOFENCE_BREACH')
     expect(breach?.severity).toBe('critical')
-    expect(breach?.text).toBe('RESTRICTED: MUFINDI: EX 24 entered DRAINS3 — a keep-out zone.')
+    expect(breach?.text).toBe('RESTRICTED: MUFINDI: EX 24 entered DRAINS3, a restricted zone.')
   })
 
   it('does not repeat while the vehicle works along the drain', async () => {

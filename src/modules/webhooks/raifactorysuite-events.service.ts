@@ -204,7 +204,7 @@ export async function handleDispatch(
   const dest = d.destinationOrPurpose ? ` to ${d.destinationOrPurpose}` : ''
   feed(
     organisationId, `dp-${d.id}`, when, 'info',
-    `${d.vehicleNumberPlate} · ${d.driverName} signed out${dest} — left the premises.`,
+    `${d.vehicleNumberPlate} · ${d.driverName} signed out${dest} and left the premises.`,
     { alertType: 'DISPATCH', plate: d.vehicleNumberPlate, vehicleId: vehicle?.id ?? null },
   )
   return true
@@ -472,7 +472,7 @@ export async function handleSale(
     // than silence — for a Menengai unit that hub is ~250 km from this gate.
     feed(
       org.organisationId, `sl-${s.id}`, signedOutAt, 'info',
-      `${who} signed out${at}${load ? ` with ${load}` : ''}${dest} — left the premises.`,
+      `${who} signed out${at}${load ? ` with ${load}` : ''}${dest} and left the premises.`,
       { alertType: 'SALE_DISPATCH', plate: org.plate, vehicleId: org.vehicleId },
     )
   }
@@ -480,7 +480,7 @@ export async function handleSale(
   if (returnIsNew) {
     feed(
       org.organisationId, `sl-${s.id}-ret`, returnedAt!, 'success',
-      `${who} signed back in${at} — sales run${dest} complete.`,
+      `${who} signed back in${at}; the sales run${dest} is complete.`,
       { alertType: 'SALE_RETURN', plate: org.plate, vehicleId: org.vehicleId },
     )
   }

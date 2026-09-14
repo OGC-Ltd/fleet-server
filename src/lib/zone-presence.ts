@@ -269,14 +269,6 @@ const REANNOUNCE_COOLDOWN_MS = 10 * 60_000
 const lastAnnouncedAt = new Map<string, number>()
 
 /**
- * How many containing features to name after the specific one.
- *
- * Two. "Workshop A — inside Nursery A, FARM #215" is a place; adding every
- * enclosing polygon turns the sentence back into the list it replaced.
- */
-const CONTEXT_LIMIT = 2
-
-/**
  * Smallest first. A vehicle inside FARM#212 is also inside the 2500 Ha Area,
  * and FARM#212 is the answer to "where is it". Corridors and circles carry no
  * area and sort last — they are not containers.
@@ -528,7 +520,7 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
     if (at - (lastAnnouncedAt.get(key) ?? 0) < REANNOUNCE_COOLDOWN_MS) continue
     lastAnnouncedAt.set(key, at)
     publish(z, 'i', 'GEOFENCE_BREACH', 'critical',
-      `RESTRICTED: ${who} entered ${z.name} — a keep-out zone${sample}.`)
+      `RESTRICTED: ${who} entered ${z.name}, a restricted zone${sample}.`)
   }
 
   // ── One sentence per crossing, not one per zone ──────────────────────────
@@ -539,26 +531,33 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
   // event, in arbitrary order, none of them saying where it actually is.
   //
   // So the crossing is reported once, led by the SMALLEST feature entered —
-  // the most specific answer to "where is it" — with the larger features that
-  // already contain it as context. That context is drawn from where the
-  // vehicle is NOW, not from what it just crossed: it was already inside
-  // FARM #215 before entering the workshop, and that is exactly the fact which
-  // makes the sentence readable.
+  // the most specific answer to "where is it".
+  //
+  // The larger features that already contain it USED to ride along as context
+  // ("arrived at Nursery A — inside FARM #215"), and that half of the sentence
+  // is gone as of 2026-09-15. It was worth trying and the trying is what
+  // settled it: because the features nest, the container is frequently a
+  // restatement of the thing it contains — "arrived at Sukari Indurstries
+  // Factory — inside Sukari industries" is one place named twice — and what
+  // contains a place is a question for the map, which is drawing all of it.
+  // The crossing is the event.
+  //
+  // `alsoEntered` stays. It is not context: those are OTHER crossings that
+  // happened in the same frame, and dropping them would drop events. What it
+  // must not become is the containment clause in a different costume — a
+  // vehicle crossing into the workshop crosses into FARM #215 on the same
+  // frame, and "(also entered FARM #215)" is the sentence that was just
+  // removed. So a feature that merely CONTAINS the lead is filtered out of it,
+  // and what remains is the siblings.
   const arrivals = entered.filter(z => !z.keepOut).sort(bySpecificity)
   if (arrivals.length > 0) {
     const lead = arrivals[0]!
     // Only AREAS can contain something. A corridor — a haulage road, a drain,
-    // a river — is a thing you are ON, and reads as nonsense as context for an
-    // arrival, so `areaHa` (polygons only) is the test.
-    const within = zones
-      .filter(z => z.estate && z.areaHa != null && now.has(z.id) && z.id !== lead.id)
-      .filter(z => (z.areaHa ?? 0) > (lead.areaHa ?? 0))
-      .sort(bySpecificity)
-      .slice(0, CONTEXT_LIMIT)
-
-    const alsoEntered = arrivals.slice(1).filter(z => !within.some(w => w.id === z.id))
+    // a river — is a thing you are ON, so `areaHa` (polygons only) is the test.
+    const contains = (z: typeof lead) =>
+      z.areaHa != null && lead.areaHa != null && z.areaHa > lead.areaHa
+    const alsoEntered = arrivals.slice(1).filter(z => !contains(z))
     const text = `${who} arrived at ${lead.name}`
-      + (within.length > 0 ? ` — inside ${within.map(z => z.name).join(', ')}` : '')
       + (alsoEntered.length > 0 ? ` (also entered ${alsoEntered.map(z => z.name).join(', ')})` : '')
       + sample
       + '.'
@@ -576,7 +575,7 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
 
     const text = `${who} left ${lead.name}`
       + (rest.length > 0 ? ` and ${rest.map(z => z.name).join(', ')}` : '')
-      + (stillIn ? ` — now in ${stillIn.name}` : '')
+      + (stillIn ? ` and is now in ${stillIn.name}` : '')
       + '.'
     publish(lead, 'o', 'ZONE_EXIT', 'info', text)
   }
