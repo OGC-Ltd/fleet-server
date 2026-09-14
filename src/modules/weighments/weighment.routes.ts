@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission } from '../../middleware/authorize.js'
 import { validateQuery } from '../../middleware/validate.js'
-import { weighmentQuerySchema } from './weighment.schema.js'
+import { weighmentQuerySchema, weighmentAnalyticsQuerySchema } from './weighment.schema.js'
 import * as ctrl from './weighment.controller.js'
 
 const router = Router({ mergeParams: true })
@@ -21,5 +21,18 @@ router.get('/', requirePermission('weighbridge:read'), validateQuery(weighmentQu
 // swallowed as a parameter. There is no such route today; this is where one
 // would go, and the ordering is the cheap half of not being bitten by it.
 router.get('/bridges', requirePermission('weighbridge:read'), ctrl.listBridges)
+
+// The window view, for the analytics screen's weighbridge card. Same
+// permission as the grid — it is the grid's own tickets, summed, and an
+// account that may not read one ticket must not read a month of them either.
+//
+// Declared beside '/bridges' and for the same reason: a literal segment ahead
+// of any parameterised route this file might one day grow.
+router.get(
+  '/analytics',
+  requirePermission('weighbridge:read'),
+  validateQuery(weighmentAnalyticsQuerySchema),
+  ctrl.listAnalytics,
+)
 
 export default router
