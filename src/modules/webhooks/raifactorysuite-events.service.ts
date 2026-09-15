@@ -346,6 +346,32 @@ export interface SaleEvent {
   status?: string | null
   signOutTime?: string | null; signOutPhotoUrl?: string | null
   returnTime?:  string | null; returnPhotoUrl?:  string | null
+  /**
+   * The gate's document number, under whichever name the provider gives it.
+   *
+   * Every one of these is optional and every one is absent today: the observed
+   * payload is exactly the eleven fields above (measured against the live
+   * /sales response, 2026-09-15). They are declared because the field is one we
+   * have been asked to display and there is no way to know in advance which
+   * spelling it will arrive under — and reading several costs nothing, whereas
+   * guessing wrong means the value lands and is silently dropped.
+   */
+  serialNumber?: string | null; serialNo?: string | null
+  gatePassNo?:   string | null; documentNo?: string | null
+  referenceNo?:  string | null
+}
+
+/**
+ * The run's document number, or null.
+ *
+ * Trimmed, and an empty string is a null — a provider that models the field
+ * without populating it tends to send `""`, and `""` rendered beside a shield
+ * icon is a label with nothing after it.
+ */
+function saleSerial(s: SaleEvent): string | null {
+  const raw = s.serialNumber ?? s.serialNo ?? s.gatePassNo ?? s.documentNo ?? s.referenceNo
+  const trimmed = typeof raw === 'string' ? raw.trim() : ''
+  return trimmed.length > 0 ? trimmed : null
 }
 
 /** Re-exported so callers that already import the bag maths from the sales
@@ -433,6 +459,11 @@ export async function handleSale(
     expectedReturnAt: null,
     actualReturnAt:   returnedAt,
     tonnageT:         s.tonnage ?? null,
+    // serialNumber: saleSerial(s) — held back until
+    // prisma/migrations/20260915090000 has been applied by hand to the shared
+    // RDS instance. Writing to a column that is not there yet would fail every
+    // sales upsert, and `saleSerial` returns null for every payload the
+    // provider currently sends in any case. See the field's note on OpenTrip.
     signOutPhotoUrl:  s.signOutPhotoUrl ?? null,
     returnPhotoUrl:   s.returnPhotoUrl ?? null,
     source,

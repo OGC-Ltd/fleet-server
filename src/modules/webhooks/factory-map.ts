@@ -70,13 +70,22 @@ import { normalisePlate } from '../../providers/wialon/wialon.unit-name.js'
  * copied from the "Sukari HQ" entry in that weather list, which sits near
  * Kakamega, on the WRONG SIDE OF THE EQUATOR and about 129 km from the mill.
  *
- * NAITIRI (2026-09-15) is the GATE from the operator's surveyed KML, and it
- * replaces a derived 0.7821 / 34.8776 that sat 122 m away. That point was not
- * wrong in the way Ndhiwa's was — it fell inside the site — but a density cell
- * lands near the middle of a yard, and the middle of a yard is not where a
- * trip begins. The same survey put a 46.56 ha boundary in `geofences` as
- * "Naitiri Factory (surveyed)"; this is its gate, 5 m outside that ring,
- * sitting in the notch the ring is drawn with.
+ * NAITIRI (2026-09-15) is the GATE, as the operator states it, and it has now
+ * been restated twice on the same day: first from their surveyed KML
+ * (0.781158 / 34.877046), then to the figure here, 86 m east of that. Both
+ * replaced a derived 0.7821 / 34.8776 — a density cell, which lands near the
+ * middle of a yard, and the middle of a yard is not where a trip begins. The
+ * same survey put a 46.56 ha boundary in `geofences` as "Naitiri Factory
+ * (surveyed)"; all three points sit within about 90 m of each other at its
+ * gate notch, which is well inside YARD_RADIUS_M and so cannot change any
+ * at-yard verdict. The operator's latest word wins because this is not a
+ * measurement we are competing with them on — it is the point they dispatch
+ * from.
+ *
+ * This is now LOAD-BEARING, which the paragraph below used to say it was not.
+ * A sales run out of Naitiri is measured from here (see the OpenTrip origin in
+ * dispatches/dispatch.repository), so a wrong gate is a wrong distance on
+ * every Naitiri → Raiply run rather than a coordinate nobody reads.
  *
  * The telemetry agrees with the figure we were given, which is why it is worth
  * recording both: the median of 268,032 SUKARI fixes is -0.82001 / 34.38443 and
@@ -84,9 +93,10 @@ import { normalisePlate } from '../../providers/wialon/wialon.unit-name.js'
  * weighments/weighbridge.geography, are -0.8227 / 34.3832 — the yard, from two
  * directions, around a stated gate at -0.82340 / 34.38449.
  *
- * Nothing read this yet, which is exactly why it survived: a coordinate with no
- * consumer is never wrong out loud. The first thing to measure a distance from
- * the Ndhiwa gate would have been 129 km short.
+ * Ndhiwa's wrong point survived as long as it did because nothing read it: a
+ * coordinate with no consumer is never wrong out loud. The first thing to
+ * measure a distance from it would have been 129 km short. Both gates have a
+ * consumer now.
  */
 export interface Factory {
   /** Our organisation `code` — the factory's OPERATOR, not the owner of any
@@ -125,7 +135,7 @@ export interface Factory {
 export const FACTORIES: Record<string, Factory> = {
   NDHIWA:  { orgCode: 'SUKARI',    label: 'Ndhiwa',  lat: -0.82340, lng: 34.38449,
              commodity: 'Raw Sugarcane',   cargoType: 'BULK' },
-  NAITIRI: { orgCode: 'WESTSUGAR', label: 'Naitiri', lat: 0.781158, lng: 34.877046,
+  NAITIRI: { orgCode: 'WESTSUGAR', label: 'Naitiri', lat: 0.78129, lng: 34.87781,
              commodity: 'Processed Sugar', cargoType: 'PACKAGED' },
 }
 

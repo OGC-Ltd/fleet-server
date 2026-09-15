@@ -42,6 +42,7 @@ import { arrivalRadiusM, YARD_RADIUS_M, type Point } from '../../lib/dispatch-tr
 import { PLAUSIBLE_KMH, JITTER_FLOOR_M } from '../../lib/fix-plausibility.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import { factoryOf, bagsFromTonnes } from '../webhooks/factory-map.js'
+import { knownDestination } from './known-destinations.js'
 
 const OPEN_STATUSES = ['DISPATCHED', 'OVERDUE']
 
@@ -110,6 +111,60 @@ export interface OpenTrip {
   destination:  string | null
   status:       string
   dispatchedAt: string
+  /**
+   * Where this run STARTED, and what to call it.
+   *
+   * Not the owning organisation's yard, which is what every consumer assumed
+   * until this existed. A dispatch is raised at a GATE, and the gate belongs to
+   * the site, not to the fleet: the three open sales runs on the live database
+   * (2026-09-15) are Menengai trucks signed out at Naitiri, which is West Kenya
+   * Sugar's factory. Menengai has no `hubLat` at all, so those runs had no
+   * origin, no leg length, no percentage and no bar — and had Menengai carried
+   * a hub, the trip would have been measured from a refinery ~250 km from the
+   * gate the truck actually left, which is worse than measuring nothing.
+   *
+   * Null when the row names no factory (every dispatch written before the
+   * `factory_code` column, and any source that does not report one). Callers
+   * fall back to the organisation's hub, which is the old behaviour and is
+   * correct for a fleet dispatching out of its own yard.
+   */
+  originLat:  number | null
+  originLng:  number | null
+  originName: string | null
+  /**
+   * Whether `dispatchedAt` is a GUARD'S SIGN-OUT or a clerk's clock.
+   *
+   * The distinction decides whether a client may draw a journey for a unit that
+   * is still standing at the gate. On a CANE dispatch the timestamp is when the
+   * paperwork was raised and a tractor can sit in the yard for hours after it,
+   * so a journey drawn at that moment asserts a departure nobody can evidence —
+   * measured on the live fleet, 12 of 46 units carrying an open dispatch had
+   * not moved. On a SALES run it is `signOutTime`: the guard has physically
+   * released the truck, and `handleSale` refuses to store a run without one
+   * rather than inventing a clock. That IS the departure, and the run should
+   * read as begun from the moment it lands even while the lorry is still
+   * inside the yard radius.
+   */
+  departureIsSignOut: boolean
+  /**
+   * The run's document number, as the gate wrote it. Null on every row today.
+   *
+   * The provider models no such field — see the sale payload in
+   * webhooks/raifactorysuite-events — so this is carried, not invented: it is
+   * populated only if a payload turns up with one, and the surfaces that show
+   * it show nothing when it is null rather than falling back to the internal
+   * UUID, which is not a number anybody at a gate can read back.
+   *
+   * Hard-wired to null for now, and deliberately so. `dispatches.serial_number`
+   * is in the schema and in prisma/migrations/20260915090000, but migrations
+   * against the shared RDS instance are applied by hand (see the note at the
+   * top of .github/workflows/deploy.yml). Reading or writing the column before
+   * that has happened would take down every fleet snapshot over a field that no
+   * row carries — so the type, the plumbing and the rendering all ship now, and
+   * two one-line changes here and in webhooks/raifactorysuite-events turn it on
+   * once the column is there.
+   */
+  serialNumber: string | null
   expectedReturnAt: string | null
   dueBackAt:     string | null
   dueBackSource: 'provider' | 'history' | null
@@ -119,6 +174,16 @@ export interface OpenTrip {
   /** Median spread of that measurement, and how many trips it came from. */
   destinationSpreadM: number
   destinationSamples: number
+  /**
+   * How the destination got its coordinates.
+   *
+   * 'stated'   the operator gave us the point (known-destinations). Samples is
+   *            0 and that is not a weakness — there is nothing to sample.
+   * 'measured' averaged from this fleet's completed trips to the name; grade
+   *            it by `destinationSamples` and `destinationSpreadM`.
+   * null       the name could not be placed at all; there is no far end.
+   */
+  destinationSource: 'stated' | 'measured' | null
   /**
    * What is on the bed right now, for a SALES run.
    *
@@ -181,6 +246,11 @@ export async function findOpenTripsByVehicle(organisationId: string): Promise<Ma
       externalId: true, vehicleId: true, driverName: true, destination: true,
       status: true, dispatchedAt: true, expectedReturnAt: true,
       kind: true, tonnageT: true, factoryCode: true,
+      // NOT serialNumber. See the field on OpenTrip below: the column exists in
+      // the schema and in prisma/migrations, and is read here the moment that
+      // migration has been applied to the shared RDS instance. Selecting it
+      // first would make every snapshot in the fleet fail on a column that is
+      // not there yet, which is a poor trade for a field no row carries.
     },
   })
   if (open.length === 0) return new Map()
@@ -201,14 +271,33 @@ export async function findOpenTripsByVehicle(organisationId: string): Promise<Ma
   const runs = [...current.values()]
 
   // Destination points, for the names in play only.
+  //
+  // A STATED point wins over a measured one. `dispatch_destinations` is built
+  // from completed round trips, and the Naitiri sugar run never produces one —
+  // the guard signs a truck out and back in minutes later, so all twelve live
+  // Raiply rows closed in under half an hour and the table holds nothing for
+  // the route. See known-destinations for why that is a permanent hole rather
+  // than a thin sample, and why the operator's gate is the better figure even
+  // when the measurement does exist.
   const names = [...new Set(runs.map(d => d.destination?.trim().toUpperCase()).filter(Boolean) as string[])]
-  const places = names.length
+  const measured = names.length
     ? await prisma.dispatchDestination.findMany({
         where:  { organisationId, name: { in: names } },
         select: { name: true, lat: true, lng: true, spreadM: true, samples: true },
       })
     : []
-  const placeByName = new Map(places.map(p => [p.name, p]))
+  const placeByName = new Map(measured.map(p => [p.name, p]))
+  // Which of the two placed each name, carried onward. `destinationSamples` is
+  // a count of completed trips and cannot answer this: a stated gate has none
+  // and always will, so a client grading confidence by sample count alone would
+  // caption the operator's own coordinate "approximate".
+  const statedNames = new Set<string>()
+  for (const name of names) {
+    const stated = knownDestination(name)
+    if (!stated) continue
+    statedNames.add(name)
+    placeByName.set(name, { name, lat: stated.lat, lng: stated.lng, spreadM: stated.spreadM, samples: 0 })
+  }
 
   const durations = await destinationDurations(organisationId)
 
@@ -307,12 +396,24 @@ export async function findOpenTripsByVehicle(organisationId: string): Promise<Ma
       dueBackSource = 'history'
     }
 
+    // The gate this run left from. A Menengai truck signed out at Naitiri
+    // starts at Naitiri; its owner's yard is 250 km away and is not where the
+    // wheels turned. Null falls the caller back to the organisation's hub.
+    const gate = d.factoryCode ? factoryOf(d.factoryCode) : null
+
     out.set(vehicleId, {
       externalId:   d.externalId,
       driverName:   d.driverName,
       destination:  d.destination,
       status:       d.status,
       dispatchedAt: d.dispatchedAt.toISOString(),
+      originLat:    gate?.lat   ?? null,
+      originLng:    gate?.lng   ?? null,
+      originName:   gate?.label ?? null,
+      departureIsSignOut: d.kind === 'SALES',
+      // Null until the migration lands — see the select above. Nothing is lost
+      // in the meantime: no row has a serial, because the provider sends none.
+      serialNumber: null,
       expectedReturnAt: d.expectedReturnAt?.toISOString() ?? null,
       dueBackAt:        dueBackAt?.toISOString() ?? null,
       dueBackSource,
@@ -320,6 +421,7 @@ export async function findOpenTripsByVehicle(organisationId: string): Promise<Ma
       destinationLng:     place?.lng ?? null,
       destinationSpreadM: place?.spreadM ?? 0,
       destinationSamples: place?.samples ?? 0,
+      destinationSource:  place ? (statedNames.has(key) ? 'stated' : 'measured') : null,
       // The load, named by the factory it left. A cane run declares no weight,
       // so these stay null and the card falls back to telemetry as before.
       cargoTonnes: d.kind === 'SALES' ? d.tonnageT : null,

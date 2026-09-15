@@ -2109,6 +2109,16 @@ model Dispatch {
   /// them yet.
   signOutPhotoUrl  String?   @map("sign_out_photo_url")
   returnPhotoUrl   String?   @map("return_photo_url")
+  /// The gate's own document number for this run, as a human reads it back.
+  ///
+  /// NOT the internal `externalId`, which is a UUID. The provider does not
+  /// model this field today and sends nothing that looks like one (the full
+  /// `/sales` payload shape is in webhooks/raifactorysuite-events' SaleEvent),
+  /// so every row is NULL and the surfaces that render it render nothing.
+  /// It exists so that the day a payload carries one, the value has somewhere
+  /// to land — the alternative was showing a UUID, which no guard can check a
+  /// truck against.
+  serialNumber     String?   @map("serial_number")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
   vehicle      Vehicle?     @relation(fields: [vehicleId], references: [id])
