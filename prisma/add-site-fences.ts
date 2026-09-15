@@ -11,10 +11,10 @@
  * Everything created here therefore has `externalId` NULL. That is the whole
  * mechanism: no external id, no upsert match, nothing to overwrite.
  *
- * Naitiri already has a Wialon fence (`wialon:zone:22`, 68.72 ha, inactive).
- * It is deliberately left alone — the surveyed ring is 46.56 ha and 98.6%
- * contained within it, i.e. the same site drawn 22 ha tighter. Two rows, one
- * dormant, is the price of a boundary the sync cannot touch.
+ * Only Raiply is created now. Naitiri already had a Wialon fence
+ * (`wialon:zone:22`, 68.72 ha) naming the same site, and two rows for one site
+ * meant two feed lines for one movement, so the surveyed Naitiri ring has been
+ * retired — see RETIRED below. Raiply has no provider zone at all.
  *
  * ## isActive is FALSE, and that is the whole point
  *
@@ -82,19 +82,6 @@ type Site = {
 
 const SITES: Site[] = [
   {
-    name: 'Naitiri Factory (surveyed)',
-    gate: [34.87704574, 0.781157685],
-    ring: [
-    [34.881483462,0.787252077], [34.875783612,0.782886858], [34.876997323,0.781201774],
-    [34.877050306,0.781212639], [34.877116614,0.781149096], [34.877074397,0.781088514],
-    [34.878813228,0.778702576], [34.883184238,0.78104791], [34.88133056,0.783317877],
-    [34.883552014,0.78480551], [34.883294917,0.785147214], [34.883736351,0.785420209],
-    [34.883578186,0.785711276], [34.883947038,0.785943223], [34.883935016,0.786050096],
-    [34.883400401,0.786704398], [34.884000686,0.787245583], [34.883868107,0.787514942],
-    [34.883649815,0.787600181], [34.881982677,0.787400488], [34.881483462,0.787252077]
-    ],
-  },
-  {
     name: 'Raiply',
     gate: [35.249393582, 0.530861608],
     ring: [
@@ -113,6 +100,26 @@ const SITES: Site[] = [
   },
 ]
 
+/**
+ * Fences this script used to create and must now remove.
+ *
+ * Naitiri was double-covered: Wialon's own `wialon:zone:22` already names the
+ * same site, so one lorry leaving produced two feed lines —
+ * "left Naitiri Factory." and "left Naitiri Factory (surveyed)." — and
+ * sometimes both inside one sentence. The surveyed ring was the tighter and
+ * better of the two, but the visual it existed to provide now comes from the
+ * `naitiri-site.geojson` site plan in `dash`, which needs no row here. So the
+ * duplicate goes and the provider's row stays, since that is the one the
+ * provider will keep re-creating anyway.
+ *
+ * Raiply has no Wialon zone. Its fence is the only thing that knows where
+ * Raiply is, and it stays.
+ *
+ * Listed rather than deleted-and-forgotten so a re-run converges on the same
+ * state instead of resurrecting what the last run removed.
+ */
+const RETIRED: string[] = ['Naitiri Factory (surveyed)']
+
 async function main() {
   console.log(`\n🗺  Surveyed site fences — ${APPLY ? 'APPLYING' : 'DRY RUN'}
 `)
@@ -122,6 +129,26 @@ async function main() {
   })
   if (!org) throw new Error(`organisation ${ORG_CODE} not found`)
   console.log(`org: ${org.name}\n`)
+
+  for (const name of RETIRED) {
+    const gone = await prisma.geofence.findFirst({
+      where: { organisationId: org.id, name },
+      select: { id: true, _count: { select: { vehicles: true, violations: true } } },
+    })
+    if (!gone) {
+      console.log(`  ${name.padEnd(28)} already absent`)
+      continue
+    }
+    // `VehicleGeofence` cascades; `GeofenceViolation` does not, and deleting a
+    // fence that has violations would erase the evidence for them, so refuse.
+    if (gone._count.violations > 0) {
+      throw new Error(
+        `${name}: ${gone._count.violations} violation(s) reference this fence — not deleting`)
+    }
+    console.log(
+      `  ${name.padEnd(28)} REMOVE  ${gone._count.vehicles} assignment(s) cascade`)
+    if (APPLY) await prisma.geofence.delete({ where: { id: gone.id } })
+  }
 
   for (const site of SITES) {
     const first = site.ring[0]
