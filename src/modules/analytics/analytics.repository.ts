@@ -706,6 +706,23 @@ export interface DriverRosterRow {
   id:                string
   fullName:          string
   status:            string
+  /**
+   * The unit this driver is on: the registration on their most recent trip,
+   * and where they have no trips, the unit they are posted to.
+   *
+   * LAST DRIVEN FIRST, deliberately. A posting is paperwork — it says where
+   * somebody was put, and it is written by the dispatch webhook, so it is as
+   * current as that integration happens to be; the trip is the truck they
+   * actually got into. But a driver on the registry who has not driven inside
+   * the history this query holds is not a driver on no vehicle, and a column
+   * of em-dashes for the whole night shift is worse than the weaker fact. So
+   * the posting fills the gap, and `vehicleFrom` says which of the two this
+   * is rather than letting the page guess.
+   */
+  vehicle:           string | null
+  /** 'trip' — the unit last driven. 'assignment' — an open posting, used only
+   *  where there is no trip to read. null — neither exists. */
+  vehicleFrom:       'trip' | 'assignment' | null
   rating:            number
   trips:             number
   tonnes:            number
@@ -835,12 +852,14 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   // trip each: the drivers' full trip history (with cargo + route for tonnage
   // and the heaviest-load callout), their fuel-theft rows, and the org's
   // overspeeding alerts (attributed to trips by vehicle + time window below).
-  const [trips, thefts, alerts] = await Promise.all([
+  const [trips, thefts, alerts, assignments] = await Promise.all([
     prisma.trip.findMany({
       where:  { driverId: { in: driverIds }, vehicle: { organisationId: orgId } },
       select: {
         driverId: true, vehicleId: true, beganAt: true, endedAt: true,
         mileageKm: true, durationSeconds: true, finalLocation: true,
+        // For the roster's vehicle column — the unit last driven.
+        vehicle:       { select: { registrationPlate: true } },
         route:         { select: { name: true, originName: true, destinationName: true } },
         cargoManifest: { select: { arrivalWeightKg: true, declaredWeightKg: true } },
       },
@@ -877,6 +896,22 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     prisma.vehicleAlert.findMany({
       where:  { organisationId: orgId, type: 'overspeeding' },
       select: { vehicleId: true, triggeredAt: true },
+    }),
+    // Open postings, for the drivers with no trip to read a unit off. The
+    // schema indexes exactly this ("which vehicle is this driver assigned to?"
+    // on userId + unassignedAt); the rows are written by the RaiFactorySuite
+    // dispatch webhook and by POST /vehicles/:id/assignments.
+    prisma.vehicleAssignment.findMany({
+      where: {
+        userId: { in: driverIds },
+        unassignedAt: null,
+        vehicle: { organisationId: orgId },
+      },
+      select: {
+        userId: true, assignmentType: true, assignedAt: true,
+        vehicle: { select: { registrationPlate: true } },
+      },
+      orderBy: { assignedAt: 'desc' },
     }),
   ])
 
@@ -1000,6 +1035,18 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     }
   }
 
+  /**
+   * One plate per driver: PRIMARY before any other kind, and the newest
+   * posting before an older one — a driver can hold two open rows (a primary
+   * unit and a relief), and a column shows one thing.
+   */
+  const postedPlate = new Map<string, string>()
+  for (const a of [...assignments].sort((x, y) =>
+    (x.assignmentType === y.assignmentType ? 0 : x.assignmentType === 'PRIMARY' ? -1 : 1)
+    || (y.assignedAt.getTime() - x.assignedAt.getTime()))) {
+    if (!postedPlate.has(a.userId)) postedPlate.set(a.userId, a.vehicle.registrationPlate)
+  }
+
   const roster: DriverRosterRow[] = []
   const details: Record<string, DriverDetail> = {}
 
@@ -1037,10 +1084,22 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     // Employment status escalated by lifetime conduct (see conductStatus) —
     // the roster badge and the detail header both use this derived value.
     const status = conductStatus(d.status, dTrips.length, chargeable, lifetimeOverspeed)
+
+    // `dTrips` is ordered by beganAt ascending, so the last entry is the most
+    // recent trip and its vehicle is the unit this driver was last in. Where
+    // there is no trip at all, the open posting stands in for it.
+    const lastDriven = dTrips.length ? dTrips[dTrips.length - 1].vehicle?.registrationPlate ?? null : null
+    const posted = postedPlate.get(d.id) ?? null
+    const vehicle = lastDriven ?? posted
+    const vehicleFrom: DriverRosterRow['vehicleFrom'] =
+      lastDriven ? 'trip' : posted ? 'assignment' : null
+
     roster.push({
       id:                d.id,
       fullName:          d.fullName,
       status,
+      vehicle,
+      vehicleFrom,
       rating,
       trips:             dTrips.length,
       tonnes:            toTonnes(lifetimeKg),
