@@ -1,5 +1,5 @@
 /**
- * The three mails this system sends.
+ * The mails this system sends.
  *
  * Inline template literals rather than .html files on purpose: the build is
  * `prisma generate && tsc`, tsc emits only .js, and there is no asset-copy
@@ -112,6 +112,104 @@ export function passwordChangedEmail(opts: { fullName: string; when: Date; ip?: 
       `<p style="margin:0 0 10px">Hello ${esc(opts.fullName)},</p>
        <p style="margin:0 0 10px">The password on your account was changed on <strong>${esc(stamp)}</strong>${from ? ` from ${esc(opts.ip!)}` : ''}. You were signed out everywhere else as part of the change.</p>
        <p style="margin:0;font-size:13px;color:#b91c1c">If this was not you, contact your organisation's administrator immediately.</p>`,
+    ),
+  }
+}
+/**
+ * A technician's repair report — the one mail here that is not about an
+ * account.
+ *
+ * Grouped by OUTCOME and ordered needs_spare, then cannot_fix, then fixed:
+ * actionable first. The person reading this has to order a part or take a unit
+ * off the road, and neither instruction should sit below a list of things that
+ * are already finished. Fixed units collapse to a single line of plates for
+ * the same reason — four lines of "fixed, nothing needed" is what makes a
+ * report get skimmed instead of read.
+ *
+ * There is deliberately NO matching "resolved" mail. A technician closing an
+ * item is closing their own loop, and mailing the same handlers to say that
+ * the thing they were told about is now done doubles the traffic for a fact
+ * already on the screen they were sent to.
+ */
+export function repairReportEmail(opts: {
+  orgName:        string
+  technicianName: string
+  reportedAt:     Date
+  note?:          string | undefined
+  /** APP_BASE_URL; blank when the mailer is configured but the origin is not. */
+  link?:          string | undefined
+  items: Array<{
+    plate:        string
+    label:        string
+    outcome:      'fixed' | 'needs_spare' | 'cannot_fix'
+    sparePart?:   string | undefined
+    problemNote?: string | undefined
+  }>
+}): RenderedMail {
+  type Item = (typeof opts.items)[number]
+
+  const spares  = opts.items.filter((i) => i.outcome === 'needs_spare')
+  const blocked = opts.items.filter((i) => i.outcome === 'cannot_fix')
+  const fixed   = opts.items.filter((i) => i.outcome === 'fixed')
+  const stamp   = opts.reportedAt.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
+
+  // The subject carries the triage, because a handler decides whether to open
+  // this from the inbox list rather than from the body.
+  const clauses: string[] = []
+  if (spares.length)  clauses.push(`${spares.length} need${spares.length === 1 ? 's' : ''} spares`)
+  if (blocked.length) clauses.push(`${blocked.length} cannot be fixed`)
+  const tail = clauses.length > 0 ? ` · ${clauses.join(' · ')}` : ' · all fixed'
+  const subject =
+    `[${opts.orgName}] Repair report — ${opts.items.length} unit${opts.items.length === 1 ? '' : 's'}${tail}`
+
+  const head = `${opts.technicianName} filed this at ${stamp} for ${opts.orgName}.`
+
+  const textGroup = (title: string, rows: Item[]): string => {
+    if (rows.length === 0) return ''
+    const body = rows.map((i) => {
+      const lines = [`  ${i.plate}   ${i.label}`]
+      if (i.sparePart)   lines.push(`             Part: ${i.sparePart}`)
+      if (i.problemNote) lines.push(`             ${i.problemNote}`)
+      return lines.join('\n')
+    }).join('\n')
+    return `\n${title} (${rows.length})\n${body}\n`
+  }
+
+  const htmlGroup = (title: string, colour: string, rows: Item[]): string => {
+    if (rows.length === 0) return ''
+    const body = rows.map((i) => `
+      <li style="margin:0 0 9px">
+        <strong>${esc(i.plate)}</strong> — ${esc(i.label)}
+        ${i.sparePart ? `<br><span style="color:#b45309">Part: ${esc(i.sparePart)}</span>` : ''}
+        ${i.problemNote ? `<br><span style="color:#475569;font-size:13px">${esc(i.problemNote)}</span>` : ''}
+      </li>`).join('')
+    return `<h2 style="font-size:14px;margin:18px 0 8px;color:${colour}">${esc(title)} (${rows.length})</h2>
+       <ul style="margin:0;padding-left:18px">${body}</ul>`
+  }
+
+  const fixedPlates = fixed.map((i) => i.plate).join(' · ')
+
+  return {
+    category: 'repair-report',
+    subject,
+    text:
+      `${head}\n` +
+      (opts.note ? `\n${opts.note}\n` : '') +
+      textGroup('Spare parts needed', spares) +
+      textGroup('Cannot be fixed', blocked) +
+      (fixed.length ? `\nFixed (${fixed.length})\n  ${fixedPlates}\n` : '') +
+      (opts.link ? `\nOpen the Maintenance screen: ${opts.link}\n` : ''),
+    html: shell(
+      'Repair report',
+      `<p style="margin:0 0 10px">${esc(head)}</p>
+       ${opts.note ? `<p style="margin:0 0 10px;color:#475569">${esc(opts.note)}</p>` : ''}
+       ${htmlGroup('Spare parts needed', '#b45309', spares)}
+       ${htmlGroup('Cannot be fixed', '#b91c1c', blocked)}
+       ${fixed.length ? `<h2 style="font-size:14px;margin:18px 0 8px;color:#15803d">Fixed (${fixed.length})</h2>
+       <p style="margin:0;color:#475569">${esc(fixedPlates)}</p>` : ''}`,
+      // Only when the origin is configured — the env header is explicit that a
+      // mail with a broken link is worse than a mail without one.
+      opts.link ? { href: opts.link, label: 'Open the Maintenance screen' } : undefined,
     ),
   }
 }

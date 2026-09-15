@@ -1,0 +1,173 @@
+/**
+ * What the handlers are told when a technician files a report — and, more
+ * often in this deployment, what they are NOT told.
+ *
+ * The production box carries no MAILTRAP keys, so `unconfigured` is the
+ * current live answer rather than an edge case. The thing that must never
+ * happen is a technician being shown a tick for a mail that did not leave the
+ * building: they would walk away believing the spare part had been ordered.
+ * Every assertion below is a variation on that one worry.
+ *
+ * sendMail is mocked rather than exercised. Its own contract — that it cannot
+ * reject, and resolves `{ sent: false }` instead — is already pinned in
+ * mailer.test.ts; what is under test here is the fold from N per-recipient
+ * results into the single status the dashboard prints.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+
+const sendMailMock = vi.hoisted(() => vi.fn())
+vi.mock('../../src/lib/mailer/mailer.js', () => ({ sendMail: sendMailMock }))
+
+const envMock = vi.hoisted(() => ({ REPAIR_NOTIFY_EMAILS: '', APP_BASE_URL: '' }))
+vi.mock('../../src/config/env.js', () => ({ env: envMock }))
+
+vi.mock('../../src/lib/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}))
+vi.mock('../../src/lib/prisma.js', () => ({ prisma: {} }))
+vi.mock('../../src/lib/notifications/notification.store.js', () => ({
+  publishNotificationDurable: vi.fn(),
+}))
+
+import { repairRecipients, notifyRepairReport } from '../../src/modules/repairs/repairs.service.js'
+import { repairReportEmail } from '../../src/lib/mailer/templates.js'
+
+const REPORTED_AT = new Date('2026-09-16T14:02:00Z')
+
+/** A mixed batch — the case the whole feature exists for. */
+const report = (): Parameters<typeof notifyRepairReport>[0] => ({
+  id: 'rep_1',
+  reportedAt: REPORTED_AT,
+  note: 'Yard was half flooded; three units unreachable.',
+  reportedBy: { id: 'u1', fullName: 'Amina Wanjiru', email: 'a@x.com' },
+  items: [
+    { outcome: 'needs_spare', faultKind: 'fuel_probe_dead', sparePart: 'Gill LS-5 float sender, 600 mm',
+      problemNote: 'Reads zero with the tank half full; harness continuity OK.',
+      vehicle: { registrationPlate: 'KBZ 431A' } },
+    { outcome: 'cannot_fix', faultKind: 'ignition_not_reporting', sparePart: null,
+      problemNote: 'Loom damaged behind the dash; unit must come off the road.',
+      vehicle: { registrationPlate: 'KBX 902Q' } },
+    { outcome: 'fixed', faultKind: 'gps_not_reporting', sparePart: null, problemNote: null,
+      vehicle: { registrationPlate: 'KBN 550L' } },
+    { outcome: 'fixed', faultKind: null, sparePart: null, problemNote: null,
+      vehicle: { registrationPlate: 'KCB 771D' } },
+  ],
+} as unknown as Parameters<typeof notifyRepairReport>[0])
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  envMock.REPAIR_NOTIFY_EMAILS = ''
+  envMock.APP_BASE_URL = ''
+  sendMailMock.mockResolvedValue({ sent: true })
+})
+
+describe('repairRecipients — one list, cleaned', () => {
+  it('trims, lowercases, dedupes and drops the empties a hand-edited env line leaves behind', () => {
+    envMock.REPAIR_NOTIFY_EMAILS = ' A@x.com , a@X.com ,, b@x.com '
+    expect(repairRecipients()).toEqual(['a@x.com', 'b@x.com'])
+  })
+
+  it('reads an unset list as nobody, not as a crash', () => {
+    expect(repairRecipients()).toEqual([])
+  })
+})
+
+describe('the send outcome is reported, never assumed', () => {
+  it('says no-recipients, and does not open a socket, when nobody is configured', async () => {
+    const out = await notifyRepairReport(report(), 'Rai Sugar', 'Amina Wanjiru')
+    expect(out.status).toBe('no-recipients')
+    expect(sendMailMock).not.toHaveBeenCalled()
+  })
+
+  it('says sent only when every recipient took it', async () => {
+    envMock.REPAIR_NOTIFY_EMAILS = 'a@x.com,b@x.com,c@x.com'
+    const out = await notifyRepairReport(report(), 'Rai Sugar', 'Amina Wanjiru')
+    expect(out.status).toBe('sent')
+    expect(out.sent).toHaveLength(3)
+    expect(out.failed).toEqual([])
+  })
+
+  it('says partial, and names who was missed, when one address fails', async () => {
+    envMock.REPAIR_NOTIFY_EMAILS = 'a@x.com,b@x.com,c@x.com'
+    sendMailMock
+      .mockResolvedValueOnce({ sent: true })
+      .mockResolvedValueOnce({ sent: false, reason: 'send-failed' })
+      .mockResolvedValueOnce({ sent: true })
+    const out = await notifyRepairReport(report(), 'Rai Sugar', 'Amina Wanjiru')
+    expect(out.status).toBe('partial')
+    expect(out.failed).toEqual(['b@x.com'])
+    expect(out.sent).toEqual(['a@x.com', 'c@x.com'])
+  })
+
+  it('distinguishes a dormant mailer from a failing one', async () => {
+    envMock.REPAIR_NOTIFY_EMAILS = 'a@x.com,b@x.com'
+    sendMailMock.mockResolvedValue({ sent: false, reason: 'unconfigured' })
+    expect((await notifyRepairReport(report(), 'Rai Sugar', 'A. W.')).status).toBe('unconfigured')
+
+    sendMailMock.mockResolvedValue({ sent: false, reason: 'send-failed' })
+    expect((await notifyRepairReport(report(), 'Rai Sugar', 'A. W.')).status).toBe('failed')
+  })
+})
+
+describe('the mail itself', () => {
+  const mail = () => repairReportEmail({
+    orgName: 'Rai Sugar',
+    technicianName: 'Amina Wanjiru',
+    reportedAt: REPORTED_AT,
+    items: [
+      { plate: 'KBZ 431A', label: 'Fuel probe dead', outcome: 'needs_spare',
+        sparePart: 'Gill LS-5 float sender', problemNote: 'Reads zero.' },
+      { plate: 'KBX 902Q', label: 'Ignition not reporting', outcome: 'cannot_fix',
+        problemNote: 'Loom damaged.' },
+      { plate: 'KBN 550L', label: 'GPS not reporting', outcome: 'fixed' },
+    ],
+  })
+
+  it('carries the triage in the subject, where a handler reads it', () => {
+    expect(mail().subject)
+      .toBe('[Rai Sugar] Repair report — 3 units · 1 needs spares · 1 cannot be fixed')
+  })
+
+  it('collapses to "all fixed" when there is nothing to action', () => {
+    const m = repairReportEmail({
+      orgName: 'Rai Sugar', technicianName: 'A. W.', reportedAt: REPORTED_AT,
+      items: [{ plate: 'KBN 550L', label: 'GPS not reporting', outcome: 'fixed' }],
+    })
+    expect(m.subject).toBe('[Rai Sugar] Repair report — 1 unit · all fixed')
+  })
+
+  it('puts the actionable groups above the finished one', () => {
+    const t = mail().text
+    expect(t.indexOf('Spare parts needed')).toBeLessThan(t.indexOf('Cannot be fixed'))
+    expect(t.indexOf('Cannot be fixed')).toBeLessThan(t.indexOf('Fixed ('))
+  })
+
+  it('names the part in the plain-text part, which some clients are all they render', () => {
+    expect(mail().text).toContain('Part: Gill LS-5 float sender')
+  })
+
+  it('escapes a part name that is trying to be markup', () => {
+    const m = repairReportEmail({
+      orgName: 'Rai Sugar', technicianName: 'A. W.', reportedAt: REPORTED_AT,
+      items: [{ plate: 'KBZ 431A', label: 'Fuel probe dead', outcome: 'needs_spare',
+        sparePart: '<script>alert(1)</script>' }],
+    })
+    expect(m.html).not.toContain('<script>')
+    expect(m.html).toContain('&lt;script&gt;')
+  })
+
+  it('offers no button when there is no origin to point it at', () => {
+    expect(mail().html).not.toContain('Open the Maintenance screen')
+  })
+
+  it('offers one when there is', () => {
+    const m = repairReportEmail({
+      orgName: 'Rai Sugar', technicianName: 'A. W.', reportedAt: REPORTED_AT,
+      link: 'https://fleet.example',
+      items: [{ plate: 'KBN 550L', label: 'GPS not reporting', outcome: 'fixed' }],
+    })
+    expect(m.html).toContain('https://fleet.example')
+    expect(m.text).toContain('Open the Maintenance screen: https://fleet.example')
+  })
+})

@@ -85,6 +85,18 @@ export const PERMISSION_CATALOGUE = {
   'fuel_theft:read':       'View fuel loss investigations',
   'fuel_theft:create':     'Raise a fuel loss case',
 
+  // Repair reporting. A technician walks the yard with a list of faulty
+  // probes, works through it, and files ONE report covering every unit they
+  // touched. `repair:create` raises that report; `repair:resolve` closes a
+  // single line of it later, when the spare arrived or the fix held.
+  //
+  // `resolve` rather than `update`: closing is the only mutation an item ever
+  // gets, and naming it `update` would invite a future edit-anything route to
+  // shelter under a grant that was handed out to mean "tick this off".
+  'repair:read':           'View repair reports',
+  'repair:create':         'File a repair report',
+  'repair:resolve':        'Close a repair job',
+
   // Device credentials. Minting one is a way to write telemetry for a whole
   // organisation, so it stays with administration rather than operations.
   'ingest_key:read':       'View device API keys',
@@ -151,6 +163,9 @@ const ORG_EVERYTHING: PermissionSlug[] = [
   'fuel_filling:read', 'fuel_filling:create',
   'fuel_theft:read', 'fuel_theft:create',
   'sensor:read',
+  // The office reads what technicians file. A repair report nobody upstream
+  // can open is a report that exists only in an inbox.
+  'repair:read', 'repair:create', 'repair:resolve',
   'vehicle:create', 'vehicle:update', 'vehicle:delete',
   'trip:create',
   'cargo:read', 'cargo:update', 'cargo:delete',
@@ -368,6 +383,55 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     ],
   },
 
+  {
+    slug: 'technician', name: 'Technician', platform: false, vehicleScopable: false,
+    description: 'Probe and sensor faults for their organisation, and the repairs they file against them. Nothing else.',
+    /*
+     * The narrowest role in the system, and narrower than `operator` above.
+     *
+     * `sensor:read` is the whole of the read grant that matters. It opens the
+     * Maint tab - the dash grades that button on exactly this slug, the same
+     * way it grades Fleet on `map:read` - and it opens the two feeds behind
+     * the only two tabs this role sees: /fuel/probe-health and
+     * /incidents/faults*. Deliberately NOT `analytics:read`; the header on
+     * incidents.routes named this role before it existed.
+     *
+     * WHAT IS ABSENT IS THE POINT, and each absence closes exactly one thing:
+     *   analytics:read     the Speed tab AND the Analytics screen
+     *   fuel_filling:read  the Fuel FSL tab (tank-state and fillings)
+     *   map:read           the Fleet tab, as it does for operator
+     *   driver:read        Drivers
+     *   weighbridge:read   Weighbridges
+     *   dashboard:read     /dashboard - there is no dashboard on this role's
+     *                      one screen, so granting it would only widen an API
+     *                      surface that nothing here draws
+     *
+     * VEHICLE:READ, TELEMETRY:READ AND NOTIFICATION:READ STAY, and not as
+     * leftovers - each is load-bearing for the Probes tab specifically:
+     *   vehicle:read + telemetry:read  ProbeHealthPanel merges the live
+     *     snapshot in per row; without them "Fuel now" is a dash on every row
+     *     and the coverage tiles above the table read zero.
+     *   notification:read  guards GET /organisations/:orgId/live, the SSE
+     *     stream that keeps that snapshot current. Drop it and a technician
+     *     reads a probe's "current" litres from ten minutes ago while standing
+     *     next to the tank. It grants the live FEED as a side effect; that is
+     *     a real widening, accepted knowingly, because a stale reading on a
+     *     diagnostic screen is the worse fault.
+     *
+     * NOT vehicleScopable. Narrowing a technician to a subset of the fleet
+     * would be theatre: probe-health and faults compute ORG-WIDE and are not
+     * vehicle scoped, which is the same objection `supervisor` raises against
+     * analytics:read. A scoped technician would still be handed every unit's
+     * probe health, quietly, through a screen that looks like it is showing
+     * them theirs.
+     */
+    permissions: [
+      ...TRACKING.filter((pm) => pm !== 'map:read'),
+      'sensor:read',
+      'repair:read', 'repair:create', 'repair:resolve',
+    ],
+  },
+
   // ── Back office ──────────────────────────────────────────────────────────
   {
     slug: 'hr', name: 'Human Resources (HR)', platform: false, vehicleScopable: false,
@@ -453,6 +517,7 @@ export const ASSIGNABLE_ROLE_SLUGS: string[] = [
   'asst_head_of_security',
   'supervisor',
   'operator',
+  'technician',
 ]
 
 export const VEHICLE_SCOPABLE_ROLE_SLUGS: string[] =
