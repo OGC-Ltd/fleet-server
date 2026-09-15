@@ -147,41 +147,45 @@ export interface OpenTrip {
    */
   departureIsSignOut: boolean
   /**
-   * The run's document number, as the gate wrote it. Null on every row today.
+   * The run's document number, as the gate wrote it.
    *
-   * The provider models no such field — see the sale payload in
-   * webhooks/raifactorysuite-events — so this is carried, not invented: it is
-   * populated only if a payload turns up with one, and the surfaces that show
-   * it show nothing when it is null rather than falling back to the internal
-   * UUID, which is not a number anybody at a gate can read back.
+   * Attached when the dispatch is raised, alongside the destination and the
+   * tonnage, and it displaces the due-back clock on every surface that shows a
+   * run — see DeliveryCard and VehicleStatsCard in dash. A serial is the thing
+   * a barrier asks a driver to read back; an estimated return time is not, and
+   * a row has no room for both.
    *
-   * Hard-wired to null, and there is NO column behind it.
+   * Carried, never invented. NULL where the payload had none, and the surfaces
+   * then fall back to the due-back rather than to `externalId`, which is a UUID
+   * and not a number anybody can read aloud at a gate.
    *
-   * There was, briefly, in schema.prisma — and it took the whole dispatch and
-   * sales ingest down for forty minutes on 2026-09-15. The reasoning behind it
-   * is worth keeping, because it is wrong in a way that looks careful: the
-   * column was added to the schema, the migration was left for a human (they
-   * are applied by hand against the shared RDS instance — see the note at the
-   * top of .github/workflows/deploy.yml), and the code was written neither to
-   * SELECT the field nor to WRITE it, which appeared to make the deploy safe in
-   * either order.
+   * ## Null on every row today, and that is the provider's doing
    *
-   * It is not, because a Prisma write RETURNS THE ROW. `prisma.dispatch.upsert`
-   * with no `select` returns every scalar field, and the generated client builds
-   * that RETURNING clause from schema.prisma — so every upsert asked Postgres
-   * for `serial_number` and got `42703 column does not exist`. handleSale and
-   * handleDispatch failed on every reconcile pass, and the symptom was not an
-   * error anyone was looking at: sign-outs simply stopped arriving, so a truck
-   * drove out of Naitiri with no trip behind it and the dash looked broken.
+   * The column exists now and is read here; the feeds are what is missing.
+   * Measured against the live responses on 2026-09-15: `/sales?factoryCode=
+   * NAITIRI` returns exactly eleven fields and `/dispatches` returns the two
+   * checklists, and no row in either carries a serial under any spelling. The
+   * number is attached in the factory system — it is simply not on the external
+   * API yet. `eventSerial` in webhooks/raifactorysuite-events reads the five
+   * names it could arrive under, so the day it is exposed it lands with no
+   * further deploy.
    *
-   * The rule, plainly: a column in schema.prisma is load-bearing for every
-   * write to that table the moment it exists, whether or not any code names it.
-   * Schema and database go together or not at all.
+   * ## The column and the schema line went in together
    *
-   * So the field stays as a null that the plumbing and the rendering carry, and
-   * the column arrives — schema line, migration, and `serialNumber: true` in
-   * the select below — as ONE change, applied before it deploys, on the day
-   * there is actually a serial to put in it.
+   * They have to. A Prisma write RETURNS THE ROW: `prisma.dispatch.upsert` with
+   * no `select` returns every scalar, and the generated client builds that
+   * RETURNING clause from schema.prisma — so a field declared there and missing
+   * in Postgres fails every write to the table, whether or not any code names
+   * it. That is what took dispatch and sales ingest down for forty minutes on
+   * 2026-09-15: schema line added, migration left for later, and the symptom
+   * was not an error anyone was watching — sign-outs simply stopped arriving,
+   * so a truck drove out of Naitiri with no trip behind it and the dash looked
+   * broken.
+   *
+   * The rule, plainly: schema and database go together or not at all. The
+   * migration is prisma/migrations/20260915190000_dispatch_serial_number, and
+   * it is applied to the shared RDS instance BEFORE the code that names the
+   * column deploys.
    */
   serialNumber: string | null
   expectedReturnAt: string | null
@@ -264,12 +268,7 @@ export async function findOpenTripsByVehicle(organisationId: string): Promise<Ma
     select: {
       externalId: true, vehicleId: true, driverName: true, destination: true,
       status: true, dispatchedAt: true, expectedReturnAt: true,
-      kind: true, tonnageT: true, factoryCode: true,
-      // NOT serialNumber. See the field on OpenTrip below: the column exists in
-      // the schema and in prisma/migrations, and is read here the moment that
-      // migration has been applied to the shared RDS instance. Selecting it
-      // first would make every snapshot in the fleet fail on a column that is
-      // not there yet, which is a poor trade for a field no row carries.
+      kind: true, tonnageT: true, factoryCode: true, serialNumber: true,
     },
   })
   if (open.length === 0) return new Map()
@@ -430,9 +429,9 @@ export async function findOpenTripsByVehicle(organisationId: string): Promise<Ma
       originLng:    gate?.lng   ?? null,
       originName:   gate?.label ?? null,
       departureIsSignOut: d.kind === 'SALES',
-      // Null until the migration lands — see the select above. Nothing is lost
-      // in the meantime: no row has a serial, because the provider sends none.
-      serialNumber: null,
+      // Whatever the gate wrote, or null where the payload carried nothing —
+      // which is still every row, because the provider exposes no such field.
+      serialNumber: d.serialNumber,
       expectedReturnAt: d.expectedReturnAt?.toISOString() ?? null,
       dueBackAt:        dueBackAt?.toISOString() ?? null,
       dueBackSource,
