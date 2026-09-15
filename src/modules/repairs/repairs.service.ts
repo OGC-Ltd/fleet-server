@@ -36,9 +36,18 @@ export function repairRecipients(): string[] {
 }
 
 const OUTCOME_LABEL: Record<string, string> = {
-  fixed:       'Fixed',
+  fixing:      'Fixing',
   needs_spare: 'Needs a spare part',
   cannot_fix:  'Cannot be fixed',
+}
+
+/** The ladder, for anything on this side that has to name a stage. */
+const STAGE_LABEL: Record<string, string> = {
+  pending:          'Pending',
+  spare_outsourced: 'Spare outsourced',
+  fixing:           'Fixing',
+  fixed:            'Fixed',
+  failed:           'Could not be fixed',
 }
 
 /** `fuel_probe_dead` -> `Fuel probe dead`. The episode kinds are snake_case. */
@@ -70,7 +79,7 @@ export async function notifyRepairReport(
     items: report.items.map((i) => ({
       plate:   i.vehicle.registrationPlate,
       label:   humanKind(i.faultKind),
-      outcome: i.outcome as 'fixed' | 'needs_spare' | 'cannot_fix',
+      outcome: i.outcome as 'fixing' | 'needs_spare' | 'cannot_fix',
       ...(i.sparePart   ? { sparePart:   i.sparePart }   : {}),
       ...(i.problemNote ? { problemNote: i.problemNote } : {}),
     })),
@@ -158,4 +167,4 @@ export async function submitRepairReport(orgId: string, userId: string, dto: Cre
   return { report, email }
 }
 
-export { OUTCOME_LABEL, humanKind }
+export { OUTCOME_LABEL, STAGE_LABEL, humanKind }

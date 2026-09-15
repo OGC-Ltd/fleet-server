@@ -1140,7 +1140,12 @@ model RepairReportItem {
   /// what the technician was sent out for.
   faultKind String? @map("fault_kind")
 
-  /// 'fixed' | 'needs_spare' | 'cannot_fix'
+  /// 'fixing' | 'needs_spare' | 'cannot_fix'
+  ///
+  /// What the technician DID on the day, frozen. Not where the job is — that
+  /// is `stage`, which keeps moving after the report is filed. The first
+  /// value was 'fixed' and it was wrong: filing a report is the start of the
+  /// work, not the end of it.
   outcome String
   /// The part, named by the technician. Required when outcome = 'needs_spare',
   /// and enforced in Postgres too — the whole point of that outcome is that
@@ -1150,6 +1155,28 @@ model RepairReportItem {
   /// What they found. Required for needs_spare and cannot_fix, optional for a
   /// clean fix, which explains itself.
   problemNote String? @map("problem_note")
+
+  /// 'pending' | 'spare_outsourced' | 'fixing' | 'fixed' | 'failed'
+  ///
+  /// Where the job is now, seeded from the outcome when the report is filed
+  /// ('fixing' stays, 'needs_spare' lands on 'pending' because naming a part
+  /// is not ordering one, 'cannot_fix' lands on 'failed') and moved by hand
+  /// afterwards.
+  ///
+  /// 'fixed' is reachable ONLY through the resolve route, which demands an
+  /// account of the fix — Postgres holds that rule too, in migration
+  /// 20260916140000_repair_item_stage. 'failed' is NOT absorbing: an open job
+  /// sitting at 'failed' is one this technician could not fix, waiting for
+  /// somebody with more kit.
+  stage String @default("pending")
+  /// When it last moved. Sorting, and "stuck for three weeks", without
+  /// reaching into the history JSON.
+  stageChangedAt DateTime? @map("stage_changed_at")
+  /// How it got here: `[{ stage, at, by, byName?, note? }]`, appended to on
+  /// every move. JSONB rather than a table because nothing joins against a
+  /// past stage — one detail panel draws one tracking line for one item, the
+  /// same shape `RepairReport.emailDetail` uses next door.
+  stageHistory Json? @map("stage_history")
 
   /// Sign-off. Null = still open.
   resolvedAt     DateTime? @map("resolved_at")
@@ -1168,6 +1195,8 @@ model RepairReportItem {
   @@index([reportId])
   /// The open-jobs list, and the "Reported" badge on the probe table.
   @@index([organisationId, resolvedAt])
+  /// "What is stuck, and where" — the Repairs tab's stage filter.
+  @@index([organisationId, stage])
   /// One unit's repair history.
   @@index([vehicleId, createdAt])
   @@map("repair_report_items")

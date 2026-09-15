@@ -48,9 +48,9 @@ const report = (): Parameters<typeof notifyRepairReport>[0] => ({
     { outcome: 'cannot_fix', faultKind: 'ignition_not_reporting', sparePart: null,
       problemNote: 'Loom damaged behind the dash; unit must come off the road.',
       vehicle: { registrationPlate: 'KBX 902Q' } },
-    { outcome: 'fixed', faultKind: 'gps_not_reporting', sparePart: null, problemNote: null,
+    { outcome: 'fixing', faultKind: 'gps_not_reporting', sparePart: null, problemNote: null,
       vehicle: { registrationPlate: 'KBN 550L' } },
-    { outcome: 'fixed', faultKind: null, sparePart: null, problemNote: null,
+    { outcome: 'fixing', faultKind: null, sparePart: null, problemNote: null,
       vehicle: { registrationPlate: 'KCB 771D' } },
   ],
 } as unknown as Parameters<typeof notifyRepairReport>[0])
@@ -120,7 +120,7 @@ describe('the mail itself', () => {
         sparePart: 'Gill LS-5 float sender', problemNote: 'Reads zero.' },
       { plate: 'KBX 902Q', label: 'Ignition not reporting', outcome: 'cannot_fix',
         problemNote: 'Loom damaged.' },
-      { plate: 'KBN 550L', label: 'GPS not reporting', outcome: 'fixed' },
+      { plate: 'KBN 550L', label: 'GPS not reporting', outcome: 'fixing' },
     ],
   })
 
@@ -129,18 +129,18 @@ describe('the mail itself', () => {
       .toBe('[Rai Sugar] Repair report — 3 units · 1 needs spares · 1 cannot be fixed')
   })
 
-  it('collapses to "all fixed" when there is nothing to action', () => {
+  it('collapses to "all in hand" when there is nothing to action', () => {
     const m = repairReportEmail({
       orgName: 'Rai Sugar', technicianName: 'A. W.', reportedAt: REPORTED_AT,
-      items: [{ plate: 'KBN 550L', label: 'GPS not reporting', outcome: 'fixed' }],
+      items: [{ plate: 'KBN 550L', label: 'GPS not reporting', outcome: 'fixing' }],
     })
-    expect(m.subject).toBe('[Rai Sugar] Repair report — 1 unit · all fixed')
+    expect(m.subject).toBe('[Rai Sugar] Repair report — 1 unit · all in hand')
   })
 
   it('puts the actionable groups above the finished one', () => {
     const t = mail().text
     expect(t.indexOf('Spare parts needed')).toBeLessThan(t.indexOf('Cannot be fixed'))
-    expect(t.indexOf('Cannot be fixed')).toBeLessThan(t.indexOf('Fixed ('))
+    expect(t.indexOf('Cannot be fixed')).toBeLessThan(t.indexOf('Being fixed ('))
   })
 
   it('names the part in the plain-text part, which some clients are all they render', () => {
@@ -165,7 +165,7 @@ describe('the mail itself', () => {
     const m = repairReportEmail({
       orgName: 'Rai Sugar', technicianName: 'A. W.', reportedAt: REPORTED_AT,
       link: 'https://fleet.example',
-      items: [{ plate: 'KBN 550L', label: 'GPS not reporting', outcome: 'fixed' }],
+      items: [{ plate: 'KBN 550L', label: 'GPS not reporting', outcome: 'fixing' }],
     })
     expect(m.html).toContain('https://fleet.example')
     expect(m.text).toContain('Open the Maintenance screen: https://fleet.example')
