@@ -25,14 +25,21 @@ export type Stage = (typeof STAGES)[number]
 /**
  * The stage a filed outcome lands on.
  *
- * 'needs_spare' lands on 'pending' rather than 'spare_outsourced' because
- * NAMING a part is not ORDERING one — somebody moves the job on when the part
- * is actually on its way, and the gap between those two facts is the thing
- * this whole ladder exists to make visible.
+ * NOTHING SEEDS 'pending', AND THAT IS THE POINT. 'pending' is what a broken
+ * probe IS before anybody has been out to it — a fault the fleet can see and
+ * nobody has taken on. It has no row in this table, so it is computed on the
+ * dashboard from probe health, and the first thing filing a report does is
+ * take the unit OUT of it.
+ *
+ * Which is why 'needs_spare' lands on 'spare_outsourced': by the time a
+ * technician has stood at the unit and named the part, the waiting has started
+ * and the report is what sets the order going. An earlier version landed it
+ * back on 'pending' to distinguish "named" from "ordered", and that read as
+ * the report having achieved nothing.
  */
 export const STAGE_FOR_OUTCOME: Record<(typeof OUTCOMES)[number], Stage> = {
   fixing:      'fixing',
-  needs_spare: 'pending',
+  needs_spare: 'spare_outsourced',
   cannot_fix:  'failed',
 }
 
