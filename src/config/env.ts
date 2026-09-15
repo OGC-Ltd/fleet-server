@@ -131,6 +131,20 @@ const schema = z.object({
   /** Dashboard origin, used to build the links in invite and reset mails. */
   APP_BASE_URL:       z.string().optional().default(''),
 
+  /**
+   * Who is told when a technician files a repair report. Comma-separated.
+   *
+   * ONE list for every organisation, deliberately. The people who order probe
+   * spares are one team across every tenant, and a per-org table would be a
+   * second place to keep a value that has one answer. Revisit when a second
+   * team actually appears, not before.
+   *
+   * Empty is a working state, not a broken one: the report is still filed and
+   * still reaches the live feed, it simply mails nobody — and the API says so
+   * in `email.status` rather than reporting a send that did not happen.
+   */
+  REPAIR_NOTIFY_EMAILS: z.string().optional().default(''),
+
   // How long an emailed link stays good. An invite is generous because it may
   // wait for someone's Monday; a reset is short because it is a live
   // credential for an account that already exists.

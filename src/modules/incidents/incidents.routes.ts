@@ -9,8 +9,10 @@
  * - Speeding is driver-conduct analytics, and `/analytics/speeding` already
  *   guards the same data with `analytics:read`.
  * - Faults are sensor health, matching `/fuel/probe-health`. It matters that
- *   this is not `analytics:read`: the technician roles hold `sensor:read` and
- *   not the other, and they are exactly the people who fix sensors.
+ *   this is not `analytics:read`: the `technician` role holds `sensor:read`
+ *   and not the other, and they are exactly the people who fix sensors. That
+ *   role did not exist when this was written and the argument was hypothetical;
+ *   it exists now, and the Malfunction tab is one of the two screens it opens.
  */
 
 import { Router } from 'express'

@@ -32,6 +32,7 @@ import weighmentRoutes from './modules/weighments/weighment.routes.js'
 import apiKeyRoutes from './modules/api-keys/api-key.routes.js'
 import analyticsRoutes from './modules/analytics/analytics.routes.js'
 import incidentsRoutes     from './modules/incidents/incidents.routes.js'
+import repairRoutes       from './modules/repairs/repairs.routes.js'
 import dashboardRoutes from './modules/dashboard/dashboard.routes.js'
 import * as dashboard from './modules/dashboard/dashboard.service.js'
 import { notificationsOrgRouter } from './modules/notifications/notifications.router.js'
@@ -253,6 +254,7 @@ export function createApp() {
   app.use(`${orgBase}/api-keys`, apiKeyRoutes)
   app.use(`${orgBase}/analytics`, analyticsRoutes)
   app.use(`${orgBase}/incidents`, incidentsRoutes)
+  app.use(`${orgBase}/repairs`, repairRoutes)
   app.use(`${orgBase}/dashboard`, dashboardRoutes)
 
   // Org-wide dashboard SSE stream + push subscription management

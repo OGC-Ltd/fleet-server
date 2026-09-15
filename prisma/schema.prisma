@@ -243,6 +243,8 @@ model Organisation {
   dispatches           Dispatch[]
   dispatchDestinations DispatchDestination[]
   weighments           Weighment[]
+  repairReports        RepairReport[]
+  repairReportItems    RepairReportItem[]
 
   @@map("organisations")
 }
@@ -367,6 +369,12 @@ model User {
 
   // Notifications
   pushSubscriptions PushSubscription[]
+
+  // Repairs: what they filed, and what they later signed off. Two relations
+  // because the technician who reports a fault is often not the one who closes
+  // it - the spare arrives on a different day and sometimes in different hands.
+  repairReportsFiled  RepairReport[]     @relation("RepairReportsFiled")
+  repairItemsResolved RepairReportItem[] @relation("RepairItemsResolved")
 
   @@index([organisationId])
   @@index([email])
@@ -656,6 +664,7 @@ model Vehicle {
   notifications      Notification[]
   dispatches         Dispatch[]
   weighments         Weighment[]
+  repairReportItems  RepairReportItem[]
 
   @@index([organisationId])
   @@index([vehicleGroupId])
@@ -1044,6 +1053,7 @@ model SensorFaultEpisode {
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
   vehicle      Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  repairItems  RepairReportItem[]
 
   @@unique([vehicleId, kind, startedAt])
   @@index([organisationId, startedAt])
@@ -1052,6 +1062,115 @@ model SensorFaultEpisode {
   @@index([organisationId, kind, recoveredAt])
   @@index([organisationId, day])
   @@map("sensor_fault_episodes")
+}
+
+/// One technician's trip to the yard, filed as one report.
+///
+/// A technician selects several faulty units at once, works through them, and
+/// files ONCE. The batch is the unit of REPORTING — one row here, one email —
+/// and the item below is the unit of WORK, because a batch routinely splits:
+/// four fixed on the spot, two waiting on a part, one that needs the unit off
+/// the road. That split is the whole reason this is two tables and not one.
+model RepairReport {
+  id             String @id @default(cuid())
+  organisationId String @map("organisation_id")
+
+  /// Who filed it. Not nullable: a repair report with no author is a rumour.
+  reportedById String   @map("reported_by_id")
+  reportedAt   DateTime @default(now()) @map("reported_at")
+
+  /// Free text about the visit as a whole — access, weather, why half the list
+  /// could not be reached. Per-unit detail belongs on the item, not here.
+  note String?
+
+  /// What actually happened to the mail, recorded because it routinely does
+  /// not send: the box carries no MAILTRAP keys today, so sendMail returns
+  /// { sent:false, reason:'unconfigured' } and the report is filed anyway.
+  /// 'pending' | 'sent' | 'partial' | 'failed' | 'unconfigured' | 'no-recipients'
+  emailStatus String    @default("pending") @map("email_status")
+  emailSentAt DateTime? @map("email_sent_at")
+  /// { recipients: string[], sent: string[], failed: string[] }. The addresses
+  /// are COPIED here rather than looked up later, because REPAIR_NOTIFY_EMAILS
+  /// is env config and can change between the send and the question.
+  emailDetail Json? @map("email_detail")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  organisation Organisation       @relation(fields: [organisationId], references: [id])
+  reportedBy   User               @relation("RepairReportsFiled", fields: [reportedById], references: [id])
+  items        RepairReportItem[]
+
+  @@index([organisationId, reportedAt])
+  @@index([reportedById, reportedAt])
+  @@map("repair_reports")
+}
+
+/// One unit inside a repair report, from the verdict at the yard to the moment
+/// it was signed off.
+///
+/// Open/closed is `resolvedAt`, the same nullable-open shape
+/// SensorFaultEpisode uses for `recoveredAt`: null is "still outstanding", and
+/// there is no boolean that can disagree with the timestamp.
+///
+/// The TARGET is typed, not polymorphic — there is no untyped id column here.
+/// `vehicleId` is always set, because probe health is COMPUTED (see
+/// fuel-probe-health.service) and has no row to point at, so a probe job can
+/// only be named by its unit. `faultEpisodeId` points at the durable episode
+/// when the job came off the Malfunction tab instead.
+///
+/// NOTE: this table also carries a PARTIAL UNIQUE INDEX that Prisma cannot
+/// express — one open job per target, in migration 20260916120000_repair_reports.
+/// A `prisma db pull` will not see it and a diff may propose dropping it. Do
+/// not let it: two technicians reporting the same dead probe on the same
+/// morning is the normal failure, and it doubles the spare-part order.
+model RepairReportItem {
+  id       String @id @default(cuid())
+  reportId String @map("report_id")
+  /// Denormalised from the report, as SensorFaultEpisode denormalises it from
+  /// the vehicle: every tenant-scoped read of items is then one table, and the
+  /// open-jobs query the Probes tab runs on every load needs no join to filter.
+  organisationId String @map("organisation_id")
+
+  /// 'probe' | 'fault'
+  targetKind     String  @map("target_kind")
+  vehicleId      String  @map("vehicle_id")
+  faultEpisodeId String? @map("fault_episode_id")
+  /// The episode's `kind` COPIED at report time. The episode can recover and be
+  /// superseded while the spare is still on order; the report must go on saying
+  /// what the technician was sent out for.
+  faultKind String? @map("fault_kind")
+
+  /// 'fixed' | 'needs_spare' | 'cannot_fix'
+  outcome String
+  /// The part, named by the technician. Required when outcome = 'needs_spare',
+  /// and enforced in Postgres too — the whole point of that outcome is that
+  /// somebody downstream has to order something, and "needs a part" with no
+  /// part named is a request nobody can act on.
+  sparePart String? @map("spare_part")
+  /// What they found. Required for needs_spare and cannot_fix, optional for a
+  /// clean fix, which explains itself.
+  problemNote String? @map("problem_note")
+
+  /// Sign-off. Null = still open.
+  resolvedAt     DateTime? @map("resolved_at")
+  resolvedById   String?   @map("resolved_by_id")
+  fixNote        String?   @map("fix_note")
+  recommendation String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  report       RepairReport        @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  organisation Organisation        @relation(fields: [organisationId], references: [id])
+  vehicle      Vehicle             @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  resolvedBy   User?               @relation("RepairItemsResolved", fields: [resolvedById], references: [id])
+  faultEpisode SensorFaultEpisode? @relation(fields: [faultEpisodeId], references: [id], onDelete: SetNull)
+
+  @@index([reportId])
+  /// The open-jobs list, and the "Reported" badge on the probe table.
+  @@index([organisationId, resolvedAt])
+  /// One unit's repair history.
+  @@index([vehicleId, createdAt])
+  @@map("repair_report_items")
 }
 
 /// Per-unit-per-day incident counts, so month-over-month survives the 90-day
