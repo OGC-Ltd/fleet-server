@@ -75,6 +75,47 @@ export interface DispatchEvent {
   id: string; factoryCode: string; vehicleNumberPlate: string; driverName: string
   vehicleType?: string | null; destinationOrPurpose?: string | null; status?: string | null
   dispatchTime?: string | null; expectedReturnTime?: string | null; actualReturnTime?: string | null
+  /** The gate's document number. See `eventSerial` — absent on every row the
+   *  provider sends today, and read from both feeds because the number is
+   *  attached when the run is RAISED, which both of them describe. */
+  serialNumber?: string | null; serialNo?: string | null
+  gatePassNo?:   string | null; documentNo?: string | null
+  referenceNo?:  string | null
+}
+
+/**
+ * The run's document number, or null.
+ *
+ * ## Why five spellings
+ *
+ * The number exists in the factory system — it is attached when a dispatch is
+ * raised, alongside the destination and the tonnage — but it is not on the
+ * external API. Measured against the live `/sales` and `/dispatches` responses
+ * on 2026-09-15: `/sales` returns exactly eleven fields and `/dispatches`
+ * returns the two checklists, and neither carries a serial under any name. The
+ * only gate-pass thing on the wire is `gatePassPhotoUrl` — a PHOTOGRAPH of the
+ * pass, not its number, and null on most rows.
+ *
+ * So the value will arrive whenever the provider chooses to expose it, under a
+ * spelling nobody has told us in advance. Reading five costs one `??` chain;
+ * guessing one and guessing wrong means the field lands on the wire and is
+ * silently dropped, and nobody finds out until an operator asks why the shield
+ * never appeared.
+ *
+ * ## An empty string is a null
+ *
+ * A provider that models a field without populating it tends to send `""`, and
+ * `""` rendered beside a shield icon is a label with nothing after it.
+ */
+function eventSerial(
+  e: {
+    serialNumber?: string | null; serialNo?: string | null
+    gatePassNo?: string | null; documentNo?: string | null; referenceNo?: string | null
+  },
+): string | null {
+  const raw = e.serialNumber ?? e.serialNo ?? e.gatePassNo ?? e.documentNo ?? e.referenceNo
+  const trimmed = typeof raw === 'string' ? raw.trim() : ''
+  return trimmed.length > 0 ? trimmed : null
 }
 
 export interface MovementEvent {
@@ -125,6 +166,7 @@ export async function handleDispatch(
     plate:            org.plate,
     driverName:       d.driverName.trim(),
     destination:      d.destinationOrPurpose?.trim() || null,
+    serialNumber:     eventSerial(d),
     status:           (d.status ?? 'DISPATCHED').toUpperCase(),
     dispatchedAt:     when,
     expectedReturnAt: parseProviderTime(d.expectedReturnTime),
@@ -346,32 +388,11 @@ export interface SaleEvent {
   status?: string | null
   signOutTime?: string | null; signOutPhotoUrl?: string | null
   returnTime?:  string | null; returnPhotoUrl?:  string | null
-  /**
-   * The gate's document number, under whichever name the provider gives it.
-   *
-   * Every one of these is optional and every one is absent today: the observed
-   * payload is exactly the eleven fields above (measured against the live
-   * /sales response, 2026-09-15). They are declared because the field is one we
-   * have been asked to display and there is no way to know in advance which
-   * spelling it will arrive under — and reading several costs nothing, whereas
-   * guessing wrong means the value lands and is silently dropped.
-   */
+  /** The gate's document number, under whichever name it turns up in. Every
+   *  one optional, every one absent today — see `eventSerial` above. */
   serialNumber?: string | null; serialNo?: string | null
   gatePassNo?:   string | null; documentNo?: string | null
   referenceNo?:  string | null
-}
-
-/**
- * The run's document number, or null.
- *
- * Trimmed, and an empty string is a null — a provider that models the field
- * without populating it tends to send `""`, and `""` rendered beside a shield
- * icon is a label with nothing after it.
- */
-function saleSerial(s: SaleEvent): string | null {
-  const raw = s.serialNumber ?? s.serialNo ?? s.gatePassNo ?? s.documentNo ?? s.referenceNo
-  const trimmed = typeof raw === 'string' ? raw.trim() : ''
-  return trimmed.length > 0 ? trimmed : null
 }
 
 /** Re-exported so callers that already import the bag maths from the sales
@@ -459,12 +480,17 @@ export async function handleSale(
     expectedReturnAt: null,
     actualReturnAt:   returnedAt,
     tonnageT:         s.tonnage ?? null,
-    // serialNumber: saleSerial(s) — there is no column to write it to. Adding
-    // one to schema.prisma ahead of the migration broke this upsert outright
-    // (Prisma returns the whole row, so RETURNING named a column Postgres did
-    // not have) and stopped every sign-out landing for forty minutes. See the
-    // field's note on OpenTrip in dispatches/dispatch.repository; `saleSerial`
-    // returns null for every payload the provider currently sends in any case.
+    // The number the gate writes on the pass, where the payload carries one.
+    // Null on every row the provider sends today, which is why this is written
+    // unconditionally rather than guarded: there is nothing to guard, and the
+    // day a serial appears on the wire it lands with no further deploy.
+    //
+    // The column behind it went in as ONE change with this line and the select
+    // in dispatches/dispatch.repository, migration applied to RDS first. The
+    // earlier attempt added the schema line alone and took dispatch and sales
+    // ingest down for forty minutes — a Prisma upsert RETURNS THE ROW, so it
+    // asked Postgres for a column that was not there.
+    serialNumber:     eventSerial(s),
     signOutPhotoUrl:  s.signOutPhotoUrl ?? null,
     returnPhotoUrl:   s.returnPhotoUrl ?? null,
     source,

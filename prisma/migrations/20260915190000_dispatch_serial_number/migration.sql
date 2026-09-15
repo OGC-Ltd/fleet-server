@@ -1,0 +1,15 @@
+-- The gate's document number for a run.
+--
+-- Nullable and with no default, so this is a catalogue-only change on
+-- Postgres 11+: no table rewrite, no lock held while 40,000 rows are copied.
+-- Every existing row keeps a NULL, which is the honest value — none of them
+-- carried a serial, because the provider has never sent one.
+--
+-- APPLY THIS BEFORE THE CODE THAT NAMES IT DEPLOYS. Migrations here are run by
+-- hand against the shared RDS instance (see the note at the top of
+-- .github/workflows/deploy.yml), and a Prisma write returns the whole row — so
+-- the moment `serialNumber` exists in schema.prisma, every upsert to this
+-- table asks Postgres for `serial_number`. If the column is not there yet the
+-- upsert fails with 42703 and sign-outs stop arriving silently, which is
+-- exactly what happened on 2026-09-15.
+ALTER TABLE "dispatches" ADD COLUMN "serial_number" TEXT;

@@ -2072,6 +2072,29 @@ model Dispatch {
   driverName       String    @map("driver_name")
   /// Free text, verbatim from the provider. Never parsed into coordinates.
   destination      String?
+  /// The gate's document number for this run, as the dispatcher wrote it.
+  ///
+  /// Attached when the dispatch is raised, alongside the destination and the
+  /// tonnage, and it is what a barrier asks a driver to read back — so the
+  /// surfaces that show it show it INSTEAD of the due-back clock, not beside
+  /// it (see DeliveryCard and VehicleStatsCard in dash).
+  ///
+  /// Carried, never invented. It is written only from a payload that actually
+  /// contains one and stays NULL otherwise: falling back to `externalId` would
+  /// put a UUID under a shield icon, which is not a number anybody at a gate
+  /// can read back. Measured against the live /sales and /dispatches responses
+  /// on 2026-09-15, no row carries one yet — the field is modelled upstream
+  /// but not exposed on the external API — so this is the column waiting for
+  /// them, and `eventSerial` in webhooks/raifactorysuite-events reads the five
+  /// spellings it could arrive under.
+  ///
+  /// NOTE for anyone adding the NEXT column here: schema and database go
+  /// together or not at all. A Prisma write RETURNS THE ROW, and the generated
+  /// client builds that RETURNING clause from this file — so a column declared
+  /// here and missing in Postgres fails every upsert to this table, whether or
+  /// not any code names it. That is what took dispatch and sales ingest down
+  /// for forty minutes on 2026-09-15. Migration first, then the deploy.
+  serialNumber     String?   @map("serial_number")
   /// The provider factory this run STARTED from (see webhooks/factory-map).
   ///
   /// The provider records a destination and never an origin, and until this
