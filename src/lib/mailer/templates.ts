@@ -119,11 +119,11 @@ export function passwordChangedEmail(opts: { fullName: string; when: Date; ip?: 
  * A technician's repair report — the one mail here that is not about an
  * account.
  *
- * Grouped by OUTCOME and ordered needs_spare, then cannot_fix, then fixed:
+ * Grouped by OUTCOME and ordered needs_spare, then cannot_fix, then fixing:
  * actionable first. The person reading this has to order a part or take a unit
  * off the road, and neither instruction should sit below a list of things that
- * are already finished. Fixed units collapse to a single line of plates for
- * the same reason — four lines of "fixed, nothing needed" is what makes a
+ * are already in hand. Units under repair collapse to one line of plates for
+ * the same reason — four lines of "in hand, nothing needed" is what makes a
  * report get skimmed instead of read.
  *
  * There is deliberately NO matching "resolved" mail. A technician closing an
@@ -141,7 +141,7 @@ export function repairReportEmail(opts: {
   items: Array<{
     plate:        string
     label:        string
-    outcome:      'fixed' | 'needs_spare' | 'cannot_fix'
+    outcome:      'fixing' | 'needs_spare' | 'cannot_fix'
     sparePart?:   string | undefined
     problemNote?: string | undefined
   }>
@@ -150,7 +150,7 @@ export function repairReportEmail(opts: {
 
   const spares  = opts.items.filter((i) => i.outcome === 'needs_spare')
   const blocked = opts.items.filter((i) => i.outcome === 'cannot_fix')
-  const fixed   = opts.items.filter((i) => i.outcome === 'fixed')
+  const fixing  = opts.items.filter((i) => i.outcome === 'fixing')
   const stamp   = opts.reportedAt.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
 
   // The subject carries the triage, because a handler decides whether to open
@@ -158,7 +158,7 @@ export function repairReportEmail(opts: {
   const clauses: string[] = []
   if (spares.length)  clauses.push(`${spares.length} need${spares.length === 1 ? 's' : ''} spares`)
   if (blocked.length) clauses.push(`${blocked.length} cannot be fixed`)
-  const tail = clauses.length > 0 ? ` · ${clauses.join(' · ')}` : ' · all fixed'
+  const tail = clauses.length > 0 ? ` · ${clauses.join(' · ')}` : ' · all in hand'
   const subject =
     `[${opts.orgName}] Repair report — ${opts.items.length} unit${opts.items.length === 1 ? '' : 's'}${tail}`
 
@@ -187,7 +187,7 @@ export function repairReportEmail(opts: {
        <ul style="margin:0;padding-left:18px">${body}</ul>`
   }
 
-  const fixedPlates = fixed.map((i) => i.plate).join(' · ')
+  const fixingPlates = fixing.map((i) => i.plate).join(' · ')
 
   return {
     category: 'repair-report',
@@ -197,7 +197,7 @@ export function repairReportEmail(opts: {
       (opts.note ? `\n${opts.note}\n` : '') +
       textGroup('Spare parts needed', spares) +
       textGroup('Cannot be fixed', blocked) +
-      (fixed.length ? `\nFixed (${fixed.length})\n  ${fixedPlates}\n` : '') +
+      (fixing.length ? `\nBeing fixed (${fixing.length})\n  ${fixingPlates}\n` : '') +
       (opts.link ? `\nOpen the Maintenance screen: ${opts.link}\n` : ''),
     html: shell(
       'Repair report',
@@ -205,8 +205,8 @@ export function repairReportEmail(opts: {
        ${opts.note ? `<p style="margin:0 0 10px;color:#475569">${esc(opts.note)}</p>` : ''}
        ${htmlGroup('Spare parts needed', '#b45309', spares)}
        ${htmlGroup('Cannot be fixed', '#b91c1c', blocked)}
-       ${fixed.length ? `<h2 style="font-size:14px;margin:18px 0 8px;color:#15803d">Fixed (${fixed.length})</h2>
-       <p style="margin:0;color:#475569">${esc(fixedPlates)}</p>` : ''}`,
+       ${fixing.length ? `<h2 style="font-size:14px;margin:18px 0 8px;color:#15803d">Being fixed (${fixing.length})</h2>
+       <p style="margin:0;color:#475569">${esc(fixingPlates)}</p>` : ''}`,
       // Only when the origin is configured — the env header is explicit that a
       // mail with a broken link is worse than a mail without one.
       opts.link ? { href: opts.link, label: 'Open the Maintenance screen' } : undefined,

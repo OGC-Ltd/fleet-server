@@ -4,7 +4,7 @@ import { ConflictError, NotFoundError } from '../../core/errors/errors.js'
 import * as repo from './repairs.repository.js'
 import * as svc from './repairs.service.js'
 import type {
-  CreateRepairReport, ResolveItem, ListReportsQuery, ListItemsQuery,
+  CreateRepairReport, ResolveItem, SetStage, ListReportsQuery, ListItemsQuery,
 } from './repairs.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -71,6 +71,35 @@ export const resolveItem: RequestHandler = async (req, res, next) => {
     const exists = await repo.itemExists(itemId, orgId)
     throw exists
       ? new ConflictError('This job has already been closed')
+      : new NotFoundError('Repair job not found')
+  } catch (err) { next(err) }
+}
+
+/**
+ * Move an open job along the ladder.
+ *
+ * Three answers, and the difference between them is what a technician needs:
+ * 404 for a job that was never here, 409 for one somebody signed off while
+ * this button was on screen, and 200 for the move. A no-op move — clicking the
+ * stage the job is already at — is also a 200 carrying the unchanged item,
+ * because nothing is wrong and a 409 would send the screen into an error state
+ * over a double click.
+ */
+export const setStage: RequestHandler = async (req, res, next) => {
+  try {
+    const orgId  = p(req, 'orgId')
+    const itemId = p(req, 'itemId')
+    const { item, reason } = await repo.setStage(itemId, orgId, req.user!.id, req.body as SetStage)
+    if (item) { sendSuccess(res, item); return }
+
+    if (reason === 'nochange') {
+      const unchanged = await repo.findItemById(itemId, orgId)
+      if (unchanged) { sendSuccess(res, unchanged); return }
+    }
+
+    const exists = await repo.itemExists(itemId, orgId)
+    throw exists
+      ? new ConflictError('This job has been signed off — its stage can no longer change')
       : new NotFoundError('Repair job not found')
   } catch (err) { next(err) }
 }

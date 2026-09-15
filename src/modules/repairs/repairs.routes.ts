@@ -1,11 +1,11 @@
 /**
  * Repair reports — what a technician did to the faulty units they were sent to.
  *
- * TWO OF THESE FIVE ROUTES ARE STRICT, WHICH IS DELIBERATE AND NOT AN
+ * THREE OF THESE SIX ROUTES ARE STRICT, WHICH IS DELIBERATE AND NOT AN
  * OVERSIGHT. `requirePermission` is in shadow mode until AUTHZ_ENFORCE is
  * true: it logs the denial and calls next(). That is tolerable for a read,
  * which leaks a figure to somebody already inside the tenant. It is not
- * tolerable for these two writes, which create a durable record attributed to
+ * tolerable for these three writes, which create a durable record attributed to
  * a named person AND mail external handlers. A dispatcher who wandered into
  * the tab and clicked "Cannot be fixed" across forty units would mail forty
  * items to management under their own name and lock forty open-job rows.
@@ -22,7 +22,7 @@ import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission, requirePermissionStrict } from '../../middleware/authorize.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
 import {
-  createRepairReportSchema, resolveItemSchema,
+  createRepairReportSchema, resolveItemSchema, setStageSchema,
   listReportsQuerySchema, listItemsQuerySchema,
 } from './repairs.schema.js'
 import * as ctrl from './repairs.controller.js'
@@ -35,6 +35,10 @@ router.get('/', requirePermission('repair:read'), validateQuery(listReportsQuery
 router.get('/items', requirePermission('repair:read'), validateQuery(listItemsQuerySchema), ctrl.listItems)
 router.post('/', requirePermissionStrict('repair:create'), validateBody(createRepairReportSchema), ctrl.createReport)
 router.post('/items/:itemId/resolve', requirePermissionStrict('repair:resolve'), validateBody(resolveItemSchema), ctrl.resolveItem)
+// Strict for the same reason resolve is, and it is the weaker claim of the two
+// — but it writes a line onto a durable trail under a named person, and the
+// stage is what the people ordering spares read to decide whether to order.
+router.post('/items/:itemId/stage', requirePermissionStrict('repair:resolve'), validateBody(setStageSchema), ctrl.setStage)
 // Last: `/items` would otherwise be swallowed by `/:reportId`.
 router.get('/:reportId', requirePermission('repair:read'), ctrl.getReport)
 

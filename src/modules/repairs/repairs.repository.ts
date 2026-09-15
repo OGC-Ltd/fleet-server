@@ -1,8 +1,42 @@
+import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { NotFoundError } from '../../core/errors/errors.js'
+import { STAGE_FOR_OUTCOME } from './repairs.schema.js'
 import type {
-  CreateRepairReport, ResolveItem, ListReportsQuery, ListItemsQuery,
+  CreateRepairReport, ResolveItem, SetStage, ListReportsQuery, ListItemsQuery, Stage,
 } from './repairs.schema.js'
+
+/**
+ * One line of the tracking line.
+ *
+ * `byName` is COPIED, not joined. The history is read on a detail panel that
+ * already has one query's budget, and a name resolved at write time still
+ * reads correctly after the technician leaves the company and their user row
+ * is anonymised — which is the whole reason to keep a trail at all.
+ */
+export type StageEvent = {
+  stage:   Stage
+  at:      string
+  by:      string | null
+  byName?: string
+  note?:   string
+}
+
+/**
+ * Append to the history, defensively.
+ *
+ * The column is JSONB and therefore `Prisma.JsonValue` — it can legally hold
+ * anything, including whatever a future backfill script decides to put there.
+ * Anything that is not an array is replaced rather than spread, because
+ * spreading a string would produce an array of characters and the tracking
+ * line would render one node per letter.
+ */
+function appendStage(history: unknown, event: StageEvent): StageEvent[] {
+  const prior = Array.isArray(history) ? (history as StageEvent[]) : []
+  // 200 moves is a job somebody is fighting with a button, not a repair. The
+  // cap bounds the column rather than expressing a belief about repairs.
+  return [...prior, event].slice(-200)
+}
 
 /**
  * What every read of an item carries with it.
@@ -52,6 +86,15 @@ export async function assertTargetsInOrg(orgId: string, items: CreateRepairRepor
 }
 
 export async function createReport(orgId: string, userId: string, dto: CreateRepairReport) {
+  /*
+   * One timestamp for the whole report, not one per item.
+   *
+   * `new Date()` inside the map would give the items of a single trip
+   * microsecond-different first history entries, and the tracking lines of two
+   * units reported together would disagree about when the trip happened.
+   */
+  const filedAt = new Date()
+
   return prisma.repairReport.create({
     data: {
       organisationId: orgId,
@@ -66,6 +109,13 @@ export async function createReport(orgId: string, userId: string, dto: CreateRep
           targetKind:     i.targetKind,
           vehicleId:      i.vehicleId,
           outcome:        i.outcome,
+          // The ladder starts where the outcome puts it — see
+          // STAGE_FOR_OUTCOME for why "needs a spare" is not yet "outsourced".
+          stage:          STAGE_FOR_OUTCOME[i.outcome],
+          stageChangedAt: filedAt,
+          stageHistory:   [{
+            stage: STAGE_FOR_OUTCOME[i.outcome], at: filedAt.toISOString(), by: userId,
+          }] satisfies StageEvent[],
           ...(i.faultEpisodeId ? { faultEpisodeId: i.faultEpisodeId } : {}),
           ...(i.faultKind      ? { faultKind:      i.faultKind }      : {}),
           ...(i.sparePart      ? { sparePart:      i.sparePart }      : {}),
@@ -123,6 +173,8 @@ export async function findItems(orgId: string, q: ListItemsQuery) {
       organisationId: orgId,
       ...(q.status === 'open'     ? { resolvedAt: null }         : {}),
       ...(q.status === 'resolved' ? { resolvedAt: { not: null } } : {}),
+      ...(q.stage ? { stage: q.stage } : {}),
+      ...(q.vehicleId ? { vehicleId: q.vehicleId } : {}),
       ...(q.cursor ? { id: { lt: q.cursor } } : {}),
     },
     include: {
@@ -147,17 +199,115 @@ export async function findItems(orgId: string, q: ListItemsQuery) {
  * that 0 into a 409; a silent overwrite would lose the account of the fix that
  * actually happened.
  */
+/**
+ * Close one item, once, and land it on a terminal stage.
+ *
+ * `updateMany` with `resolvedAt: null` in the WHERE rather than a plain
+ * `update`, so a second attempt matches nothing and returns 0 instead of
+ * overwriting the first technician's notes with the second's. The caller turns
+ * that 0 into a 409; a silent overwrite would lose the account of the fix that
+ * actually happened.
+ *
+ * A transaction now, because the stage history has to be read before it can be
+ * appended to. The guard in the WHERE is still what does the concurrency work
+ * — the read only exists to build the new array.
+ */
 export async function resolveItem(itemId: string, orgId: string, userId: string, dto: ResolveItem) {
-  const { count } = await prisma.repairReportItem.updateMany({
-    where: { id: itemId, organisationId: orgId, resolvedAt: null },
-    data: {
-      resolvedAt:   new Date(),
-      resolvedById: userId,
-      fixNote:      dto.fixNote,
-      ...(dto.recommendation ? { recommendation: dto.recommendation } : {}),
-    },
+  return prisma.$transaction(async (tx) => {
+    const current = await tx.repairReportItem.findFirst({
+      where:  { id: itemId, organisationId: orgId, resolvedAt: null },
+      select: { id: true, stageHistory: true },
+    })
+    if (!current) return null
+
+    const at = new Date()
+    const { count } = await tx.repairReportItem.updateMany({
+      where: { id: itemId, organisationId: orgId, resolvedAt: null },
+      data: {
+        resolvedAt:   at,
+        resolvedById: userId,
+        fixNote:      dto.fixNote,
+        /*
+         * The sign-off is the ONLY way to reach 'fixed' — see STAGES, and the
+         * CHECK that holds the same rule where the API cannot be bypassed. A
+         * failed sign-off lands on 'failed' and closes the job just the same:
+         * the unit is off the list, and the ladder says why.
+         */
+        stage:          dto.verdict,
+        stageChangedAt: at,
+        stageHistory:   appendStage(current.stageHistory, {
+          stage: dto.verdict,
+          at:    at.toISOString(),
+          by:    userId,
+          ...(await byName(tx, userId)),
+          note:  dto.fixNote,
+        }),
+        ...(dto.recommendation ? { recommendation: dto.recommendation } : {}),
+      },
+    })
+    if (count === 0) return null
+
+    return tx.repairReportItem.findFirst({
+      where: { id: itemId, organisationId: orgId },
+      include: itemInclude,
+    })
   })
-  if (count === 0) return null
+}
+
+/**
+ * Move an open job along the ladder.
+ *
+ * Shaped exactly like `resolveItem`, and for the same reason: the WHERE still
+ * carries `resolvedAt: null`, so a move that races a sign-off matches nothing
+ * and returns 0 rather than reopening a closed job by writing a stage over it.
+ * The read before it only decides which of 404 / 409 the caller is told.
+ *
+ * A move to the stage the job is already at is refused rather than recorded.
+ * Two clicks on "Fixing" should not draw two nodes on the tracking line.
+ */
+export async function setStage(itemId: string, orgId: string, userId: string, dto: SetStage) {
+  return prisma.$transaction(async (tx) => {
+    const current = await tx.repairReportItem.findFirst({
+      where:  { id: itemId, organisationId: orgId, resolvedAt: null },
+      select: { id: true, stage: true, stageHistory: true },
+    })
+    if (!current) return { item: null, reason: 'closed' as const }
+    if (current.stage === dto.stage) return { item: null, reason: 'nochange' as const }
+
+    const at = new Date()
+    const { count } = await tx.repairReportItem.updateMany({
+      where: { id: itemId, organisationId: orgId, resolvedAt: null, stage: current.stage },
+      data: {
+        stage:          dto.stage,
+        stageChangedAt: at,
+        stageHistory:   appendStage(current.stageHistory, {
+          stage: dto.stage,
+          at:    at.toISOString(),
+          by:    userId,
+          ...(await byName(tx, userId)),
+          ...(dto.note ? { note: dto.note } : {}),
+        }),
+      },
+    })
+    if (count === 0) return { item: null, reason: 'closed' as const }
+
+    const item = await tx.repairReportItem.findFirst({
+      where: { id: itemId, organisationId: orgId },
+      include: itemInclude,
+    })
+    return { item, reason: 'ok' as const }
+  })
+}
+
+/** The actor's name, copied onto the history entry. `{}` when unknown, so the
+ *  spread adds nothing rather than an explicit undefined. */
+async function byName(tx: Prisma.TransactionClient, userId: string): Promise<{ byName?: string }> {
+  const u = await tx.user.findUnique({ where: { id: userId }, select: { fullName: true } })
+  return u?.fullName ? { byName: u.fullName } : {}
+}
+
+/** One item, by id, tenant-scoped. The no-op stage move's answer. */
+export async function findItemById(itemId: string, orgId: string) {
   return prisma.repairReportItem.findFirst({
     where: { id: itemId, organisationId: orgId },
     include: itemInclude,

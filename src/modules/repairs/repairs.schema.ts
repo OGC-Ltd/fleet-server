@@ -7,7 +7,34 @@ import { z } from 'zod'
  * 20260916120000_repair_reports) and a label map on the dashboard. Adding a
  * fourth means touching all three, in that order.
  */
-const OUTCOMES = ['fixed', 'needs_spare', 'cannot_fix'] as const
+const OUTCOMES = ['fixing', 'needs_spare', 'cannot_fix'] as const
+
+/**
+ * Where a job can be, and the ladder it climbs.
+ *
+ * Also a CHECK constraint (migration 20260916140000_repair_item_stage) and a
+ * label map on the dashboard, the same three-places rule the outcomes have.
+ *
+ * 'fixed' is absent from `setStageSchema` below on purpose: it is a claim
+ * somebody has to stand behind, so it is reachable only through the resolve
+ * route, which demands an account of the fix. Postgres holds that rule too.
+ */
+export const STAGES = ['pending', 'spare_outsourced', 'fixing', 'fixed', 'failed'] as const
+export type Stage = (typeof STAGES)[number]
+
+/**
+ * The stage a filed outcome lands on.
+ *
+ * 'needs_spare' lands on 'pending' rather than 'spare_outsourced' because
+ * NAMING a part is not ORDERING one — somebody moves the job on when the part
+ * is actually on its way, and the gap between those two facts is the thing
+ * this whole ladder exists to make visible.
+ */
+export const STAGE_FOR_OUTCOME: Record<(typeof OUTCOMES)[number], Stage> = {
+  fixing:      'fixing',
+  needs_spare: 'pending',
+  cannot_fix:  'failed',
+}
 
 const itemSchema = z.object({
   targetKind:     z.enum(['probe', 'fault']),
@@ -49,6 +76,25 @@ export const resolveItemSchema = z.object({
   // not a record. The recommendation is optional because most fixes have none.
   fixNote:        z.string().trim().min(1).max(2000),
   recommendation: z.string().trim().max(2000).optional(),
+  /*
+   * How it ended. Defaulting to 'fixed' keeps every existing caller correct
+   * and matches the common close; 'failed' is the unit that came off the road
+   * for good, and it must be a DIFFERENT terminal stage rather than a fixed
+   * one with a sad note, because the ladder is what somebody scans.
+   */
+  verdict:        z.enum(['fixed', 'failed']).default('fixed'),
+})
+
+/**
+ * Move an OPEN job between the working stages.
+ *
+ * No 'fixed' here — see STAGES. The note is short by design: it is a line on a
+ * tracking line ("part ordered from Nairobi"), not the account of the repair,
+ * which belongs to the sign-off and has ten times the budget.
+ */
+export const setStageSchema = z.object({
+  stage: z.enum(['pending', 'spare_outsourced', 'fixing', 'failed']),
+  note:  z.string().trim().max(500).optional(),
 })
 
 export const listReportsQuerySchema = z.object({
@@ -62,10 +108,17 @@ export const listItemsQuerySchema = z.object({
   // `open` is the default because the question this endpoint answers on every
   // load of the Probes tab is "what is already reported".
   status: z.enum(['open', 'resolved', 'all']).default('open'),
+  // Narrower than `status`, and orthogonal to it: "what is waiting on a part"
+  // is a question about the ladder, not about the sign-off.
+  stage:  z.enum(STAGES).optional(),
+  // One unit's repair history — the detail panel's tracking line. Served by
+  // the [vehicle_id, created_at] index the table has carried from the start.
+  vehicleId: z.string().min(1).optional(),
 })
 
 export type CreateRepairReport = z.infer<typeof createRepairReportSchema>
 export type RepairItemInput    = CreateRepairReport['items'][number]
 export type ResolveItem        = z.infer<typeof resolveItemSchema>
+export type SetStage           = z.infer<typeof setStageSchema>
 export type ListReportsQuery   = z.infer<typeof listReportsQuerySchema>
 export type ListItemsQuery     = z.infer<typeof listItemsQuerySchema>
