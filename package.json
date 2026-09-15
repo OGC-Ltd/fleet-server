@@ -46,6 +46,7 @@
     "sync:fuel": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-fuel-events.ts",
     "geofence:assign": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/geofence-assign.ts",
     "fix:plates": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/fix-plate-format.ts",
+    "link:drivers": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/link-drivers.ts",
     "fix:rings": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/fix-ring-geofences.ts",
     "sync:sukari-gps": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-sukari-wialon.ts",
     "sync:alerts": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-alerts.ts",
