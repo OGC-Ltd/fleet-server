@@ -47,7 +47,11 @@ const STAGE_LABEL: Record<string, string> = {
   spare_outsourced: 'Spare outsourced',
   fixing:           'Fixing',
   fixed:            'Fixed',
-  failed:           'Could not be fixed',
+  // The stored value stays 'failed'. Unlike fixed/fixing — which had to be
+  // renamed because they mean different things — these two are the same word,
+  // so the label can read the way people say it without the column drifting
+  // from what it holds.
+  failed:           'Unsuccessful',
 }
 
 /** `fuel_probe_dead` -> `Fuel probe dead`. The episode kinds are snake_case. */
