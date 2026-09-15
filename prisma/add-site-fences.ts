@@ -16,8 +16,33 @@
  * contained within it, i.e. the same site drawn 22 ha tighter. Two rows, one
  * dormant, is the price of a boundary the sync cannot touch.
  *
- * `mode: BLOCKLIST` matches all 109 fences already in the table, NOT the
- * schema's ALLOWLIST default.
+ * ## isActive is FALSE, and that is the whole point
+ *
+ * These are reference geometry: something to see and to measure arrivals
+ * against, not a rule to enforce. The distinction is not cosmetic, because
+ * `zone-presence` derives
+ *
+ *     keepOut = isActive && mode === 'BLOCKLIST'
+ *
+ * and a keep-out zone puts "entered X, a RESTRICTED zone" in the live feed for
+ * every unit that arrives. Created active, these two did exactly that: Naitiri
+ * is where the lorries are SUPPOSED to go, and the feed filled with warnings
+ * about trucks doing their job.
+ *
+ * Inactive is not the same as invisible. The overlay draws every fence
+ * regardless (Mufindi's estate is 90 inactive rows out of 97), zone-presence
+ * still loads them and still reports ARRIVALS from them — `arrivals` is
+ * exactly the set that is NOT keepOut — and `ingest` ignores them, both
+ * because it filters `isActive: true` and because it only evaluates fences
+ * assigned to the vehicle.
+ *
+ * ALLOWLIST is NOT the fix and is strictly worse: `ingest.service.ts` reads it
+ * as "the vehicle must stay INSIDE", so an allowlisted Naitiri would make a
+ * violation of every unit that is anywhere else — nearly the whole fleet.
+ *
+ * `mode: BLOCKLIST` therefore matches all 109 fences already in the table, NOT
+ * the schema's ALLOWLIST default. With isActive false it enforces nothing; it
+ * is simply the mode this deployment writes.
  *
  * `geom` is left unset on purpose — the `geofences_geom_sync` trigger derives
  * it from `polygonCoords`. Nothing in the app writes it.
@@ -106,10 +131,24 @@ async function main() {
     }
 
     const existing = await prisma.geofence.findFirst({
-      where: { organisationId: org.id, name: site.name }, select: { id: true },
+      where: { organisationId: org.id, name: site.name },
+      select: { id: true, isActive: true },
     })
     if (existing) {
-      console.log(`  ${site.name.padEnd(28)} exists — left alone`)
+      // Repair, not just report: the first run of this script created both
+      // fences ACTIVE, which made them keep-out zones. Anything already in
+      // that state is corrected here rather than left for someone to find in
+      // the feed.
+      if (existing.isActive) {
+        console.log(`  ${site.name.padEnd(28)} exists, ACTIVE — deactivating (was a keep-out)`)
+        if (APPLY) {
+          await prisma.geofence.update({
+            where: { id: existing.id }, data: { isActive: false },
+          })
+        }
+      } else {
+        console.log(`  ${site.name.padEnd(28)} exists — left alone`)
+      }
       continue
     }
 
@@ -121,7 +160,8 @@ async function main() {
           type: 'POLYGON',
           mode: 'BLOCKLIST',
           polygonCoords: site.ring,
-          isActive: true,
+          // See the note above — active would make this a keep-out.
+          isActive: false,
         },
       })
     }
