@@ -65,10 +65,18 @@ import { normalisePlate } from '../../providers/wialon/wialon.unit-name.js'
  * fixes on 2026-08-31, the same derivation behind dashboard.weather's location
  * list (which is where they lived until this file needed them too).
  *
- * NDHIWA is the exception: it is the site as GIVEN by the operator
- * (2026-09-13), not as derived. It carried 0.3358 / 34.4928 — copied from the
- * "Sukari HQ" entry in that weather list, which sits near Kakamega, on the
- * WRONG SIDE OF THE EQUATOR and about 129 km from the mill.
+ * NDHIWA and NAITIRI are the exceptions: both are the site as GIVEN by the
+ * operator, not as derived. NDHIWA (2026-09-13) carried 0.3358 / 34.4928 —
+ * copied from the "Sukari HQ" entry in that weather list, which sits near
+ * Kakamega, on the WRONG SIDE OF THE EQUATOR and about 129 km from the mill.
+ *
+ * NAITIRI (2026-09-15) is the GATE from the operator's surveyed KML, and it
+ * replaces a derived 0.7821 / 34.8776 that sat 122 m away. That point was not
+ * wrong in the way Ndhiwa's was — it fell inside the site — but a density cell
+ * lands near the middle of a yard, and the middle of a yard is not where a
+ * trip begins. The same survey put a 46.56 ha boundary in `geofences` as
+ * "Naitiri Factory (surveyed)"; this is its gate, 5 m outside that ring,
+ * sitting in the notch the ring is drawn with.
  *
  * The telemetry agrees with the figure we were given, which is why it is worth
  * recording both: the median of 268,032 SUKARI fixes is -0.82001 / 34.38443 and
@@ -117,7 +125,7 @@ export interface Factory {
 export const FACTORIES: Record<string, Factory> = {
   NDHIWA:  { orgCode: 'SUKARI',    label: 'Ndhiwa',  lat: -0.82340, lng: 34.38449,
              commodity: 'Raw Sugarcane',   cargoType: 'BULK' },
-  NAITIRI: { orgCode: 'WESTSUGAR', label: 'Naitiri', lat: 0.7821, lng: 34.8776,
+  NAITIRI: { orgCode: 'WESTSUGAR', label: 'Naitiri', lat: 0.781158, lng: 34.877046,
              commodity: 'Processed Sugar', cargoType: 'PACKAGED' },
 }
 
