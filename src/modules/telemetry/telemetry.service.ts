@@ -290,19 +290,41 @@ interface SnapshotPosition { lat: number | null; lng: number | null; capturedAt:
  * different claims and the difference matters: telemetry retention is finite,
  * so on an older dispatch the earliest fix still held can be hours after the
  * unit actually left, and "where we first saw it" would then be presented as
- * "where it set off". Every dispatch leaves from the plant, so the plant is the
- * honest origin — and it is measured, not assumed (see sync-destinations).
+ * "where it set off". Every dispatch leaves from a gate, so the gate is the
+ * honest origin — and it is stated or measured, not assumed.
+ *
+ * ## Which gate
+ *
+ * The DISPATCH'S, falling back to the organisation's hub. The two are the same
+ * thing for a fleet dispatching out of its own yard and are nothing like each
+ * other otherwise: the live sales runs are Menengai trucks signed out at
+ * Naitiri, a West Kenya Sugar factory. Measuring those from Menengai's hub
+ * would put the origin ~250 km from where the wheels turned — and Menengai has
+ * no hub recorded at all, so before the dispatch gate was consulted here those
+ * runs had no origin, which meant no leg length, no percentage and no bar.
+ *
+ * It also fixes a quieter failure. With no yard, `fromYardM` is null, so
+ * `atYard` is false, so the leg resolves to 'outbound' for a truck standing
+ * still in the yard — and getFleetSnapshot's day filter keeps any run whose leg
+ * is 'outbound'. A sales row the provider never closed therefore stayed on the
+ * vehicle indefinitely, declaring 29 t on the bed of a parked truck. With a
+ * real origin the same truck reads 'at-yard' and the filter drops it.
  */
 function buildTrip(
   open: import('../dispatches/dispatch.repository.js').OpenTrip,
-  yard: import('../../lib/dispatch-trip.js').Point | null,
-  yardName: string | null,
+  hub: import('../../lib/dispatch-trip.js').Point | null,
+  hubName: string | null,
   v: SnapshotPosition,
 ) {
   const current = v.lat != null && v.lng != null ? { lat: v.lat, lng: v.lng } : null
   const destination = open.destinationLat != null && open.destinationLng != null
     ? { lat: open.destinationLat, lng: open.destinationLng }
     : null
+
+  const yard = open.originLat != null && open.originLng != null
+    ? { lat: open.originLat, lng: open.originLng }
+    : hub
+  const yardName = open.originName ?? hubName
 
   const geo = tripGeometry({
     yard,
@@ -335,7 +357,17 @@ function buildTrip(
     /** How well-founded the destination point is; 0 samples = not placed. */
     destinationSamples: open.destinationSamples,
     destinationSpreadM: open.destinationSpreadM,
+    destinationSource:  open.destinationSource,
+    /**
+     * When the wheels turned, which for a sales run is when the guard signed
+     * the unit out — `dispatches.dispatched_at` is written from `signOutTime`
+     * and from nothing else (see webhooks/raifactorysuite-events' handleSale,
+     * which refuses to store a run that has not been signed out at all).
+     * So this is the ACTUAL departure, not the moment paperwork was raised.
+     */
     departedAt:   open.dispatchedAt,
+    departureIsSignOut: open.departureIsSignOut,
+    serialNumber: open.serialNumber,
     arrivedAt:    open.arrivedAt,
     /**
      * Kilometres actually DRIVEN since local midnight. Deliberately alongside
@@ -436,6 +468,8 @@ export async function getFleetSnapshot(orgId: string, vehicleIds: Set<string> | 
     // three measured points: the yard, the destination (both from
     // sync:destinations) and the vehicle's own current fix.
     const open = openTrips.get(v.vehicleId)
+    // `yard`/`yardName` here are the ORGANISATION's, and are only the fallback
+    // — buildTrip prefers the gate the dispatch itself names.
     const built = open ? buildTrip(open, yard, yardName, v as SnapshotPosition) : null
 
     // Is this still the vehicle's CURRENT run?
@@ -447,10 +481,45 @@ export async function getFleetSnapshot(orgId: string, vehicleIds: Set<string> | 
     // in-flight runs are in that state for part of the day. A yesterday row on
     // a unit sitting in the yard, or one that has not reported at all, is the
     // stale paperwork the day filter exists to remove.
+    //
+    // 'back' counts too, and that is not a loosening. A TRIP IS COMPLETED BY
+    // THE SIGN-IN, not by the truck arriving: the guard signs it in, the
+    // provider records a return, `actual_return_at` is set and the row leaves
+    // the open set entirely — which is why a completed run never reaches this
+    // line at all. So a row that is still open while its unit stands at the
+    // gate is a run with the paperwork outstanding, and dropping it hid exactly
+    // the state somebody needs to act on.
+    //
+    // It cannot readmit the stale paperwork above, because `tripGeometry` only
+    // reaches 'back' through `arrived` — a unit that never left is 'at-yard'
+    // and stays excluded.
     const trip = built && (
       built.departedAt >= dayStart ||
-      built.leg === 'outbound' || built.leg === 'at-destination' || built.leg === 'returning'
+      built.leg === 'outbound' || built.leg === 'at-destination' ||
+      built.leg === 'returning' || built.leg === 'back'
     ) ? built : null
+
+    // Has the load come off?
+    //
+    // A trip is CLOSED by the sign-in, but the bed is emptied long before that
+    // — a sales run tips its sugar at the customer and drives home with nothing
+    // on it, and on this route the gap between the two is the whole return leg
+    // plus however long the paperwork takes. Carrying the declared tonnage
+    // until the sign-in would have every truck on the way back from Raiply
+    // counted into the fleet's in-transit stock, which is a real figure on the
+    // dashboard and would have been overstated by exactly the homebound half of
+    // every run.
+    //
+    // These three legs are precisely the ones `tripGeometry` reaches through
+    // `arrived`, so this says "has been seen at the destination on this run"
+    // and not "is near it now" — a unit that delivered yesterday and is still
+    // driving home stays empty.
+    //
+    // Only a SALES run declares a weight at all, so this cannot empty a cane
+    // truck, which is loaded in the other direction: out empty, home full.
+    const delivered = trip != null
+      && (trip.leg === 'at-destination' || trip.leg === 'returning' || trip.leg === 'back')
+    const declared = trip && !delivered ? open : null
 
     return {
       ...v,
@@ -477,12 +546,28 @@ export async function getFleetSnapshot(orgId: string, vehicleIds: Set<string> | 
       // vehicle since it was built. The sales office knows the tonnage; an open
       // SALES run is where the card can learn it.
       //
+      // Read from `declared`, which is `open` narrowed twice — and each
+      // narrowing is a different mistake this used to make.
+      //
+      // FIRST, by `trip`. `open` is any dispatch row still lacking a return;
+      // `trip` is the one that survived the day filter below, i.e. the run the
+      // vehicle is actually on. Sourcing the load from `open` meant a sales row
+      // the provider never closed kept declaring its tonnage after its trip had
+      // been dropped as stale — 29 t of sugar on the bed of a truck with no
+      // journey next to it, which is precisely the state an operator reads as
+      // "loaded and waiting".
+      //
+      // SECOND, by delivery. See `delivered` above: the sugar comes off at the
+      // far end, hours before the guard closes the run.
+      //
       // Falls through untouched for a cane run or an idle unit, so a fleet with
-      // real load cells would keep using them.
-      cargoWeightKg: open?.cargoTonnes != null ? open.cargoTonnes * 1000 : v.cargoWeightKg,
-      cargoDesc:     open?.cargoName ?? v.cargoDesc,
+      // real load cells would keep using them — and a load cell outranks a
+      // declaration in both directions, because it is the only one of the two
+      // that is a measurement of what is on the bed right now.
+      cargoWeightKg: declared?.cargoTonnes != null ? declared.cargoTonnes * 1000 : v.cargoWeightKg,
+      cargoDesc:     declared?.cargoName ?? v.cargoDesc,
       /** 50 kg bags in the declared load — the unit the yard actually counts. */
-      cargoBags:     open?.cargoBags ?? null,
+      cargoBags:     declared?.cargoBags ?? null,
       trip,
       connectionOnline:    conn?.online    ?? null,
       connectionCheckedAt: conn?.checkedAt ?? null,
