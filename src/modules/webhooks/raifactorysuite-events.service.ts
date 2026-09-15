@@ -459,11 +459,12 @@ export async function handleSale(
     expectedReturnAt: null,
     actualReturnAt:   returnedAt,
     tonnageT:         s.tonnage ?? null,
-    // serialNumber: saleSerial(s) — held back until
-    // prisma/migrations/20260915090000 has been applied by hand to the shared
-    // RDS instance. Writing to a column that is not there yet would fail every
-    // sales upsert, and `saleSerial` returns null for every payload the
-    // provider currently sends in any case. See the field's note on OpenTrip.
+    // serialNumber: saleSerial(s) — there is no column to write it to. Adding
+    // one to schema.prisma ahead of the migration broke this upsert outright
+    // (Prisma returns the whole row, so RETURNING named a column Postgres did
+    // not have) and stopped every sign-out landing for forty minutes. See the
+    // field's note on OpenTrip in dispatches/dispatch.repository; `saleSerial`
+    // returns null for every payload the provider currently sends in any case.
     signOutPhotoUrl:  s.signOutPhotoUrl ?? null,
     returnPhotoUrl:   s.returnPhotoUrl ?? null,
     source,

@@ -155,14 +155,33 @@ export interface OpenTrip {
    * it show nothing when it is null rather than falling back to the internal
    * UUID, which is not a number anybody at a gate can read back.
    *
-   * Hard-wired to null for now, and deliberately so. `dispatches.serial_number`
-   * is in the schema and in prisma/migrations/20260915090000, but migrations
-   * against the shared RDS instance are applied by hand (see the note at the
-   * top of .github/workflows/deploy.yml). Reading or writing the column before
-   * that has happened would take down every fleet snapshot over a field that no
-   * row carries — so the type, the plumbing and the rendering all ship now, and
-   * two one-line changes here and in webhooks/raifactorysuite-events turn it on
-   * once the column is there.
+   * Hard-wired to null, and there is NO column behind it.
+   *
+   * There was, briefly, in schema.prisma — and it took the whole dispatch and
+   * sales ingest down for forty minutes on 2026-09-15. The reasoning behind it
+   * is worth keeping, because it is wrong in a way that looks careful: the
+   * column was added to the schema, the migration was left for a human (they
+   * are applied by hand against the shared RDS instance — see the note at the
+   * top of .github/workflows/deploy.yml), and the code was written neither to
+   * SELECT the field nor to WRITE it, which appeared to make the deploy safe in
+   * either order.
+   *
+   * It is not, because a Prisma write RETURNS THE ROW. `prisma.dispatch.upsert`
+   * with no `select` returns every scalar field, and the generated client builds
+   * that RETURNING clause from schema.prisma — so every upsert asked Postgres
+   * for `serial_number` and got `42703 column does not exist`. handleSale and
+   * handleDispatch failed on every reconcile pass, and the symptom was not an
+   * error anyone was looking at: sign-outs simply stopped arriving, so a truck
+   * drove out of Naitiri with no trip behind it and the dash looked broken.
+   *
+   * The rule, plainly: a column in schema.prisma is load-bearing for every
+   * write to that table the moment it exists, whether or not any code names it.
+   * Schema and database go together or not at all.
+   *
+   * So the field stays as a null that the plumbing and the rendering carry, and
+   * the column arrives — schema line, migration, and `serialNumber: true` in
+   * the select below — as ONE change, applied before it deploys, on the day
+   * there is actually a serial to put in it.
    */
   serialNumber: string | null
   expectedReturnAt: string | null
