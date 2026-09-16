@@ -97,7 +97,7 @@ export const sensitiveLimiter = rateLimit({
   ...shared,
   store:    createRateLimitStore('rl:sensitive:'),
   windowMs: 15 * 60_000,
-  limit:    10,
+  limit:    100,
 })
 
 /**
