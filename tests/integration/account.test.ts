@@ -48,8 +48,12 @@ vi.mock('../../src/middleware/rateLimiter.js', () => {
     globalLimiter: passthrough,
     authLimiter: passthrough,
     passwordResetLimiter: passthrough,
+    passwordResetIpLimiter: passthrough,
+    setupLimiter: passthrough,
+    setupIpLimiter: passthrough,
     sensitiveLimiter: passthrough,
     refreshLimiter: passthrough,
+    refreshIpLimiter: passthrough,
     ingestLimiter: passthrough,
   }
 })
