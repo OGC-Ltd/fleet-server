@@ -510,15 +510,29 @@ export async function getFleetSnapshot(orgId: string, vehicleIds: Set<string> | 
     // dashboard and would have been overstated by exactly the homebound half of
     // every run.
     //
-    // These three legs are precisely the ones `tripGeometry` reaches through
-    // `arrived`, so this says "has been seen at the destination on this run"
-    // and not "is near it now" — a unit that delivered yesterday and is still
-    // driving home stays empty.
+    // THE EXIT FROM THE ZONE, NOT THE ENTRY. Arriving is not offloading: a
+    // truck that has just rolled through the Raiply gate is standing in the
+    // yard with its sugar still on, waiting its turn at the bay, and the
+    // in-transit figure was writing that load off at the moment the wheels
+    // crossed the line — up to an hour early on this route, and visible on the
+    // vehicle card as "Empty" beside a unit nobody had unloaded yet.
+    //
+    // 'returning' and 'back' are exactly the pair that means "went in, and has
+    // since come out": `tripGeometry` reaches neither except through `arrived`
+    // — the first fix recorded INSIDE the arrival radius since the dispatch
+    // clock, computed from history in dispatch.repository — and reaches them
+    // only while the current fix is outside it. Entry alone is
+    // 'at-destination', which is now a LADEN state.
+    //
+    // A unit that tips and then parks inside the perimeter overnight therefore
+    // reads as laden until it pulls out. That is the honest answer: the only
+    // evidence of the bags moving that this system has is the truck leaving
+    // without them.
     //
     // Only a SALES run declares a weight at all, so this cannot empty a cane
     // truck, which is loaded in the other direction: out empty, home full.
     const delivered = trip != null
-      && (trip.leg === 'at-destination' || trip.leg === 'returning' || trip.leg === 'back')
+      && (trip.leg === 'returning' || trip.leg === 'back')
     const declared = trip && !delivered ? open : null
 
     return {
