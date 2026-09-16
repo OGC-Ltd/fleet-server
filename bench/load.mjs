@@ -307,9 +307,55 @@ if (args.mode === 'sse') {
   process.exit(0)
 }
 
+/**
+ * Is anything actually there?
+ *
+ * Without this, pointing the generator at a port nothing is listening on
+ * produced a full-length run of refused connections and then a table reading
+ * `rps 0` with a five-figure ECONNREFUSED count — twenty seconds spent to
+ * report, obscurely, that the server was not started. A benchmark that cannot
+ * reach its target has not measured a slow server; it has not measured
+ * anything, and it should say so immediately.
+ *
+ * One request, before the warmup, and a diagnosis rather than an error code.
+ */
+async function preflight(target) {
+  const agent = makeAgent(target.protocol === 'https:', 1)
+  const r = await once(agent, target, { method: 'GET', headers: {} })
+  agent.destroy()
+  if (!r.error) return
+
+  const say = (line) => console.error(line)
+  say('')
+  say('cannot reach ' + target.origin + ' — nothing was measured.')
+  say('')
+  if (r.error === 'ECONNREFUSED') {
+    say('  Refused: nothing is listening on that port.')
+    say('  load.mjs is the CLIENT. The server it drives is a separate')
+    say('  process and has to be running first:')
+    say('')
+    say('      npx tsx bench/server.mts')
+    say('')
+    say('  Leave that in its own shell, then run this again. To do both')
+    say('  from one shell, background it and wait for the port:')
+    say('')
+    say('      npx tsx bench/server.mts > /tmp/bench.log 2>&1 &')
+    say('      until curl -sf localhost:3100/health >/dev/null; do sleep 1; done')
+    say('')
+    say('  It takes a few seconds to boot. If it never comes up, read')
+    say('  /tmp/bench.log — env validation failures are reported there.')
+  } else {
+    say('  ' + r.error + ' — check --url, the host, and any firewall between.')
+  }
+  say('')
+  process.exit(1)
+}
+
 const stages = args.stages.length
   ? args.stages
   : [{ conn: args.conn ?? 50, duration: args.duration ?? 10 }]
+
+await preflight(new URL(paths[0], base))
 
 if (warmup > 0) {
   process.stderr.write('warming up ' + warmup + 's (discarded)...\n')
