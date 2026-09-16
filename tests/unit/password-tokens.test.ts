@@ -113,7 +113,9 @@ describe('consumeToken', () => {
     // Both operations, together — a password set without the token consumed
     // leaves a live link that can set it again.
     const ops = prismaMock.$transaction.mock.calls[0]![0] as unknown as unknown[]
-    expect(ops).toHaveLength(2)
+    // Three: the password, this token, and every OTHER live link to the
+    // account — see the sibling-revocation test below.
+    expect(ops).toHaveLength(3)
     expect(prismaMock.user.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'u1' },
@@ -129,6 +131,47 @@ describe('consumeToken', () => {
     expect(prismaMock.passwordToken.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'tok-1' } }),
     )
+  })
+
+  /**
+   * An account takeover, found on a live account.
+   *
+   * `mintPasswordToken` only revokes tokens of the SAME purpose, so an invited
+   * user who gave up on their invite and pressed "forgot password" ends up
+   * holding two live links. Consuming only the reset left the INVITE valid —
+   * and `findLiveToken` matches on the hash without ever looking at the purpose
+   * — so the original invitation email still set the password of an account
+   * that by then had a person using it.
+   */
+  it('revokes every OTHER live link to the account, not just the one used', async () => {
+    prismaMock.$transaction.mockResolvedValue([] as never)
+    await consumeToken('tok-reset', 'u1', 'new-hash')
+
+    expect(prismaMock.passwordToken.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          userId:     'u1',
+          // Every purpose, not just this one. An INVITE left live behind a
+          // consumed RESET is the exact case this exists for.
+          id:         { not: 'tok-reset' },
+          consumedAt: null,
+          revokedAt:  null,
+        }),
+        data: expect.objectContaining({
+          revokedAt:     expect.any(Date),
+          revokedReason: expect.any(String),
+        }),
+      }),
+    )
+  })
+
+  it('revokes them in the SAME transaction as the password write', async () => {
+    // Outside it, a crash between the two leaves the old link live against the
+    // new password — which is the whole failure, merely narrower.
+    prismaMock.$transaction.mockResolvedValue([] as never)
+    await consumeToken('tok-1', 'u1', 'new-hash')
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(prismaMock.passwordToken.updateMany).toHaveBeenCalledTimes(1)
   })
 })
 
