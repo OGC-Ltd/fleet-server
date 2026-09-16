@@ -91,7 +91,21 @@ export async function deleteUser(orgId: string, userId: string) {
  * the second would be a trap.
  */
 export async function purgeUser(orgId: string, userId: string, actorId?: string) {
-  const user = await getUser(orgId, userId)
+  /*
+   * `findReachable`, not `getUser`.
+   *
+   * getUser resolves through `findById`, which matches on the home
+   * organisation alone — while the roster that produced this button lists
+   * anybody with a live MEMBERSHIP here too. So every visiting member reached
+   * this function as a 404 "User not found" about a person plainly on screen,
+   * and the refusal below — the one that explains what is actually going on
+   * and what to do instead — was unreachable code.
+   *
+   * The narrow lookup is used here rather than widening findById for
+   * everything: see the note on findReachable.
+   */
+  const user = await repo.findReachable(orgId, userId)
+  if (!user) throw new NotFoundError('User')
 
   if (actorId && actorId === userId) {
     throw new ConflictError('You cannot permanently delete the account you are signed in as.')
