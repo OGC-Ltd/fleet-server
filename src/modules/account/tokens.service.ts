@@ -127,10 +127,26 @@ export async function findLiveToken(raw: string): Promise<LiveToken | null> {
 }
 
 /**
- * Set the password this token was issued for, and burn the token.
+ * Set the password this token was issued for, and burn every link to it.
  *
- * Both writes are in one transaction: a password changed without the token
+ * All three writes are in one transaction: a password changed without the token
  * being marked consumed leaves a live link that sets it again.
+ *
+ * ## It burns the OTHER live tokens too, not just this one
+ *
+ * `mintPasswordToken` only revokes tokens of the SAME purpose, so an invited
+ * user who gave up on their invite and used "forgot password" instead has two
+ * live links: the reset they just used, and the original invite. Consuming only
+ * the reset left that invite valid — `findLiveToken` matches on the hash and
+ * never looks at the purpose — so the invitation email kept working against an
+ * account that now had a password and a person using it. Anyone still holding
+ * that email could set the password again and take the account.
+ *
+ * That was found on a live account. It is not an edge case either: giving up on
+ * a failing invite link and asking for a reset is the ordinary thing to do, and
+ * the setup routes' rate limit was making invite links fail.
+ *
+ * `updateMany` rather than a second `update`, because there may be none.
  */
 export async function consumeToken(tokenId: string, userId: string, passwordHash: string): Promise<void> {
   await prisma.$transaction([
@@ -148,6 +164,18 @@ export async function consumeToken(tokenId: string, userId: string, passwordHash
     prisma.passwordToken.update({
       where: { id: tokenId },
       data: { consumedAt: new Date() },
+    }),
+    prisma.passwordToken.updateMany({
+      where: {
+        userId,
+        id: { not: tokenId },
+        consumedAt: null,
+        revokedAt: null,
+      },
+      data: {
+        revokedAt: new Date(),
+        revokedReason: 'a password was set from another link',
+      },
     }),
   ])
 }
