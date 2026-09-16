@@ -191,9 +191,23 @@ export const listReportsQuerySchema = z.object({
 export const listItemsQuerySchema = z.object({
   cursor: z.string().optional(),
   limit:  z.coerce.number().int().min(1).max(200).default(100),
-  // `open` is the default because the question this endpoint answers on every
-  // load of the Probes tab is "what is already reported".
-  status: z.enum(['open', 'resolved', 'all']).default('open'),
+  /*
+   * `open` is the default because the question this endpoint answers on every
+   * load of the Probes tab is "what is already reported".
+   *
+   * 'resolved' and 'unresolved' SPLIT the signed-off jobs rather than nesting,
+   * and that is the fix for a real complaint: a job signed off unsuccessfully
+   * was filed under "Resolved", which is the one word it is not. It went where
+   * nobody would look for it and read as lost. They are now two buckets —
+   * "the unit went back into service" and "it did not" — and 'all' is still
+   * the union of everything.
+   *
+   * Both are keyed on `stage` and not on `resolvedAt` alone, because the
+   * terminal stage is what says WHICH kind of finished a job is. Postgres
+   * guarantees a signed-off job is one of the two (the stage/resolution CHECK
+   * in 20260916140000), so the pair cannot leave a row unreachable.
+   */
+  status: z.enum(['open', 'resolved', 'unresolved', 'all']).default('open'),
   // Narrower than `status`, and orthogonal to it: "what is waiting on a part"
   // is a question about the ladder, not about the sign-off.
   stage:  z.enum(STAGES).optional(),
