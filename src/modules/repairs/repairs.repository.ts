@@ -120,6 +120,10 @@ export async function createReport(orgId: string, userId: string, dto: CreateRep
           ...(i.faultKind      ? { faultKind:      i.faultKind }      : {}),
           ...(i.sparePart      ? { sparePart:      i.sparePart }      : {}),
           ...(i.problemNote    ? { problemNote:    i.problemNote }    : {}),
+          // Already a midnight-UTC Date by the time it gets here — zod's
+          // `calendarDay` did the parsing, so nothing below this line has to
+          // know that the wire format was a string.
+          ...(i.expectedResolutionAt ? { expectedResolutionAt: i.expectedResolutionAt } : {}),
         })),
       },
     },

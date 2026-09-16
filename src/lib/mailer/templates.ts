@@ -144,9 +144,23 @@ export function repairReportEmail(opts: {
     outcome:      'fixing' | 'needs_spare' | 'cannot_fix'
     sparePart?:   string | undefined
     problemNote?: string | undefined
+    /** The technician's estimate of when the unit is back in service. */
+    expectedResolutionAt?: Date | undefined
   }>
 }): RenderedMail {
   type Item = (typeof opts.items)[number]
+
+  /*
+   * The estimate, as a date and nothing else.
+   *
+   * `toISOString().slice(0, 10)` rather than a locale format: the column is a
+   * DATE stored at midnight UTC, and any localisation of it is a chance to
+   * render the previous day for a reader east of UTC — which is the whole
+   * fleet. The people this mail goes to read ISO dates everywhere else in the
+   * product.
+   */
+  const due = (i: Item): string | null =>
+    i.expectedResolutionAt ? i.expectedResolutionAt.toISOString().slice(0, 10) : null
 
   const spares  = opts.items.filter((i) => i.outcome === 'needs_spare')
   const blocked = opts.items.filter((i) => i.outcome === 'cannot_fix')
@@ -169,6 +183,9 @@ export function repairReportEmail(opts: {
     const body = rows.map((i) => {
       const lines = [`  ${i.plate}   ${i.label}`]
       if (i.sparePart)   lines.push(`             Part: ${i.sparePart}`)
+      // Beside the part, because the two are one instruction: order this,
+      // and it is wanted by then. A part with no date is a job nobody chases.
+      if (due(i))        lines.push(`             Fix date: ${due(i)}`)
       if (i.problemNote) lines.push(`             ${i.problemNote}`)
       return lines.join('\n')
     }).join('\n')
@@ -181,6 +198,7 @@ export function repairReportEmail(opts: {
       <li style="margin:0 0 9px">
         <strong>${esc(i.plate)}</strong> — ${esc(i.label)}
         ${i.sparePart ? `<br><span style="color:#b45309">Part: ${esc(i.sparePart)}</span>` : ''}
+        ${due(i) ? `<br><span style="color:#b45309">Fix date: ${esc(due(i)!)}</span>` : ''}
         ${i.problemNote ? `<br><span style="color:#475569;font-size:13px">${esc(i.problemNote)}</span>` : ''}
       </li>`).join('')
     return `<h2 style="font-size:14px;margin:18px 0 8px;color:${colour}">${esc(title)} (${rows.length})</h2>
