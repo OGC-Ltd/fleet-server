@@ -100,6 +100,36 @@ export async function findAll(orgId: string, { page, limit, status, access }: Li
   return { data, total }
 }
 
+/**
+ * Is this person visible to this organisation at all?
+ *
+ * The same reachability `findMany` uses for the roster — HOME ORGANISATION OR
+ * A LIVE MEMBERSHIP — and it exists because `findById` below uses only the
+ * first of those. That asymmetry is a real defect with a visible symptom: a
+ * visiting member is listed by the roster and then not found by anything that
+ * looks them up, so the screen offers an action against a row the server will
+ * swear does not exist.
+ *
+ * Deliberately NOT a widening of `findById`. The routes that use findById also
+ * EDIT the user's global record — name, phone, roles — and letting a host
+ * organisation rename somebody whose account lives in another tenant is a
+ * different decision from letting it SEE them, and not one to make as a side
+ * effect of fixing a delete. See the note in purgeUser.
+ */
+export async function findReachable(orgId: string, userId: string) {
+  return prisma.user.findFirst({
+    where: {
+      id: userId,
+      deletedAt: null,
+      OR: [
+        { organisationId: orgId },
+        { memberships: { some: { organisationId: orgId, revokedAt: null } } },
+      ],
+    },
+    select: { id: true, fullName: true, email: true, organisationId: true },
+  })
+}
+
 export async function findById(orgId: string, userId: string) {
   return prisma.user.findFirst({
     where: { id: userId, organisationId: orgId, deletedAt: null },
