@@ -17,18 +17,24 @@
  *
  * ## Derived, not swept
  *
- * There is no scheduler that could do this. The repeatable-job machinery is
- * BullMQ (see lib/queues/retention.ts) and it is inert without Redis, which
- * this deployment has none of — a sweep written there would simply never run
- * in production. A `setInterval` would run once per instance and lose every
- * transition the process slept through.
+ * A correction worth keeping, because the first version of this comment got it
+ * wrong: a sweep IS available. `REDIS_URL` is set on the production box and
+ * BullMQ connects to it, so the repeatable-job machinery in lib/queues works
+ * here and a nightly job could move these rows for real.
  *
- * Deriving it sidesteps all of that. There is no run to miss, no catch-up to
- * get right, no write on a read path, and the answer is correct the instant
- * the date passes rather than at the next tick. What Postgres stores is what
- * was FILED — the stage a person put it in, and the date they gave — and this
- * is the reading of those two facts. The same split `accountState` makes on
- * the dashboard, for the same reason: one column cannot answer a question that
+ * It is still the wrong tool, for a reason that survives the correction. This
+ * field has DAY granularity. A job that sweeps at 03:00 leaves every unit
+ * whose part lands today reading "spare outsourced" for most of the working
+ * day — wrong on precisely the day the answer matters, and wrong in the
+ * direction that hides work from whoever is chasing it. Sweeping more often to
+ * fix that is a cron firing every few minutes to notice a date change once.
+ *
+ * Deriving has no run to miss and no catch-up to get right; the answer is
+ * correct the instant the date passes, it costs no write on a read path, and
+ * it keeps working if Redis goes away. What Postgres stores is what was FILED
+ * — the stage a person put it in, and the date they gave — and this is the
+ * reading of those two facts. The same split `accountState` makes on the
+ * dashboard, for the same reason: one column cannot answer a question that
  * depends on today.
  *
  * The cost is that `stage` in the database disagrees with `stage` on the wire
