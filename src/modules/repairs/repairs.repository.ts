@@ -2,6 +2,7 @@ import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { NotFoundError } from '../../core/errors/errors.js'
 import { STAGE_FOR_OUTCOME } from './repairs.schema.js'
+import { withEffectiveStage, withEffectiveStages, stageFilter } from './effective-stage.js'
 import type {
   CreateRepairReport, ResolveItem, SetStage, ListReportsQuery, ListItemsQuery, Stage,
 } from './repairs.schema.js'
@@ -152,6 +153,12 @@ export async function setEmailOutcome(
   })
 }
 
+/** A report's own items, read the way every other surface reads them. Without
+ *  this a report opened from the list would draw a tracking line one rung
+ *  behind the same job on the Repairs tab. */
+const reportWithEffectiveStages = <T extends { items: Parameters<typeof withEffectiveStage>[0][] }>(r: T): T =>
+  ({ ...r, items: withEffectiveStages(r.items) })
+
 export async function findReports(orgId: string, q: ListReportsQuery) {
   const rows = await prisma.repairReport.findMany({
     where: { organisationId: orgId, ...(q.cursor ? { id: { lt: q.cursor } } : {}) },
@@ -161,23 +168,34 @@ export async function findReports(orgId: string, q: ListReportsQuery) {
   })
   const hasNextPage = rows.length > q.limit
   if (hasNextPage) rows.pop()
-  return { data: rows, cursor: hasNextPage ? (rows.at(-1)?.id ?? null) : null, hasNextPage }
+  return {
+    data: rows.map(reportWithEffectiveStages),
+    cursor: hasNextPage ? (rows.at(-1)?.id ?? null) : null,
+    hasNextPage,
+  }
 }
 
 export async function findReportById(reportId: string, orgId: string) {
-  return prisma.repairReport.findFirst({
+  const row = await prisma.repairReport.findFirst({
     where: { id: reportId, organisationId: orgId },
     include: reportInclude,
   })
+  return row && reportWithEffectiveStages(row)
 }
 
 export async function findItems(orgId: string, q: ListItemsQuery) {
   const rows = await prisma.repairReportItem.findMany({
     where: {
       organisationId: orgId,
-      ...(q.status === 'open'     ? { resolvedAt: null }         : {}),
-      ...(q.status === 'resolved' ? { resolvedAt: { not: null } } : {}),
-      ...(q.stage ? { stage: q.stage } : {}),
+      ...(q.status === 'open'       ? { resolvedAt: null }                              : {}),
+      // Signed off, split by WHICH end it reached. See the note on `status` in
+      // repairs.schema: a failed job filed under "Resolved" is a job nobody
+      // finds again.
+      ...(q.status === 'resolved'   ? { resolvedAt: { not: null }, stage: 'fixed'  }     : {}),
+      ...(q.status === 'unresolved' ? { resolvedAt: { not: null }, stage: 'failed' }     : {}),
+      // Translated rather than matched literally — a job whose fix date has
+      // passed reads as 'fixing' everywhere, so the filter has to agree.
+      ...(q.stage ? stageFilter(q.stage) : {}),
       ...(q.vehicleId ? { vehicleId: q.vehicleId } : {}),
       ...(q.cursor ? { id: { lt: q.cursor } } : {}),
     },
@@ -191,7 +209,11 @@ export async function findItems(orgId: string, q: ListItemsQuery) {
   })
   const hasNextPage = rows.length > q.limit
   if (hasNextPage) rows.pop()
-  return { data: rows, cursor: hasNextPage ? (rows.at(-1)?.id ?? null) : null, hasNextPage }
+  return {
+    data: withEffectiveStages(rows),
+    cursor: hasNextPage ? (rows.at(-1)?.id ?? null) : null,
+    hasNextPage,
+  }
 }
 
 /**
@@ -251,10 +273,11 @@ export async function resolveItem(itemId: string, orgId: string, userId: string,
     })
     if (count === 0) return null
 
-    return tx.repairReportItem.findFirst({
+    const saved = await tx.repairReportItem.findFirst({
       where: { id: itemId, organisationId: orgId },
       include: itemInclude,
     })
+    return saved && withEffectiveStage(saved)
   })
 }
 
@@ -299,7 +322,7 @@ export async function setStage(itemId: string, orgId: string, userId: string, dt
       where: { id: itemId, organisationId: orgId },
       include: itemInclude,
     })
-    return { item, reason: 'ok' as const }
+    return { item: item && withEffectiveStage(item), reason: 'ok' as const }
   })
 }
 
@@ -312,10 +335,11 @@ async function byName(tx: Prisma.TransactionClient, userId: string): Promise<{ b
 
 /** One item, by id, tenant-scoped. The no-op stage move's answer. */
 export async function findItemById(itemId: string, orgId: string) {
-  return prisma.repairReportItem.findFirst({
+  const row = await prisma.repairReportItem.findFirst({
     where: { id: itemId, organisationId: orgId },
     include: itemInclude,
   })
+  return row && withEffectiveStage(row)
 }
 
 /** Does this item exist at all? Separates "already closed" from "never here". */
