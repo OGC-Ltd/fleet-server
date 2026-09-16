@@ -38,6 +38,16 @@ declare global {
        */
       authSessionId?: string
 
+      /**
+       * A stable per-BROWSER id, always present — see middleware/device-id.ts,
+       * which mounts before anything that reads it.
+       *
+       * It is a rate-limiting SUB-key and nothing else. It is minted by the
+       * server but held by the client, so it is as trustworthy as any cookie:
+       * a caller can discard it and be handed a new one. Never authorise on it.
+       */
+      deviceId?: string
+
       /** Populated by ingestAuth middleware for device-to-server telemetry push. */
       ingestOrg?: {
         id: string

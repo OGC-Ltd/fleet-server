@@ -151,8 +151,36 @@ const schema = z.object({
   INVITE_TTL_S:         z.coerce.number().int().positive().optional().default(604_800), // 7 days
   PASSWORD_RESET_TTL_S: z.coerce.number().int().positive().optional().default(3_600),   // 1 hour
 
-  /** Password-reset requests allowed per IP per 15 minutes. */
+  /**
+   * Password-reset requests per 15 minutes, per MACHINE — `ip|device`, not the
+   * IP alone. A company sits behind one NAT, so the old per-IP reading made
+   * this five requests for the whole building.
+   */
   PASSWORD_RESET_RATE_LIMIT_MAX: z.coerce.number().int().positive().optional().default(5),
+
+  /**
+   * The per-IP ceiling over the top of it, which an id-rotating caller cannot
+   * escape. Sized for an office, not for one person: thirty reset mails from a
+   * single address in fifteen minutes is already far more than onboarding a
+   * department costs, and the per-ACCOUNT cooldown in tokens.service.ts is what
+   * actually stops one inbox being bombed from many addresses.
+   */
+  PASSWORD_RESET_IP_RATE_LIMIT_MAX: z.coerce.number().int().positive().optional().default(30),
+
+  /**
+   * Requests to the two /account/setup routes per 15 minutes, per machine.
+   *
+   * Generous, and NOT the reset number, because these two routes are nothing
+   * like the one above: they send no mail, and the caller already holds a
+   * single-use 32-byte token. Sharing one five-request budget across all three
+   * is the defect this split exists to fix — a setup costs two requests, so an
+   * IP got two and a half password setups per fifteen minutes and an office got
+   * two and a half between everyone.
+   */
+  SETUP_RATE_LIMIT_MAX: z.coerce.number().int().positive().optional().default(30),
+
+  /** The per-IP ceiling over the setup routes. Pure DoS bound; see above. */
+  SETUP_IP_RATE_LIMIT_MAX: z.coerce.number().int().positive().optional().default(300),
 
   CORS_ORIGIN: z.string().default('*'),
   // 100 requests per SECOND, per client IP.
@@ -175,6 +203,11 @@ const schema = z.object({
   // several open tabs would otherwise spend the sign-in budget and report "too
   // many attempts" to somebody who never typed a password.
   REFRESH_RATE_LIMIT_MAX: z.coerce.number().default(120),
+
+  // The per-IP ceiling over REFRESH_RATE_LIMIT_MAX. The per-machine number
+  // above is what an office needs; this is what stops one address refreshing
+  // without bound by minting device ids.
+  REFRESH_IP_RATE_LIMIT_MAX: z.coerce.number().default(600),
 
   // Device telemetry per MINUTE — its window is fixed in rateLimiter rather
   // than shared, so the global knob above cannot redefine this one's meaning.

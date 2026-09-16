@@ -26,9 +26,14 @@
 
 import { Router } from 'express'
 import { authenticate } from '../../middleware/auth.js'
+import { deviceId } from '../../middleware/device-id.js'
 import { requireRealAuth } from '../../middleware/requireRealAuth.js'
 import { validateBody } from '../../middleware/validate.js'
-import { passwordResetLimiter, sensitiveLimiter } from '../../middleware/rateLimiter.js'
+import {
+  passwordResetLimiter, passwordResetIpLimiter,
+  setupLimiter, setupIpLimiter,
+  sensitiveLimiter,
+} from '../../middleware/rateLimiter.js'
 import {
   updateProfileSchema, changePasswordSchema, forgotPasswordSchema, setupSchema,
 } from './account.schema.js'
@@ -40,13 +45,40 @@ const router = Router()
 // caller is without checking a token. See requireRealAuth.
 router.use(requireRealAuth)
 
+// Ahead of every limiter below, because that is what guarantees `req.deviceId`
+// is set by the time a keyGenerator runs.
+//
+// Mounted HERE rather than globally in app.ts on purpose. The id is read by
+// four routes — three in this file and /auth/refresh — and mounting it on the
+// whole app would hang a Set-Cookie on every telemetry POST from hardware that
+// holds no cookies, several hundred times a minute, to no end.
+router.use(deviceId)
+
 // ── Public ───────────────────────────────────────────────────────────────────
 // Reachable without a session: somebody who has forgotten their password, or
 // who has an invite and no password yet, has no session to offer.
 
-router.post('/forgot-password', passwordResetLimiter, validateBody(forgotPasswordSchema), ctrl.forgotPassword)
-router.get('/setup/:token', passwordResetLimiter, ctrl.describeSetup)
-router.post('/setup', passwordResetLimiter, validateBody(setupSchema), ctrl.completeSetup)
+// Two limiters each, and the order is the sentence: this ADDRESS, then this
+// MACHINE. The per-machine one is the limit people meet; the per-IP one exists
+// only to bound a caller who throws away device ids to mint fresh buckets.
+//
+// The two groups are deliberately far apart. Asking for a reset mails an
+// address the caller chose and is worth being stingy about. Opening the link
+// that mail contained sends nothing and requires a single-use token the caller
+// must already hold — it was on the reset budget until it turned out that a
+// setup costs two requests out of five, shared by everyone behind one office
+// NAT, and invited users were being told they had made too many requests.
+router.post('/forgot-password',
+  passwordResetIpLimiter, passwordResetLimiter,
+  validateBody(forgotPasswordSchema), ctrl.forgotPassword)
+
+router.get('/setup/:token',
+  setupIpLimiter, setupLimiter,
+  ctrl.describeSetup)
+
+router.post('/setup',
+  setupIpLimiter, setupLimiter,
+  validateBody(setupSchema), ctrl.completeSetup)
 
 // ── Everything below requires a session ──────────────────────────────────────
 router.use(authenticate)
