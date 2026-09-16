@@ -86,6 +86,7 @@ export async function notifyRepairReport(
       outcome: i.outcome as 'fixing' | 'needs_spare' | 'cannot_fix',
       ...(i.sparePart   ? { sparePart:   i.sparePart }   : {}),
       ...(i.problemNote ? { problemNote: i.problemNote } : {}),
+      ...(i.expectedResolutionAt ? { expectedResolutionAt: i.expectedResolutionAt } : {}),
     })),
   })
 

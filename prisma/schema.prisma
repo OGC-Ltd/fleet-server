@@ -1123,6 +1123,11 @@ model RepairReport {
 /// A `prisma db pull` will not see it and a diff may propose dropping it. Do
 /// not let it: two technicians reporting the same dead probe on the same
 /// morning is the normal failure, and it doubles the spare-part order.
+///
+/// The same applies to the PARTIAL INDEX on `expected_resolution_at`
+/// (migration 20260916160000_repair_expected_resolution), which covers the
+/// open jobs with a date on them — the overdue scan — and is likewise absent
+/// from a `db pull`.
 model RepairReportItem {
   id       String @id @default(cuid())
   reportId String @map("report_id")
@@ -1155,6 +1160,20 @@ model RepairReportItem {
   /// What they found. Required for needs_spare and cannot_fix, optional for a
   /// clean fix, which explains itself.
   problemNote String? @map("problem_note")
+  /// When the technician expects the unit to be back in service.
+  ///
+  /// Required when outcome = 'needs_spare', and enforced in Postgres too
+  /// (migration 20260916160000_repair_expected_resolution). Outsourcing a part
+  /// is the one outcome that hands the job to somebody else and then waits, and
+  /// a wait with no stated end cannot be chased — "ordered" and "ordered three
+  /// weeks ago" look identical on the Repairs tab without it. It is the
+  /// technician's ESTIMATE, not a promise from a supplier, and the tab says so.
+  ///
+  /// `@db.Date` because the answer has day granularity: a technician says "the
+  /// 25th", not "14:30 on the 25th". Storing a timestamp would invite a
+  /// timezone to move it to the 24th for a reader in Nairobi, which is the
+  /// classic way a date field starts lying by one day.
+  expectedResolutionAt DateTime? @map("expected_resolution_at") @db.Date
 
   /// 'pending' | 'spare_outsourced' | 'fixing' | 'fixed' | 'failed'
   ///
