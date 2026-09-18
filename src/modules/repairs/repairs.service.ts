@@ -5,7 +5,8 @@ import { repairReportEmail } from '../../lib/mailer/templates.js'
 import { publishNotificationDurable } from '../../lib/notifications/notification.store.js'
 import { prisma } from '../../lib/prisma.js'
 import * as repo from './repairs.repository.js'
-import type { CreateRepairReport } from './repairs.schema.js'
+import { reportResolution, reportStageChange } from './repairs.notify.js'
+import type { CreateRepairReport, ResolveItem, SetStage } from './repairs.schema.js'
 
 /**
  * What became of the mail, in enough detail to say so on screen.
@@ -170,6 +171,83 @@ export async function submitRepairReport(orgId: string, userId: string, dto: Cre
   }
 
   return { report, email }
+}
+
+/**
+ * Move an open job, and tell somebody.
+ *
+ * The controller used to call the repository straight, which is how a ticket
+ * could change hands with nobody hearing about it — see the note at the top of
+ * repairs.notify.ts. The move and the message are one call now, and the
+ * message is best-effort: a notification that fails must never undo a stage
+ * change a technician has already been shown.
+ */
+export async function changeStage(itemId: string, orgId: string, userId: string, dto: SetStage) {
+  const result = await repo.setStage(itemId, orgId, userId, dto)
+  if (!result.item) return result
+
+  const item = result.item as typeof result.item & {
+    vehicle?: { registrationPlate?: string }
+    faultKind?: string | null
+    stageChangedAt?: Date | null
+  }
+  await reportStageChange(
+    {
+      itemId,
+      orgId,
+      plate: item.vehicle?.registrationPlate ?? 'Unknown unit',
+      label: humanKind(item.faultKind),
+    },
+    dto.stage,
+    await actorName(userId),
+    item.stageChangedAt ?? new Date(),
+    dto.note,
+  )
+  return result
+}
+
+/**
+ * Sign a job off, and tell somebody.
+ *
+ * The one closure that leaves the building is the unsuccessful one: a unit that
+ * cannot be fixed here is a decision for somebody who does not read the Repairs
+ * tab, so `reportResolution` mails that half and only that half.
+ */
+export async function closeItem(itemId: string, orgId: string, userId: string, dto: ResolveItem) {
+  const item = await repo.resolveItem(itemId, orgId, userId, dto)
+  if (!item) return null
+
+  const withVehicle = item as typeof item & {
+    vehicle?: { registrationPlate?: string }
+    faultKind?: string | null
+    resolvedAt?: Date | null
+  }
+  await reportResolution(
+    {
+      itemId,
+      orgId,
+      plate: withVehicle.vehicle?.registrationPlate ?? 'Unknown unit',
+      label: humanKind(withVehicle.faultKind),
+    },
+    dto.verdict,
+    await actorName(userId),
+    withVehicle.resolvedAt ?? new Date(),
+    dto.fixNote,
+    repairRecipients(),
+  )
+  return item
+}
+
+/** Who did it, for the message. The trail on the row already carries the id;
+ *  a feed item that said "moved by cmr6da1bp0000" would be a message nobody
+ *  can read. */
+async function actorName(userId: string): Promise<string> {
+  try {
+    const u = await prisma.user.findUnique({ where: { id: userId }, select: { fullName: true } })
+    return u?.fullName ?? 'A technician'
+  } catch {
+    return 'A technician'
+  }
 }
 
 export { OUTCOME_LABEL, STAGE_LABEL, humanKind }
