@@ -74,6 +74,7 @@
 import { Queue, Worker, type Job } from 'bullmq'
 import { getQueueRedis } from '../redis.js'
 import { env } from '../../config/env.js'
+import { runRepairSweep } from '../../modules/repairs/repairs.sweep.js'
 import { logger } from '../logger.js'
 import { fleetDayStart } from '../provider-time.js'
 import { prisma } from '../prisma.js'
@@ -149,6 +150,16 @@ const RATE_JOB = 'fuel:consumption-rates'
  * modules/analytics/vehicle-daily-stats.service for why an index could not have
  * done this instead.
  */
+/**
+ * Open repair jobs: escalate what is late, and file the day's open-job digest.
+ *
+ * On THIS queue rather than a queue of its own because it is one more daily
+ * pass over a few hundred rows, and a second queue would be a second Redis
+ * connection and a second worker process on a box with 2 vCPU. It is also the
+ * one job here that exists to fire when nothing has happened — see
+ * docs/tech-resolution-process.md §4.
+ */
+const REPAIR_JOB = 'repairs:escalation'
 const STATS_JOB = 'vehicle:daily-stats'
 const INCIDENT_STATS_JOB = 'vehicle:incident-daily-stats'
 const SENSOR_FAULT_JOB   = 'sensor:fault-sweep'
@@ -585,6 +596,18 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     backoff:           { type: 'exponential', delay: 60_000 },
   })
 
+  if (rollups) await queue.add(REPAIR_JOB, {}, {
+    // 05:05 UTC by default = 08:05 in Nairobi: the escalations and the digest
+    // are on the feed as the operations room opens, rather than overnight where
+    // they scroll away before anybody reads them. Clear of the 04:11 and 04:23
+    // sweeps, which hold the same pooler in batches.
+    repeat:            { pattern: env.REPAIR_ESCALATION_CRON },
+    removeOnComplete:  { count: 30 },
+    removeOnFail:      { count: 30 },
+    attempts:          3,
+    backoff:           { type: 'exponential', delay: 60_000 },
+  })
+
   if (rollups) await queue.add(STATS_JOB, {}, {
     // 21:40 UTC — twenty minutes after the trend job, which reads the same
     // fleet day. Sequential rather than concurrent: the worker runs one job at
@@ -661,6 +684,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
       await persistMeasuredBurnRates()
       return derived
     }
+    if (job.name === REPAIR_JOB) return runRepairSweep()
     if (job.name === SENSOR_JOB) return syncSensorInventory()
     if (job.name === PROBE_JOB) return sweepProbeHealth({ notify: true })
     if (job.name !== PRUNE_JOB) return
@@ -684,6 +708,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     trendCron: rollups ? '20 21 * * *' : null,
     statsCron: rollups ? '40 21 * * *' : null,
     rateCron:  rollups ? '40 2 * * 0'  : null,
+    repairCron: rollups ? env.REPAIR_ESCALATION_CRON : null,
     retentionDays: env.NOTIFICATION_RETENTION_DAYS,
   }, 'Maintenance jobs scheduled')
 

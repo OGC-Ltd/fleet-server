@@ -145,6 +145,44 @@ const schema = z.object({
    */
   REPAIR_NOTIFY_EMAILS: z.string().optional().default(''),
 
+  /**
+   * Escalation — the walkthrough's last step, which has no number in it.
+   *
+   * "Escalate if unresolved after X days" cannot be implemented until X is a
+   * number AND the clock it runs on is named, and there are two clocks worth
+   * running (see docs/tech-resolution-process.md §2.6). Both are here, both
+   * default to the values proposed to the business, and neither is a policy
+   * this code should decide on its own — they are env so the answer can change
+   * without a deploy the day the business gives one.
+   *
+   *   STALE    days with no movement at all. Catches the job nobody is
+   *            working, which is the failure the process exists to prevent.
+   *   OVERDUE  days past the technician's own expected date. Catches the
+   *            estimate that was wrong or the order that never came.
+   *   REPEAT   how long an escalated job stays quiet before it comes back one
+   *            level higher. Without it the sweep re-reports every open
+   *            escalation every morning, and a feed that repeats itself is a
+   *            feed people filter.
+   */
+  REPAIR_ESCALATE_STALE_DAYS:   z.coerce.number().int().positive().optional().default(3),
+  REPAIR_ESCALATE_OVERDUE_DAYS: z.coerce.number().int().nonnegative().optional().default(2),
+  REPAIR_ESCALATE_REPEAT_DAYS:  z.coerce.number().int().positive().optional().default(3),
+  /**
+   * Who an escalation goes to, beyond the people who handle the repairs.
+   *
+   * Empty falls back to REPAIR_NOTIFY_EMAILS rather than to nobody: an unset
+   * list must not be a silent way to turn escalation off. Until the MAILTRAP
+   * keys are on the box neither list receives anything, and the durable feed
+   * is the only channel that actually reaches production.
+   */
+  REPAIR_ESCALATION_EMAILS: z.string().optional().default(''),
+  /**
+   * When the sweep runs. 05:05 UTC is 08:05 in Nairobi — the escalations and
+   * the day's open-job digest are on the feed as the operations room opens,
+   * and clear of the 04:11/04:23 probe and sensor sweeps that share the box.
+   */
+  REPAIR_ESCALATION_CRON: z.string().optional().default('5 5 * * *'),
+
   // How long an emailed link stays good. An invite is generous because it may
   // wait for someone's Monday; a reset is short because it is a live
   // credential for an account that already exists.

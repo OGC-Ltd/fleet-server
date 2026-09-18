@@ -62,7 +62,7 @@ export const resolveItem: RequestHandler = async (req, res, next) => {
   try {
     const orgId  = p(req, 'orgId')
     const itemId = p(req, 'itemId')
-    const item = await repo.resolveItem(itemId, orgId, req.user!.id, req.body as ResolveItem)
+    const item = await svc.closeItem(itemId, orgId, req.user!.id, req.body as ResolveItem)
     if (item) { sendSuccess(res, item); return }
 
     // Nothing was updated. Two different reasons, two different answers — a
@@ -89,7 +89,7 @@ export const setStage: RequestHandler = async (req, res, next) => {
   try {
     const orgId  = p(req, 'orgId')
     const itemId = p(req, 'itemId')
-    const { item, reason } = await repo.setStage(itemId, orgId, req.user!.id, req.body as SetStage)
+    const { item, reason } = await svc.changeStage(itemId, orgId, req.user!.id, req.body as SetStage)
     if (item) { sendSuccess(res, item); return }
 
     if (reason === 'nochange') {
