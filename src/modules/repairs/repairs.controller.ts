@@ -109,14 +109,17 @@ export const assignItem: RequestHandler = async (req, res, next) => {
   try {
     const orgId = p(req, 'orgId')
     const itemId = p(req, 'itemId')
-    const item = await svc.assignItemToTechnician(itemId, orgId, req.user!.id, req.body as AssignRepairItem)
-    if (!item) {
+    const result = await svc.assignItemToTechnician(itemId, orgId, req.user!.id, req.body as AssignRepairItem)
+    if (!result.item) {
       const exists = await repo.itemExists(itemId, orgId)
       throw exists
         ? new ConflictError('This job has already been closed')
         : new NotFoundError('Repair job not found')
     }
-    sendSuccess(res, item)
+    sendSuccess(res, {
+      ...result.item,
+      assignmentEmail: 'assignmentEmail' in result ? result.assignmentEmail : undefined,
+    })
   } catch (err) { next(err) }
 }
 

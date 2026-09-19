@@ -231,7 +231,7 @@ export async function assignItemToTechnician(itemId: string, orgId: string, user
   })
   if (!result.item) return result
 
-  await notifyRepairAssignment({
+  const assignmentEmail = await notifyRepairAssignment({
     itemId,
     orgId,
     assignedById: userId,
@@ -261,7 +261,7 @@ export async function assignItemToTechnician(itemId: string, orgId: string, user
     dto.reason ? `Assigned to ${assignee} — ${dto.reason}` : `Assigned to ${assignee}`,
   )
 
-  return result
+  return { ...result, assignmentEmail }
 }
 
 export async function autoAssignTechnician(orgId: string, itemId: string, userId: string, reason?: string) {
