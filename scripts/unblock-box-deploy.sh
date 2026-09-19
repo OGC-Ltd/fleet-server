@@ -49,10 +49,15 @@ box() { ssh -i "$BOX_KEY" -o IdentitiesOnly=yes -o BatchMode=yes "${BOX_USER}@${
 # One round trip. `hash-object` is the whole point: a path plus a content hash
 # is a question this repository can answer offline, where a diff is only
 # something to read.
+#
+# `-uall` rather than plain `--porcelain`, which COLLAPSES an untracked
+# directory to one entry with a trailing slash — and the untracked thing that
+# blocks this deploy is `prisma/migrations/<name>/`, so the default would hand
+# `hash-object` a directory and get an error instead of an answer.
 head2 "reading the box"
 state=$(box "cd '$BOX_DIR' && \
   echo \"HEAD \$(git rev-parse HEAD)\" && \
-  git status --porcelain=v1 | while read -r st path; do \
+  git status --porcelain=v1 -uall | while read -r st path; do \
     if [ ! -e \"\$path\" ]; then echo \"X - \$path\"; \
     elif [ \"\$st\" = '??' ]; then echo \"U \$(git hash-object \"\$path\") \$path\"; \
     else echo \"M \$(git hash-object \"\$path\") \$path\"; fi; \
@@ -175,8 +180,8 @@ stash="/tmp/box-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
     printf 'git checkout -- %q\n' "$p"
   done
   for p in ${blockers[@]+"${blockers[@]}"}; do
-    printf 'mkdir -p %q/$(dirname %q)\n' "$stash" "$p"
-    printf 'mv %q %q/%q\n' "$p" "$stash" "$p"
+    printf 'mkdir -p %q\n' "$stash/$(dirname "$p")"
+    printf 'mv %q %q\n' "$p" "$stash/$p"
   done
   printf 'echo "anything moved is under %s"\n' "$stash"
   printf 'echo "--- git status now:"\n'
