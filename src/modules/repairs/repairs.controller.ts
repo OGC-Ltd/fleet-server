@@ -4,7 +4,8 @@ import { ConflictError, NotFoundError } from '../../core/errors/errors.js'
 import * as repo from './repairs.repository.js'
 import * as svc from './repairs.service.js'
 import type {
-  CreateRepairReport, ResolveItem, SetStage, ListReportsQuery, ListItemsQuery,
+  AssignRepairItem, CreateRepairReport, ResolveItem, SetStage, ListReportsQuery, ListItemsQuery,
+  RespondToAssignment,
 } from './repairs.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -101,5 +102,31 @@ export const setStage: RequestHandler = async (req, res, next) => {
     throw exists
       ? new ConflictError('This job has been signed off — its stage can no longer change')
       : new NotFoundError('Repair job not found')
+  } catch (err) { next(err) }
+}
+
+export const assignItem: RequestHandler = async (req, res, next) => {
+  try {
+    const orgId = p(req, 'orgId')
+    const itemId = p(req, 'itemId')
+    const item = await svc.assignItemToTechnician(itemId, orgId, req.user!.id, req.body as AssignRepairItem)
+    if (!item) {
+      const exists = await repo.itemExists(itemId, orgId)
+      throw exists
+        ? new ConflictError('This job has already been closed')
+        : new NotFoundError('Repair job not found')
+    }
+    sendSuccess(res, item)
+  } catch (err) { next(err) }
+}
+
+export const respondToAssignment: RequestHandler = async (req, res, next) => {
+  try {
+    const result = await svc.respondToAssignment(
+      p(req, 'itemId'), p(req, 'orgId'), req.user!.id, req.body as RespondToAssignment,
+    )
+    if (result.item) { sendSuccess(res, result.item); return }
+    if (result.reason === 'not_assignee') throw new ConflictError('Only the assigned person can respond to this task')
+    throw new ConflictError('This repair task is no longer open')
   } catch (err) { next(err) }
 }

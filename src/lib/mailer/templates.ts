@@ -131,6 +131,33 @@ export function passwordChangedEmail(opts: { fullName: string; when: Date; ip?: 
  * the thing they were told about is now done doubles the traffic for a fact
  * already on the screen they were sent to.
  */
+export function repairAssignmentEmail(opts: {
+  assigneeName: string
+  assignerName: string
+  plate: string
+  label: string
+  reason?: string | undefined
+  /** APP_BASE_URL; blank when the mailer is configured but the origin is not. */
+  link?: string | undefined
+}): RenderedMail {
+  const reasonLine = opts.reason ? `\nReason: ${opts.reason}\n` : ''
+  return {
+    category: 'repair-assignment',
+    subject: `Repair task assigned: ${opts.plate} — ${opts.label}`,
+    text:
+      `Hello ${opts.assigneeName},\n\n` +
+      `${opts.assignerName} has assigned you a repair task for ${opts.plate} (${opts.label}).${reasonLine}\n` +
+      (opts.link ? `Open the task here: ${opts.link}\n` : ''),
+    html: shell(
+      'Repair task assigned',
+      `<p style="margin:0 0 10px">Hello ${esc(opts.assigneeName)},</p>
+       <p style="margin:0 0 10px"><strong>${esc(opts.assignerName)}</strong> has assigned you a repair task for <strong>${esc(opts.plate)}</strong> (${esc(opts.label)}).</p>
+       ${opts.reason ? `<p style="margin:0 0 10px">Reason: ${esc(opts.reason)}</p>` : ''}`,
+      opts.link ? { href: opts.link, label: 'Open the task' } : undefined,
+    ),
+  }
+}
+
 export function repairReportEmail(opts: {
   orgName:        string
   technicianName: string

@@ -22,7 +22,8 @@ import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission, requirePermissionStrict } from '../../middleware/authorize.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
 import {
-  createRepairReportSchema, resolveItemSchema, setStageSchema,
+  assignRepairItemSchema, createRepairReportSchema, resolveItemSchema, setStageSchema,
+  respondToAssignmentSchema,
   listReportsQuerySchema, listItemsQuerySchema,
 } from './repairs.schema.js'
 import * as ctrl from './repairs.controller.js'
@@ -34,6 +35,8 @@ router.use(authenticate, requireOrgAccess)
 router.get('/', requirePermission('repair:read'), validateQuery(listReportsQuerySchema), ctrl.listReports)
 router.get('/items', requirePermission('repair:read'), validateQuery(listItemsQuerySchema), ctrl.listItems)
 router.post('/', requirePermissionStrict('repair:create'), validateBody(createRepairReportSchema), ctrl.createReport)
+router.post('/items/:itemId/assign', requirePermissionStrict('repair:assign'), validateBody(assignRepairItemSchema), ctrl.assignItem)
+router.post('/items/:itemId/assignment-response', requirePermissionStrict('repair:read'), validateBody(respondToAssignmentSchema), ctrl.respondToAssignment)
 router.post('/items/:itemId/resolve', requirePermissionStrict('repair:resolve'), validateBody(resolveItemSchema), ctrl.resolveItem)
 // Strict for the same reason resolve is, and it is the weaker claim of the two
 // — but it writes a line onto a durable trail under a named person, and the

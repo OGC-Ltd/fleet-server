@@ -183,6 +183,15 @@ export const setStageSchema = z.object({
   note:  z.string().trim().max(500).optional(),
 })
 
+export const assignRepairItemSchema = z.object({
+  technicianId: z.string().min(1).optional(),
+  reason:      z.string().trim().max(500).optional(),
+})
+
+export const respondToAssignmentSchema = z.object({
+  status: z.enum(['accepted', 'declined']),
+})
+
 export const listReportsQuerySchema = z.object({
   cursor: z.string().optional(),
   limit:  z.coerce.number().int().min(1).max(100).default(20),
@@ -220,5 +229,7 @@ export type CreateRepairReport = z.infer<typeof createRepairReportSchema>
 export type RepairItemInput    = CreateRepairReport['items'][number]
 export type ResolveItem        = z.infer<typeof resolveItemSchema>
 export type SetStage           = z.infer<typeof setStageSchema>
+export type AssignRepairItem   = z.infer<typeof assignRepairItemSchema>
+export type RespondToAssignment = z.infer<typeof respondToAssignmentSchema>
 export type ListReportsQuery   = z.infer<typeof listReportsQuerySchema>
 export type ListItemsQuery     = z.infer<typeof listItemsQuerySchema>

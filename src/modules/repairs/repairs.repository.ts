@@ -23,6 +23,24 @@ export type StageEvent = {
   note?:   string
 }
 
+export type AssignmentEvent = {
+  kind: 'assignment'
+  assignedToId: string | null
+  assignedToName?: string
+  by: string | null
+  byName?: string
+  at: string
+  note?: string
+}
+
+export type AssignmentResponseEvent = {
+  kind: 'assignment_response'
+  status: 'accepted' | 'declined'
+  by: string
+  byName?: string
+  at: string
+}
+
 /**
  * Append to the history, defensively.
  *
@@ -32,8 +50,8 @@ export type StageEvent = {
  * spreading a string would produce an array of characters and the tracking
  * line would render one node per letter.
  */
-function appendStage(history: unknown, event: StageEvent): StageEvent[] {
-  const prior = Array.isArray(history) ? (history as StageEvent[]) : []
+function appendStage<T extends StageEvent | AssignmentEvent | AssignmentResponseEvent>(history: unknown, event: T): T[] {
+  const prior = Array.isArray(history) ? (history as T[]) : []
   // 200 moves is a job somebody is fighting with a button, not a repair. The
   // cap bounds the column rather than expressing a belief about repairs.
   return [...prior, event].slice(-200)
@@ -48,6 +66,8 @@ function appendStage(history: unknown, event: StageEvent): StageEvent[] {
  */
 const itemInclude = {
   vehicle: { select: { id: true, registrationPlate: true, name: true } },
+  assignedTo: { select: { id: true, fullName: true } },
+  assignedBy: { select: { id: true, fullName: true } },
 } as const
 
 const reportInclude = {
@@ -181,6 +201,87 @@ export async function findReportById(reportId: string, orgId: string) {
     include: reportInclude,
   })
   return row && reportWithEffectiveStages(row)
+}
+
+export async function assignItem(itemId: string, orgId: string, assignedById: string, dto: { technicianId?: string; reason?: string }): Promise<{ item: any | null; reason: 'ok' | 'closed' | 'invalid_assignee' }> {
+  return prisma.$transaction(async (tx) => {
+    const current = await tx.repairReportItem.findFirst({
+      where: { id: itemId, organisationId: orgId, resolvedAt: null },
+      select: { id: true, assignedToId: true, stageHistory: true, assignedAt: true, assignedById: true },
+    })
+    if (!current) return { item: null, reason: 'closed' }
+
+    const technicianId = dto.technicianId ?? null
+    if (technicianId) {
+      const tech = await tx.user.findFirst({
+        where: { id: technicianId, organisationId: orgId },
+        select: { id: true },
+      })
+      if (!tech) return { item: null, reason: 'invalid_assignee' }
+    }
+
+    const now = new Date()
+    const { count } = await tx.repairReportItem.updateMany({
+      where: { id: itemId, organisationId: orgId, resolvedAt: null },
+      data: {
+        assignedToId: technicianId,
+        assignedById: assignedById,
+        assignedAt: now,
+          assignmentNote: dto.reason ?? null,
+          assignmentStatus: technicianId ? 'pending' : 'accepted',
+        stageHistory: appendStage(current.stageHistory, {
+          kind: 'assignment',
+          assignedToId: technicianId,
+          by: assignedById,
+          at: now.toISOString(),
+          ...(dto.reason ? { note: dto.reason } : {}),
+        } satisfies AssignmentEvent),
+      },
+    })
+
+    if (count === 0) return { item: null, reason: 'closed' }
+
+    const item = await tx.repairReportItem.findFirst({
+      where: { id: itemId, organisationId: orgId },
+      include: itemInclude,
+    })
+    return { item: item && withEffectiveStage(item), reason: 'ok' }
+  })
+}
+
+export async function respondToAssignment(
+  itemId: string,
+  orgId: string,
+  userId: string,
+  status: 'accepted' | 'declined',
+): Promise<{ item: any | null; reason: 'ok' | 'not_assignee' | 'closed' }> {
+  return prisma.$transaction(async (tx) => {
+    const current = await tx.repairReportItem.findFirst({
+      where: { id: itemId, organisationId: orgId, resolvedAt: null },
+      select: { id: true, assignedToId: true, stageHistory: true },
+    })
+    if (!current) return { item: null, reason: 'closed' as const }
+    if (current.assignedToId !== userId) return { item: null, reason: 'not_assignee' as const }
+
+    const at = new Date()
+    const { count } = await tx.repairReportItem.updateMany({
+      where: { id: itemId, organisationId: orgId, resolvedAt: null, assignedToId: userId },
+      data: {
+        assignmentStatus: status,
+        stageHistory: appendStage(current.stageHistory, {
+          kind: 'assignment_response', status, by: userId, at: at.toISOString(),
+          ...(await byName(tx, userId)),
+        } satisfies AssignmentResponseEvent),
+      },
+    })
+    if (count === 0) return { item: null, reason: 'closed' as const }
+
+    const item = await tx.repairReportItem.findFirst({
+      where: { id: itemId, organisationId: orgId },
+      include: itemInclude,
+    })
+    return { item: item && withEffectiveStage(item), reason: 'ok' as const }
+  })
 }
 
 export async function findItems(orgId: string, q: ListItemsQuery) {

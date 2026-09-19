@@ -87,14 +87,16 @@ export const PERMISSION_CATALOGUE = {
 
   // Repair reporting. A technician walks the yard with a list of faulty
   // probes, works through it, and files ONE report covering every unit they
-  // touched. `repair:create` raises that report; `repair:resolve` closes a
-  // single line of it later, when the spare arrived or the fix held.
+  // `repair:create` raises that report; `repair:assign` hands one open item to
+  // a technician; `repair:resolve` closes a single line of it later, when the
+  // spare arrived or the fix held.
   //
   // `resolve` rather than `update`: closing is the only mutation an item ever
   // gets, and naming it `update` would invite a future edit-anything route to
   // shelter under a grant that was handed out to mean "tick this off".
   'repair:read':           'View repair reports',
   'repair:create':         'File a repair report',
+  'repair:assign':         'Assign a repair job to a technician',
   'repair:resolve':        'Close a repair job',
 
   // Device credentials. Minting one is a way to write telemetry for a whole
@@ -165,7 +167,7 @@ const ORG_EVERYTHING: PermissionSlug[] = [
   'sensor:read',
   // The office reads what technicians file. A repair report nobody upstream
   // can open is a report that exists only in an inbox.
-  'repair:read', 'repair:create', 'repair:resolve',
+  'repair:read', 'repair:create', 'repair:assign', 'repair:resolve',
   'vehicle:create', 'vehicle:update', 'vehicle:delete',
   'trip:create',
   'cargo:read', 'cargo:update', 'cargo:delete',
