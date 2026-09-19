@@ -184,7 +184,7 @@ export const setStageSchema = z.object({
 })
 
 export const assignRepairItemSchema = z.object({
-  technicianId: z.string().min(1).optional(),
+  technicianId: z.string().min(1).nullable().optional(),
   reason:      z.string().trim().max(500).optional(),
 })
 

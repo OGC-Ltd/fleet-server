@@ -4,7 +4,7 @@ import { prisma } from '../../lib/prisma.js'
 
 export type AssignmentEmailResult =
   | { sent: true; assigneeName: string }
-  | { sent: false; reason: 'self-assignment' | 'no-assignee-email' | 'unconfigured' | 'send-failed'; assigneeName?: string }
+  | { sent: false; reason: 'self-assignment' | 'unassigned' | 'no-assignee-email' | 'unconfigured' | 'send-failed'; assigneeName?: string }
 
 export interface NotifyRepairAssignmentInput {
   itemId: string

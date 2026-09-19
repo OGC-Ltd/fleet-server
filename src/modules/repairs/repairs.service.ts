@@ -213,7 +213,7 @@ export async function changeStage(itemId: string, orgId: string, userId: string,
 export async function assignItemToTechnician(itemId: string, orgId: string, userId: string, dto: AssignRepairItem) {
   let technicianId = dto.technicianId
 
-  if (!technicianId) {
+  if (technicianId === undefined) {
     const technicians = await prisma.user.findMany({
       where: { organisationId: orgId },
       select: { id: true, fullName: true },
@@ -231,13 +231,15 @@ export async function assignItemToTechnician(itemId: string, orgId: string, user
   })
   if (!result.item) return result
 
-  const assignmentEmail = await notifyRepairAssignment({
-    itemId,
-    orgId,
-    assignedById: userId,
-    assignedToId: technicianId ?? userId,
-    reason: dto.reason ?? (technicianId ? 'Assigned by triage' : undefined),
-  })
+  const assignmentEmail = technicianId
+    ? await notifyRepairAssignment({
+      itemId,
+      orgId,
+      assignedById: userId,
+      assignedToId: technicianId,
+      reason: dto.reason ?? 'Assigned by triage',
+    })
+    : { sent: false as const, reason: 'unassigned' as const }
 
   const item = result.item as typeof result.item & {
     vehicle?: { registrationPlate?: string }

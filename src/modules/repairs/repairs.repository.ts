@@ -33,6 +33,14 @@ export type AssignmentEvent = {
   note?: string
 }
 
+export type AssignmentRevokedEvent = {
+  kind: 'assignment_revoked'
+  assignedToId: string
+  by: string
+  byName?: string
+  at: string
+}
+
 export type AssignmentResponseEvent = {
   kind: 'assignment_response'
   status: 'accepted' | 'declined'
@@ -50,7 +58,7 @@ export type AssignmentResponseEvent = {
  * spreading a string would produce an array of characters and the tracking
  * line would render one node per letter.
  */
-function appendStage<T extends StageEvent | AssignmentEvent | AssignmentResponseEvent>(history: unknown, event: T): T[] {
+function appendStage<T extends StageEvent | AssignmentEvent | AssignmentRevokedEvent | AssignmentResponseEvent>(history: unknown, event: T): T[] {
   const prior = Array.isArray(history) ? (history as T[]) : []
   // 200 moves is a job somebody is fighting with a button, not a repair. The
   // cap bounds the column rather than expressing a belief about repairs.
@@ -203,7 +211,7 @@ export async function findReportById(reportId: string, orgId: string) {
   return row && reportWithEffectiveStages(row)
 }
 
-export async function assignItem(itemId: string, orgId: string, assignedById: string, dto: { technicianId?: string; reason?: string }): Promise<{ item: any | null; reason: 'ok' | 'closed' | 'invalid_assignee' }> {
+export async function assignItem(itemId: string, orgId: string, assignedById: string, dto: { technicianId?: string | null; reason?: string }): Promise<{ item: any | null; reason: 'ok' | 'closed' | 'invalid_assignee' }> {
   return prisma.$transaction(async (tx) => {
     const current = await tx.repairReportItem.findFirst({
       where: { id: itemId, organisationId: orgId, resolvedAt: null },
@@ -229,13 +237,22 @@ export async function assignItem(itemId: string, orgId: string, assignedById: st
         assignedAt: now,
           assignmentNote: dto.reason ?? null,
           assignmentStatus: technicianId ? 'pending' : 'accepted',
-        stageHistory: appendStage(current.stageHistory, {
+          stageHistory: appendStage(
+            current.assignedToId && current.assignedToId !== technicianId
+              ? appendStage(current.stageHistory, {
+                kind: 'assignment_revoked', assignedToId: current.assignedToId,
+                by: assignedById, at: now.toISOString(),
+                ...(await byName(tx, assignedById)),
+              } satisfies AssignmentRevokedEvent)
+              : current.stageHistory,
+            {
           kind: 'assignment',
           assignedToId: technicianId,
           by: assignedById,
           at: now.toISOString(),
           ...(dto.reason ? { note: dto.reason } : {}),
-        } satisfies AssignmentEvent),
+            } satisfies AssignmentEvent,
+          ),
       },
     })
 
