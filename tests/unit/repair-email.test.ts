@@ -22,16 +22,21 @@ vi.mock('../../src/lib/mailer/mailer.js', () => ({ sendMail: sendMailMock }))
 const envMock = vi.hoisted(() => ({ REPAIR_NOTIFY_EMAILS: '', APP_BASE_URL: '' }))
 vi.mock('../../src/config/env.js', () => ({ env: envMock }))
 
+const prismaMock = vi.hoisted(() => ({
+  user: { findUnique: vi.fn() },
+  repairReportItem: { findUnique: vi.fn() },
+}))
+
 vi.mock('../../src/lib/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
-vi.mock('../../src/lib/prisma.js', () => ({ prisma: {} }))
+vi.mock('../../src/lib/prisma.js', () => ({ prisma: prismaMock }))
 vi.mock('../../src/lib/notifications/notification.store.js', () => ({
   publishNotificationDurable: vi.fn(),
 }))
 
-import { repairRecipients, notifyRepairReport } from '../../src/modules/repairs/repairs.service.js'
-import { repairReportEmail } from '../../src/lib/mailer/templates.js'
+import { notifyRepairAssignment, repairRecipients, notifyRepairReport } from '../../src/modules/repairs/repairs.service.js'
+import { repairAssignmentEmail, repairReportEmail } from '../../src/lib/mailer/templates.js'
 
 const REPORTED_AT = new Date('2026-09-16T14:02:00Z')
 
@@ -60,6 +65,8 @@ beforeEach(() => {
   envMock.REPAIR_NOTIFY_EMAILS = ''
   envMock.APP_BASE_URL = ''
   sendMailMock.mockResolvedValue({ sent: true })
+  prismaMock.user.findUnique.mockReset()
+  prismaMock.repairReportItem.findUnique.mockReset()
 })
 
 describe('repairRecipients — one list, cleaned', () => {
@@ -107,6 +114,42 @@ describe('the send outcome is reported, never assumed', () => {
 
     sendMailMock.mockResolvedValue({ sent: false, reason: 'send-failed' })
     expect((await notifyRepairReport(report(), 'Rai Sugar', 'A. W.')).status).toBe('failed')
+  })
+})
+
+describe('triage assignment notifications', () => {
+  it('sends an email when the task is assigned to someone else', async () => {
+    prismaMock.user.findUnique
+      .mockResolvedValueOnce({ fullName: 'Amina Wanjiru', email: 'a@x.com' })
+      .mockResolvedValueOnce({ fullName: 'Benson Otieno', email: 'b@x.com' })
+    prismaMock.repairReportItem.findUnique.mockResolvedValue({
+      vehicle: { registrationPlate: 'KBZ 431A' },
+      faultKind: 'fuel_probe_dead',
+      organisationId: 'org-1',
+    })
+
+    await notifyRepairAssignment({
+      itemId: 'r1',
+      orgId: 'org-1',
+      assignedById: 'u1',
+      assignedToId: 'u2',
+      reason: 'Please inspect today',
+    })
+
+    expect(sendMailMock).toHaveBeenCalledTimes(1)
+    expect(sendMailMock.mock.calls[0]?.[0]).toBe('b@x.com')
+  })
+
+  it('does not email the assigner when they triage the task to themselves', async () => {
+    await notifyRepairAssignment({
+      itemId: 'r1',
+      orgId: 'org-1',
+      assignedById: 'u1',
+      assignedToId: 'u1',
+      reason: 'Self-triage',
+    })
+
+    expect(sendMailMock).not.toHaveBeenCalled()
   })
 })
 

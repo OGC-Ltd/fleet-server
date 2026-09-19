@@ -370,10 +370,12 @@ model User {
   // Notifications
   pushSubscriptions PushSubscription[]
 
-  // Repairs: what they filed, and what they later signed off. Two relations
-  // because the technician who reports a fault is often not the one who closes
-  // it - the spare arrives on a different day and sometimes in different hands.
+  // Repairs: what they filed, what they are assigned, and what they later
+  // signed off. The assignment is distinct from the author because triage often
+  // puts the task onto a different technician than the person who logged it.
   repairReportsFiled  RepairReport[]     @relation("RepairReportsFiled")
+  repairItemsAssigned RepairReportItem[] @relation("RepairItemsAssigned")
+  repairItemsAssignedBy RepairReportItem[] @relation("RepairItemsAssignedBy")
   repairItemsResolved RepairReportItem[] @relation("RepairItemsResolved")
 
   @@index([organisationId])
@@ -1188,6 +1190,15 @@ model RepairReportItem {
   /// sitting at 'failed' is one this technician could not fix, waiting for
   /// somebody with more kit.
   stage String @default("pending")
+  /// Who is currently carrying the job, if any. This is the triage handoff:
+  /// the ops room or dispatcher can assign a repair to a specific technician,
+  /// and the assignment is used to balance load without opening a second queue.
+  assignedToId String? @map("assigned_to_id")
+  assignedAt   DateTime? @map("assigned_at")
+  assignedById String? @map("assigned_by_id")
+  assignmentNote String? @map("assignment_note")
+  /// 'pending' | 'accepted' | 'declined' — the assignee's response to the handoff.
+  assignmentStatus String @default("accepted") @map("assignment_status")
   /// When it last moved. Sorting, and "stuck for three weeks", without
   /// reaching into the history JSON.
   stageChangedAt DateTime? @map("stage_changed_at")
@@ -1208,6 +1219,8 @@ model RepairReportItem {
   report       RepairReport        @relation(fields: [reportId], references: [id], onDelete: Cascade)
   organisation Organisation        @relation(fields: [organisationId], references: [id])
   vehicle      Vehicle             @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  assignedTo   User?               @relation("RepairItemsAssigned", fields: [assignedToId], references: [id])
+  assignedBy   User?               @relation("RepairItemsAssignedBy", fields: [assignedById], references: [id])
   resolvedBy   User?               @relation("RepairItemsResolved", fields: [resolvedById], references: [id])
   faultEpisode SensorFaultEpisode? @relation(fields: [faultEpisodeId], references: [id], onDelete: SetNull)
 

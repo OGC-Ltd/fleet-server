@@ -6,7 +6,11 @@ import { publishNotificationDurable } from '../../lib/notifications/notification
 import { prisma } from '../../lib/prisma.js'
 import * as repo from './repairs.repository.js'
 import { reportResolution, reportStageChange } from './repairs.notify.js'
-import type { CreateRepairReport, ResolveItem, SetStage } from './repairs.schema.js'
+import { notifyRepairAssignment } from './repairs.assignment-mail.js'
+import { chooseTechnicianForTriage } from './repairs.triage.js'
+import type { AssignRepairItem, CreateRepairReport, ResolveItem, SetStage, RespondToAssignment } from './repairs.schema.js'
+
+export { notifyRepairAssignment }
 
 /**
  * What became of the mail, in enough detail to say so on screen.
@@ -206,6 +210,72 @@ export async function changeStage(itemId: string, orgId: string, userId: string,
   return result
 }
 
+export async function assignItemToTechnician(itemId: string, orgId: string, userId: string, dto: AssignRepairItem) {
+  let technicianId = dto.technicianId
+
+  if (!technicianId) {
+    const technicians = await prisma.user.findMany({
+      where: { organisationId: orgId },
+      select: { id: true, fullName: true },
+    })
+    const openItems = await prisma.repairReportItem.findMany({
+      where: { organisationId: orgId, resolvedAt: null },
+      select: { id: true, assignedToId: true },
+    })
+    technicianId = chooseTechnicianForTriage(technicians, openItems, userId) ?? undefined
+  }
+
+  const result = await repo.assignItem(itemId, orgId, userId, {
+    technicianId,
+    reason: dto.reason ?? (technicianId ? 'Assigned by triage' : undefined),
+  })
+  if (!result.item) return result
+
+  await notifyRepairAssignment({
+    itemId,
+    orgId,
+    assignedById: userId,
+    assignedToId: technicianId ?? userId,
+    reason: dto.reason ?? (technicianId ? 'Assigned by triage' : undefined),
+  })
+
+  const item = result.item as typeof result.item & {
+    vehicle?: { registrationPlate?: string }
+    faultKind?: string | null
+    assignedToId?: string | null
+    assignedTo?: { fullName?: string | null } | null
+  }
+
+  const actor = await actorName(userId)
+  const assignee = item.assignedTo?.fullName ?? 'Unassigned'
+  await reportStageChange(
+    {
+      itemId,
+      orgId,
+      plate: item.vehicle?.registrationPlate ?? 'Unknown unit',
+      label: humanKind(item.faultKind),
+    },
+    item.stage,
+    actor,
+    item.stageChangedAt ?? new Date(),
+    dto.reason ? `Assigned to ${assignee} — ${dto.reason}` : `Assigned to ${assignee}`,
+  )
+
+  return result
+}
+
+export async function autoAssignTechnician(orgId: string, itemId: string, userId: string, reason?: string) {
+  return assignItemToTechnician(itemId, orgId, userId, {
+    reason: reason ?? 'Auto-assigned by triage',
+  })
+}
+
+export async function respondToAssignment(
+  itemId: string, orgId: string, userId: string, dto: RespondToAssignment,
+) {
+  return repo.respondToAssignment(itemId, orgId, userId, dto.status)
+}
+
 /**
  * Sign a job off, and tell somebody.
  *
@@ -232,7 +302,7 @@ export async function closeItem(itemId: string, orgId: string, userId: string, d
     dto.verdict,
     await actorName(userId),
     withVehicle.resolvedAt ?? new Date(),
-    dto.fixNote,
+    dto.fixNote ?? '',
     repairRecipients(),
   )
   return item

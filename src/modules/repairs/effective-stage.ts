@@ -1,19 +1,16 @@
 /**
  * The stage a job is ACTUALLY at, once the calendar is taken into account.
  *
- * ## The one transition nobody should have to click
+ * ## Expected dates do not confirm delivery
  *
  * A job filed as "needs a spare part" lands on `spare_outsourced` and carries
- * the technician's fix date — the day they expect the part to land and the
- * work to start. On that day the job IS being fixed. Making somebody open the
- * Repairs tab and press "Fixing" to say so is asking them to hand-copy a fact
- * the row already holds, and the press is the kind of bookkeeping that quietly
- * stops happening: the jobs that most need chasing are exactly the ones nobody
- * is opening the tab for.
+ * the technician's expected date. That date is a deadline for chasing the
+ * supplier, not proof that the spare arrived. A technician must explicitly
+ * confirm receipt and move the job to `fixing`; otherwise an overdue delivery
+ * would be shown as work already in progress.
  *
- * So the step is automatic. It is the last one that can be, and deliberately
- * the ONLY one: `fixed` and `failed` are claims a person has to stand behind
- * and a date can never assert either.
+ * There is consequently no automatic stage transition. `fixed`, `failed`, and
+ * even `fixing` are claims a person has to stand behind.
  *
  * ## Derived, not swept
  *
@@ -49,11 +46,6 @@ import type { Stage } from './repairs.schema.js'
 export const AUTO_FROM: Stage = 'spare_outsourced'
 export const AUTO_TO:   Stage = 'fixing'
 
-/** Midnight UTC today — the same frame `expected_resolution_at` is stored in. */
-function utcToday(now: Date): Date {
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
-}
-
 /** The minimum shape this reasoning needs. Structural so it accepts a Prisma
  *  row, an include-widened row, or a test fixture, without any of them
  *  importing a type from here. */
@@ -87,25 +79,19 @@ export interface StageBearing {
  * that day.
  */
 export function isAutoAdvanced(item: StageBearing, now: Date = new Date()): boolean {
-  if (item.resolvedAt !== null) return false
-  if (item.stage !== AUTO_FROM) return false
-  if (item.expectedResolutionAt === null) return false
-  return item.expectedResolutionAt.getTime() <= utcToday(now).getTime()
+  // An expected date is a deadline, not evidence that the spare arrived.
+  // The technician must explicitly move the job to fixing after confirming it.
+  void item
+  void now
+  return false
 }
 
 /**
  * One item as the API should describe it.
  *
- * Returns the row untouched unless the date has arrived, in which case the
- * stage moves AND a matching entry is appended to the history — because a
- * tracking line reading "Fixing" with no date under it looks like a rung that
- * was skipped rather than one that was reached. The entry is synthesised, not
- * stored: it carries no `by`, since nobody did it, and `auto: true` so the
- * dashboard can say so rather than implying a person pressed something.
- *
- * `stageChangedAt` moves to the fix date too. "Stuck for three weeks" is read
- * off that column, and leaving it on the day the part was ordered would age
- * the job from the wrong event.
+ * Expected dates never alter the row. The stage changes only through an
+ * explicit action, so the tracking line cannot claim a spare arrived when it
+ * did not.
  */
 export function withEffectiveStage<T extends StageBearing>(item: T, now: Date = new Date()): T {
   if (!isAutoAdvanced(item, now)) return item
@@ -124,7 +110,6 @@ export function withEffectiveStage<T extends StageBearing>(item: T, now: Date = 
         at:    at.toISOString(),
         by:    null,
         auto:  true,
-        note:  'The part was expected on this date, so the job moved to Fixing on its own.',
       },
     ],
   }
@@ -136,39 +121,10 @@ export function withEffectiveStages<T extends StageBearing>(items: T[], now: Dat
 }
 
 /**
- * Translate a `?stage=` filter so it selects what a reader would SEE.
- *
- * Without this the tab lies in both directions: filtering to Fixing would hide
- * the jobs that reached it by date — the ones that got there without anybody
- * looking, which are precisely the ones worth listing — and filtering to Spare
- * outsourced would show jobs the same screen is drawing as Fixing.
- *
- * Both branches stay index-backed: the partial index on
- * (organisation_id, expected_resolution_at) covers the date half and
- * (organisation_id, stage) covers the other.
+ * Translate a `?stage=` filter to the stored stage. Expected dates are used by
+ * escalation and display, but never change which stage a row belongs to.
  */
 export function stageFilter(stage: Stage, now: Date = new Date()): Record<string, unknown> {
-  const today = utcToday(now)
-
-  if (stage === AUTO_TO) {
-    return {
-      OR: [
-        { stage: AUTO_TO },
-        { stage: AUTO_FROM, resolvedAt: null, expectedResolutionAt: { lte: today } },
-      ],
-    }
-  }
-
-  if (stage === AUTO_FROM) {
-    // Still waiting: no date, or a date still ahead of itself.
-    return {
-      stage: AUTO_FROM,
-      OR: [
-        { expectedResolutionAt: null },
-        { expectedResolutionAt: { gt: today } },
-      ],
-    }
-  }
-
+  void now
   return { stage }
 }

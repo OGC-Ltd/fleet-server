@@ -45,12 +45,12 @@ describe('waiting on a part', () => {
    * day; the job is under way that day. An off-by-one here would be invisible
    * and would make every job read a day behind its own plan.
    */
-  it('moves to fixing ON the fix date', () => {
-    expect(isAutoAdvanced(item({ expectedResolutionAt: day(0) }), NOW)).toBe(true)
+  it('does not move to fixing when the expected date arrives', () => {
+    expect(isAutoAdvanced(item({ expectedResolutionAt: day(0) }), NOW)).toBe(false)
   })
 
-  it('has moved once the date is behind it', () => {
-    expect(isAutoAdvanced(item({ expectedResolutionAt: day(-5) }), NOW)).toBe(true)
+  it('keeps an overdue shipment waiting for confirmation', () => {
+    expect(isAutoAdvanced(item({ expectedResolutionAt: day(-5) }), NOW)).toBe(false)
   })
 
   /*
@@ -108,34 +108,24 @@ describe('what the tracking line is handed', () => {
     expect(withEffectiveStage(i, NOW)).toBe(i)
   })
 
-  it('records the step so the rung is not drawn dateless', () => {
-    const moved = withEffectiveStage(item({ expectedResolutionAt: day(-2) }), NOW)
-    expect(moved.stage).toBe(AUTO_TO)
-
-    const history = moved.stageHistory as Array<Record<string, unknown>>
-    const last = history.at(-1)!
-    expect(last['stage']).toBe(AUTO_TO)
-    // The date the step HAPPENED is the fix date, not today — the job has been
-    // under way since then, and "stuck for three weeks" is read off this.
-    expect(last['at']).toBe(day(-2).toISOString())
-    expect(moved.stageChangedAt).toEqual(day(-2))
+  it('does not synthesize a fixing step from an overdue date', () => {
+    const original = item({ expectedResolutionAt: day(-2) })
+    expect(withEffectiveStage(original, NOW)).toBe(original)
   })
 
   /*
    * Nobody pressed anything, so the entry must not name a person. A history
    * row with a `by` on it is a claim that somebody took an action.
    */
-  it('attributes the step to nobody, and marks it automatic', () => {
+  it('does not add an automatic history event', () => {
     const moved = withEffectiveStage(item({ expectedResolutionAt: day(-1) }), NOW)
-    const last = (moved.stageHistory as Array<Record<string, unknown>>).at(-1)!
-    expect(last['by']).toBeNull()
-    expect(last['auto']).toBe(true)
+    expect(moved.stageHistory).toHaveLength(1)
   })
 
   it('keeps the earlier history rather than replacing it', () => {
     const moved = withEffectiveStage(item({ expectedResolutionAt: day(-1) }), NOW)
     const history = moved.stageHistory as Array<Record<string, unknown>>
-    expect(history).toHaveLength(2)
+    expect(history).toHaveLength(1)
     expect(history[0]!['stage']).toBe(AUTO_FROM)
   })
 
@@ -143,7 +133,7 @@ describe('what the tracking line is handed', () => {
     const due    = item({ expectedResolutionAt: day(-1) })
     const notYet = item({ expectedResolutionAt: day(+1) })
     const [a, b] = withEffectiveStages([due, notYet], NOW)
-    expect(a!.stage).toBe(AUTO_TO)
+    expect(a!.stage).toBe(AUTO_FROM)
     expect(b).toBe(notYet)
   })
 })
@@ -155,21 +145,15 @@ describe('the ?stage= filter follows what is displayed', () => {
    * exactly the ones worth listing — and "Spare outsourced" would list jobs
    * the same screen is drawing as Fixing.
    */
-  it('counts the date-advanced jobs as fixing', () => {
+  it('does not count overdue shipments as fixing', () => {
     const f = stageFilter(AUTO_TO, NOW) as { OR: Array<Record<string, unknown>> }
-    expect(f['OR']).toHaveLength(2)
-    expect(f['OR'][0]).toEqual({ stage: AUTO_TO })
-    expect(f['OR'][1]).toMatchObject({ stage: AUTO_FROM, resolvedAt: null })
+    expect(f).toEqual({ stage: AUTO_TO })
   })
 
   it('leaves them OUT of spare outsourced', () => {
     const f = stageFilter(AUTO_FROM, NOW) as Record<string, unknown>
     expect(f['stage']).toBe(AUTO_FROM)
-    // Either no date at all, or one still ahead of today.
-    expect(f['OR']).toEqual([
-      { expectedResolutionAt: null },
-      { expectedResolutionAt: { gt: new Date(Date.UTC(2026, 8, 16)) } },
-    ])
+    expect(f).toEqual({ stage: AUTO_FROM })
   })
 
   it('passes every other stage straight through', () => {
