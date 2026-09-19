@@ -2,6 +2,10 @@ import { sendMail } from '../../lib/mailer/mailer.js'
 import { repairAssignmentEmail } from '../../lib/mailer/templates.js'
 import { prisma } from '../../lib/prisma.js'
 
+export type AssignmentEmailResult =
+  | { sent: true; assigneeName: string }
+  | { sent: false; reason: 'self-assignment' | 'no-assignee-email' | 'unconfigured' | 'send-failed'; assigneeName?: string }
+
 export interface NotifyRepairAssignmentInput {
   itemId: string
   orgId: string
@@ -10,8 +14,8 @@ export interface NotifyRepairAssignmentInput {
   reason?: string
 }
 
-export async function notifyRepairAssignment(input: NotifyRepairAssignmentInput): Promise<void> {
-  if (input.assignedById === input.assignedToId) return
+export async function notifyRepairAssignment(input: NotifyRepairAssignmentInput): Promise<AssignmentEmailResult> {
+  if (input.assignedById === input.assignedToId) return { sent: false, reason: 'self-assignment' }
 
   const [assigner, assignee, item] = await Promise.all([
     prisma.user.findUnique({
@@ -31,7 +35,11 @@ export async function notifyRepairAssignment(input: NotifyRepairAssignmentInput)
     }),
   ])
 
-  if (!assignee?.email) return
+  if (!assignee?.email) return {
+    sent: false,
+    reason: 'no-assignee-email',
+    ...(assignee?.fullName ? { assigneeName: assignee.fullName } : {}),
+  }
 
   const mail = repairAssignmentEmail({
     assigneeName: assignee.fullName ?? 'Technician',
@@ -42,5 +50,8 @@ export async function notifyRepairAssignment(input: NotifyRepairAssignmentInput)
     link: undefined,
   })
 
-  await sendMail(assignee.email, assignee.fullName ?? null, mail)
+  const result = await sendMail(assignee.email, assignee.fullName ?? null, mail)
+  return result.sent
+    ? { sent: true, assigneeName: assignee.fullName ?? 'Technician' }
+    : { sent: false, reason: result.reason, assigneeName: assignee.fullName ?? 'Technician' }
 }
