@@ -1,6 +1,6 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
-import { ConflictError, NotFoundError } from '../../core/errors/errors.js'
+import { ConflictError, NotFoundError, UnprocessableError } from '../../core/errors/errors.js'
 import * as repo from './repairs.repository.js'
 import * as svc from './repairs.service.js'
 import type {
@@ -111,6 +111,17 @@ export const assignItem: RequestHandler = async (req, res, next) => {
     const itemId = p(req, 'itemId')
     const result = await svc.assignItemToTechnician(itemId, orgId, req.user!.id, req.body as AssignRepairItem)
     if (!result.item) {
+      /*
+       * READ THE REASON. This threw away `result.reason` and re-derived the
+       * answer from `itemExists` alone, which has exactly one failure mode and
+       * it is not a rare one: `invalid_assignee` also returns a null item, the
+       * job is open and therefore exists, and the operator was told "This job
+       * has already been closed" about a job sitting open in front of them.
+       * The message named the wrong noun, the wrong verb and the wrong fix.
+       */
+      if (result.reason === 'invalid_assignee') {
+        throw new UnprocessableError('That person cannot be given this job - they are not a member of this organisation')
+      }
       const exists = await repo.itemExists(itemId, orgId)
       throw exists
         ? new ConflictError('This job has already been closed')
