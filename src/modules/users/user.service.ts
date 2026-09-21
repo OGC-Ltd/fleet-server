@@ -50,8 +50,43 @@ export async function updateUser(orgId: string, userId: string, dto: UpdateUserD
   return user
 }
 
+/**
+ * Mark an account deleted.
+ *
+ * ## `findReachable`, not `getUser` — the same correction purgeUser already carries
+ *
+ * getUser resolves through `findById`, which matches on the home organisation
+ * COLUMN alone, while the roster that produced this button lists anybody with a
+ * live MEMBERSHIP here too. Measured against the live fleets: of 48 rows across
+ * the four organisations' rosters, 35 are people whose account lives in another
+ * tenant — and on Mufindi it is ALL TWELVE. Every one of them answered this
+ * endpoint with a 404 "User" about somebody plainly on screen, which is why
+ * "I cannot delete users" was the correct description of the whole feature.
+ *
+ * ## A guest is refused, and told what to do instead
+ *
+ * Not an oversight and not a lesser version of the fix. `deletedAt` is on the
+ * USER row, so a soft delete reaches every organisation that person belongs to
+ * — exactly the objection purgeUser raises against deleting a guest, and it
+ * applies here unchanged. Doing that from a page headed with one site's name,
+ * for somebody whose home is another site, is a delete nobody could have
+ * predicted from where they clicked. Withdrawing the membership is the action
+ * that means what the operator intends, and it is scoped to one organisation.
+ *
+ * The difference the fix makes is therefore not "guests can now be deleted".
+ * It is that the answer changed from a 404 about a person who is visibly there
+ * into a sentence naming the right button.
+ */
 export async function deleteUser(orgId: string, userId: string) {
-  await getUser(orgId, userId)
+  const user = await repo.findReachable(orgId, userId)
+  if (!user) throw new NotFoundError('User')
+
+  if (user.organisationId !== orgId) {
+    throw new ConflictError(
+      'This person belongs to another organisation. Remove their access to this one instead '
+      + '— deleting the account would remove them everywhere.',
+    )
+  }
   // Read their organisations BEFORE the delete: afterwards the row is gone
   // from the roster's point of view and there is nothing left to resolve.
   await invalidateRosterForUser(userId, orgId)

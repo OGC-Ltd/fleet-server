@@ -10,6 +10,7 @@ import type { CreateUserDto, UpdateUserDto, ListUserQuery, AssignRoleDto,
 import { ASSIGNABLE_ROLE_SLUGS, WILDCARD } from '../../lib/permissions.js'
 import { NotFoundError, BadRequestError, ForbiddenError } from '../../core/errors/errors.js'
 import { resolveSubject, can, canReachOrg } from '../../lib/authz/subject.js'
+import { canDeleteUser } from './user.authz.js'
 import { forgetUser } from '../../middleware/auth.js'
 import * as authService from '../auth/auth.service.js'
 import { invalidateSubject } from '../../lib/authz/subject.js'
@@ -84,8 +85,52 @@ export const update: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+/**
+ * The role rule in front of both deletes.
+ *
+ * `user:delete` answers "may this person remove people". It cannot answer "may
+ * they remove THIS person", which is the half the operator specified: an admin
+ * may not delete a system administrator, the platform administrator, a
+ * director or a manager. See users/user.authz for why that is a rule about
+ * auditors rather than about rank.
+ *
+ * In the controller rather than the service because BOTH deletes need it and
+ * they are two different services apart — soft and permanent — with
+ * different refusals of their own underneath.
+ */
+async function assertMayDelete(req: Parameters<RequestHandler>[0]): Promise<void> {
+  const orgId = p(req, 'orgId')
+  const targetId = p(req, 'userId')
+  const actorId = req.user?.id
+  if (!actorId) throw new ForbiddenError('Not signed in')
+
+  const verdict = await canDeleteUser(actorId, targetId, orgId)
+  if (verdict.ok) return
+
+  if (verdict.reason === 'protected') {
+    throw new ForbiddenError(
+      `An administrator cannot delete a ${ROLE_WORD[verdict.blockedBy ?? ''] ?? 'more senior'} account. `
+      + 'Ask the platform administrator.',
+    )
+  }
+  if (verdict.reason === 'not_a_member') {
+    throw new ForbiddenError('You can only delete accounts in an organisation you belong to')
+  }
+  throw new ForbiddenError('Only an administrator of this organisation can delete accounts')
+}
+
+/** For the refusal sentence. The two System Administrator slugs share a name. */
+const ROLE_WORD: Record<string, string> = {
+  super_admin:  'platform administrator',
+  system_admin: 'system administrator',
+  admin:        'system administrator',
+  director:     'director',
+  manager:      'manager',
+}
+
 export const remove: RequestHandler = async (req, res, next) => {
   try {
+    await assertMayDelete(req)
     await service.deleteUser(p(req, 'orgId'), p(req, 'userId'))
     sendSuccess(res, null, 204)
   } catch (err) { next(err) }
@@ -101,6 +146,7 @@ export const remove: RequestHandler = async (req, res, next) => {
  */
 export const purge: RequestHandler = async (req, res, next) => {
   try {
+    await assertMayDelete(req)
     sendSuccess(res, await service.purgeUser(p(req, 'orgId'), p(req, 'userId'), req.user?.id))
   } catch (err) { next(err) }
 }
