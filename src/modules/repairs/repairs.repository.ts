@@ -221,8 +221,25 @@ export async function assignItem(itemId: string, orgId: string, assignedById: st
 
     const technicianId = dto.technicianId ?? null
     if (technicianId) {
+      /*
+       * REACHABLE, not employed here. This asked `{ id, organisationId }` — the
+       * home-organisation COLUMN alone — while the picker in front of it is
+       * built from listOrgUsers, which uses HOME ORGANISATION OR A LIVE
+       * MEMBERSHIP. Anybody working across sites therefore appeared in the
+       * dropdown, was accepted by the authorization check, and was then
+       * rejected here. See users/user.repository.findReachable, which is the
+       * canonical form of this predicate and carries the full reasoning; it is
+       * inlined rather than called because this runs inside a transaction.
+       */
       const tech = await tx.user.findFirst({
-        where: { id: technicianId, organisationId: orgId },
+        where: {
+          id: technicianId,
+          deletedAt: null,
+          OR: [
+            { organisationId: orgId },
+            { memberships: { some: { organisationId: orgId, revokedAt: null } } },
+          ],
+        },
         select: { id: true },
       })
       if (!tech) return { item: null, reason: 'invalid_assignee' }
