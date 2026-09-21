@@ -19,6 +19,7 @@ import { startRaiFactorySuiteReconciler } from './providers/raifactorysuite/raif
 import { startRetentionSweep } from './lib/queues/retention.js'
 import { startFuelSync } from './lib/queues/fuel-events.js'
 import { startTripBuild } from './lib/queues/trips.js'
+import { startOutboundWorker } from './lib/queues/outbound.js'
 import { disconnectRedis } from './lib/redis.js'
 import { staticRoutePairs } from './providers/raifactorysuite/raifactorysuite.simulator.js'
 
@@ -90,6 +91,11 @@ async function main() {
   // Completed dispatches → measured trips. Nothing else writes that table
   // since the simulator was retired — see lib/queues/trips.
   const tripBuild = await startTripBuild()
+  // Mail and durable notifications, off the request thread. Unlike the three
+  // above this one is NOT conditional on Redis in its effect: with no
+  // REDIS_URL the publishers send inline exactly as they did before, so a
+  // password reset still leaves the building. See lib/queues/outbound.
+  const outbound = await startOutboundWorker()
   // API-only instances re-emit live positions + feed off the shared DB
   // (read-only) so a dev dashboard still gets a live map — see lib/db-follower.
   const stopDbFollower = !env.POLL_ENABLED && env.FOLLOW_DB ? startDbFollower() : () => {}
@@ -101,6 +107,9 @@ async function main() {
     await retention.stop().catch((err) => logger.warn({ err }, 'Retention sweep shutdown failed'))
     await fuelSync.stop().catch((err) => logger.warn({ err }, 'Fuel sync shutdown failed'))
     await tripBuild.stop().catch((err) => logger.warn({ err }, 'Trip build shutdown failed'))
+    // Before disconnectRedis below, so in-flight mail is finished rather than
+    // having its connection pulled out from under it.
+    await outbound.stop().catch((err) => logger.warn({ err }, 'Outbound worker shutdown failed'))
     // Freeze the simulation exactly where it is so the next start resumes it.
     await poller.flush().catch((err) => logger.warn({ err }, 'Simulation flush failed on shutdown'))
     stopDbFollower()

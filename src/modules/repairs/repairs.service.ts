@@ -3,6 +3,7 @@ import { logger } from '../../lib/logger.js'
 import { sendMail } from '../../lib/mailer/mailer.js'
 import { repairReportEmail } from '../../lib/mailer/templates.js'
 import { publishNotificationDurable } from '../../lib/notifications/notification.store.js'
+import { enqueueMail, dispatchStatus, isAccepted } from '../../lib/queues/outbound.js'
 import { prisma } from '../../lib/prisma.js'
 import * as repo from './repairs.repository.js'
 import { reportResolution, reportStageChange } from './repairs.notify.js'
@@ -22,7 +23,13 @@ export { notifyRepairAssignment }
  * case — a tick shown against it would be a lie the technician acts on.
  */
 export type EmailOutcome = {
-  status:     'sent' | 'partial' | 'failed' | 'unconfigured' | 'no-recipients'
+  /**
+   * `queued` is accepted by BullMQ and not yet offered to the provider. It is
+   * deliberately not a kind of `sent`: the dashboard prints this word, and the
+   * standing rule in lib/mailer is that a tick is never shown for a mail that
+   * has not left the building.
+   */
+  status:     'sent' | 'queued' | 'partial' | 'failed' | 'unconfigured' | 'no-recipients'
   recipients: string[]
   sent:       string[]
   failed:     string[]
@@ -97,20 +104,29 @@ export async function notifyRepairReport(
   })
 
   /*
-   * sendMail takes ONE recipient and, by its own documented contract, cannot
-   * reject — it resolves `{ sent: false }` instead. That is what makes
-   * Promise.all safe here rather than a footgun: no single bad address can
-   * reject the lot and lose the outcome of the addresses that worked.
+   * enqueueMail takes ONE recipient and, like the sendMail it wraps, cannot
+   * reject — it resolves an outcome instead. That is what makes Promise.all
+   * safe here rather than a footgun: no single bad address can reject the lot
+   * and lose the outcome of the addresses that worked.
+   *
+   * With Redis this costs N `add` calls and returns; without it, it is the
+   * inline send it always was. Either way the fan-out keeps its shape, so the
+   * fold below did not have to change — only to learn one more word.
    */
-  const results = await Promise.all(recipients.map((addr) => sendMail(addr, null, mail)))
-  const sent   = recipients.filter((_, i) => results[i]!.sent)
-  const failed = recipients.filter((_, i) => !results[i]!.sent)
+  const results = await Promise.all(recipients.map((addr) => enqueueMail(addr, null, mail)))
+  const sent   = recipients.filter((_, i) => isAccepted(results[i]!))
+  const failed = recipients.filter((_, i) => !isAccepted(results[i]!))
 
   const status: EmailOutcome['status'] =
-    sent.length === recipients.length ? 'sent'
-      : sent.length > 0 ? 'partial'
-        : results.every((r) => !r.sent && r.reason === 'unconfigured') ? 'unconfigured'
-          : 'failed'
+    // QUEUED IS ITS OWN ANSWER, consulted before the others. Folding it into
+    // `sent` would print a tick for a mail still sitting in Redis, which is the
+    // one thing this type exists to prevent; folding it into `failed` would
+    // send somebody chasing a mail that is simply in flight.
+    results.every((r) => dispatchStatus(r) === 'queued') ? 'queued'
+      : sent.length === recipients.length ? 'sent'
+        : sent.length > 0 ? 'partial'
+          : results.every((r) => dispatchStatus(r) === 'unconfigured') ? 'unconfigured'
+            : 'failed'
 
   return { status, recipients, sent, failed }
 }

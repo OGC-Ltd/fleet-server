@@ -16,10 +16,23 @@
  * function that structurally cannot reject is the shape that is safe in both
  * directions.
  *
- * The cost is that a request can wait on a slow Mailtrap; the client's
- * AbortController bounds that at 10s. Moving this onto a queue is the right
- * eventual answer, but Redis is optional in this deployment and a queued mail
- * that never sends because Redis is absent is worse than a slow request.
+ * ## MOST CALLERS SHOULD NOT CALL THIS DIRECTLY ANY MORE
+ *
+ * The cost of the above is that a request waits on a slow Mailtrap; the
+ * client's AbortController bounds that at 10s, per recipient. `enqueueMail` in
+ * lib/queues/outbound is the entry point now: it hands the rendered mail to
+ * BullMQ and returns, and the worker calls THIS function.
+ *
+ * This docblock used to argue against that, on the grounds that "Redis is
+ * optional in this deployment and a queued mail that never sends because Redis
+ * is absent is worse than a slow request". The objection was right and it is
+ * answered rather than overruled: `enqueueMail` FALLS BACK to calling this
+ * inline when there is no queue, and again when the queue is configured but
+ * refuses the job. With REDIS_URL unset — the production state today —
+ * behaviour is byte-for-byte what it was before the queue existed.
+ *
+ * Call this directly only from inside that worker, or from a one-shot script
+ * that will exit before a queued job could ever run.
  *
  * ## Dormant is a first-class outcome
  *
