@@ -183,8 +183,21 @@ export const setStageSchema = z.object({
   note:  z.string().trim().max(500).optional(),
 })
 
+/**
+ * `technicianId` is REQUIRED, and that is the whole of the "no automatic
+ * triage" change at the edge of the system.
+ *
+ * It was `.optional()`, and omitting it did not mean "leave it alone" — it
+ * meant "server, choose somebody", which the service answered by ranking every
+ * user in the tenant by open-item count. Making it required is what stops a
+ * body that simply forgot the field from being read as a request to hand a
+ * unit to whoever happened to sort first.
+ *
+ * `null` is still accepted and still means UNASSIGN. It is a decision, spelled
+ * out; the absence of the key was not.
+ */
 export const assignRepairItemSchema = z.object({
-  technicianId: z.string().min(1).nullable().optional(),
+  technicianId: z.string().min(1).nullable(),
   reason:      z.string().trim().max(500).optional(),
 })
 

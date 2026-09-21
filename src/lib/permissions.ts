@@ -167,7 +167,16 @@ const ORG_EVERYTHING: PermissionSlug[] = [
   'sensor:read',
   // The office reads what technicians file. A repair report nobody upstream
   // can open is a report that exists only in an inbox.
-  'repair:read', 'repair:create', 'repair:assign', 'repair:resolve',
+  //
+  // `repair:assign` IS DELIBERATELY NOT HERE, and it is the one capability
+  // lifted out of "everything an org role can be given". Handing a named
+  // person responsibility for a unit — and mailing them about it — is an act
+  // of administration, not of operating the fleet, and the operator scoped it
+  // to the two administrator roles by name. It is granted explicitly on
+  // `admin` below, and reaches the platform administrator through the
+  // wildcard. Heads of section, managers and fleet managers keep every other
+  // repair verb: they read the board, file a report and sign one off.
+  'repair:read', 'repair:create', 'repair:resolve',
   'vehicle:create', 'vehicle:update', 'vehicle:delete',
   'trip:create',
   'cargo:read', 'cargo:update', 'cargo:delete',
@@ -240,6 +249,9 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     description: 'Full access within this organisation, including its users.',
     permissions: [
       ...ORG_EVERYTHING,
+      // Lifted out of ORG_EVERYTHING — see the note there. This role and the
+      // platform administrator are the only two that hand out a triage.
+      'repair:assign',
       'user:create', 'user:update', 'user:delete', 'user:assign_role',
       'ingest_key:read', 'ingest_key:create', 'ingest_key:update', 'ingest_key:delete',
     ],
