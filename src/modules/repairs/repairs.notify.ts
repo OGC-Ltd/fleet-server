@@ -37,6 +37,7 @@ import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
 import { sendMail } from '../../lib/mailer/mailer.js'
 import { publishNotificationDurable } from '../../lib/notifications/notification.store.js'
+import { enqueueMail, enqueueNotification, isAccepted } from '../../lib/queues/outbound.js'
 import { escalationPhrase, type EscalationEvent } from './repairs.escalation.js'
 import { STAGE_LABEL } from './repairs.service.js'
 
@@ -68,7 +69,11 @@ async function feed(
   ref: TicketRef, id: string, alertType: string, severity: Level, text: string, at: Date,
 ): Promise<void> {
   try {
-    await publishNotificationDurable({
+    // Queued when there is a Redis, written inline when there is not. Either
+    // way this no longer holds an HTTP handler open for a pooler round trip,
+    // which on this connection is about a second per item and there are two
+    // per sign-off.
+    await enqueueNotification({
       orgId: ref.orgId, id, source: 'repair', alertType, severity, text, at,
     })
   } catch (err) {
@@ -84,7 +89,7 @@ async function mail(
   const body = lines.join('\n')
   try {
     const results = await Promise.all(
-      to.map((addr) => sendMail(addr, null, {
+      to.map((addr) => enqueueMail(addr, null, {
         subject,
         text: body,
         // No template in lib/mailer for these two yet: they are one plain
@@ -94,9 +99,14 @@ async function mail(
         category: 'repair-alert',
       })),
     )
+    /* `sent` here has always meant "we are not going to tell anybody this
+       failed", and queued belongs on that side of the line — a job with
+       three attempts in front of it is not a failure to report. The precise
+       word, where a person reads one, is carried by EmailOutcome in
+       repairs.service; this pair only decides what to log. */
     return {
-      sent:   to.filter((_, i) => results[i]!.sent),
-      failed: to.filter((_, i) => !results[i]!.sent),
+      sent:   to.filter((_, i) => isAccepted(results[i]!)),
+      failed: to.filter((_, i) => !isAccepted(results[i]!)),
     }
   } catch (err) {
     logger.error({ err, subject }, 'repair: could not send mail')

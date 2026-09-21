@@ -20,7 +20,7 @@ import { BadRequestError, NotFoundError } from '../../core/errors/errors.js'
 import { forgetUser } from '../../middleware/auth.js'
 import * as authService from '../auth/auth.service.js'
 import type { SessionContext } from '../auth/auth.service.js'
-import { sendMail } from '../../lib/mailer/mailer.js'
+import { enqueueMail, dispatchStatus } from '../../lib/queues/outbound.js'
 import { passwordChangedEmail, resetEmail, inviteEmail } from '../../lib/mailer/templates.js'
 import { env } from '../../config/env.js'
 import {
@@ -110,7 +110,12 @@ export async function changeOwnPassword(
   // away. Without it the user is signed out of the tab they are standing in.
   const session = await authService.issueSession({ id: user.id, email: user.email }, ctx)
 
-  await sendMail(
+  /* Nobody reads this result and nobody should: the password IS changed, the
+     sessions ARE revoked, and this mail is a courtesy telling the owner it
+     happened. It was the clearest case of a request waiting on SMTP for
+     nothing — the user is sitting in front of a form that has already
+     succeeded. Queued, the form returns without it. */
+  await enqueueMail(
     user.email ?? '',
     user.fullName,
     passwordChangedEmail({ fullName: user.fullName, when: new Date(), ip: ctx.ip ?? undefined }),
@@ -145,7 +150,13 @@ export async function requestPasswordReset(
   if (await hasRecentToken(user.id, 'RESET')) return
 
   const { raw, expiresAt } = await mintPasswordToken(user.id, 'RESET', ctx)
-  await sendMail(
+  /* This endpoint answers identically whatever it finds, so that a stranger
+     cannot use it to ask whether somebody has an account here. Its TIMING has
+     to be uninformative too, and awaiting a real SMTP send made it the one
+     thing that was not: a known address waited on Mailtrap, an unknown one
+     returned immediately, and the gap was the answer the endpoint refuses to
+     give in words. Queueing removes it on the path that matters. */
+  await enqueueMail(
     user.email,
     user.fullName,
     resetEmail({ fullName: user.fullName, link: setupLink(raw), expiresAt }),
@@ -215,7 +226,7 @@ export async function sendInvite(
     createdById: opts.createdById ?? null,
     ip: opts.ip ?? null,
   })
-  const result = await sendMail(
+  const dispatch = await enqueueMail(
     user.email,
     user.fullName,
     inviteEmail({
@@ -226,7 +237,13 @@ export async function sendInvite(
       expiresAt,
     }),
   )
-  return result.sent ? { sent: true } : { sent: false, reason: result.reason }
+  /* `queued` comes back as a reason rather than a tick, for the reason in this
+     function's header: an invited user whose mail never went has no way into
+     the system at all. It has not gone yet. The admin screen prints the reason
+     it is given, so it will say queued, which is true and is the one thing
+     that keeps "resend" an informed decision rather than a guess. */
+  const status = dispatchStatus(dispatch)
+  return status === 'sent' ? { sent: true } : { sent: false, reason: status }
 }
 
 /**
