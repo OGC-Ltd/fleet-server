@@ -7,7 +7,8 @@ import { prisma } from '../../lib/prisma.js'
 import * as repo from './repairs.repository.js'
 import { reportResolution, reportStageChange } from './repairs.notify.js'
 import { notifyRepairAssignment } from './repairs.assignment-mail.js'
-import { chooseTechnicianForTriage } from './repairs.triage.js'
+import { canAssignTriage, canReceiveTriage } from './repairs.authz.js'
+import { ForbiddenError } from '../../core/errors/errors.js'
 import type { AssignRepairItem, CreateRepairReport, ResolveItem, SetStage, RespondToAssignment } from './repairs.schema.js'
 
 export { notifyRepairAssignment }
@@ -210,24 +211,61 @@ export async function changeStage(itemId: string, orgId: string, userId: string,
   return result
 }
 
+/**
+ * Hand a triage to a named person, or take it back.
+ *
+ * ## There is no automatic triage any more
+ *
+ * This used to accept a MISSING `technicianId` as "you pick", and answer it by
+ * listing every user in the organisation, counting their open items and
+ * choosing the least loaded. Two things were wrong with that, and neither is
+ * fixed by a better rule.
+ *
+ * It picked from EVERYBODY. The candidate list was `user.findMany({ where: {
+ * organisationId } })` with no role filter at all, so on a tenant whose roster
+ * is mostly drivers synced from the registry, "least loaded" is a near
+ * guarantee of landing on somebody who has never signed in — they hold no open
+ * items, so they sort first. The load-balancing was working perfectly and the
+ * answer was still wrong.
+ *
+ * And it attributed a decision to nobody. `assignedById` recorded the person
+ * who clicked, the trail read "Assigned by triage", and the assignee got an
+ * email naming them as responsible for a unit — with no human anywhere in that
+ * chain having chosen them. Work is given to a person BY a person; that is the
+ * record the sign-off trail exists to keep.
+ *
+ * So `technicianId` is now required. `null` still means unassign, which is a
+ * decision somebody makes and not an absence of one.
+ *
+ * ## Both ends are checked
+ *
+ * See repairs.authz: an administrator hands out, an administrator or a
+ * technician receives, and the receiver must be in this organisation. The
+ * route's `repair:assign` permission covers the first of those and cannot
+ * express the second.
+ */
 export async function assignItemToTechnician(itemId: string, orgId: string, userId: string, dto: AssignRepairItem) {
-  let technicianId = dto.technicianId
+  const technicianId = dto.technicianId ?? null
 
-  if (technicianId === undefined) {
-    const technicians = await prisma.user.findMany({
-      where: { organisationId: orgId },
-      select: { id: true, fullName: true },
-    })
-    const openItems = await prisma.repairReportItem.findMany({
-      where: { organisationId: orgId, resolvedAt: null },
-      select: { id: true, assignedToId: true },
-    })
-    technicianId = chooseTechnicianForTriage(technicians, openItems, userId) ?? undefined
+  const assigner = await canAssignTriage(userId, orgId)
+  if (!assigner.ok) {
+    throw new ForbiddenError(assigner.reason === 'not_a_member'
+      ? 'Only an administrator of this organisation can assign a triage'
+      : 'Only a system administrator or the platform administrator can assign a triage')
+  }
+
+  if (technicianId) {
+    const assignee = await canReceiveTriage(technicianId, orgId)
+    if (!assignee.ok) {
+      throw new ForbiddenError(assignee.reason === 'not_a_member'
+        ? 'That person is not an active member of this organisation'
+        : 'A triage can only be given to a technician, a system administrator or the platform administrator')
+    }
   }
 
   const result = await repo.assignItem(itemId, orgId, userId, {
     technicianId,
-    reason: dto.reason ?? (technicianId ? 'Assigned by triage' : undefined),
+    ...(dto.reason !== undefined ? { reason: dto.reason } : {}),
   })
   if (!result.item) return result
 
@@ -237,7 +275,7 @@ export async function assignItemToTechnician(itemId: string, orgId: string, user
       orgId,
       assignedById: userId,
       assignedToId: technicianId,
-      reason: dto.reason ?? 'Assigned by triage',
+      reason: dto.reason ?? 'Assigned',
     })
     : { sent: false as const, reason: 'unassigned' as const }
 
@@ -264,12 +302,6 @@ export async function assignItemToTechnician(itemId: string, orgId: string, user
   )
 
   return { ...result, assignmentEmail }
-}
-
-export async function autoAssignTechnician(orgId: string, itemId: string, userId: string, reason?: string) {
-  return assignItemToTechnician(itemId, orgId, userId, {
-    reason: reason ?? 'Auto-assigned by triage',
-  })
 }
 
 export async function respondToAssignment(
