@@ -147,3 +147,59 @@ export async function canReceiveTriage(userId: string, orgId: string): Promise<T
   })
   return active ? { ok: true } : { ok: false, reason: 'not_a_member' }
 }
+
+// ---------------------------------------------------------------------------
+// Signing a job off
+// ---------------------------------------------------------------------------
+
+/**
+ * May this person sign off this job?
+ *
+ * ## The rule
+ *
+ * A sign-off is a claim about work: "I went, and this is what I found." So the
+ * default is that only the person the job was GIVEN to may make it. Three
+ * other people may, and each for a reason that is not seniority:
+ *
+ *   · THE PLATFORM ADMINISTRATOR, whose remit is every organisation.
+ *   · AN ADMINISTRATOR OF THIS ORGANISATION, who has to be able to close a job
+ *     whose assignee has left, is suspended, or never responded. Without this
+ *     a job can be orphaned permanently by one person's absence.
+ *   · WHOEVER FILED THE REPORT. They raised the fault; if it turns out to be
+ *     nothing, or they fixed it themselves on the spot, they can close their
+ *     own ticket without needing somebody to hand it back to them first.
+ *
+ * ## What this is NOT
+ *
+ * Not `repair:resolve`. That permission is held by every technician in the
+ * organisation, which is correct — a technician must be able to sign off THEIR
+ * job — and useless as the whole answer, because it says nothing about WHICH
+ * job. The route keeps it as the coarse gate; this decides the rest.
+ *
+ * ## The unassigned job
+ *
+ * A job nobody has been given has no assignee to be, so the first two arms and
+ * the reporter arm are the whole of it. That is deliberate: an unassigned job
+ * closed by a passer-by is a fault nobody was sent to look at, recorded as
+ * resolved.
+ */
+export type SignOffCheck =
+  | { ok: true; as: 'assignee' | 'reporter' | 'administrator' }
+  | { ok: false; reason: 'not_yours' }
+
+export async function canSignOffTriage(
+  userId: string,
+  orgId: string,
+  item: { assignedToId: string | null; reportedById: string | null },
+): Promise<SignOffCheck> {
+  if (item.assignedToId && item.assignedToId === userId) return { ok: true, as: 'assignee' }
+  if (item.reportedById && item.reportedById === userId) return { ok: true, as: 'reporter' }
+
+  // Same two roles that hand a triage out, and the same scoping: an
+  // administrator of THIS organisation, or the platform administrator
+  // anywhere. Reusing `canAssignTriage` rather than restating it keeps the two
+  // from drifting apart — somebody who may give the work out is exactly
+  // somebody who may close it when the person it was given to cannot.
+  const admin = await canAssignTriage(userId, orgId)
+  return admin.ok ? { ok: true, as: 'administrator' } : { ok: false, reason: 'not_yours' }
+}

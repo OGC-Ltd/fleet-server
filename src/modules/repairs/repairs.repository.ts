@@ -478,6 +478,28 @@ export async function findItemById(itemId: string, orgId: string) {
 }
 
 /** Does this item exist at all? Separates "already closed" from "never here". */
+/**
+ * Who a job belongs to: the person it was given to, and the person who raised
+ * it. Enough to decide a sign-off and nothing more, so it stays one indexed
+ * read on the path of a write.
+ *
+ * `reportedById` lives on the REPORT, not the item — six units reported in one
+ * visit share one author — so it is lifted through the relation here rather
+ * than at every call site.
+ */
+export async function findItemOwnership(itemId: string, orgId: string) {
+  const row = await prisma.repairReportItem.findFirst({
+    where:  { id: itemId, organisationId: orgId },
+    select: { assignedToId: true, resolvedAt: true, report: { select: { reportedById: true } } },
+  })
+  if (!row) return null
+  return {
+    assignedToId: row.assignedToId ?? null,
+    reportedById: row.report?.reportedById ?? null,
+    resolved:     row.resolvedAt != null,
+  }
+}
+
 export async function itemExists(itemId: string, orgId: string): Promise<boolean> {
   const row = await prisma.repairReportItem.findFirst({
     where: { id: itemId, organisationId: orgId },

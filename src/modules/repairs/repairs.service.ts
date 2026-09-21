@@ -8,7 +8,7 @@ import { prisma } from '../../lib/prisma.js'
 import * as repo from './repairs.repository.js'
 import { reportResolution, reportStageChange } from './repairs.notify.js'
 import { notifyRepairAssignment } from './repairs.assignment-mail.js'
-import { canAssignTriage, canReceiveTriage } from './repairs.authz.js'
+import { canAssignTriage, canReceiveTriage, canSignOffTriage } from './repairs.authz.js'
 import { ForbiddenError } from '../../core/errors/errors.js'
 import type { AssignRepairItem, CreateRepairReport, ResolveItem, SetStage, RespondToAssignment } from './repairs.schema.js'
 
@@ -332,8 +332,31 @@ export async function respondToAssignment(
  * The one closure that leaves the building is the unsuccessful one: a unit that
  * cannot be fixed here is a decision for somebody who does not read the Repairs
  * tab, so `reportResolution` mails that half and only that half.
+ *
+ * ## A sign-off is a claim about work somebody did
+ *
+ * "I went, and this is what I found", recorded under a name, on a trail people
+ * order spare parts from. So it is the assignee's to make — see
+ * canSignOffTriage for who else, and why each of them is not a matter of
+ * seniority. The route's `repair:resolve` is held by every technician in the
+ * organisation, which is right and which says nothing about WHICH job; this is
+ * the part that does.
+ *
+ * Checked BEFORE the write, not after: repo.resolveItem is the only path to
+ * the 'fixed' stage, and a refusal that arrives after the row has moved is not
+ * a refusal.
  */
 export async function closeItem(itemId: string, orgId: string, userId: string, dto: ResolveItem) {
+  const owner = await repo.findItemOwnership(itemId, orgId)
+  if (owner && !owner.resolved) {
+    const allowed = await canSignOffTriage(userId, orgId, owner)
+    if (!allowed.ok) {
+      throw new ForbiddenError(
+        'Only the person this job is assigned to, whoever filed it, or an administrator of this organisation can sign it off',
+      )
+    }
+  }
+
   const item = await repo.resolveItem(itemId, orgId, userId, dto)
   if (!item) return null
 
