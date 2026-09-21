@@ -167,3 +167,69 @@ describe('no automatic triage', () => {
     expect(assignRepairItemSchema.safeParse({ technicianId: 'u2' }).success).toBe(true)
   })
 })
+
+describe('signing a job off', () => {
+  // canSignOffTriage falls through to canAssignTriage for the administrator
+  // arm, so the role mocks below drive that.
+  const JOB = { assignedToId: 'tech-1', reportedById: 'filer-1' }
+
+  it('lets the person it was assigned to sign it off', async () => {
+    const { canSignOffTriage } = await import('../../src/modules/repairs/repairs.authz.js')
+    await expect(canSignOffTriage('tech-1', ORG, JOB)).resolves.toEqual({ ok: true, as: 'assignee' })
+    // Decided without touching the database: the two ids are already in hand.
+    expect(prismaMock.userRole.findMany).not.toHaveBeenCalled()
+  })
+
+  it('lets whoever filed the report close their own ticket', async () => {
+    // They raised the fault. If it turns out to be nothing, or they fixed it on
+    // the spot, they should not need somebody to hand it back to them first.
+    const { canSignOffTriage } = await import('../../src/modules/repairs/repairs.authz.js')
+    await expect(canSignOffTriage('filer-1', ORG, JOB)).resolves.toEqual({ ok: true, as: 'reporter' })
+  })
+
+  it('refuses a different technician', async () => {
+    // The whole point: a sign-off is a claim about work somebody did.
+    holding('technician'); member(true)
+    const { canSignOffTriage } = await import('../../src/modules/repairs/repairs.authz.js')
+    await expect(canSignOffTriage('tech-2', ORG, JOB)).resolves.toEqual({ ok: false, reason: 'not_yours' })
+  })
+
+  it('lets an administrator of this organisation close an orphaned job', async () => {
+    // Without this arm one person leaving, or being suspended, strands a job
+    // permanently — nobody else could ever close it.
+    holding('admin'); member(true)
+    const { canSignOffTriage } = await import('../../src/modules/repairs/repairs.authz.js')
+    await expect(canSignOffTriage('boss', ORG, JOB)).resolves.toEqual({ ok: true, as: 'administrator' })
+  })
+
+  it('lets the platform administrator close one anywhere', async () => {
+    holding('super_admin')
+    prismaMock.user.findFirst.mockResolvedValue(null)
+    const { canSignOffTriage } = await import('../../src/modules/repairs/repairs.authz.js')
+    await expect(canSignOffTriage('root', ORG, JOB)).resolves.toEqual({ ok: true, as: 'administrator' })
+  })
+
+  it('refuses an admin of ANOTHER organisation', async () => {
+    holding('admin'); member(false)
+    const { canSignOffTriage } = await import('../../src/modules/repairs/repairs.authz.js')
+    await expect(canSignOffTriage('boss', ORG, JOB)).resolves.toEqual({ ok: false, reason: 'not_yours' })
+  })
+
+  it('does not let a passer-by close an UNASSIGNED job', async () => {
+    // A job nobody was sent to, recorded as resolved, is a fault that was never
+    // looked at. Only the filer and an administrator may close one.
+    holding('technician'); member(true)
+    const { canSignOffTriage } = await import('../../src/modules/repairs/repairs.authz.js')
+    await expect(canSignOffTriage('tech-2', ORG, { assignedToId: null, reportedById: 'filer-1' }))
+      .resolves.toEqual({ ok: false, reason: 'not_yours' })
+  })
+
+  it('does not treat a null assignee as matching a null user', async () => {
+    // `null === null` would hand an unassigned job to anybody the id of whom
+    // failed to resolve.
+    holding('operator'); member(true)
+    const { canSignOffTriage } = await import('../../src/modules/repairs/repairs.authz.js')
+    await expect(canSignOffTriage(null as unknown as string, ORG, { assignedToId: null, reportedById: null }))
+      .resolves.toEqual({ ok: false, reason: 'not_yours' })
+  })
+})
