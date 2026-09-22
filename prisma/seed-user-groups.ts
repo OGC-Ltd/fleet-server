@@ -1,7 +1,7 @@
 /**
  * Seed the user groups and the email-domain rules that route into them.
  *
- * ADDITIVE and idempotent, like seed-rbac and unlike seed.ts: it upserts two
+ * ADDITIVE and idempotent, like seed-rbac and unlike seed.ts: it upserts the
  * groups and their patterns and touches no `users` row at all. Placing people
  * is a separate step on purpose — see prisma/backfill-user-groups.ts, which is
  * a dry run until told otherwise.
@@ -22,6 +22,12 @@
  *             administrator has to land somewhere: ungrouped means invisible
  *             to everyone but the platform administrator once enforcement is
  *             on, which for a system_admin is a lockout.
+ *   controltech  `controltech-ea.com` as a suffix, plus a `controltech` label.
+ *             The contractors who fit and service the trackers and probes.
+ *             They are not staff of any of the sites, which is the whole point
+ *             of the group axis: a ControlTech technician reachable from Sukari
+ *             must not be administered by Sukari's own administrator, and vice
+ *             versa.
  *
  * Adding a rule here is a real access-control change: it moves whoever it
  * matches into a group, and therefore changes who may administer them. Run the
@@ -68,6 +74,22 @@ const GROUPS: GroupSeed[] = [
     description: 'Sukari Industries staff.',
     domains: [
       { pattern: 'sukari', kind: 'LABEL' },
+    ],
+  },
+  {
+    slug: 'controltech',
+    name: 'ControlTech',
+    description: 'ControlTech East Africa — the tracker and sensor contractors.',
+    domains: [
+      // The address this group was created for is tech@controltech-ea.com, so
+      // the SUFFIX carries it and any subdomain under it. The LABEL is beside
+      // it for the same reason `ogc-monitoring` has one: this is a contractor
+      // whose people turn up on more than one domain, and a label catches
+      // controltech.co.ke or controltech.fleet without a second rule each time.
+      // It cannot catch `controltech-ea` — that is a different label — which is
+      // why both are listed rather than the label alone.
+      { pattern: 'controltech-ea.com', kind: 'SUFFIX' },
+      { pattern: 'controltech',        kind: 'LABEL'  },
     ],
   },
 ]
