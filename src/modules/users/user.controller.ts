@@ -1,6 +1,7 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as service from './user.service.js'
+import * as repo from './user.repository.js'
 import * as provisioning from './provisioning.service.js'
 import * as account from '../account/account.service.js'
 import { prisma } from '../../lib/prisma.js'
@@ -11,6 +12,7 @@ import { ASSIGNABLE_ROLE_SLUGS, WILDCARD } from '../../lib/permissions.js'
 import { NotFoundError, BadRequestError, ForbiddenError } from '../../core/errors/errors.js'
 import { resolveSubject, can, canReachOrg } from '../../lib/authz/subject.js'
 import { canDeleteUser } from './user.authz.js'
+import { groupScopeFor } from './user-group.scope.js'
 import { forgetUser } from '../../middleware/auth.js'
 import * as authService from '../auth/auth.service.js'
 import { invalidateSubject } from '../../lib/authz/subject.js'
@@ -62,14 +64,16 @@ async function callerMayGrantPlatformRoles(userId: string | undefined, orgId: st
 
 export const list: RequestHandler = async (req, res, next) => {
   try {
-    const { data, total } = await service.listUsers(p(req, 'orgId'), req.query as unknown as ListUserQuery)
+    const { data, total } = await service.listUsers(
+      p(req, 'orgId'), req.query as unknown as ListUserQuery, req.user?.id,
+    )
     sendSuccess(res, data, 200, { total, page: Number(req.query['page']), limit: Number(req.query['limit']) })
   } catch (err) { next(err) }
 }
 
 export const getOne: RequestHandler = async (req, res, next) => {
   try {
-    sendSuccess(res, await service.getUser(p(req, 'orgId'), p(req, 'userId')))
+    sendSuccess(res, await service.getUser(p(req, 'orgId'), p(req, 'userId'), req.user?.id))
   } catch (err) { next(err) }
 }
 
@@ -81,7 +85,7 @@ export const create: RequestHandler = async (req, res, next) => {
 
 export const update: RequestHandler = async (req, res, next) => {
   try {
-    sendSuccess(res, await service.updateUser(p(req, 'orgId'), p(req, 'userId'), req.body as UpdateUserDto))
+    sendSuccess(res, await service.updateUser(p(req, 'orgId'), p(req, 'userId'), req.body as UpdateUserDto, req.user?.id))
   } catch (err) { next(err) }
 }
 
@@ -116,6 +120,9 @@ async function assertMayDelete(req: Parameters<RequestHandler>[0]): Promise<void
   if (verdict.reason === 'not_a_member') {
     throw new ForbiddenError('You can only delete accounts in an organisation you belong to')
   }
+  if (verdict.reason === 'other_group') {
+    throw new ForbiddenError('You can only delete accounts in your own group')
+  }
   throw new ForbiddenError('Only an administrator of this organisation can delete accounts')
 }
 
@@ -131,7 +138,7 @@ const ROLE_WORD: Record<string, string> = {
 export const remove: RequestHandler = async (req, res, next) => {
   try {
     await assertMayDelete(req)
-    await service.deleteUser(p(req, 'orgId'), p(req, 'userId'))
+    await service.deleteUser(p(req, 'orgId'), p(req, 'userId'), req.user?.id)
     sendSuccess(res, null, 204)
   } catch (err) { next(err) }
 }
@@ -160,7 +167,7 @@ export const assignRole: RequestHandler = async (req, res, next) => {
 
 export const revokeRole: RequestHandler = async (req, res, next) => {
   try {
-    const result = await service.revokeRoleFromUser(p(req, 'orgId'), p(req, 'userId'), p(req, 'roleId'))
+    const result = await service.revokeRoleFromUser(p(req, 'orgId'), p(req, 'userId'), p(req, 'roleId'), req.user?.id)
     sendSuccess(res, result)
   } catch (err) { next(err) }
 }
@@ -274,6 +281,10 @@ export const provisionInOrg: RequestHandler = async (req, res, next) => {
 
 export const listUserMemberships: RequestHandler = async (req, res, next) => {
   try {
+    // The answer spans every organisation this person reaches, which is the
+    // point of it — but WHO may ask is still this organisation's question,
+    // and it was not being asked at all. Same gate as the roster.
+    await reachableOrThrow(req, p(req, 'orgId'), p(req, 'userId'))
     sendSuccess(res, await provisioning.listMemberships(p(req, 'userId')))
   } catch (err) { next(err) }
 }
@@ -283,6 +294,9 @@ export const putMembership: RequestHandler = async (req, res, next) => {
   try {
     const orgId = p(req, 'orgId')
     const b = req.body as SetMembershipDto
+    // Group only — see sameGroupOrThrow. This route ADDS an organisation to
+    // somebody who may not be in it yet, so it cannot require reachability.
+    await sameGroupOrThrow(req, p(req, 'userId'))
     const result = await provisioning.setMembership(
       p(req, 'userId'),
       { organisationId: orgId, ...b },
@@ -301,6 +315,9 @@ export const putMembership: RequestHandler = async (req, res, next) => {
 export const deleteMembership: RequestHandler = async (req, res, next) => {
   try {
     const orgId = p(req, 'orgId')
+    // Same gate as setUserRole above: revoking a membership takes access
+    // away, and a bare user id must not reach outside the caller's group.
+    await reachableOrThrow(req, orgId, p(req, 'userId'))
     const result = await provisioning.revokeMembership(p(req, 'userId'), orgId, { restrictToOrgId: orgId })
     sendSuccess(res, result)
   } catch (err) { next(err) }
@@ -399,11 +416,62 @@ export const listAssignableRoles: RequestHandler = async (req, res, next) => {
  * re-invitation, it is a password reset for somebody else, and the person
  * concerned can ask for one themselves.
  */
+/**
+ * The person this route names, IF the caller may reach them.
+ *
+ * Organisation and group in one place, because three routes here were reading
+ * `{ id, deletedAt: null }` and nothing else: a bare id out of any tenant and
+ * any group would resend that person's invitation, or suspend them, or read
+ * back their address. Pre-existing, and not something to leave standing once
+ * the roster is narrowed — a rule that only narrows the LIST is a filter, and
+ * the id is right there in the URL.
+ *
+ * `findReachable` is the roster's own reachability test (home organisation or
+ * a live membership), so this cannot drift from what the list shows. The
+ * group scope is unscoped until USER_GROUP_ENFORCE is on.
+ */
+/**
+ * The group gate ALONE, for the two routes that may legitimately name
+ * somebody who is not in this organisation yet.
+ *
+ * `PUT /:userId/memberships` exists precisely to ADD an organisation to a
+ * person who was not in it ("adding somebody to a second site means calling
+ * this with that site's id"), and `PATCH /:userId/role` goes through the same
+ * `setMembership`. Putting `reachableOrThrow` on either would 404 the case
+ * the route was written for — the caller's right to the organisation is
+ * already checked by `requirePermissionStrict` on `:orgId`, and it is the
+ * TARGET's organisation that must stay open here.
+ *
+ * The group is a different question and does apply: an administrator must not
+ * pull somebody out of another group into their own. Unscoped, and therefore
+ * inert, until USER_GROUP_ENFORCE is on.
+ */
+async function sameGroupOrThrow(req: Parameters<RequestHandler>[0], userId: string): Promise<void> {
+  const scope = await groupScopeFor(req.user?.id)
+  if (scope.unscoped) return
+  const target = await prisma.user.findFirst({
+    where:  { id: userId, deletedAt: null },
+    select: { groupId: true },
+  })
+  // A target that does not exist is the route's own 404 to raise, not this
+  // gate's — it knows what it was looking for and this does not.
+  if (target && target.groupId !== scope.groupId) {
+    throw new ForbiddenError('You can only manage accounts in your own group')
+  }
+}
+
+async function reachableOrThrow(req: Parameters<RequestHandler>[0], orgId: string, userId: string) {
+  const found = await repo.findReachable(orgId, userId, await groupScopeFor(req.user?.id))
+  if (!found) throw new NotFoundError('User')
+  return found
+}
+
 export const resendInvite: RequestHandler = async (req, res, next) => {
   try {
     const orgId  = p(req, 'orgId')
     const userId = p(req, 'userId')
 
+    await reachableOrThrow(req, orgId, userId)
     const user = await prisma.user.findFirst({
       where:  { id: userId, deletedAt: null },
       select: { id: true, email: true, fullName: true, passwordHash: true },
@@ -440,10 +508,7 @@ export const setUserStatus: RequestHandler = async (req, res, next) => {
     const userId = p(req, 'userId')
     const { status } = req.body as SetUserStatusDto
 
-    const existing = await prisma.user.findFirst({
-      where: { id: userId, deletedAt: null }, select: { id: true, email: true },
-    })
-    if (!existing) throw new NotFoundError('User')
+    const existing = await reachableOrThrow(req, orgId, userId)
 
     // Suspending yourself locks you out of the tab you are standing in, with
     // no way back that does not need another admin.
@@ -488,6 +553,12 @@ export const setUserRole: RequestHandler = async (req, res, next) => {
     if (userId === req.user?.id) {
       throw new BadRequestError('You cannot change your own roles')
     }
+
+    // Setting somebody's roles is the sharpest thing on this route file — it
+    // changes what they can DO. Group only, for the same reason as
+    // putMembership: this goes through `setMembership`, which adds the
+    // organisation when it is missing.
+    await sameGroupOrThrow(req, userId)
 
     const memberships = await provisioning.setMembership(
       userId,

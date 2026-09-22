@@ -46,6 +46,10 @@ export function makeUser(overrides: Partial<User> = {}): User {
     licenceNumber: null,
     employeeId: null,
     externalId: null,
+    // Ungrouped, which is what every account is until a domain rule or an
+    // administrator places it — and, under USER_GROUP_ENFORCE, what makes a
+    // row reachable by the platform administrator only.
+    groupId: null,
     dutyStatus: null,
     driverType: null,
     status: 'ACTIVE',

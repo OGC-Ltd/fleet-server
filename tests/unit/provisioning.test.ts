@@ -263,4 +263,59 @@ describe('revoking a membership', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect((prismaMock.orgMembership.update as any).mock.calls[0][0].data.revokedAt).toBeInstanceOf(Date)
   })
+
+  /* ── The home organisation follows ──────────────────────────────────────
+     `users.organisation_id` was set once at creation and never revisited, so
+     somebody granted four organisations and removed from three kept a home
+     organisation naming one they had lost — and the account page printed it
+     directly above an Organisations list that did not contain it. */
+
+  /** The user row and the surviving membership the rehome reads. */
+  function rehome(homeOrgId: string | null, survivorOrgId: string | null) {
+    const m = prismaMock as unknown as Record<string, Record<string, ReturnType<typeof vi.fn>>>
+    m['user']!['findUnique']!.mockResolvedValue(
+      homeOrgId === null ? null : { organisationId: homeOrgId },
+    )
+    m['orgMembership']!['findFirst']!.mockResolvedValue(
+      survivorOrgId === null ? null : { organisationId: survivorOrgId },
+    )
+  }
+
+  it('moves the home organisation to what is left when the home one is revoked', async () => {
+    arrange()
+    rehome(ORG_A, ORG_B)
+    await provisioning.revokeMembership('usr_1', ORG_A)
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const call = (prismaMock.user.update as any).mock.calls.at(-1)[0]
+    expect(call.where).toEqual({ id: 'usr_1' })
+    expect(call.data).toEqual({ organisationId: ORG_B })
+  })
+
+  it('takes the OLDEST surviving membership, so a repair pass agrees with a live revoke', async () => {
+    arrange()
+    rehome(ORG_A, ORG_B)
+    await provisioning.revokeMembership('usr_1', ORG_A)
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const query = (prismaMock.orgMembership.findFirst as any).mock.calls.at(-1)[0]
+    expect(query.where).toEqual({ userId: 'usr_1', revokedAt: null })
+    expect(query.orderBy).toEqual({ createdAt: 'asc' })
+  })
+
+  it('leaves the home organisation alone when it is not the one being revoked', async () => {
+    arrange()
+    rehome(ORG_B, ORG_B)
+    await provisioning.revokeMembership('usr_1', ORG_A)
+    expect(prismaMock.user.update).not.toHaveBeenCalled()
+  })
+
+  it('leaves it alone when nothing survives — the column is NOT NULL', async () => {
+    arrange()
+    // Their last organisation. A stale home is a better record than a crash:
+    // they did work there, and this is the shape every registry driver has.
+    rehome(ORG_A, null)
+    await provisioning.revokeMembership('usr_1', ORG_A)
+    expect(prismaMock.user.update).not.toHaveBeenCalled()
+  })
 })

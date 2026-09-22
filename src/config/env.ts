@@ -28,6 +28,23 @@ const schema = z.object({
   // MUST become true - the boot warning in app.ts says so on every start.
   AUTHZ_ENFORCE: z.string().optional().default('false').transform(v => v === 'true'),
 
+  // The same staged rollout, for USER GROUPS (modules/users/user-group.scope).
+  // FALSE = shadow: the group scope is computed and every row it WOULD have
+  // hidden is logged, and nothing is hidden.
+  //
+  // Its own flag rather than a second use of AUTHZ_ENFORCE, for two reasons.
+  // AUTHZ_ENFORCE is still false on the box, so sharing it would leave this
+  // inert in production for as long as that stays true; and the two decide
+  // different things - one is whether a permission may DENY a request, this is
+  // whether a roster may HIDE a row - so they want to be turned on separately
+  // and rolled back separately.
+  //
+  // Group scoping fails CLOSED: an administrator whose own address matches no
+  // rule sees nobody. That is the intended reading, and it is exactly why this
+  // ships off. Run prisma/backfill-user-groups.ts first and confirm its
+  // lockout list is empty before turning it on.
+  USER_GROUP_ENFORCE: z.string().optional().default('false').transform(v => v === 'true'),
+
   // `Secure` on the auth cookies. False only because the box serves plain HTTP
   // today; every credential is sniffable on the wire until TLS terminates in
   // front of it, at which point this becomes true.

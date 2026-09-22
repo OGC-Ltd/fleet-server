@@ -195,6 +195,73 @@ enum AlertSeverity {
 // IAM — identity & access control
 // ---------------------------------------------------------------------------
 
+/// How a `GroupEmailDomain` rule is matched against an address's domain.
+enum DomainMatch {
+  /// The domain itself, or any subdomain of it, ON A DOT BOUNDARY:
+  /// `kasulu.co.ke` matches `kasulu.co.ke` and `admin.kasulu.co.ke`, and must
+  /// NOT match `notkasulu.co.ke`. A plain `endsWith` would match all three,
+  /// which is a cross-group leak spelled as a convenience.
+  SUFFIX
+  /// Any one dot-separated label of the domain: `ogc-monitoring` matches
+  /// `ogc-monitoring.com` and `mail.ogc-monitoring.co.ke`. Exists because a
+  /// group can be named by a label whose TLD nobody has settled on.
+  LABEL
+}
+
+/// A grouping of PEOPLE, and the third axis of who may administer whom.
+///
+/// Distinct from the two that already exist, and easy to confuse with either:
+///
+///   Organisation    who EMPLOYS somebody (`User.organisationId`)
+///   OrgMembership   which tenants an account may READ
+///   UserGroup       which people an administrator may ADMINISTER
+///
+/// The need is that the first two are not enough. Offgrid Consulting staff and
+/// Kasulu staff can both be reachable from one organisation, and an
+/// administrator on one side has no business administering the other's
+/// accounts. Organisation cannot express that — they share one — and a
+/// membership cannot either, because it is about reading a fleet rather than
+/// about people.
+model UserGroup {
+  id          String   @id @default(cuid())
+  /// Stable machine name — "offgrid", "kasulu". What seeds and rules refer to.
+  slug        String   @unique
+  name        String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  domains GroupEmailDomain[]
+  users   User[]
+
+  @@map("user_groups")
+}
+
+/// How an address is ROUTED to a group when an account is created or its email
+/// changes.
+///
+/// These rules auto-fill `User.groupId`; they are never consulted at read
+/// time. That separation is the point. If access were derived from the address
+/// on every query, then an account's reach would be a function of a field that
+/// can be edited — including, on some paths, by its own owner — and there
+/// would be no record of how anybody came to be where they are. Here the
+/// stored `groupId` is the authority and the rule is merely how it got its
+/// value, so an exception placed by hand will survive.
+model GroupEmailDomain {
+  id        String      @id @default(cuid())
+  groupId   String      @map("group_id")
+  /// Stored LOWERCASED. Domains are case-insensitive and two rules differing
+  /// only in case would both be live and disagree.
+  pattern   String      @unique
+  kind      DomainMatch @default(SUFFIX)
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  group UserGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([groupId])
+  @@map("group_email_domains")
+}
+
 /// Top-level tenant. All entities are scoped to an organisation.
 model Organisation {
   id          String   @id @default(cuid())
@@ -321,6 +388,14 @@ model User {
   // Provider's driver class (TRACTOR / TRUCK / COMPANY_VEHICLE) — the vehicle
   // type this driver is licensed to operate.
   driverType          String?    @map("driver_type")
+  /// Which group administers this account. See UserGroup.
+  ///
+  /// NULLABLE, and it has to be: the accounts synced from the RaiFactorySuite
+  /// driver registry carry no email (see `email` above), so no rule can ever
+  /// place them. "No group" therefore has to be a state the column can hold
+  /// rather than an error, and the read path treats such a row as reachable
+  /// by the platform administrator only.
+  groupId             String?    @map("group_id")
   status              UserStatus @default(ACTIVE)
   // bcrypt hash for local auth (scripts/set-password.ts sets it).
   // NULL = account cannot log in (all pre-2026-07 accounts start this way —
@@ -345,6 +420,7 @@ model User {
   driverRatingScore Float @default(5.0) @map("driver_rating_score")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
+  group        UserGroup?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
 
   // IAM
   userRoles             UserRole[]
@@ -373,14 +449,15 @@ model User {
   // Repairs: what they filed, what they are assigned, and what they later
   // signed off. The assignment is distinct from the author because triage often
   // puts the task onto a different technician than the person who logged it.
-  repairReportsFiled  RepairReport[]     @relation("RepairReportsFiled")
-  repairItemsAssigned RepairReportItem[] @relation("RepairItemsAssigned")
+  repairReportsFiled    RepairReport[]     @relation("RepairReportsFiled")
+  repairItemsAssigned   RepairReportItem[] @relation("RepairItemsAssigned")
   repairItemsAssignedBy RepairReportItem[] @relation("RepairItemsAssignedBy")
-  repairItemsResolved RepairReportItem[] @relation("RepairItemsResolved")
+  repairItemsResolved   RepairReportItem[] @relation("RepairItemsResolved")
 
   @@index([organisationId])
   @@index([email])
   @@index([organisationId, status])
+  @@index([groupId])
   @@map("users")
 }
 
@@ -1024,7 +1101,7 @@ model SensorFaultEpisode {
   durationSec Int?      @map("duration_sec")
 
   detail       String
-  observations Int      @default(1)
+  observations Int    @default(1)
   /// { speedKmh, movingSinceMs, accuracyM, channel, lastValueAt }
   evidence     Json?
 
@@ -1037,24 +1114,24 @@ model SensorFaultEpisode {
   /// silent tracker, and for a channel death the newest position at or before
   /// the fault can be minutes older than the fault itself.
   lastFixAt    DateTime? @map("last_fix_at")
-  lastLat      Float?   @map("last_lat")
-  lastLng      Float?   @map("last_lng")
+  lastLat      Float?    @map("last_lat")
+  lastLng      Float?    @map("last_lng")
   /// Speed at that fix, and the MOVING verdict taken there. Stored rather than
   /// re-derived, so a later change to MOVING_THRESHOLD_KMH cannot restate what
   /// was true at the time — the same rule speeding_incidents applies to
   /// limit_kmh.
-  lastSpeedKmh Float?   @map("last_speed_kmh")
-  lastMoving   Boolean? @map("last_moving")
+  lastSpeedKmh Float?    @map("last_speed_kmh")
+  lastMoving   Boolean?  @map("last_moving")
   /// Reverse-geocoded label for that fix, filled asynchronously — the geocoder
   /// is rate-limited and must not sit in the path of fault capture. Null means
   /// unresolved, never "nowhere".
-  lastPlace    String?  @map("last_place")
+  lastPlace    String?   @map("last_place")
 
-  day          DateTime @db.Date
-  createdAt    DateTime @default(now()) @map("created_at")
+  day       DateTime @db.Date
+  createdAt DateTime @default(now()) @map("created_at")
 
-  organisation Organisation @relation(fields: [organisationId], references: [id])
-  vehicle      Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  organisation Organisation       @relation(fields: [organisationId], references: [id])
+  vehicle      Vehicle            @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
   repairItems  RepairReportItem[]
 
   @@unique([vehicleId, kind, startedAt])
@@ -1094,7 +1171,7 @@ model RepairReport {
   /// { recipients: string[], sent: string[], failed: string[] }. The addresses
   /// are COPIED here rather than looked up later, because REPAIR_NOTIFY_EMAILS
   /// is env config and can change between the send and the question.
-  emailDetail Json? @map("email_detail")
+  emailDetail Json?     @map("email_detail")
 
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -1131,8 +1208,8 @@ model RepairReport {
 /// open jobs with a date on them — the overdue scan — and is likewise absent
 /// from a `db pull`.
 model RepairReportItem {
-  id       String @id @default(cuid())
-  reportId String @map("report_id")
+  id             String @id @default(cuid())
+  reportId       String @map("report_id")
   /// Denormalised from the report, as SensorFaultEpisode denormalises it from
   /// the vehicle: every tenant-scoped read of items is then one table, and the
   /// open-jobs query the Probes tab runs on every load needs no join to filter.
@@ -1145,7 +1222,7 @@ model RepairReportItem {
   /// The episode's `kind` COPIED at report time. The episode can recover and be
   /// superseded while the spare is still on order; the report must go on saying
   /// what the technician was sent out for.
-  faultKind String? @map("fault_kind")
+  faultKind      String? @map("fault_kind")
 
   /// 'fixing' | 'needs_spare' | 'cannot_fix'
   ///
@@ -1153,15 +1230,15 @@ model RepairReportItem {
   /// is `stage`, which keeps moving after the report is filed. The first
   /// value was 'fixed' and it was wrong: filing a report is the start of the
   /// work, not the end of it.
-  outcome String
+  outcome              String
   /// The part, named by the technician. Required when outcome = 'needs_spare',
   /// and enforced in Postgres too — the whole point of that outcome is that
   /// somebody downstream has to order something, and "needs a part" with no
   /// part named is a request nobody can act on.
-  sparePart String? @map("spare_part")
+  sparePart            String?   @map("spare_part")
   /// What they found. Required for needs_spare and cannot_fix, optional for a
   /// clean fix, which explains itself.
-  problemNote String? @map("problem_note")
+  problemNote          String?   @map("problem_note")
   /// When the technician expects the unit to be back in service.
   ///
   /// Required when outcome = 'needs_spare', and enforced in Postgres too
@@ -1189,24 +1266,24 @@ model RepairReportItem {
   /// 20260916140000_repair_item_stage. 'failed' is NOT absorbing: an open job
   /// sitting at 'failed' is one this technician could not fix, waiting for
   /// somebody with more kit.
-  stage String @default("pending")
+  stage            String    @default("pending")
   /// Who is currently carrying the job, if any. This is the triage handoff:
   /// the ops room or dispatcher can assign a repair to a specific technician,
   /// and the assignment is used to balance load without opening a second queue.
-  assignedToId String? @map("assigned_to_id")
-  assignedAt   DateTime? @map("assigned_at")
-  assignedById String? @map("assigned_by_id")
-  assignmentNote String? @map("assignment_note")
+  assignedToId     String?   @map("assigned_to_id")
+  assignedAt       DateTime? @map("assigned_at")
+  assignedById     String?   @map("assigned_by_id")
+  assignmentNote   String?   @map("assignment_note")
   /// 'pending' | 'accepted' | 'declined' — the assignee's response to the handoff.
-  assignmentStatus String @default("accepted") @map("assignment_status")
+  assignmentStatus String    @default("accepted") @map("assignment_status")
   /// When it last moved. Sorting, and "stuck for three weeks", without
   /// reaching into the history JSON.
-  stageChangedAt DateTime? @map("stage_changed_at")
+  stageChangedAt   DateTime? @map("stage_changed_at")
   /// How it got here: `[{ stage, at, by, byName?, note? }]`, appended to on
   /// every move. JSONB rather than a table because nothing joins against a
   /// past stage — one detail panel draws one tracking line for one item, the
   /// same shape `RepairReport.emailDetail` uses next door.
-  stageHistory Json? @map("stage_history")
+  stageHistory     Json?     @map("stage_history")
 
   /// Sign-off. Null = still open.
   resolvedAt     DateTime? @map("resolved_at")
@@ -2236,10 +2313,10 @@ model ProviderAlert {
 /// 1000 rows with no pagination, so the history it exposes is a sliding window
 /// that will eventually drop the trips the duration statistics are built from.
 model Dispatch {
-  id               String    @id @default(cuid())
+  id               String       @id @default(cuid())
   /// Provider's dispatch UUID — dedupe key across webhook, reconciler and backfill.
-  externalId       String    @unique @map("external_id")
-  organisationId   String    @map("organisation_id")
+  externalId       String       @unique @map("external_id")
+  organisationId   String       @map("organisation_id")
   /// Which lifecycle produced this row. See DispatchKind.
   ///
   /// The organisation is the UNIT'S OWNER, not the factory's operator — a
@@ -2247,9 +2324,9 @@ model Dispatch {
   /// modules/webhooks/factory-map's `resolveEventOrg` for why.
   kind             DispatchKind @default(CANE)
   /// NULL when the plate does not resolve to our registry.
-  vehicleId        String?   @map("vehicle_id")
+  vehicleId        String?      @map("vehicle_id")
   plate            String
-  driverName       String    @map("driver_name")
+  driverName       String       @map("driver_name")
   /// Free text, verbatim from the provider. Never parsed into coordinates.
   destination      String?
   /// The gate's document number for this run, as the dispatcher wrote it.
@@ -2274,7 +2351,7 @@ model Dispatch {
   /// here and missing in Postgres fails every upsert to this table, whether or
   /// not any code names it. That is what took dispatch and sales ingest down
   /// for forty minutes on 2026-09-15. Migration first, then the deploy.
-  serialNumber     String?   @map("serial_number")
+  serialNumber     String?      @map("serial_number")
   /// The provider factory this run STARTED from (see webhooks/factory-map).
   ///
   /// The provider records a destination and never an origin, and until this
@@ -2288,17 +2365,17 @@ model Dispatch {
   /// tonnage and never says of what, and the commodity is a property of the
   /// site (Naitiri ships processed sugar). NULL for rows written before this
   /// column, and for any source that does not name a factory.
-  factoryCode      String?   @map("factory_code")
+  factoryCode      String?      @map("factory_code")
   /// DISPATCHED | OVERDUE | COMPLETED | CANCELLED, as the provider reports it.
   status           String
-  dispatchedAt     DateTime  @map("dispatched_at")
+  dispatchedAt     DateTime     @map("dispatched_at")
   /// The dispatcher's own commitment, when they set one — present on about a
   /// third of open dispatches. Beats any estimate we could compute.
-  expectedReturnAt DateTime? @map("expected_return_at")
-  actualReturnAt   DateTime? @map("actual_return_at")
-  receivedAt       DateTime  @default(now()) @map("received_at")
+  expectedReturnAt DateTime?    @map("expected_return_at")
+  actualReturnAt   DateTime?    @map("actual_return_at")
+  receivedAt       DateTime     @default(now()) @map("received_at")
   /// 'webhook' when pushed, 'reconciler' on the safety-net poll, 'backfill' from sync:dispatches.
-  source           String    @default("webhook")
+  source           String       @default("webhook")
 
   // ── SALES only ────────────────────────────────────────────────────────────
   /// Load in tonnes, as the sales office recorded it. The ONLY weight the
@@ -2306,12 +2383,12 @@ model Dispatch {
   /// or a gate movement, Wialon's adapter hardcodes `cargoWeightKg: null`, and
   /// CargoManifest is written only by the simulator and the manual API. Bag
   /// counts are derived from this and nothing else.
-  tonnageT         Float?    @map("tonnage_t")
+  tonnageT        Float?  @map("tonnage_t")
   /// The guard's photo at sign-out / sign-in. Null on every row observed so
   /// far (2026-09-09) — the provider models the fields but is not populating
   /// them yet.
-  signOutPhotoUrl  String?   @map("sign_out_photo_url")
-  returnPhotoUrl   String?   @map("return_photo_url")
+  signOutPhotoUrl String? @map("sign_out_photo_url")
+  returnPhotoUrl  String? @map("return_photo_url")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
   vehicle      Vehicle?     @relation(fields: [vehicleId], references: [id])
@@ -2476,75 +2553,75 @@ model Weighment {
 
   /// The plate exactly as the scale operator typed it, kept verbatim because
   /// it is what the paper ticket says.
-  vehicleNo      String            @map("vehicle_no")
+  vehicleNo    String  @map("vehicle_no")
   /// The same plate through `normalisePlate`, which is what a search matches
   /// and what joins to our own registry.
-  vehiclePlate   String            @map("vehicle_plate")
+  vehiclePlate String  @map("vehicle_plate")
   /// Our vehicle, when the plate matches one. NULL is common and is not an
   /// error: cane is hauled by contractors' lorries and farmers' tractors that
   /// carry no tracker and appear in no fleet we hold.
-  vehicleId      String?           @map("vehicle_id")
+  vehicleId    String? @map("vehicle_id")
   /// The driver as the ticket names them. There is no drivers table to point
   /// at — the integration has never had one — so this is the name and nothing
   /// more.
-  driverName     String            @map("driver_name")
+  driverName   String  @map("driver_name")
 
   /// Where the weighing happened: 101 FACTORY, 102 OPAPO, 103 OYANI,
   /// 104 NYAONDO (measured 2026-09-10; the four bridges Sukari operates).
-  centerCode     Int               @map("center_code")
+  centerCode Int    @map("center_code")
   /// The provider's name for that centre. Denormalised deliberately: a
   /// transfer payload carries only `centerFrom`, so the name has to come from
   /// the delivery feed's own mapping, and a ticket must still read correctly
   /// years later if a code is ever reassigned.
-  centerName     String            @map("center_name")
+  centerName String @map("center_name")
 
   // ── the weighing at `centerCode` ──────────────────────────────────────────
   /// Loaded weight, kg, and when the scale took it.
-  grossWeightKg  Float?            @map("gross_weight_kg")
-  grossAt        DateTime?         @map("gross_at")
+  grossWeightKg Float?    @map("gross_weight_kg")
+  grossAt       DateTime? @map("gross_at")
   /// The operator's initials, as recorded at the scale.
-  grossOperator  String?           @map("gross_operator")
+  grossOperator String?   @map("gross_operator")
   /// WHICH physical scale. A centre can run several — five distinct numbers
   /// across the four sites — and a dispute about a weight starts here.
-  grossBridgeNo  Int?              @map("gross_bridge_no")
-  tareWeightKg   Float?            @map("tare_weight_kg")
-  tareAt         DateTime?         @map("tare_at")
-  tareOperator   String?           @map("tare_operator")
-  tareBridgeNo   Int?              @map("tare_bridge_no")
+  grossBridgeNo Int?      @map("gross_bridge_no")
+  tareWeightKg  Float?    @map("tare_weight_kg")
+  tareAt        DateTime? @map("tare_at")
+  tareOperator  String?   @map("tare_operator")
+  tareBridgeNo  Int?      @map("tare_bridge_no")
   /// Gross − tare, as the provider computed it. Stored rather than derived:
   /// it is the number on the ticket, and it is what the farmer is paid on.
   /// (It agreed with gross − tare on all 729 rows measured 2026-09-10, which
   /// is a reason to trust it, not a reason to recompute it.)
-  netWeightKg    Float?            @map("net_weight_kg")
+  netWeightKg   Float?    @map("net_weight_kg")
 
   // ── CANE_TRANSFER only: the second weighing, at the factory ───────────────
-  factoryGrossWeightKg Float?      @map("factory_gross_weight_kg")
-  factoryGrossAt       DateTime?   @map("factory_gross_at")
-  factoryGrossOperator String?     @map("factory_gross_operator")
-  factoryGrossBridgeNo Int?        @map("factory_gross_bridge_no")
-  factoryTareWeightKg  Float?      @map("factory_tare_weight_kg")
-  factoryTareAt        DateTime?   @map("factory_tare_at")
-  factoryTareOperator  String?     @map("factory_tare_operator")
-  factoryTareBridgeNo  Int?        @map("factory_tare_bridge_no")
+  factoryGrossWeightKg Float?    @map("factory_gross_weight_kg")
+  factoryGrossAt       DateTime? @map("factory_gross_at")
+  factoryGrossOperator String?   @map("factory_gross_operator")
+  factoryGrossBridgeNo Int?      @map("factory_gross_bridge_no")
+  factoryTareWeightKg  Float?    @map("factory_tare_weight_kg")
+  factoryTareAt        DateTime? @map("factory_tare_at")
+  factoryTareOperator  String?   @map("factory_tare_operator")
+  factoryTareBridgeNo  Int?      @map("factory_tare_bridge_no")
   /// The factory's own net for the same load. It differs from `netWeightKg` —
   /// 26,800 against 26,540 on the first transfer measured — and that
   /// difference is the point of weighing twice, so both are kept and neither
   /// is treated as a correction of the other.
-  factoryNetWeightKg   Float?      @map("factory_net_weight_kg")
+  factoryNetWeightKg   Float?    @map("factory_net_weight_kg")
 
   /// What the load was, when the provider says. Null on every delivery row
   /// observed so far (729 of 729) — the columns exist upstream and are not
   /// being filled.
-  productCode    String?           @map("product_code")
-  productName    String?           @map("product_name")
+  productCode String? @map("product_code")
+  productName String? @map("product_name")
 
   /// When we first stored it, and when we last saw a change. Neither is the
   /// ticket's own clock — `tokenAt` is — and both are here to make a stalled
   /// feed visible.
-  receivedAt     DateTime          @default(now()) @map("received_at")
-  updatedAt      DateTime          @updatedAt @map("updated_at")
+  receivedAt DateTime @default(now()) @map("received_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
   /// 'webhook' when pushed, 'reconciler' on the poll that backstops it.
-  source         String            @default("reconciler")
+  source     String   @default("reconciler")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
   vehicle      Vehicle?     @relation(fields: [vehicleId], references: [id])
