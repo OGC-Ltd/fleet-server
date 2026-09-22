@@ -82,6 +82,38 @@ describe('groupForEmail — both of the operator\'s groups', () => {
   })
 })
 
+describe('groupForEmail — the ControlTech pair', () => {
+  /* Two rules for one contractor, and the reason is a hyphen. `controltech-ea`
+     is a single dot-separated label, so a LABEL rule for `controltech` does NOT
+     match it — labels match whole, which is the property the whole matcher is
+     built on. The suffix carries the address this group was created for; the
+     label is what catches the same firm on a different domain later. */
+  const CT: GroupRule[] = [
+    { groupId: 'g-ct', pattern: 'controltech-ea.com', kind: 'SUFFIX' },
+    { groupId: 'g-ct', pattern: 'controltech',        kind: 'LABEL'  },
+  ]
+
+  it('routes the address the group was created for', () => {
+    expect(groupForEmail('tech@controltech-ea.com', CT)).toBe('g-ct')
+    expect(groupForEmail('tech@mail.controltech-ea.com', CT)).toBe('g-ct')
+  })
+
+  it('routes the same firm on another domain, via the label', () => {
+    expect(groupForEmail('a@controltech.co.ke', CT)).toBe('g-ct')
+    expect(groupForEmail('a@controltech.fleet', CT)).toBe('g-ct')
+  })
+
+  it('is why BOTH rules are listed: the label alone would miss the hyphen', () => {
+    const labelOnly: GroupRule[] = [{ groupId: 'g-ct', pattern: 'controltech', kind: 'LABEL' }]
+    expect(groupForEmail('tech@controltech-ea.com', labelOnly)).toBeNull()
+  })
+
+  it('does not catch a lookalike domain', () => {
+    expect(groupForEmail('a@notcontroltech-ea.com', CT)).toBeNull()
+    expect(groupForEmail('a@controltech-ea.com.attacker.com', CT)).toBeNull()
+  })
+})
+
 describe('groupForEmail — specificity', () => {
   it('prefers the longer suffix, so a subdomain can have its own group', () => {
     const rules: GroupRule[] = [
