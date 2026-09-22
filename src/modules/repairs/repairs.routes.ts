@@ -34,6 +34,11 @@ router.use(authenticate, requireOrgAccess)
 
 router.get('/', requirePermission('repair:read'), validateQuery(listReportsQuerySchema), ctrl.listReports)
 router.get('/items', requirePermission('repair:read'), validateQuery(listItemsQuerySchema), ctrl.listItems)
+/* Before the `/:reportId` catch-all at the foot of this file, like `/items`.
+   `repair:assign` rather than `repair:read`: this is the assign control's
+   backing list, and it is NOT group-scoped -- an assignee must share the
+   ORGANISATION, not the group (see repairs.repository.findAssignees). */
+router.get('/assignees', requirePermission('repair:assign'), ctrl.listAssignees)
 router.post('/', requirePermissionStrict('repair:create'), validateBody(createRepairReportSchema), ctrl.createReport)
 router.post('/items/:itemId/assign', requirePermissionStrict('repair:assign'), validateBody(assignRepairItemSchema), ctrl.assignItem)
 router.post('/items/:itemId/assignment-response', requirePermissionStrict('repair:read'), validateBody(respondToAssignmentSchema), ctrl.respondToAssignment)
