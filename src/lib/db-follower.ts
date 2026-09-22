@@ -187,8 +187,12 @@ async function runOneCycle(): Promise<void> {
         fuelLevelPct: row.fuel_level_ml != null && m.tankCapacityL
           ? Math.round((row.fuel_level_ml / (m.tankCapacityL * 1000)) * 100)
           : null,
-        cargoWeightKg: row.cargo_weight_kg,
-        cargoDesc:    row.cargo_desc,
+        // Absent rather than null when nothing measured the load — the same
+        // rule the poller's telemetry.worker follows, and for the same reason:
+        // a null here used to clear a declared tonnage on the dashboard. See
+        // DashboardPositionPayload.cargoWeightKg.
+        ...(row.cargo_weight_kg != null ? { cargoWeightKg: row.cargo_weight_kg } : {}),
+        ...(row.cargo_desc      != null ? { cargoDesc:     row.cargo_desc } : {}),
         doorStatus:   row.door_status ?? undefined,
         engineTempC:  null,   // not persisted — see module doc
         oilLevelPct:  null,
@@ -213,8 +217,8 @@ async function runOneCycle(): Promise<void> {
         lat:           payload.lat,
         lng:           payload.lng,
         speedKmh:      payload.speedKmh,
-        cargoWeightKg: payload.cargoWeightKg,
-        cargoDesc:     payload.cargoDesc,
+        cargoWeightKg: row.cargo_weight_kg,
+        cargoDesc:     row.cargo_desc,
         vehicleType:   m.vehicleType,
         phase:         payload.phase ?? null,
         leg:           payload.leg ?? null,

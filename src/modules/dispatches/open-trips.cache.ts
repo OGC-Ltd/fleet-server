@@ -47,3 +47,59 @@ const cache = createWarmCache<OpenTripsForOrg>({
 export function getOpenTripsCached(orgId: string): Promise<OpenTripsForOrg> {
   return cache.get(orgId)
 }
+
+/**
+ * Fold a dispatch that has JUST changed into the cached map, without rebuilding
+ * the organisation.
+ *
+ * The sweep is a minute apart and serves stale data while it refreshes, so a
+ * sales run signed out at the gate reached the vehicle's cargo fields up to two
+ * sweeps after the webhook delivered it — the number was in the database and
+ * the truck still read Empty. This is what closes that gap.
+ *
+ * ## Why a patch and not a rebuild
+ *
+ * A rebuild of this cache is measured at ~6 s against the live fleet, and three
+ * of them at once took the API down on 2026-08-10 (see the note on `inflight`
+ * in lib/warm-cache). A reconcile pass can touch hundreds of runs in one
+ * second. Rebuilding per event is therefore not a slower way to be correct, it
+ * is an outage; the caller batches (see dispatch-refresh) and this asks about
+ * that batch only.
+ *
+ * ## It never builds
+ *
+ * A key nobody has read has nothing to patch, and building one here would make
+ * a webhook pay for the 6 s that the request path is designed never to pay. The
+ * first reader builds it fresh, which already includes this dispatch.
+ *
+ * Returns the vehicles whose run actually changed — the caller narrates from
+ * that, so a redelivered webhook that changes nothing says nothing.
+ */
+export async function patchOpenTrips(orgId: string, vehicleIds: string[]): Promise<string[]> {
+  const entry = cache.peek(orgId)
+  if (!entry || vehicleIds.length === 0) return []
+
+  const fresh   = await findOpenTripsByVehicle(orgId, vehicleIds)
+  const changed: string[] = []
+
+  for (const vehicleId of vehicleIds) {
+    const before = entry.byVehicle.get(vehicleId)
+    const after  = fresh.get(vehicleId)
+    // A run that closed while we were away leaves the map, or the vehicle
+    // would keep declaring a load it signed back in without.
+    if (!after) {
+      if (before) { entry.byVehicle.delete(vehicleId); changed.push(vehicleId) }
+      continue
+    }
+    if (!before || before.externalId !== after.externalId
+      || before.cargoTonnes !== after.cargoTonnes
+      || before.destination !== after.destination
+      || before.driverName  !== after.driverName
+      || before.status      !== after.status) {
+      changed.push(vehicleId)
+    }
+    entry.byVehicle.set(vehicleId, after)
+  }
+
+  return changed
+}

@@ -37,6 +37,7 @@ import { parseProviderTime, parseProviderTimeOr } from '../../lib/provider-time.
 import {
   resolveEventOrg, skipUnmappedFactory, bagsFromTonnes, BAG_KG, type EventOrg,
 } from './factory-map.js'
+import { markDispatchChanged } from '../dispatches/dispatch-refresh.js'
 
 /**
  * Narrate an event into the Live Feed via the bus (notification.worker owns the
@@ -188,6 +189,12 @@ export async function handleDispatch(
     // end), so the update path is the normal case, not the exception.
     update: row,
   })
+
+  // The truck's live record now disagrees with the database until the next
+  // cache sweep. Batched and fire-and-forget — see dispatches/dispatch-refresh,
+  // and note that a reconcile pass re-reading a thousand rows collapses into
+  // one query there rather than a thousand.
+  markDispatchChanged(organisationId, vehicle?.id)
 
   // The driver is identified by name only — the provider sends no id here.
   // A name shared by two people can't be resolved, so leave it unassigned
@@ -511,6 +518,12 @@ export async function handleSale(
     create: { externalId: s.id, ...row },
     update: row,
   })
+
+  // A SALES run is the one that declares a WEIGHT, and the vehicle's cargo
+  // fields have no other source — this fleet carries no load cells. So this is
+  // the line that puts 29 t of sugar on the truck the guard just signed out,
+  // seconds after the gate rather than up to two cache sweeps later.
+  markDispatchChanged(org.organisationId, org.vehicleId)
 
   await linkSaleDriver(s, org, signedOutAt, returnedAt)
 
