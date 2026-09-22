@@ -24,6 +24,8 @@
 
 import 'dotenv/config'
 import { prisma } from '../src/lib/prisma.js'
+import { disconnectRedis } from '../src/lib/redis.js'
+import { bumpAuthzEpoch } from '../src/lib/authz/subject.js'
 import {
   PERMISSION_CATALOGUE,
   ROLE_DEFINITIONS,
@@ -140,9 +142,26 @@ async function main(): Promise<void> {
     }
   }
 
+  /* Retire every cached subject. This is the step the run that prompted it
+     was missing: the seed had just given `admin` four permissions it did not
+     have, and every session already signed in went on being served the OLD
+     set out of Redis for up to SUBJECT_TTL (300s) — so the capability was in
+     the database and invisible in the browser, which reads as "the seed did
+     nothing" to whoever is waiting for a button to appear.
+
+     bumpAuthzEpoch's own docstring asks for exactly this: call it after
+     changing what a ROLE grants. It is best-effort by design — an unreachable
+     Redis logs and moves on, and the cache then expires on its own — so it
+     cannot fail the seed. */
+  await bumpAuthzEpoch()
+  console.log('authz epoch bumped — cached permissions retired')
+
   console.log(PRESERVE ? '\ndone (--preserve: existing roles untouched)' : '\ndone')
 }
 
 main()
   .catch((err) => { console.error(err); process.exitCode = 1 })
-  .finally(() => prisma.$disconnect())
+  /* Redis as well as Postgres. bumpAuthzEpoch opens a cache connection, and a
+     script that leaves one open never exits — which is how the ControlTech
+     seed came to hang after succeeding (c4ffcac). */
+  .finally(async () => { await prisma.$disconnect(); await disconnectRedis() })
