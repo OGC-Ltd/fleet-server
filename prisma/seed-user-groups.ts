@@ -11,8 +11,17 @@
  *   offgrid   offgridconsultingltd.com, and anything under an `ogc-monitoring`
  *             label. The second is a LABEL rule because it was given without a
  *             TLD, so it has to match whatever domain it turns up under.
- *   kasulu    kasulu.co.ke and every subdomain — `admin.kasulu.co.ke` is the
- *             address that prompted this.
+ *   kasulu    any `kasulu` label. It was `kasulu.co.ke` SUFFIX, from the
+ *             example address this was specified with, and MEASURED against
+ *             production on 2026-09-22 that rule matched nothing at all: the
+ *             site is Tanzanian and its accounts are on `kasulu.co.tz`, with
+ *             the org's own administrator on the internal `kasulu.fleet`.
+ *             A label catches both, which a suffix for either would not.
+ *   sukari    the same, for `sukari.fleet`. Sukari was not named when this was
+ *             specified, but it is a company like the other two and its
+ *             administrator has to land somewhere: ungrouped means invisible
+ *             to everyone but the platform administrator once enforcement is
+ *             on, which for a system_admin is a lockout.
  *
  * Adding a rule here is a real access-control change: it moves whoever it
  * matches into a group, and therefore changes who may administer them. Run the
@@ -48,7 +57,17 @@ const GROUPS: GroupSeed[] = [
     name: 'Kasulu',
     description: 'Kasulu site staff.',
     domains: [
-      { pattern: 'kasulu.co.ke', kind: 'SUFFIX' },
+      // LABEL, not a suffix: the live accounts are on kasulu.co.tz and
+      // kasulu.fleet, which no single suffix covers.
+      { pattern: 'kasulu', kind: 'LABEL' },
+    ],
+  },
+  {
+    slug: 'sukari',
+    name: 'Sukari',
+    description: 'Sukari Industries staff.',
+    domains: [
+      { pattern: 'sukari', kind: 'LABEL' },
     ],
   },
 ]
@@ -74,6 +93,25 @@ async function main(): Promise<void> {
         create: { groupId: group.id, pattern, kind: d.kind },
       })
       console.log(`  ${d.kind.padEnd(6)} ${pattern}`)
+    }
+
+    /* Rules this group used to have and no longer does.
+       Without this the seed can only ever ADD: `kasulu.co.ke` was seeded on
+       2026-09-22, measured against production, found to match nothing, and
+       replaced by a label — and it would have stayed behind as a rule that
+       reads like Kasulu is covered while matching no address in the fleet. A
+       stale access-control rule is worse than a missing one, because somebody
+       reads it and believes it.
+
+       Scoped to THIS group's rows, so it can never touch another group's. */
+    const keep = g.domains.map(d => d.pattern.trim().toLowerCase())
+    const stale = await prisma.groupEmailDomain.findMany({
+      where:  { groupId: group.id, pattern: { notIn: keep } },
+      select: { id: true, pattern: true },
+    })
+    for (const r of stale) {
+      await prisma.groupEmailDomain.delete({ where: { id: r.id } })
+      console.log(`  removed ${r.pattern} (no longer listed)`)
     }
   }
 
