@@ -32,6 +32,7 @@
 
 import 'dotenv/config'
 import { prisma } from '../src/lib/prisma.js'
+import { disconnectRedis } from '../src/lib/redis.js'
 import { provisionUser } from '../src/modules/users/provisioning.service.js'
 
 const EMAIL     = 'tech@controltech-ea.com'
@@ -102,6 +103,15 @@ async function main(): Promise<void> {
   console.log('  roles         none — assign one from User accounts before they can see anything')
 }
 
+/* Redis as well as Postgres, which the other seeds do not need to do.
+   provisionUser invalidates the subject and roster caches, and that opens a
+   cache connection — so without this the work commits, the summary prints, and
+   the process then sits there with a live socket and never exits. Measured on
+   the box: the account was created and the script was still running two minutes
+   later. */
 main()
   .catch((err) => { console.error(err); process.exitCode = 1 })
-  .finally(() => prisma.$disconnect())
+  .finally(async () => {
+    await prisma.$disconnect()
+    await disconnectRedis()
+  })
