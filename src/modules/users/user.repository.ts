@@ -1,5 +1,7 @@
 import { prisma } from '../../lib/prisma.js'
 import type { CreateUserDto, UpdateUserDto, ListUserQuery } from './user.schema.js'
+import { UNSCOPED, groupWhere, type GroupScope } from './user-group.scope.js'
+import { resolveGroupId } from './user-group.assign.js'
 
 const SELECT_USER = {
   id: true,
@@ -12,6 +14,10 @@ const SELECT_USER = {
   status: true,
   createdAt: true,
   updatedAt: true,
+  // Which group administers this person. On the roster because the roster is
+  // now narrowed by it: a reader who cannot see the axis cannot tell a short
+  // list from a broken one.
+  group: { select: { id: true, slug: true, name: true } },
   // The password history the account page and the admin roster both show.
   // `passwordChangedAt: null` on an account that has one means it was set
   // before this was recorded — distinct from an account that has no password
@@ -42,9 +48,15 @@ const SELECT_USER = {
   },
 }
 
-export async function findAll(orgId: string, { page, limit, status, access }: ListUserQuery) {
-  const skip = (page - 1) * limit
-
+/**
+ * The roster's filter, built once and used by both the page and the count.
+ *
+ * Extracted rather than duplicated because `countForScope` below has to ask
+ * the SAME question under a different group scope, and a shadow report
+ * measured against a subtly different filter would report a number nobody
+ * could act on.
+ */
+function rosterWhere(orgId: string, { status, access }: ListUserQuery, scope: GroupScope) {
   /**
    * "Invited to access the system" — either an invitation was issued for them,
    * or they can already sign in.
@@ -88,11 +100,42 @@ export async function findAll(orgId: string, { page, limit, status, access }: Li
     ],
   }
 
-  const where = {
+  /**
+   * The GROUP narrowing, and why it rides with `access === 'system'`.
+   *
+   * It applies to the administration roster and to nothing else. That roster
+   * is already the invited/can-sign-in set, which is the handful of real
+   * logins; the unfiltered roster is overwhelmingly accounts synced from the
+   * driver registry, who carry no email and so can never be placed in a
+   * group. Narrowing that list by group would empty it, and would take the
+   * drivers page, the PDF export and the live map's driver name with it.
+   *
+   * So the rule is stated where it is true: an administrator administers
+   * their own group's PEOPLE WHO CAN LOG IN. See user-group.scope.
+   */
+  return {
     deletedAt: null,
     ...(status ? { status } : {}),
-    ...(access === 'system' ? { AND: [reachable, invited] } : reachable),
+    ...(access === 'system'
+      ? { AND: [reachable, invited], ...groupWhere(scope) }
+      : reachable),
   }
+}
+
+/** How many rows this roster holds under a DIFFERENT scope — the shadow report. */
+export async function countForScope(orgId: string, query: ListUserQuery, scope: GroupScope) {
+  return prisma.user.count({ where: rosterWhere(orgId, query, scope) })
+}
+
+export async function findAll(
+  orgId: string,
+  query: ListUserQuery,
+  scope: GroupScope = UNSCOPED,
+) {
+  const { page, limit } = query
+  const skip  = (page - 1) * limit
+  const where = rosterWhere(orgId, query, scope)
+
   const [data, total] = await prisma.$transaction([
     prisma.user.findMany({ where, skip, take: limit, select: SELECT_USER, orderBy: { createdAt: 'desc' } }),
     prisma.user.count({ where }),
@@ -116,23 +159,28 @@ export async function findAll(orgId: string, { page, limit, status, access }: Li
  * different decision from letting it SEE them, and not one to make as a side
  * effect of fixing a delete. See the note in purgeUser.
  */
-export async function findReachable(orgId: string, userId: string) {
+export async function findReachable(orgId: string, userId: string, scope: GroupScope = UNSCOPED) {
   return prisma.user.findFirst({
     where: {
       id: userId,
       deletedAt: null,
+      // Same group as the caller, when the caller is scoped. Here as well as
+      // on the roster because a row this cannot find is a row the mutations
+      // above refuse to touch — otherwise the list is narrowed and the id is
+      // still good, which is a filter rather than a rule.
+      ...groupWhere(scope),
       OR: [
         { organisationId: orgId },
         { memberships: { some: { organisationId: orgId, revokedAt: null } } },
       ],
     },
-    select: { id: true, fullName: true, email: true, organisationId: true },
+    select: { id: true, fullName: true, email: true, organisationId: true, groupId: true },
   })
 }
 
-export async function findById(orgId: string, userId: string) {
+export async function findById(orgId: string, userId: string, scope: GroupScope = UNSCOPED) {
   return prisma.user.findFirst({
-    where: { id: userId, organisationId: orgId, deletedAt: null },
+    where: { id: userId, organisationId: orgId, deletedAt: null, ...groupWhere(scope) },
     select: {
       ...SELECT_USER,
       userRoles: {
@@ -145,12 +193,18 @@ export async function findById(orgId: string, userId: string) {
 
 export async function create(orgId: string, dto: CreateUserDto) {
   return prisma.user.create({
-    data: { ...dto, organisationId: orgId },
+    // Placed by the domain rules at creation. A registry driver has no email
+    // and resolves to null, which is the correct answer for them.
+    data: { ...dto, organisationId: orgId, groupId: await resolveGroupId(dto.email) },
     select: SELECT_USER,
   })
 }
 
 export async function update(orgId: string, userId: string, dto: UpdateUserDto) {
+  // No group handling here on purpose: `updateUserSchema` omits `email`, and
+  // self-service changes only the name, so no route in this app can move an
+  // address between groups. Should one ever be added, it has to place the
+  // account again — see users/user-group.assign.
   return prisma.user.update({
     where: { id: userId, organisationId: orgId },
     data: dto,

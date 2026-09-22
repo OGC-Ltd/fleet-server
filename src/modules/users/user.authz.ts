@@ -6,6 +6,8 @@
  *   · The platform administrator, an organisation's system administrator and
  *     its admin may delete accounts.
  *   · Only accounts in the same organisation.
+ *   · Only accounts in the same GROUP — see user-group.scope. Gated on
+ *     USER_GROUP_ENFORCE, and inert until it is on.
  *   · An admin may NOT delete a system administrator, the platform
  *     administrator, a director or a manager.
  *
@@ -27,6 +29,7 @@
  */
 
 import { prisma } from '../../lib/prisma.js'
+import { groupScopeFor } from './user-group.scope.js'
 
 /** Roles whose holders may delete an account at all. */
 export const DELETER_ROLE_SLUGS = ['admin', 'super_admin'] as const
@@ -48,7 +51,7 @@ const PROTECTED_FROM_ADMIN = new Set<string>([
 
 export type DeleteCheck =
   | { ok: true }
-  | { ok: false; reason: 'wrong_role' | 'not_a_member' | 'protected'; blockedBy?: string }
+  | { ok: false; reason: 'wrong_role' | 'not_a_member' | 'protected' | 'other_group'; blockedBy?: string }
 
 /** The live role slugs a person holds in `orgId`, or platform-wide. */
 async function roleSlugsFor(userId: string, orgId: string): Promise<Set<string>> {
@@ -105,6 +108,26 @@ export async function canDeleteUser(
   // The platform administrator is subject to none of the below: there is
   // nobody above them for the rule to protect.
   if (isPlatform) return { ok: true }
+
+  /**
+   * Same group, as well as same organisation.
+   *
+   * Checked here and not only on the roster, because narrowing a LIST while
+   * leaving the action open is not a rule — it is a filter, and an id is easy
+   * to come by. `groupScopeFor` is unscoped while USER_GROUP_ENFORCE is off,
+   * so this is inert until the flag is turned on, and the roster's shadow
+   * logging is what reports the effect in the meantime.
+   */
+  const scope = await groupScopeFor(actorId)
+  if (!scope.unscoped) {
+    const target = await prisma.user.findUnique({
+      where: { id: targetId },
+      select: { groupId: true },
+    })
+    if ((target?.groupId ?? null) !== scope.groupId) {
+      return { ok: false, reason: 'other_group' }
+    }
+  }
 
   const targetRoles = await roleSlugsFor(targetId, orgId)
   for (const slug of targetRoles) {

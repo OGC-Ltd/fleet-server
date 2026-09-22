@@ -3,6 +3,9 @@ import * as repo from './user.repository.js'
 import { readRoster, writeRoster, invalidateRoster, invalidateRosterForUser } from './roster.cache.js'
 import { invalidateSubject } from '../../lib/authz/subject.js'
 import type { CreateUserDto, UpdateUserDto, ListUserQuery, AssignRoleDto } from './user.schema.js'
+import {
+  groupScopeFor, prospectiveScope, groupCacheKey, logShadowHidden,
+} from './user-group.scope.js'
 
 type Roster = Awaited<ReturnType<typeof repo.findAll>>
 
@@ -18,19 +21,64 @@ type Roster = Awaited<ReturnType<typeof repo.findAll>>
  * the client anyway, so the cached round trip produces the same response body
  * as the database one. Nothing between here and the wire does date arithmetic.
  */
-export async function listUsers(orgId: string, query: ListUserQuery) {
-  const variant = `${query.page}:${query.limit}:${query.status ?? 'all'}:${query.access ?? 'all'}`
+export async function listUsers(orgId: string, query: ListUserQuery, actorUserId?: string) {
+  const scope = await groupScopeFor(actorUserId)
+
+  /**
+   * The group belongs in the KEY, not merely in the query.
+   *
+   * This variant had no caller dimension at all, which was right while the
+   * roster was the same for every administrator of an organisation. It stopped
+   * being right the moment the group narrowed it: two admins in different
+   * groups would share one entry, and whichever asked first would serve the
+   * other their people for the next sixty seconds — no error, nothing logged,
+   * and the wrong answer indistinguishable from the right one.
+   */
+  const variant =
+    `${query.page}:${query.limit}:${query.status ?? 'all'}:${query.access ?? 'all'}` +
+    `:g:${groupCacheKey(scope)}`
 
   const cached = await readRoster<Roster>(orgId, variant)
   if (cached) return cached
 
-  const fresh = await repo.findAll(orgId, query)
+  const fresh = await repo.findAll(orgId, query, scope)
   await writeRoster(orgId, variant, fresh)
+
+  // Shadow mode: say what enforcement WOULD have removed, having removed
+  // nothing. Only for the roster that the rule actually applies to.
+  if (scope.unscoped && query.access === 'system') {
+    await reportShadow(orgId, query, actorUserId, fresh.total)
+  }
   return fresh
 }
 
-export async function getUser(orgId: string, userId: string) {
-  const user = await repo.findById(orgId, userId)
+/**
+ * How much of this roster the group rule would take away.
+ *
+ * Costs a COUNT on a page the caller already fetched, and only while the
+ * feature is off — `prospectiveScope` short-circuits to unscoped for the
+ * platform administrator, and `logShadowHidden` returns immediately once
+ * enforcement is on. A failure here must never fail the roster: the operator
+ * asked for a list of people, not for a rehearsal of a feature flag.
+ */
+async function reportShadow(
+  orgId: string,
+  query: ListUserQuery,
+  actorUserId: string | undefined,
+  total: number,
+): Promise<void> {
+  try {
+    const would = await prospectiveScope(actorUserId)
+    if (would.unscoped) return
+    const visible = await repo.countForScope(orgId, query, would)
+    logShadowHidden(actorUserId, orgId, total - visible, total)
+  } catch {
+    /* a rehearsal that fails is still only a rehearsal */
+  }
+}
+
+export async function getUser(orgId: string, userId: string, actorUserId?: string) {
+  const user = await repo.findById(orgId, userId, await groupScopeFor(actorUserId))
   if (!user) throw new NotFoundError('User')
   return user
 }
@@ -41,8 +89,10 @@ export async function createUser(orgId: string, dto: CreateUserDto) {
   return user
 }
 
-export async function updateUser(orgId: string, userId: string, dto: UpdateUserDto) {
-  await getUser(orgId, userId) // ensure exists + correct org
+export async function updateUser(orgId: string, userId: string, dto: UpdateUserDto, actorUserId?: string) {
+  // Exists, right organisation, AND in the caller's group — the same gate the
+  // roster uses, so a row this admin cannot see is a row they cannot edit.
+  await getUser(orgId, userId, actorUserId)
   const user = await repo.update(orgId, userId, dto)
   // Every roster they appear in, not just this one — a renamed person is
   // renamed everywhere they have access.
@@ -77,8 +127,8 @@ export async function updateUser(orgId: string, userId: string, dto: UpdateUserD
  * It is that the answer changed from a 404 about a person who is visibly there
  * into a sentence naming the right button.
  */
-export async function deleteUser(orgId: string, userId: string) {
-  const user = await repo.findReachable(orgId, userId)
+export async function deleteUser(orgId: string, userId: string, actorUserId?: string) {
+  const user = await repo.findReachable(orgId, userId, await groupScopeFor(actorUserId))
   if (!user) throw new NotFoundError('User')
 
   if (user.organisationId !== orgId) {
@@ -139,7 +189,7 @@ export async function purgeUser(orgId: string, userId: string, actorId?: string)
    * The narrow lookup is used here rather than widening findById for
    * everything: see the note on findReachable.
    */
-  const user = await repo.findReachable(orgId, userId)
+  const user = await repo.findReachable(orgId, userId, await groupScopeFor(actorId))
   if (!user) throw new NotFoundError('User')
 
   if (actorId && actorId === userId) {
@@ -194,7 +244,10 @@ export async function purgeUser(orgId: string, userId: string, actorId?: string)
 }
 
 export async function assignRoleToUser(orgId: string, userId: string, dto: AssignRoleDto, assignedById?: string) {
-  await getUser(orgId, userId)
+  // `assignedById` IS the caller, so the group gate costs nothing extra here.
+  // Granting a role across a group would be the sharpest version of the leak:
+  // not reading somebody else's people, but changing what they can do.
+  await getUser(orgId, userId, assignedById)
   try {
     const assigned = await repo.assignRole(userId, dto.roleId, assignedById)
     await invalidateRosterForUser(userId, orgId)
@@ -207,8 +260,8 @@ export async function assignRoleToUser(orgId: string, userId: string, dto: Assig
   }
 }
 
-export async function revokeRoleFromUser(orgId: string, userId: string, roleId: string) {
-  await getUser(orgId, userId)
+export async function revokeRoleFromUser(orgId: string, userId: string, roleId: string, actorUserId?: string) {
+  await getUser(orgId, userId, actorUserId)
   const result = await repo.revokeRole(userId, roleId)
   if (!result) throw new NotFoundError('Active role assignment')
   await invalidateRosterForUser(userId, orgId)

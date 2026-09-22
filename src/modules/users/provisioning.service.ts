@@ -23,10 +23,12 @@
 
 import bcrypt from 'bcryptjs'
 import { prisma } from '../../lib/prisma.js'
+import { logger } from '../../lib/logger.js'
 import { NotFoundError, ValidationError, ConflictError } from '../../core/errors/errors.js'
 import { invalidateSubject } from '../../lib/authz/subject.js'
 import { invalidateRosterForUser } from './roster.cache.js'
 import type { MembershipInput, ProvisionUserDto } from './user.schema.js'
+import { resolveGroupId } from './user-group.assign.js'
 
 const BCRYPT_ROUNDS = 12
 
@@ -231,6 +233,9 @@ export async function provisionUser(
         phone:          dto.phone ?? null,
         employeeId:     dto.employeeId ?? null,
         organisationId: homeOrgId,
+        // Which administrators may reach this account, from the address the
+        // invitation is going to. See users/user-group.assign.
+        groupId:        await resolveGroupId(dto.email),
         status:         'ACTIVE',
         passwordHash:   dto.password ? await bcrypt.hash(dto.password, BCRYPT_ROUNDS) : null,
       },
@@ -279,6 +284,61 @@ export async function setMembership(
  * with it, so the access history survives. `resolveSubject` only ever reads
  * live rows, so this takes effect on the next resolution.
  */
+/**
+ * Keep `User.organisationId` among the organisations the person can actually
+ * reach.
+ *
+ * ## The divergence this closes
+ *
+ * `organisationId` records who EMPLOYS somebody and was set once, at creation,
+ * and never revisited. Memberships are what they may reach, and those come and
+ * go. Nothing kept the two in step, so somebody granted four organisations and
+ * later removed from three kept a home organisation naming one of the three
+ * they had lost — and the account page said so, printing "Home organisation:
+ * Kabras" directly above an Organisations list that did not contain Kabras.
+ * Two facts about one person, on one screen, disagreeing.
+ *
+ * ## What it does NOT do
+ *
+ * It never clears the column, and it never touches somebody with no
+ * memberships at all. `organisationId` is NOT NULL, and the accounts that have
+ * no membership are the ~549 synced from the driver registry — their home
+ * organisation is the only organisation they have, it is what the analytics
+ * roster reads, and there is nothing to reconcile it against. So: only when
+ * the home organisation has just been revoked, and only when somewhere else
+ * remains to move it to.
+ *
+ * The OLDEST surviving membership wins. Deterministic, so a repair pass and a
+ * live revoke reach the same answer, and defensible: the one they have held
+ * longest is the likeliest employer of the ones left.
+ */
+async function rehomeIfNeeded(userId: string, revokedOrgId: string): Promise<void> {
+  const user = await prisma.user.findUnique({
+    where:  { id: userId },
+    select: { organisationId: true },
+  })
+  // Their home is elsewhere; losing this organisation says nothing about it.
+  if (!user || user.organisationId !== revokedOrgId) return
+
+  const survivor = await prisma.orgMembership.findFirst({
+    where:   { userId, revokedAt: null },
+    orderBy: { createdAt: 'asc' },
+    select:  { organisationId: true },
+  })
+  // Nowhere to move it to. The column is NOT NULL, and a stale home is a
+  // better record than a lie — they did work there.
+  if (!survivor) return
+
+  await prisma.user.update({
+    where: { id: userId },
+    data:  { organisationId: survivor.organisationId },
+  })
+  logger.info(
+    { userId, from: revokedOrgId, to: survivor.organisationId },
+    'membership: home organisation followed the revoke',
+  )
+}
+
 export async function revokeMembership(
   userId: string,
   organisationId: string,
@@ -298,6 +358,10 @@ export async function revokeMembership(
     where: { userId, revokedAt: null, role: { organisationId } },
     data:  { revokedAt: now },
   })
+
+  // Before the cache work below, so the rosters retired there already reflect
+  // the new home organisation rather than needing a second pass.
+  await rehomeIfNeeded(userId, organisationId)
 
   await invalidateSubject(userId)
   // The membership is already revoked, so this organisation no longer resolves
