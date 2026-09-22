@@ -507,3 +507,82 @@ export async function itemExists(itemId: string, orgId: string): Promise<boolean
   })
   return row !== null
 }
+
+// ---------------------------------------------------------------------------
+// Who a triage may be handed to
+// ---------------------------------------------------------------------------
+
+/**
+ * Every technician this organisation may hand a triage to.
+ *
+ * ## Why this lives here and not on the user roster
+ *
+ * The picker used to call the roster (`GET /organisations/:orgId/users?
+ * access=system`), pull back up to a hundred rows and decide in the BROWSER
+ * which of them held `technician`. Two things were wrong with that.
+ *
+ *   1. The roster is GROUP-SCOPED (users/user.service.listUsers). Group is a
+ *      grouping of PEOPLE for the purpose of administering them: Offgrid staff
+ *      must not administer Kasulu staff. Assignment is not administration, and
+ *      the operator bounded it differently and explicitly: the assignee must be
+ *      a technician IN THE SAME ORGANISATION, and NEED NOT BE IN THE SAME
+ *      GROUP. Those two rules disagree, and the roster answers the wrong one.
+ *
+ *      That disagreement is not hypothetical. ControlTech are contractors --
+ *      their own group -- who service units across all four tenants. They are
+ *      the assignees this feature exists for, and the first administrator to
+ *      turn `USER_GROUP_ENFORCE` on would have watched them vanish from the
+ *      picker with no error and nothing logged.
+ *
+ *   2. Deciding a rule in the browser is not deciding it. The old client held
+ *      its own copy of the role list, which is how it came to offer names the
+ *      server refuses (see repairs.authz).
+ *
+ * So the server answers the question, in the module that owns the rule, and
+ * the client renders what it is given.
+ *
+ * ## The filter, and why each clause is here
+ *
+ * IN THIS ORGANISATION -- home organisation or a live membership, the same
+ * two-armed test the roster runs and `repairs.authz.isMemberOf` runs. Using
+ * only the column would miss a contractor who is employed by nobody here and
+ * granted a membership, which is exactly ControlTech's shape.
+ *
+ * HOLDING `technician` HERE -- the role row must be scoped to this
+ * organisation, so a technician of Kabras is not offered for a Menengai job.
+ * A platform-wide grant (organisation_id IS NULL) is deliberately NOT accepted:
+ * the only roles that carry one are super_admin and director, and neither may
+ * receive a triage.
+ *
+ * NOT SUSPENDED, NOT TERMINATED, NOT DELETED -- they cannot sign in to work it.
+ *
+ * Every clause above matches `canReceiveTriage`, which is what the assign
+ * endpoint enforces. This list and that check must agree, or the picker offers
+ * somebody the next request refuses.
+ */
+export type Assignee = {
+  id:       string
+  fullName: string | null
+  email:    string | null
+}
+
+export async function findAssignees(orgId: string): Promise<Assignee[]> {
+  return prisma.user.findMany({
+    where: {
+      deletedAt: null,
+      status:    { notIn: ['SUSPENDED', 'TERMINATED'] },
+      OR: [
+        { organisationId: orgId },
+        { memberships: { some: { organisationId: orgId, revokedAt: null } } },
+      ],
+      userRoles: {
+        some: {
+          revokedAt: null,
+          role: { slug: 'technician', organisationId: orgId },
+        },
+      },
+    },
+    select:  { id: true, fullName: true, email: true },
+    orderBy: [{ fullName: 'asc' }, { email: 'asc' }],
+  })
+}

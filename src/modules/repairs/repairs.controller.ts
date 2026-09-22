@@ -24,6 +24,20 @@ export const listItems: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+/**
+ * The people this organisation's triages may be handed to.
+ *
+ * Gated on `repair:assign` rather than `repair:read`: it is the picker's
+ * backing list, and everybody who can see a repair does not need the roster of
+ * who could be given one. It returns names and addresses, which is a narrower
+ * thing to hand out than the full user roster and a wider one than nothing.
+ */
+export const listAssignees: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await repo.findAssignees(p(req, 'orgId')))
+  } catch (err) { next(err) }
+}
+
 export const getReport: RequestHandler = async (req, res, next) => {
   try {
     const report = await repo.findReportById(p(req, 'reportId'), p(req, 'orgId'))
