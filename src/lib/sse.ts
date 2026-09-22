@@ -216,6 +216,23 @@ export function emitDashboardPosition(orgId: string, data: unknown) {
   broadcastDashboard(orgId, 'position', data)
 }
 
+/**
+ * The unit's paperwork changed — what it is carrying, where it is taking it,
+ * who signed for it.
+ *
+ * A position frame cannot carry this. Wialon emits one only when a fix time
+ * advances, so a truck standing at the gate with 29 t on the bed may not
+ * produce another for an hour, and the load it just signed out with would sit
+ * unannounced until the browser next re-read the snapshot. This is pushed by
+ * the paperwork instead of by the wheels.
+ *
+ * It carries `vehicleId`, so a permission-scoped client is filtered by
+ * `visibleTo` like every other event, with no rule of its own.
+ */
+export function emitDashboardDispatch(orgId: string, data: unknown) {
+  broadcastDashboard(orgId, 'dispatch', data)
+}
+
 /** Alert notification — powers the alert feed and banner toasts. */
 export function emitDashboardAlert(orgId: string, data: unknown) {
   broadcastDashboard(orgId, 'alert', data)

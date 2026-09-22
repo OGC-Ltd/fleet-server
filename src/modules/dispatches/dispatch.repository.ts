@@ -240,13 +240,32 @@ export interface OpenTrip {
   distanceTodayM: number | null
 }
 
-export async function findOpenTripsByVehicle(organisationId: string): Promise<Map<string, OpenTrip>> {
+/**
+ * Every vehicle's current open run, or just the ones named.
+ *
+ * `vehicleIds` narrows the whole build, not the result: it is the difference
+ * between the warm cache's periodic rebuild (the whole organisation, measured
+ * at ~6 s) and answering "what did the unit that just signed out pick up"
+ * (one indexed query plus one probe row). Every derived value below — the
+ * destination points, the medians, the arrival probe — is already driven off
+ * `runs`, so narrowing the first query narrows all of them and nothing else in
+ * this function had to learn about it.
+ *
+ * An EMPTY array is not "no filter": it is a caller asking about no vehicles,
+ * and it returns an empty map rather than the fleet.
+ */
+export async function findOpenTripsByVehicle(
+  organisationId: string,
+  vehicleIds?: string[],
+): Promise<Map<string, OpenTrip>> {
+  if (vehicleIds && vehicleIds.length === 0) return new Map()
+
   const open = await prisma.dispatch.findMany({
     where:   {
       organisationId,
       actualReturnAt: null,
       status:    { in: OPEN_STATUSES },
-      vehicleId: { not: null },
+      vehicleId: vehicleIds ? { in: vehicleIds } : { not: null },
       // Today's runs on the fleet's own clock, plus the tail of yesterday's.
       //
       // "Open" and "current" are not the same thing. A dispatch stays open

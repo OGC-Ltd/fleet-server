@@ -91,6 +91,27 @@ const registry: Registered[] = []
 export interface WarmCache<T> {
   /** SWR read: cached (possibly stale) data immediately; computes on first use. */
   get(key: string): Promise<T>
+  /**
+   * What is held for this key RIGHT NOW, without building or refreshing
+   * anything. Undefined for a key nobody has read yet.
+   *
+   * For the caller that already knows what changed and can splice the change
+   * into the cached value more cheaply than a rebuild. `open-trips` is the
+   * case this exists for: a rebuild is measured at ~6 s for an organisation
+   * (see the note on `inflight`), while the single dispatch that just arrived
+   * costs one indexed query. A whole-cache rebuild per webhook would be the
+   * most expensive way to learn the smallest possible fact.
+   *
+   * It hands back the LIVE object, not a copy, so a caller that mutates it is
+   * mutating the cache. That is the point, and it is safe here only because
+   * readers of these caches are synchronous — they read the value out and are
+   * done inside one tick. Anything else belongs in `compute`.
+   *
+   * It does NOT mark the entry fresh: the sweep still rebuilds on its own
+   * schedule, so a patch that got something wrong is corrected within a minute
+   * rather than living in memory until restart.
+   */
+  peek(key: string): T | undefined
 }
 
 export function createWarmCache<T>(opts: {
@@ -214,8 +235,10 @@ export function createWarmCache<T>(opts: {
     return refresh(key)
   }
 
+  const peek = (key: string): T | undefined => store.get(key)?.data
+
   if (opts.warmKeysFor) registry.push({ name: opts.name, keysFor: opts.warmKeysFor, refreshIfStale })
-  return { get }
+  return { get, peek }
 }
 
 /**

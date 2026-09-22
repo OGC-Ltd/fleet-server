@@ -41,10 +41,28 @@ export interface DashboardPositionPayload {
   engineOn:     boolean
   fuelLevelMl:  number | null
   fuelLevelPct: number | null   // 0–100; computed from tankCapacityMl
-  cargoWeightKg: number | null
+  /**
+   * What the BED weighs, where a load cell said so — and ABSENT otherwise.
+   *
+   * Optional, and that is the whole point of the change. `cargo_weight_kg` is
+   * a load-cell channel and this fleet has none: wialon.adapter hardcodes it
+   * null on every frame. Sending the null anyway was not neutral, because the
+   * dashboard reads `!== undefined` as "the frame knows something about the
+   * load" — so every ping quietly overwrote the tonnage the sales office had
+   * declared, and a truck signed out with 29 t read "Empty · 29.0 t · 580 bags"
+   * within seconds of the snapshot that got it right.
+   *
+   * Null is not empty, it is UNKNOWN, and a frame with nothing to say about the
+   * load now says nothing. A fleet with real load cells is unaffected: a
+   * measurement, including a measured 0, is still sent and still outranks a
+   * declaration — it is the only one of the two that describes the bed rather
+   * than the paperwork.
+   */
+  cargoWeightKg?: number
   // Product description on board — e.g. Aquamist's 'Still water — 5 L bottles'
   // (null for Sukari bulk loads, which the dash labels from vehicleType).
-  cargoDesc:    string | null
+  // Omitted, not nulled, for the same reason as the weight above.
+  cargoDesc?:   string
   doorStatus:   string | undefined
   engineTempC:  number | null
   oilLevelPct:  number | null
@@ -100,6 +118,10 @@ export function startTelemetryWorker(): () => void {
         (frame.rawPayload as { ignition_known?: boolean } | undefined)?.ignition_known,
       )
 
+      const simCargoDesc = (frame.rawPayload as {
+        _sim?: { cargoDesc?: string | null }
+      } | undefined)?._sim?.cargoDesc ?? null
+
       const payload: DashboardPositionPayload = {
         vehicleId,
         vehicleName,
@@ -113,8 +135,10 @@ export function startTelemetryWorker(): () => void {
         engineOn:     frame.engineOn,
         fuelLevelMl:  frame.fuelLevelMl,
         fuelLevelPct,
-        cargoWeightKg: frame.cargoWeightKg ?? null,
-        cargoDesc:    (frame.rawPayload as { _sim?: { cargoDesc?: string | null } } | undefined)?._sim?.cargoDesc ?? null,
+        // Spread, so the keys are absent rather than null when nothing
+        // measured them — see DashboardPositionPayload.cargoWeightKg.
+        ...(frame.cargoWeightKg != null ? { cargoWeightKg: frame.cargoWeightKg } : {}),
+        ...(simCargoDesc != null ? { cargoDesc: simCargoDesc } : {}),
         doorStatus:   frame.doorStatus,
         engineTempC:  frame.engineTempC ?? null,
         oilLevelPct:  frame.oilLevelPct ?? null,
@@ -201,8 +225,10 @@ export function startTelemetryWorker(): () => void {
         lat:           payload.lat,
         lng:           payload.lng,
         speedKmh:      payload.speedKmh,
-        cargoWeightKg: payload.cargoWeightKg,
-        cargoDesc:     payload.cargoDesc,
+        // The feed derives offload lines from the load going to zero, so it
+        // still wants "no measurement" spelled as null rather than absent.
+        cargoWeightKg: frame.cargoWeightKg ?? null,
+        cargoDesc:     simCargoDesc,
         vehicleType:   vehicleType ?? null,
         phase:         payload.phase ?? null,
         leg:           payload.leg ?? null,
