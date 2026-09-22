@@ -66,6 +66,19 @@ describe('handing a triage out', () => {
     expect(prismaMock.user.findFirst).not.toHaveBeenCalled()
   })
 
+  it('lets an admin who ALSO holds technician assign', async () => {
+    // Holding the worker's role does not cost somebody the assigner's. The
+    // check filters the assigner slugs IN rather than filtering other roles
+    // OUT, so extra roles are ignored — which is the behaviour we want and
+    // was, until this test, an accident of how the filter is written.
+    //
+    // The pair is common: a workshop supervisor who administers the tenant and
+    // also picks up jobs. They may hand work out AND be handed it, and they
+    // are the only kind of account that is on both sides.
+    holding('admin', 'technician'); member(true)
+    await expect(canAssignTriage('u1', ORG)).resolves.toEqual({ ok: true })
+  })
+
   it('refuses an admin who is not a member of THIS organisation', async () => {
     holding('admin'); member(false)
     await expect(canAssignTriage('u1', ORG)).resolves.toEqual({ ok: false, reason: 'not_a_member' })
@@ -156,6 +169,16 @@ describe('the two lists', () => {
     for (const slug of TRIAGE_ASSIGNER_ROLE_SLUGS) {
       expect(TRIAGE_ASSIGNEE_ROLE_SLUGS as readonly string[]).not.toContain(slug)
     }
+  })
+
+  it('is the ROLES that are disjoint, not the PEOPLE', async () => {
+    // One person may hold both, and then they are on both sides at once. The
+    // rule bars an administrator from being handed work BECAUSE THEY ARE AN
+    // ADMINISTRATOR; it does not bar somebody who is also a technician.
+    holding('admin', 'technician'); member(true)
+    await expect(canAssignTriage('u1', ORG)).resolves.toEqual({ ok: true })
+    holding('admin', 'technician'); member(true)
+    await expect(canReceiveTriage('u1', ORG)).resolves.toEqual({ ok: true })
   })
 
   it('does not let a technician assign, and lets nobody else receive', async () => {
