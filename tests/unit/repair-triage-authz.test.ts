@@ -6,7 +6,8 @@
  *
  *   - an administrator of THIS organisation hands a triage out;
  *   - the platform administrator may hand one out anywhere;
- *   - it goes to a technician or an administrator, never to anybody else;
+ *   - it goes to a TECHNICIAN, and to nobody else — not to a fellow
+ *     administrator, and not to the assigner themselves;
  *   - and always to somebody in that same organisation.
  *
  * The case that matters most is the one the server previously allowed without
@@ -93,8 +94,23 @@ describe('handing a triage out', () => {
 })
 
 describe('being handed one', () => {
-  it.each(['technician', 'admin', 'super_admin'])('accepts %s who is a member here', async (slug) => {
+  it('accepts a technician who is a member here', async () => {
+    holding('technician'); member(true)
+    await expect(canReceiveTriage('u2', ORG)).resolves.toEqual({ ok: true })
+  })
+
+  it.each(['admin', 'super_admin'])('refuses %s — an administrator hands work out, it is not handed to them', async (slug) => {
+    // The narrowing the operator asked for: "can only assign a triage to only
+    // a technician". These two used to be accepted, which let an administrator
+    // park a job under their own name or a colleague's.
     holding(slug); member(true)
+    await expect(canReceiveTriage('u2', ORG)).resolves.toEqual({ ok: false, reason: 'wrong_role' })
+  })
+
+  it('accepts an administrator who ALSO holds technician', async () => {
+    // The escape hatch, and the only one: an administrator who really does
+    // work jobs is reached by the role that says so.
+    holding('admin', 'technician'); member(true)
     await expect(canReceiveTriage('u2', ORG)).resolves.toEqual({ ok: true })
   })
 
@@ -115,14 +131,13 @@ describe('being handed one', () => {
     await expect(canReceiveTriage('u2', ORG)).resolves.toEqual({ ok: false, reason: 'not_a_member' })
   })
 
-  it('refuses the PLATFORM administrator when they are not a member here', async () => {
+  it('refuses a platform administrator on the ROLE, membership or not', async () => {
     // Deliberately the opposite of the assigner rule above, and the asymmetry
     // is the point: assigning is an act performed upon an organisation, which
     // a platform remit covers. Being assigned is being made responsible for a
-    // job inside one — "in the same organization", every time the operator
-    // said it.
+    // job inside one, and only a technician is.
     holding('super_admin'); member(false)
-    await expect(canReceiveTriage('u2', ORG)).resolves.toEqual({ ok: false, reason: 'not_a_member' })
+    await expect(canReceiveTriage('u2', ORG)).resolves.toEqual({ ok: false, reason: 'wrong_role' })
   })
 
   it('refuses a suspended technician', async () => {
@@ -134,17 +149,18 @@ describe('being handed one', () => {
 })
 
 describe('the two lists', () => {
-  it('lets every assigner also be an assignee', async () => {
-    // "assigned to the admin by a fellow admin", "to a system administrator by
-    // a colleague" — an administrator is on both sides of the sentence.
+  it('keeps the two sides DISJOINT', async () => {
+    // The rule in one assertion: nobody who may hand a triage out may also be
+    // given one. This is what "a system administrator can only assign a triage
+    // to only a technician" means once it is written down.
     for (const slug of TRIAGE_ASSIGNER_ROLE_SLUGS) {
-      expect(TRIAGE_ASSIGNEE_ROLE_SLUGS as readonly string[]).toContain(slug)
+      expect(TRIAGE_ASSIGNEE_ROLE_SLUGS as readonly string[]).not.toContain(slug)
     }
   })
 
-  it('does not let a technician assign', async () => {
+  it('does not let a technician assign, and lets nobody else receive', async () => {
     expect(TRIAGE_ASSIGNER_ROLE_SLUGS as readonly string[]).not.toContain('technician')
-    expect(TRIAGE_ASSIGNEE_ROLE_SLUGS as readonly string[]).toContain('technician')
+    expect(TRIAGE_ASSIGNEE_ROLE_SLUGS as readonly string[]).toEqual(['technician'])
   })
 })
 

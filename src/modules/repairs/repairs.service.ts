@@ -255,10 +255,9 @@ export async function changeStage(itemId: string, orgId: string, userId: string,
  *
  * ## Both ends are checked
  *
- * See repairs.authz: an administrator hands out, an administrator or a
- * technician receives, and the receiver must be in this organisation. The
- * route's `repair:assign` permission covers the first of those and cannot
- * express the second.
+ * See repairs.authz: an administrator hands out, a TECHNICIAN receives, and the
+ * receiver must be in this organisation. The route's `repair:assign` permission
+ * covers the first of those and cannot express the second.
  */
 export async function assignItemToTechnician(itemId: string, orgId: string, userId: string, dto: AssignRepairItem) {
   const technicianId = dto.technicianId ?? null
@@ -275,7 +274,7 @@ export async function assignItemToTechnician(itemId: string, orgId: string, user
     if (!assignee.ok) {
       throw new ForbiddenError(assignee.reason === 'not_a_member'
         ? 'That person is not an active member of this organisation'
-        : 'A triage can only be given to a technician, a system administrator or the platform administrator')
+        : 'A triage can only be given to a technician')
     }
   }
 

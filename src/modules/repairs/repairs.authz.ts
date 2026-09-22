@@ -4,17 +4,30 @@
  * ## The rule, as the operator stated it
  *
  * A triage under Maintenance is handed out by an ADMINISTRATOR and worked by a
- * technician or another administrator. Nobody else is in the sentence:
+ * TECHNICIAN. Nobody else is in the sentence:
  *
  *   ASSIGNER  the organisation's system administrator (`admin`), who must be a
  *             member of the organisation the job belongs to; or the PLATFORM
  *             administrator (`super_admin`), whose remit is every organisation
  *             by definition and who therefore needs no membership in this one.
  *
- *   ASSIGNEE  a technician, a system administrator, or the platform
- *             administrator — and in every case somebody IN THAT SAME
- *             ORGANISATION. An administrator may be handed a job by a fellow
- *             administrator; a technician may be handed one by either.
+ *   ASSIGNEE  a technician, and only a technician — in the SAME ORGANISATION
+ *             as the job. The two lists are now disjoint, which is the rule
+ *             the operator restated: an administrator hands the work out, a
+ *             technician does it, and neither does the other's half.
+ *
+ * ## The administrator used to be on both sides, and is not any more
+ *
+ * `admin` and `super_admin` were assignees as well as assigners, so a job
+ * could be given to a colleague in the office, or to oneself. That is gone.
+ * An administrator who genuinely works jobs holds `technician` as well and is
+ * reached by it; an administrator who does not can no longer park a repair
+ * under their own name, which is what "only a technician" means when it is
+ * enforced rather than merely intended.
+ *
+ * SIGNING OFF IS UNAFFECTED. `canSignOffTriage` below still lets an
+ * administrator close a job — that is how an orphaned job whose technician
+ * left is ever closed, and closing is not being assigned.
  *
  * ## Why this is checked here and not left to `repair:assign` alone
  *
@@ -53,8 +66,9 @@ import { prisma } from '../../lib/prisma.js'
 /** Roles whose holders may hand a triage out. */
 export const TRIAGE_ASSIGNER_ROLE_SLUGS = ['admin', 'super_admin'] as const
 
-/** Roles whose holders may be handed one. */
-export const TRIAGE_ASSIGNEE_ROLE_SLUGS = ['admin', 'super_admin', 'technician'] as const
+/** Roles whose holders may be handed one. Deliberately disjoint from the
+ *  assigner list above: only a technician works a triage. */
+export const TRIAGE_ASSIGNEE_ROLE_SLUGS = ['technician'] as const
 
 /**
  * Platform roles reach every tenant without a membership — that is what makes
@@ -126,11 +140,13 @@ export async function canAssignTriage(userId: string, orgId: string): Promise<Tr
 /**
  * May `userId` be handed one in `orgId`?
  *
- * Membership is required of EVERYBODY here, platform administrator included,
- * and that is not an inconsistency with the rule above. Assigning is an act
- * performed upon an organisation, which a platform remit covers. Being
- * assigned is being made responsible for a job inside one, and the operator
- * bounded it in the same breath every time: "in the same organization".
+ * Only a technician, and only one who is a member HERE. Membership is required
+ * of everybody, and that is not an inconsistency with the rule above: assigning
+ * is an act performed upon an organisation, which a platform remit covers.
+ * Being assigned is being made responsible for a job inside one, and the
+ * operator bounded it in the same breath every time: "in the same
+ * organization". (A platform administrator now fails the role test first, so
+ * the membership arm is reached only by a technician from another tenant.)
  *
  * A suspended or terminated account is refused. The job would be mailed to
  * somebody who cannot sign in to work it, and it would sit open under their
