@@ -22,10 +22,14 @@ export const FOLLOW_UP_SELECT = {
   openedAt: true,
   acceptedAt: true,
   resolvedAt: true,
+  assignedAt: true,
   dismissedById: true,
   acceptedById: true,
+  assignedToId: true,
   dismissedBy: PERSON,
   acceptedBy: PERSON,
+  assignedTo: PERSON,
+  assignedBy: PERSON,
   theft: {
     select: {
       id: true, vehicleId: true, stolenMl: true, beganAt: true, detectedAt: true,
@@ -35,7 +39,7 @@ export const FOLLOW_UP_SELECT = {
   },
   actions: {
     orderBy: { at: 'asc' },
-    select: { id: true, kind: true, note: true, at: true, actor: PERSON },
+    select: { id: true, kind: true, note: true, at: true, actor: PERSON, subject: PERSON },
   },
 } satisfies Prisma.FuelTheftFollowUpSelect
 
@@ -68,13 +72,14 @@ export function findFollowUp(orgId: string, id: string) {
 
 /**
  * Take on an OPEN follow-up. Returns false when somebody else got there first
- * (the row is no longer OPEN by the time this runs).
+ * (the row is no longer OPEN by the time this runs), or when an administrator
+ * has meanwhile handed it to somebody else.
  */
 export async function acceptFollowUp(id: string, theftId: string, userId: string): Promise<boolean> {
   return prisma.$transaction(async (tx) => {
     const now = new Date()
     const { count } = await tx.fuelTheftFollowUp.updateMany({
-      where: { id, status: 'OPEN' },
+      where: { id, status: 'OPEN', OR: [{ assignedToId: null }, { assignedToId: userId }] },
       data: { status: 'ACCEPTED', acceptedById: userId, acceptedAt: now },
     })
     if (count === 0) return false
@@ -140,4 +145,101 @@ export async function resolveFollowUp(args: {
     })
     return true
   })
+}
+
+/**
+ * Say no to an OPEN follow-up, with a reason. Returns false when it is no
+ * longer OPEN, or no longer in the state the caller saw.
+ *
+ * Declining one that was ASSIGNED to the caller hands it back: the assignment
+ * is cleared so an administrator can send it to somebody else. Declining an
+ * unassigned one changes nothing on the row; the log entry is the whole
+ * effect, and it is what marks the follow-up as needing an administrator.
+ */
+export async function declineFollowUp(id: string, userId: string, note: string, assignedToMe: boolean): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    const now = new Date()
+    const { count } = await tx.fuelTheftFollowUp.updateMany({
+      where: assignedToMe
+        ? { id, status: 'OPEN', assignedToId: userId }
+        : { id, status: 'OPEN', assignedToId: null },
+      data: { assignedToId: null, assignedById: null, assignedAt: null },
+    })
+    if (count === 0) return false
+    await tx.fuelTheftFollowUpAction.create({
+      data: { followUpId: id, kind: 'DECLINED', actorId: userId, note, at: now },
+    })
+    return true
+  })
+}
+
+/**
+ * An administrator hands a follow-up to somebody. Allowed while it is OPEN or
+ * ACCEPTED: reassigning an accepted one takes it off its current owner, back
+ * to OPEN, so the new person has to accept it themselves.
+ */
+export async function assignFollowUp(args: {
+  id: string
+  theftId: string
+  byId: string
+  toId: string
+  note: string | null
+}): Promise<boolean> {
+  const { id, theftId, byId, toId, note } = args
+  return prisma.$transaction(async (tx) => {
+    const now = new Date()
+    const { count } = await tx.fuelTheftFollowUp.updateMany({
+      where: { id, status: { in: ['OPEN', 'ACCEPTED'] } },
+      data: {
+        status: 'OPEN', acceptedById: null, acceptedAt: null,
+        assignedToId: toId, assignedById: byId, assignedAt: now,
+      },
+    })
+    if (count === 0) return false
+    // Nobody is reviewing it until the new person accepts.
+    await tx.fuelTheft.update({ where: { id: theftId }, data: { reviewStatus: 'DISMISSED' } })
+    await tx.fuelTheftFollowUpAction.create({
+      data: { followUpId: id, kind: 'ASSIGNED', actorId: byId, subjectId: toId, note, at: now },
+    })
+    return true
+  })
+}
+
+/**
+ * Who a follow-up in this organisation may be handed to: an active member of
+ * it (employed here, or a live membership; the roster's test, see
+ * repairs.authz) holding `fuel_theft:triage` through a live role here or a
+ * platform role. Without case rights the assignee could not even open it.
+ */
+function assignableWhere(orgId: string): Prisma.UserWhereInput {
+  return {
+    deletedAt: null,
+    status: { notIn: ['SUSPENDED', 'TERMINATED'] },
+    OR: [
+      { organisationId: orgId },
+      { memberships: { some: { organisationId: orgId, revokedAt: null } } },
+    ],
+    userRoles: {
+      some: {
+        revokedAt: null,
+        role: {
+          OR: [{ organisationId: orgId }, { organisationId: null }],
+          permissions: { some: { permission: { slug: 'fuel_theft:triage' } } },
+        },
+      },
+    },
+  }
+}
+
+export function listAssignees(orgId: string, excludeIds: string[]) {
+  return prisma.user.findMany({
+    where: { ...assignableWhere(orgId), id: { notIn: excludeIds } },
+    select: { id: true, fullName: true, email: true },
+    orderBy: [{ fullName: 'asc' }, { email: 'asc' }],
+  })
+}
+
+export async function isAssignable(orgId: string, userId: string): Promise<boolean> {
+  const row = await prisma.user.findFirst({ where: { ...assignableWhere(orgId), id: userId }, select: { id: true } })
+  return row !== null
 }

@@ -6,7 +6,7 @@ import { UnauthorizedError } from '../../core/errors/errors.js'
 import { getProbeReport } from './probe-report.service.js'
 import { getFleetTankState } from './fuel-tank-state.service.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
-import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, TheftOutcomesQuery } from './fuel.schema.js'
+import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, AssignFollowUpDto, TheftOutcomesQuery } from './fuel.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -72,6 +72,25 @@ export const getFollowUp: RequestHandler = async (req, res, next) => {
 export const acceptFollowUp: RequestHandler = async (req, res, next) => {
   try {
     sendSuccess(res, await followUps.acceptFollowUp(p(req, 'orgId'), p(req, 'followUpId'), actor(req)))
+  } catch (err) { next(err) }
+}
+
+export const declineFollowUp: RequestHandler = async (req, res, next) => {
+  try {
+    const { note } = req.body as FollowUpNoteDto
+    sendSuccess(res, await followUps.declineFollowUp(p(req, 'orgId'), p(req, 'followUpId'), actor(req), note))
+  } catch (err) { next(err) }
+}
+
+export const listFollowUpAssignees: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await followUps.listAssignees(p(req, 'orgId'), p(req, 'followUpId'), actor(req)))
+  } catch (err) { next(err) }
+}
+
+export const assignFollowUp: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await followUps.assignFollowUp(p(req, 'orgId'), p(req, 'followUpId'), actor(req), req.body as AssignFollowUpDto))
   } catch (err) { next(err) }
 }
 
