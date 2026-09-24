@@ -573,6 +573,26 @@ Its floor is **10 L**, below the adjudicator's 15 L, because 176 drains over 30
 days sit in the 10-15 L band the adjudicator excludes entirely — including
 MUFINDI - EX 16's 11 L on 2026-09-24, which prompted it.
 
+### The verdict pass got its own clock, 2026-09-24
+
+The adjudication pass ran at the tail of `runFuelSync`, so it inherited
+`FUEL_SYNC_CRON` — quarter-hourly, a cadence chosen because executing Wialon
+reports for 460 vehicles is expensive. This pass asks Wialon nothing; the
+comment it sat under said so. Sharing that clock put **up to fifteen minutes of
+dead wait** between a drain ripening and anything looking at it, on top of
+`SETTLE_MINUTES`.
+
+A drain detected 14:48 ripened 15:08 and was judged 15:15.
+
+It now has its own queue, worker and cadence (`FUEL_ADJUDICATION_CRON`, every
+minute). A separate QUEUE rather than just a schedule: the sync worker runs at
+concurrency 1 so two cycles cannot open two Wialon sessions, and a one-minute
+job on that queue would wait behind every slow sweep.
+
+Worst case for a ripe drain: **35 minutes → 21**. The remaining twenty are
+`SETTLE_MINUTES`, which the live watcher does not wait for at all because it is
+not deciding — it is reporting that a tank dropped.
+
 ### The filling/drain ordering
 
 `tests/unit/fuel-ledger-ordering.test.ts` pins it. `adjudicateDrain` exempts a

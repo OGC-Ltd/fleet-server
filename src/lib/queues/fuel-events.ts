@@ -48,6 +48,16 @@ export const FUEL_QUEUE = 'fuel'
 const SYNC_JOB = 'fuel:sync'
 
 /**
+ * A SEPARATE queue for adjudication, not just a separate schedule.
+ *
+ * The sync worker runs at concurrency 1 so two cycles cannot open two Wialon
+ * sessions. A one-minute job on that queue would wait behind every slow sweep —
+ * precisely the starvation the split exists to end.
+ */
+export const FUEL_ADJUDICATION_QUEUE = 'fuel-adjudication'
+const ADJUDICATE_JOB = 'fuel:adjudicate'
+
+/**
  * How far back each cycle looks.
  *
  * Wider than the interval on purpose. Wialon's report only recognises a
@@ -179,24 +189,9 @@ export interface FuelSyncResult {
   settled:    number
   /** Ledger rows deleted because the provider has retracted them. */
   removed:    number
-  /** Fillings whose hold window elapsed and were given a verdict this cycle. */
-  fillingsJudged:  number
-  /** Of those, the ones where no fuel arrived — an up-swing, not a delivery. */
-  fillingsPhantom: number
-  /** Drains whose settle window elapsed and were given a verdict this cycle. */
-  adjudicated:   number
-  /** Of those, the ones whose fuel came back — never announced as a loss. */
-  redistributed: number
-  /**
-   * The adjudication pass threw and judged nothing this cycle.
-   *
-   * Its own field because `adjudicated: 0` cannot carry the difference between
-   * "nothing was ripe to judge", which is the ordinary state, and "the detector
-   * did not run", which is an outage.
-   */
-  adjudicationFailed: boolean
-  /** How many cycles in a row it has now failed. 0 when this one succeeded. */
-  adjudicationFailStreak: number
+  // (The verdict counters lived here until 2026-09-24. They moved to
+  // FuelAdjudicationResult with the pass itself — a field this cycle can no
+  // longer compute must not stay on its result reading zero.)
   failed:     number
   /** Wall clock, so an overrunning cycle is visible rather than inferred. */
   ms:         number
@@ -229,9 +224,6 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   const result: FuelSyncResult = {
     candidates: 0, fillings: 0, thefts: 0, published: 0, deduped: 0,
     corrected: 0, settled: 0, removed: 0,
-    fillingsJudged: 0, fillingsPhantom: 0,
-    adjudicated: 0, redistributed: 0,
-    adjudicationFailed: false, adjudicationFailStreak: 0,
     failed: 0, ms: 0,
   }
 
@@ -321,102 +313,18 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
     await client.logout().catch(() => { /* best effort */ })
   }
 
-  // ── adjudication pass ──
-  // Judge the drains whose settle window has elapsed, and put the survivors on
-  // the feed. Deliberately AFTER the Wialon session is closed: it touches only
-  // our own database, so it must not hold a provider session open, and it must
-  // still run on a cycle where every report failed.
-  if (env.FUEL_ADJUDICATION_ENABLED) {
-    // ── fillings first, and the ORDER is the whole point ──
-    //
-    // `adjudicateDrain` takes a filling in its window as real and cuts the
-    // recovery window at it, excluding only fillings already judged
-    // REDISTRIBUTION (see the `verdict: { not: 'REDISTRIBUTION' }` filter in
-    // fuel-adjudication.service). A PENDING filling still counts, deliberately:
-    // unjudged is not disproved.
-    //
-    // That was safe only if fillings were judged at least as often as drains,
-    // and they were not. Drains run on FUEL_SYNC_CRON (quarter-hourly); the
-    // filling sweep was a daily repeatable at 04:05 on the maintenance queue.
-    // So a filling recorded at 10:00 stayed PENDING for eighteen hours, and
-    // every drain judged in between had its evidence cut short by a "delivery"
-    // nobody had checked — on an oscillating probe, by the up-swing of the very
-    // noise the drain was. That manufactures DRAIN verdicts out of undulation,
-    // which is the one failure this module exists to prevent.
-    //
-    // retention.ts already said so — "judging fillings first is what stops a
-    // phantom one truncating a drain's evidence" — while scheduling the two
-    // 288 cycles apart. This puts them on one clock, in that order.
-    //
-    // Ripeness is unchanged: FILL_SETTLE_MINUTES + FILL_HOLD_MINUTES = 60, so a
-    // filling becomes judgeable an hour after the pump stops. Running quarter-
-    // hourly does not judge anything sooner than its own evidence allows; it
-    // just stops the verdict waiting until morning for a cycle to come round.
-    try {
-      const fills = await adjudicateFillings({ apply: true })
-      // Rows that actually got a verdict this cycle: not the ones still inside
-      // their hold window, and not the ones the re-judge guard left alone.
-      result.fillingsJudged  = fills.examined - fills.stillPending - fills.kept
-      result.fillingsPhantom = fills.redistribution
-    } catch (err) {
-      // Not fatal to the cycle. Drains are still judged below — exactly as they
-      // were when this pass ran once a day — because judging them against a
-      // stale filling ledger is what happens today and is better than judging
-      // nothing. But it is logged at ERROR, because every drain in this cycle
-      // is now reading fillings this pass failed to refresh.
-      logger.error({ err },
-        'Fuel filling adjudication failed — drains this cycle may be truncated by unjudged fillings')
-    }
-
-    try {
-      // The same KIND of age gate the sync uses — a backlog being worked
-      // through must not narrate weeks of history onto the live feed — but a
-      // much longer one, because a judged drain is hours old by construction.
-      const verdicts = await adjudicatePendingDrains({
-        apply: true, notify: true,
-        // NOT `cutoff` — that is the sync's two-hour reach, and adjudication
-        // takes a mean of 8.9 h to reach a verdict. See the constant.
-        notifyCutoff: new Date(to.getTime() - ADJUDICATION_NOTIFY_AGE_MS),
-      })
-      result.adjudicated   = verdicts.examined
-      result.redistributed = verdicts.redistribution
-      result.published    += verdicts.published
-      // It ran. Whatever was wrong before is not wrong now.
-      adjudicationFailStreak = 0
-    } catch (err) {
-      // ERROR, not warn. This is the fuel detector not running, and it used to
-      // be reported at the same level as a single vehicle's report failing —
-      // which is how ten hours of it went unnoticed.
-      adjudicationFailStreak += 1
-      result.adjudicationFailed = true
-      result.adjudicationFailStreak = adjudicationFailStreak
-      logger.error(
-        { err, streak: adjudicationFailStreak },
-        'Fuel adjudication pass failed — no drains were judged this cycle',
-      )
-      // A streak is a different event from a failure, and it is the one worth
-      // waking somebody for: nothing has been judged for the best part of an
-      // hour, so no fuel finding can reach the feed no matter what the machines
-      // are doing.
-      if (adjudicationFailStreak >= ADJUDICATION_OUTAGE_STREAK) {
-        logger.error(
-          { streak: adjudicationFailStreak, cron: env.FUEL_SYNC_CRON },
-          'FUEL DETECTOR DOWN — adjudication has failed every cycle in a row; nothing is being judged',
-        )
-      }
-    }
-  }
+  // (The adjudication pass used to run here, at the tail of this cycle. It was
+  // moved to its own queue on 2026-09-24 — see `runAdjudication` below. It
+  // touches only our own database, so sharing a quarter-hourly Wialon cadence
+  // cost up to fifteen minutes of dead wait before a ripe drain was judged.)
 
   result.ms = Date.now() - startedAt
 
-  // A quiet cycle is logged at debug, which production never emits — right for
-  // the ordinary case and exactly wrong for a broken one. An adjudication
-  // failure leaves every counter at zero, so without this the cycle in which
-  // the detector died is the least visible line in the log.
-  const log = result.adjudicationFailed
-           || result.published > 0 || result.fillings > 0 || result.thefts > 0
-           || result.corrected > 0 || result.removed > 0 || result.adjudicated > 0
-           || result.fillingsJudged > 0
+  // A quiet cycle is logged at debug, which production never emits. The
+  // equivalent guard for a DEAD detector now lives on the adjudication pass,
+  // which owns that failure since the split.
+  const log = result.published > 0 || result.fillings > 0 || result.thefts > 0
+           || result.corrected > 0 || result.removed > 0
     ? logger.info.bind(logger)
     : logger.debug.bind(logger)
   log(result, 'Fuel sync cycle complete')
@@ -433,6 +341,146 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   return result
 }
 
+
+// ─── the adjudication pass, on its own clock ───────────────────────────────
+
+/**
+ * Judge the fillings and drains whose evidence has matured.
+ *
+ * ## Why this is not part of the sync cycle any more
+ *
+ * It sat at the tail of `runFuelSync` until 2026-09-24, and so inherited
+ * `FUEL_SYNC_CRON` — a quarter-hourly cadence chosen for a completely different
+ * reason, namely that executing Wialon reports for 460 vehicles is expensive and
+ * the provider should not be asked more often.
+ *
+ * This pass asks Wialon nothing. It reads rows we already hold and writes
+ * verdicts, and the comment it used to live under said so: "it touches only our
+ * own database". Sharing that cadence cost up to fifteen minutes of dead wait
+ * between a drain becoming ripe and anything looking at it — on top of
+ * SETTLE_MINUTES, and for no reason at all.
+ *
+ * A drain detected at 14:48 ripened at 15:08 and was judged at 15:15. The
+ * fifteen minutes in the middle is what this removes.
+ *
+ * ## Its own queue, not just its own schedule
+ *
+ * The sync worker runs at concurrency 1 so two cycles cannot open two Wialon
+ * sessions. Putting a one-minute job on that queue would have it wait behind
+ * every slow sweep — exactly the starvation this is meant to end. A separate
+ * queue gives the two independent workers.
+ */
+export interface FuelAdjudicationResult {
+  fillingsJudged:  number
+  fillingsPhantom: number
+  adjudicated:     number
+  redistributed:   number
+  published:       number
+  adjudicationFailed: boolean
+  adjudicationFailStreak: number
+  ms: number
+}
+
+export async function runAdjudication(): Promise<FuelAdjudicationResult> {
+  const startedAt = Date.now()
+  const out: FuelAdjudicationResult = {
+    fillingsJudged: 0, fillingsPhantom: 0,
+    adjudicated: 0, redistributed: 0, published: 0,
+    adjudicationFailed: false, adjudicationFailStreak: 0, ms: 0,
+  }
+  const to = new Date()
+
+// ── adjudication pass ──
+// Judge the drains whose settle window has elapsed, and put the survivors on
+// the feed. Deliberately AFTER the Wialon session is closed: it touches only
+// our own database, so it must not hold a provider session open, and it must
+// still run on a cycle where every report failed.
+  // ── fillings first, and the ORDER is the whole point ──
+  //
+  // `adjudicateDrain` takes a filling in its window as real and cuts the
+  // recovery window at it, excluding only fillings already judged
+  // REDISTRIBUTION (see the `verdict: { not: 'REDISTRIBUTION' }` filter in
+  // fuel-adjudication.service). A PENDING filling still counts, deliberately:
+  // unjudged is not disproved.
+  //
+  // That was safe only if fillings were judged at least as often as drains,
+  // and they were not. Drains run on FUEL_SYNC_CRON (quarter-hourly); the
+  // filling sweep was a daily repeatable at 04:05 on the maintenance queue.
+  // So a filling recorded at 10:00 stayed PENDING for eighteen hours, and
+  // every drain judged in between had its evidence cut short by a "delivery"
+  // nobody had checked — on an oscillating probe, by the up-swing of the very
+  // noise the drain was. That manufactures DRAIN verdicts out of undulation,
+  // which is the one failure this module exists to prevent.
+  //
+  // retention.ts already said so — "judging fillings first is what stops a
+  // phantom one truncating a drain's evidence" — while scheduling the two
+  // 288 cycles apart. This puts them on one clock, in that order.
+  //
+  // Ripeness is unchanged: FILL_SETTLE_MINUTES + FILL_HOLD_MINUTES = 60, so a
+  // filling becomes judgeable an hour after the pump stops. Running quarter-
+  // hourly does not judge anything sooner than its own evidence allows; it
+  // just stops the verdict waiting until morning for a cycle to come round.
+  try {
+    const fills = await adjudicateFillings({ apply: true })
+    // Rows that actually got a verdict this cycle: not the ones still inside
+    // their hold window, and not the ones the re-judge guard left alone.
+    out.fillingsJudged = fills.examined - fills.stillPending - fills.kept
+    out.fillingsPhantom = fills.redistribution
+  } catch (err) {
+    // Not fatal to the cycle. Drains are still judged below — exactly as they
+    // were when this pass ran once a day — because judging them against a
+    // stale filling ledger is what happens today and is better than judging
+    // nothing. But it is logged at ERROR, because every drain in this cycle
+    // is now reading fillings this pass failed to refresh.
+    logger.error({ err },
+      'Fuel filling adjudication failed — drains this cycle may be truncated by unjudged fillings')
+  }
+
+  try {
+    // The same KIND of age gate the sync uses — a backlog being worked
+    // through must not narrate weeks of history onto the live feed — but a
+    // much longer one, because a judged drain is hours old by construction.
+    const verdicts = await adjudicatePendingDrains({
+      apply: true, notify: true,
+      // NOT `cutoff` — that is the sync's two-hour reach, and adjudication
+      // takes a mean of 8.9 h to reach a verdict. See the constant.
+      notifyCutoff: new Date(to.getTime() - ADJUDICATION_NOTIFY_AGE_MS),
+    })
+    out.adjudicated   = verdicts.examined
+    out.redistributed = verdicts.redistribution
+    out.published    += verdicts.published
+    // It ran. Whatever was wrong before is not wrong now.
+    adjudicationFailStreak = 0
+  } catch (err) {
+    // ERROR, not warn. This is the fuel detector not running, and it used to
+    // be reported at the same level as a single vehicle's report failing —
+    // which is how ten hours of it went unnoticed.
+    adjudicationFailStreak += 1
+    out.adjudicationFailed = true
+    out.adjudicationFailStreak = adjudicationFailStreak
+    logger.error(
+      { err, streak: adjudicationFailStreak },
+      'Fuel adjudication pass failed — no drains were judged this cycle',
+    )
+    // A streak is a different event from a failure, and it is the one worth
+    // waking somebody for: nothing has been judged for the best part of an
+    // hour, so no fuel finding can reach the feed no matter what the machines
+    // are doing.
+    if (adjudicationFailStreak >= ADJUDICATION_OUTAGE_STREAK) {
+      logger.error(
+        { streak: adjudicationFailStreak, cron: env.FUEL_SYNC_CRON },
+        'FUEL DETECTOR DOWN — adjudication has failed every cycle in a row; nothing is being judged',
+      )
+    }
+  }
+
+  out.ms = Date.now() - startedAt
+  const log = out.adjudicationFailed || out.published > 0 || out.adjudicated > 0 || out.fillingsJudged > 0
+    ? logger.info.bind(logger) : logger.debug.bind(logger)
+  log(out, 'Fuel adjudication cycle complete')
+  return out
+}
+
 // ─── queue wiring ──────────────────────────────────────────────────────────
 
 let queue:  Queue  | null = null
@@ -442,6 +490,75 @@ let running = false
 
 export interface FuelSyncHandle {
   stop: () => Promise<void>
+}
+
+let adjQueue:  Queue  | null = null
+let adjWorker: Worker | null = null
+/** One adjudication at a time — a tick that overruns must not stack. */
+let adjudicating = false
+
+/**
+ * Schedule the verdict pass on its own clock.
+ *
+ * Independent of `startFuelSync` in every way that matters: its own queue, its
+ * own worker, its own cadence, and no Wialon session. It is still gated by
+ * FUEL_ADJUDICATION_ENABLED, which now means what it says rather than "and only
+ * when the sync happens to run".
+ */
+export async function startFuelAdjudication(): Promise<FuelSyncHandle> {
+  const noop: FuelSyncHandle = { stop: async () => {} }
+
+  if (!env.FUEL_ADJUDICATION_ENABLED) {
+    logger.warn('FUEL_ADJUDICATION_ENABLED=false — no drain or filling will be judged')
+    return noop
+  }
+  const connection = getQueueRedis()
+  if (!connection) {
+    logger.warn('No REDIS_URL — fuel adjudication NOT scheduled; run `npm run fuel:adjudicate` by hand')
+    return noop
+  }
+
+  adjQueue = new Queue(FUEL_ADJUDICATION_QUEUE, { connection })
+  // Same reason as the sync queue: a changed cadence must not leave the old
+  // scheduler firing alongside the new one.
+  for (const r of await adjQueue.getRepeatableJobs()) {
+    if (r.name === ADJUDICATE_JOB) await adjQueue.removeRepeatableByKey(r.key)
+  }
+
+  await adjQueue.add(ADJUDICATE_JOB, {}, {
+    repeat:           { pattern: env.FUEL_ADJUDICATION_CRON },
+    removeOnComplete: { count: 50 },
+    removeOnFail:     { count: 50 },
+    // One attempt: the next tick is a minute away and its query is the same.
+    attempts:         1,
+  })
+
+  adjWorker = new Worker(FUEL_ADJUDICATION_QUEUE, async (job: Job) => {
+    if (job.name !== ADJUDICATE_JOB) return
+    if (adjudicating) {
+      logger.warn({ jobId: job.id }, 'Fuel adjudication: previous pass still running — skipping this tick')
+      return
+    }
+    adjudicating = true
+    try { return await runAdjudication() } finally { adjudicating = false }
+  }, { connection, concurrency: 1 })
+
+  adjWorker.on('failed', (job, err) =>
+    logger.error({ err, jobId: job?.id }, 'Fuel adjudication job failed'))
+
+  logger.info(
+    { queue: FUEL_ADJUDICATION_QUEUE, cron: env.FUEL_ADJUDICATION_CRON },
+    'Fuel adjudication scheduled',
+  )
+
+  return {
+    async stop() {
+      await adjWorker?.close()
+      await adjQueue?.close()
+      adjWorker = null
+      adjQueue = null
+    },
+  }
 }
 
 export async function startFuelSync(): Promise<FuelSyncHandle> {

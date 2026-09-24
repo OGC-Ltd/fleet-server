@@ -18,7 +18,7 @@ import { startAiInsightWarmer } from './modules/dashboard/ai-insight.js'
 import { WialonLiveAdapter } from './providers/wialon/wialon.adapter.js'
 import { startRaiFactorySuiteReconciler } from './providers/raifactorysuite/raifactorysuite.reconciler.js'
 import { startRetentionSweep } from './lib/queues/retention.js'
-import { startFuelSync } from './lib/queues/fuel-events.js'
+import { startFuelSync, startFuelAdjudication } from './lib/queues/fuel-events.js'
 import { startTripBuild } from './lib/queues/trips.js'
 import { startOutboundWorker } from './lib/queues/outbound.js'
 import { disconnectRedis } from './lib/redis.js'
@@ -93,6 +93,12 @@ async function main() {
   // cannot write that cache, so its items were durable but invisible.
   // Also no-op without REDIS_URL — see lib/queues/fuel-events.ts.
   const fuelSync = await startFuelSync()
+  // Verdicts on their OWN clock, every minute. This used to ride on the fuel
+  // sync's quarter-hourly cadence, which is set by what Wialon costs to ask —
+  // a cost this pass does not incur, since it reads rows we already hold. That
+  // put up to fifteen minutes of dead wait between a drain ripening and
+  // anything looking at it. See lib/queues/fuel-events.ts.
+  const fuelAdjudication = await startFuelAdjudication()
   // Completed dispatches → measured trips. Nothing else writes that table
   // since the simulator was retired — see lib/queues/trips.
   const tripBuild = await startTripBuild()
@@ -111,6 +117,7 @@ async function main() {
     raiFactorySuite.stop()
     await retention.stop().catch((err) => logger.warn({ err }, 'Retention sweep shutdown failed'))
     await fuelSync.stop().catch((err) => logger.warn({ err }, 'Fuel sync shutdown failed'))
+    await fuelAdjudication.stop().catch((err) => logger.warn({ err }, 'Fuel adjudication shutdown failed'))
     await tripBuild.stop().catch((err) => logger.warn({ err }, 'Trip build shutdown failed'))
     // Before disconnectRedis below, so in-flight mail is finished rather than
     // having its connection pulled out from under it.
