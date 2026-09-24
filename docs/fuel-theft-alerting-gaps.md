@@ -369,7 +369,112 @@ MTR 09 passes all six at 12:21:42.
 | 7 | the disturbance rule (§5) | stops the erasures recurring |
 | 8 | live two-stage detector (§7) | latency: hours → minutes |
 
-With 1 and 2 alone, six of the eight alert. With 1–4, all eight.
+---
+
+## 8a. Validation — replayed against 30 days of ledger
+
+`prisma/measure-alerting-gates.ts` replays every drain in the window through the
+same gates under each change, cumulatively. Read-only. **It corrects a claim
+this document made before it was run** (see the end of this section).
+
+Two things cannot be replayed and both make every count below an **upper
+bound**: the SETTLING branch (`kT` / `decayResidual` are computed and discarded,
+so a parked fall that decays is counted here and would not be in life), and
+gates 4–5, which need `resolveBand`. 2,482 of 3,443 drains carry a persisted
+fall shape; the rest predate 2026-08-28 or never reached a DRAIN verdict, so no
+cause was computed for them.
+
+### Alert volume
+
+| scenario | alerts / 30 d | per day | on trusted probes | volume |
+|---|---|---|---|---|
+| **S0 current** | **1** | 0.0 | 1 | 46 L |
+| S1 + step test retired | 5 | 0.2 | 5 | 146 L |
+| S2 + 120 s fall floor | 8 | 0.3 | 8 | 207 L |
+| S3 + removal ceiling 3,000 | 17 | 0.6 | 17 | 661 L |
+| S4 + stray-speed tolerance | 27 | 0.9 | 27 | 994 L |
+| **S5 + 5 L drop floor** | **31** | **1.0** | 31 | 1,272 L |
+
+The replayed S0 gives 1 where the ledger holds 3 stored SIPHON rows; the
+difference is the unreplayable settling branch plus a profile window that does
+not exactly match the live `getProbeProfile`. Close enough to trust the deltas.
+
+**Operator burden is one alert a day.** Not a flood, and that is the number the
+proposal has to survive.
+
+**Every one of the 31 lands on a probe the trust gate already trusts. Zero on a
+distrusted one.** That is the safety result: `probeSwings` suppresses 2,199 of
+the 2,482 replayable rows — 89% — before any of these gates is reached, and
+raising the gates does not disturb that. The heavy oscillators (DZ 04, DZ 07,
+DZ 14) stay silent throughout.
+
+The corollary is a known and accepted blind spot: a genuine theft on a
+distrusted probe remains silent under every scenario here.
+
+### Which change is load-bearing
+
+The cumulative table is order-dependent — a change applied fourth is credited
+only with what the first three left. Removing each change from the *full*
+proposal measures what it is actually worth:
+
+| remove this change | alerts | cost |
+|---|---|---|
+| **step retirement** | 10 | **−21** |
+| removal ceiling | 13 | −18 |
+| 120 s fall floor | 15 | −16 |
+| stray-speed tolerance | 17 | −14 |
+| 5 L drop floor | 27 | −4 |
+
+They sum to 73 against a total gain of 30, so the gates overlap heavily — most
+rows are blocked by several at once, which is why no single change unlocks much
+on its own and why the cumulative view understates the first one applied.
+Retiring the step test is confirmed as the largest single contributor, as §3
+argued from the eight cases.
+
+### Where the rows go
+
+| outcome | current | proposed |
+|---|---|---|
+| SIPHON | 1 | **31** |
+| probe-swings | 2,199 | 2,199 |
+| slosh | 33 | 3 |
+| not-parked | 60 | 66 |
+| below-floor | 5 | 3 |
+| step-shaped | 4 | 0 |
+| other-branch | 180 | 180 |
+
+### The correction
+
+This document previously asserted *"with 1 and 2 alone, six of the eight alert;
+with 1–4, all eight."* **The replay does not support it.** Of the six hand-read
+cases that carry a replayable fall shape:
+
+| case | current | full proposal |
+|---|---|---|
+| MTR 04 17:12 | below-floor | **SIPHON** |
+| CTR 12 16:59 | slosh | **SIPHON** |
+| CTR 19 16:53 | below-floor | **SIPHON** |
+| MTR 20 17:33 | below-floor | **SIPHON** |
+| FT 13 12:49 | not-parked | not-parked |
+| CTR 19 12:06 | not-parked | not-parked |
+
+**Four of six, not six of eight**, and changes 1+2 alone reach only three of
+them (CTR 12 needs the removal ceiling). The two that stay silent are silent for
+reasons no gate constant can fix:
+
+- **FT 13** has `engine_evidence = 0` — it is one of the 54 ignition-blind
+  vehicles (§4.5), so `parked` can never be true. It needs change 6.
+- **CTR 19 12:06** has an 82-minute fall that genuinely spans movement. Calling
+  that a parked siphon would be wrong, and the classifier is right to refuse.
+
+**MTR 09 and CTR 14 do not appear at all** — both were settled
+`REDISTRIBUTION`, so `classifyDrain` never ran and no fall shape was persisted.
+They need change 3 (the filling baseline) before there is anything to classify.
+
+So the ordering in §8 stands, but its expected yield does not: **changes 1–5
+raise fleet alerts from 1 to 31 per 30 days and recover four of the eight known
+cases. The other four need changes 3 and 6, which are accounting and ingestion
+fixes rather than gate changes.**
 
 ---
 
@@ -418,6 +523,7 @@ npx tsx prisma/truncation-concentration.ts --org=KASULU --days=30 --tunnel
 npx tsx prisma/threshold-probe.ts    --org=KASULU --days=30 --tunnel
 npx tsx prisma/ignition-coverage.ts  --org=KASULU --days=2  --tunnel
 npx tsx prisma/adjudication-pulse.ts --tunnel
+npx tsx prisma/measure-alerting-gates.ts --org=KASULU --days=30 --tunnel
 ```
 
 `--tunnel` rewrites the host in `DIRECT_URL` to `localhost:15432` for a dev
