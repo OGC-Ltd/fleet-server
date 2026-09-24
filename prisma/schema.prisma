@@ -1998,10 +1998,13 @@ enum FuelFollowUpActionKind {
   NOTE
   ESCALATED
   DEESCALATED
-  /// An administrator handed it to somebody (`subjectId`), or took it back.
+  /// An administrator handed it to somebody (`subjectId`).
   ASSIGNED
   /// Somebody who could have accepted it said no, with a reason.
   DECLINED
+  /// An administrator took it back from the person it was with (`subjectId`),
+  /// assigned or already reviewing, and returned it to the open pool.
+  RECALLED
 }
 
 /// The follow-up a dismissed fuel incident triggers.
@@ -2071,8 +2074,8 @@ model FuelTheftFollowUpAction {
   /// Required on ESCALATED, DEESCALATED and DECLINED (the reason) and on
   /// NOTE; optional on ASSIGNED; empty on OPENED and ACCEPTED.
   note       String?
-  /// The person an ASSIGNED entry handed it to. Null elsewhere, and null on
-  /// an ASSIGNED entry that took an assignment back.
+  /// The person an ASSIGNED entry handed it to, or a RECALLED entry took it
+  /// from. Null elsewhere.
   subjectId  String?                @map("subject_id")
   at         DateTime               @default(now())
 
