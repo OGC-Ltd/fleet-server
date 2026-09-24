@@ -364,6 +364,19 @@ const schema = z.object({
   FUEL_SYNC_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
 
   /**
+   * The live fuel-drop watcher (lib/fuel-drop-watch).
+   *
+   * Raises a PROVISIONAL warning within a few minutes of a tank dropping on a
+   * machine that is standing still with its engine measured off — the fast path
+   * beside `fuel-adjudication`, which is authoritative but takes a mean of 8.9
+   * hours because it waits for the provider's own report.
+   *
+   * It never uses the word theft and never writes to the ledger. Turning it off
+   * loses the early warning and changes no verdict.
+   */
+  LIVE_FUEL_WATCH_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  /**
    * The speed above which a unit is overspeeding, km/h.
    *
    * 80 is not a new number: `analytics.repository` has applied it to the

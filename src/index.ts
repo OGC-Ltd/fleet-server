@@ -9,6 +9,7 @@ import { startNotificationWorker }  from './lib/workers/notification.worker.js'
 import { startAlertsWorker }        from './lib/workers/alerts.worker.js'
 import { startSpeedingWorker }      from './lib/workers/speeding.worker.js'
 import { startSensorFaultsWorker }  from './lib/workers/sensor-faults.worker.js'
+import { startFuelWatchWorker }     from './lib/workers/fuel-watch.worker.js'
 import { startSimEventsWorker }     from './lib/workers/sim-events.worker.js'
 import { stopPushDispatcher }       from './lib/push-dispatcher.js'
 import { startCacheWarmer } from './lib/warm-cache.js'
@@ -38,6 +39,10 @@ async function main() {
   const stopAlertsWorker       = startAlertsWorker()
   const stopSpeedingWorker     = startSpeedingWorker()
   const stopSensorFaultsWorker = startSensorFaultsWorker()
+  // The fast half of fuel detection: a tank that drops while the machine stands
+  // still reaches the feed in minutes, provisionally, instead of waiting on the
+  // provider's report — see lib/fuel-drop-watch.
+  const stopFuelWatchWorker    = startFuelWatchWorker()
   const stopSimEventsWorker    = startSimEventsWorker()
   // Keep the analytics/maintenance read caches hot so those pages never wait
   // on the remote database (each pooler round trip costs ~1s) — see
@@ -118,6 +123,7 @@ async function main() {
     stopAlertsWorker()
     stopSpeedingWorker()
     stopSensorFaultsWorker()
+    stopFuelWatchWorker()
     stopSimEventsWorker()
     stopCacheWarmer()
     stopAiInsightWarmer()
