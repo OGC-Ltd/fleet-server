@@ -79,7 +79,7 @@ const CURRENT: Gates = {
 const SCENARIOS: Gates[] = [
   CURRENT,
   { ...CURRENT, label: 'S1  + step retired  SHIPPED',      maxStepFraction: Infinity },
-  { ...CURRENT, label: 'S2  + min fall 120 s',         maxStepFraction: Infinity, minSeconds: 120 },
+  { ...CURRENT, label: 'S2  + 120 s floor  SHIPPED',         maxStepFraction: Infinity, minSeconds: 120 },
   { ...CURRENT, label: 'S3  + removal ceiling 3000',   maxStepFraction: Infinity, minSeconds: 120, maxRemovalLph: 3_000 },
   { ...CURRENT, label: 'S4  + stray-speed tolerance',  maxStepFraction: Infinity, minSeconds: 120, maxRemovalLph: 3_000, movedKm: 0.1 },
   { ...CURRENT, label: 'S5  + drop floor 5 L',         maxStepFraction: Infinity, minSeconds: 120, maxRemovalLph: 3_000, movedKm: 0.1, minDropMl: 5_000 },
@@ -226,6 +226,23 @@ async function main() {
       `${pad((hits.length / DAYS).toFixed(1), 8)}${pad(String(st), 9)}` +
       `${pad(String(hits.length - st), 9)}${L(vol)}`,
     )
+  }
+
+  // ── threshold sweep on the fall floor ────────────────────────────────────
+  //
+  // A constant should sit on a plateau, not a spike. This walks SIPHON_MIN_SECONDS
+  // across the plausible range on top of what has already shipped, so the chosen
+  // value can be seen against its neighbours rather than asserted.
+  const SHIPPED: Gates = { ...CURRENT, maxStepFraction: Infinity }
+  console.log(`\n  FALL-FLOOR SWEEP (on the shipped gates, everything else unchanged)`)
+  console.log(`    ${pad('SIPHON_MIN_SECONDS', 22)}${pad('ALERTS', 9)}${pad('/DAY', 8)}${pad('TRUSTED', 9)}WANDERING`)
+  console.log('    ' + '─'.repeat(60))
+  for (const secs of [600, 480, 360, 300, 240, 180, 120, 90, 60, 30]) {
+    const hits = withEvidence.filter(r => replay(r, { ...SHIPPED, minSeconds: secs }) === 'SIPHON')
+    const st = hits.filter(steady).length
+    console.log(`    ${pad(String(secs) + (secs === 600 ? '  (was)' : secs === 120 ? '  (proposed)' : ''), 22)}` +
+                `${pad(String(hits.length), 9)}${pad((hits.length / DAYS).toFixed(2), 8)}` +
+                `${pad(String(st), 9)}${hits.length - st}`)
   }
 
   // ── leave-one-out: which change is actually load-bearing? ────────────────

@@ -1012,9 +1012,16 @@ export const MIN_ENGINE_SECONDS = 120
  * announcements from drains with ZERO-LENGTH windows: 12.1 L and 15.1 L with
  * `beganAt` equal to `detectedAt`. It was half of all alerts on the fleet.
  *
- * Ten minutes, because that is the floor the parked branch already uses
- * (`SIPHON_MIN_SECONDS`) for the same reason: below it, a fall is an event we
- * watched too briefly to describe. A shorter fall still gets a CAUSE — it is
+ * Ten minutes, and it stands on its own arithmetic rather than on any other
+ * constant. This used to be justified by pointing at `SIPHON_MIN_SECONDS`,
+ * which was also ten minutes — but that one answers a different question ("was
+ * this fall sustained, or a blip") and moved to 120 s on 2026-09-24 when it was
+ * measured. This one is about a QUOTIENT: the shorter the window, the more a
+ * couple of noisy readings dominate the rate, and no amount of evidence that
+ * the fall was real makes a rate computed across two pings trustworthy.
+ *
+ * So the two are deliberately no longer equal, and the parked branch's floor
+ * moving does not drag this with it. A shorter fall still gets a CAUSE — it is
  * still classified and still on the ledger — it simply cannot be announced on
  * the strength of a rate measured across a couple of readings.
  */
@@ -1052,8 +1059,51 @@ export const SIPHON_MIN_DROP_ML = 15_000
 /** Least a parked fall must sustain, in litres per wall-clock hour. */
 export const SIPHON_MIN_LPH = 5
 
-/** Shortest parked fall that can be called sustained. */
-export const SIPHON_MIN_SECONDS = 10 * 60
+/**
+ * Shortest parked fall that can be called sustained.
+ *
+ * Two minutes, lowered from ten on 2026-09-24. Ten minutes was never measured
+ * against the falls it excluded; it was a round number standing in for "long
+ * enough to be an event rather than a blip".
+ *
+ * ## What it was excluding
+ *
+ * Three of the eight siphons hand-read on 2026-09-23 died here with
+ * `below-parked-floor`, on machines with the engine MEASURED off and a probe
+ * the trust gate trusts:
+ *
+ *   MUFINDI: MTR 04  302 s   19.1 L
+ *   MUFINDI: CTR 19  419 s   21.4 L
+ *   MUFINDI: MTR 20  429 s   20.6 L
+ *
+ * A transfer pump empties 20 L in well under seven minutes; the floor was
+ * asserting otherwise. CTR 19's is the clearest — 21.5 L over six minutes,
+ * stationary, engine off, the level flat for ten minutes afterwards and no
+ * filling anywhere in the window. See docs/fuel-theft-alerting-gaps.md §2.1.
+ *
+ * ## Why 120, measured
+ *
+ * Swept across the ledger on the shipped gates
+ * (`prisma/measure-alerting-gates.ts`, 30 days, KASULU):
+ *
+ *   floor   600   480   360   300   240   180   120    90    60    30
+ *   alerts    5     5     7     8     8     8     8     8     8     8
+ *
+ * Every alert at every floor is on a probe the trust gate trusts; none is on a
+ * wandering one. The curve is flat from 300 s downward, so this is a plateau
+ * rather than a spike and the exact figure inside it changes nothing today —
+ * the 5 → 7 step is CTR 19 and MTR 20, the 7 → 8 step is MTR 04.
+ *
+ * 120 rather than 300 because nothing is gained below it and a floor is still
+ * worth keeping: at a 30 s median reporting gap, 120 s is four readings, and a
+ * "fall" spanning fewer than that is a pair of samples, not an event. It bounds
+ * a shape the ledger does not contain today and might tomorrow.
+ *
+ * NOT the same number as `MIN_RATE_WINDOW_SECONDS`, which stayed at ten minutes
+ * — that one bounds a quotient, this one bounds an event. They were equal by
+ * coincidence and are now deliberately not.
+ */
+export const SIPHON_MIN_SECONDS = 2 * 60
 
 /**
  * Above this share of the drop landing in one interval, the fall is a STEP and

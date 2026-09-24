@@ -107,13 +107,34 @@ describe('the parked branch — the only route to SIPHON', () => {
     expect(causeOf(parked(40, 60, { kT: 3, decayResidual: 0.01 }))).toBe('SETTLING')
   })
 
-  it('too small, too slow or too brief is not judged at all', () => {
+  it('too small or too slow is not judged at all', () => {
     expect(causeOf(parked(SIPHON_MIN_DROP_ML / 1000 - 1, 60))).toBe('INDETERMINATE')  // magnitude
     expect(causeOf(parked(20, 60 * 8))).toBe('INDETERMINATE')                          // ~2.5 L/h
-    // Brief, but at a rate a hose could actually draw (16 L in 8 min = 120 L/h).
-    // A steeper "brief" case would trip the physical ceiling first and come
-    // back SLOSH — correctly, but it would not be testing this floor.
-    expect(causeOf(parked(16, 8))).toBe('INDETERMINATE')
+  })
+
+  it('a brief fall at a rate a pump could draw is a siphon, not a floor rejection', () => {
+    // 16 L in 8 minutes = 120 L/h, engine measured off, probe trusted. Under
+    // the old ten-minute floor this came back INDETERMINATE as "too brief";
+    // that floor moved to 120 s on 2026-09-24 because it was refusing real
+    // events — MTR 04 at 302 s, CTR 19 at 419 s, MTR 20 at 429 s, all on
+    // 2026-09-23. See SIPHON_MIN_SECONDS for the sweep behind the number.
+    expect(causeOf(parked(16, 8))).toBe('SIPHON')
+  })
+
+  it('the duration floor is unreachable while the rate ceiling stands at 300 L/h', () => {
+    // Worth pinning, because it is not obvious and it decides what must ship
+    // alongside any change to the ceiling.
+    //
+    // To fail a 120 s floor a fall must be shorter than two minutes. To reach
+    // the floor at all it must already have dropped SIPHON_MIN_DROP_ML — 15 L.
+    // 15 L in under 120 s is at least 450 L/h, which exceeds
+    // MAX_PLAUSIBLE_REMOVAL_LPH and is caught by gate 3 as SLOSH first. So no
+    // input can land on `below-parked-floor` for duration alone today.
+    expect(causeOf(parked(15, 1.9))).toBe('SLOSH')
+    expect(causeOf(parked(20, 1))).toBe('SLOSH')
+    // It regains its effect the moment the ceiling is raised — which is exactly
+    // when a per-interval rate test must arrive too. See
+    // SIPHON_MAX_STEP_FRACTION's retirement note on that coupling.
   })
 
   it('the physical ceiling is checked before the duration floor', () => {
