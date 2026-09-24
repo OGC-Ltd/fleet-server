@@ -34,6 +34,12 @@ export const listThefts: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+export const dismissTheft: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await service.dismissTheft(p(req, 'orgId'), p(req, 'theftId'), req.user?.id ?? null))
+  } catch (err) { next(err) }
+}
+
 export const getTheft: RequestHandler = async (req, res, next) => {
   try {
     sendSuccess(res, await service.getTheft(p(req, 'orgId'), p(req, 'theftId')))

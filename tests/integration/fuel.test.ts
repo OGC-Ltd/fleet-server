@@ -99,4 +99,43 @@ describe('Fuel Thefts', () => {
       expect(res.status).toBe(400)
     })
   })
+  describe('POST /fuel/thefts/:id/dismiss', () => {
+    it('marks the row dismissed and keeps it (update, never delete)', async () => {
+      prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', vehicleId: 'v1', dismissedAt: null } as never)
+      prismaMock.fuelTheft.update.mockResolvedValue({ id: 'th1', vehicleId: 'v1', dismissedAt: new Date() } as never)
+
+      const res = await request(app).post(`${THEFT_BASE}/th1/dismiss`)
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.id).toBe('th1')
+      expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: 'th1' },
+        data: expect.objectContaining({ dismissedAt: expect.any(Date) }),
+      }))
+      expect(prismaMock.fuelTheft.delete).not.toHaveBeenCalled()
+    })
+
+    it('scopes the lookup to the path organisation', async () => {
+      prismaMock.fuelTheft.findFirst.mockResolvedValue(null)
+
+      const res = await request(app).post(`${THEFT_BASE}/other-org-row/dismiss`)
+
+      expect(res.status).toBe(404)
+      expect(prismaMock.fuelTheft.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: 'other-org-row', vehicle: { organisationId: TEST_ORG_ID } },
+      }))
+      expect(prismaMock.fuelTheft.update).not.toHaveBeenCalled()
+    })
+
+    it('keeps the first dismissal rather than overwriting it', async () => {
+      const first = new Date('2026-09-24T10:00:00Z')
+      prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', vehicleId: 'v1', dismissedAt: first } as never)
+
+      const res = await request(app).post(`${THEFT_BASE}/th1/dismiss`)
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.dismissedAt).toBe(first.toISOString())
+      expect(prismaMock.fuelTheft.update).not.toHaveBeenCalled()
+    })
+  })
 })
