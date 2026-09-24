@@ -432,16 +432,19 @@ model User {
   passwordTokensCreated PasswordToken[] @relation("PasswordTokenCreatedBy")
 
   // Driver-specific relations (only relevant when user holds "driver" role)
-  vehicleAssignments     VehicleAssignment[]       @relation("AssignedUser")
-  trips                  Trip[]                    @relation("TripDriver")
-  fuelThefts             FuelTheft[]               @relation("TheftDriver")
-  fuelTheftsDismissed    FuelTheft[]               @relation("TheftDismissedBy")
-  fuelTheftsReviewed     FuelTheft[]               @relation("TheftReviewedBy")
-  fuelFollowUpsDismissed FuelTheftFollowUp[]       @relation("FollowUpDismissedBy")
-  fuelFollowUpsAccepted  FuelTheftFollowUp[]       @relation("FollowUpAcceptedBy")
-  fuelFollowUpActions    FuelTheftFollowUpAction[] @relation("FollowUpActions")
-  geofenceViolations     GeofenceViolation[]       @relation("ViolationDriver")
-  speedingIncidents      SpeedingIncident[]        @relation("SpeedingDriver")
+  vehicleAssignments         VehicleAssignment[]       @relation("AssignedUser")
+  trips                      Trip[]                    @relation("TripDriver")
+  fuelThefts                 FuelTheft[]               @relation("TheftDriver")
+  fuelTheftsDismissed        FuelTheft[]               @relation("TheftDismissedBy")
+  fuelTheftsReviewed         FuelTheft[]               @relation("TheftReviewedBy")
+  fuelFollowUpsDismissed     FuelTheftFollowUp[]       @relation("FollowUpDismissedBy")
+  fuelFollowUpsAccepted      FuelTheftFollowUp[]       @relation("FollowUpAcceptedBy")
+  fuelFollowUpActions        FuelTheftFollowUpAction[] @relation("FollowUpActions")
+  fuelFollowUpsAssignedTo    FuelTheftFollowUp[]       @relation("FollowUpAssignedTo")
+  fuelFollowUpsAssignedBy    FuelTheftFollowUp[]       @relation("FollowUpAssignedBy")
+  fuelFollowUpActionSubjects FuelTheftFollowUpAction[] @relation("FollowUpActionSubject")
+  geofenceViolations         GeofenceViolation[]       @relation("ViolationDriver")
+  speedingIncidents          SpeedingIncident[]        @relation("SpeedingDriver")
 
   // Audit — who assigned/unassigned
   assignmentsGranted   VehicleAssignment[] @relation("AssignedByUser")
@@ -1995,6 +1998,10 @@ enum FuelFollowUpActionKind {
   NOTE
   ESCALATED
   DEESCALATED
+  /// An administrator handed it to somebody (`subjectId`), or took it back.
+  ASSIGNED
+  /// Somebody who could have accepted it said no, with a reason.
+  DECLINED
 }
 
 /// The follow-up a dismissed fuel incident triggers.
@@ -2028,6 +2035,12 @@ model FuelTheftFollowUp {
   acceptedAt       DateTime?          @map("accepted_at")
   /// When it was escalated or de-escalated. Null while OPEN or ACCEPTED.
   resolvedAt       DateTime?          @map("resolved_at")
+  /// Who an administrator handed it to. While set on an OPEN follow-up only
+  /// that account may accept or decline it; declining clears it again. Kept
+  /// after acceptance as the record of who was sent.
+  assignedToId     String?            @map("assigned_to_id")
+  assignedById     String?            @map("assigned_by_id")
+  assignedAt       DateTime?          @map("assigned_at")
   /// The alert exactly as it stood when it was deleted: every column of the
   /// fuel_thefts row plus the unit and driver names. The row itself keeps
   /// being rewritten by the adjudication sweep, so without this nobody could
@@ -2038,6 +2051,8 @@ model FuelTheftFollowUp {
   theft        FuelTheft                 @relation(fields: [theftId], references: [id])
   dismissedBy  User?                     @relation("FollowUpDismissedBy", fields: [dismissedById], references: [id], onDelete: SetNull)
   acceptedBy   User?                     @relation("FollowUpAcceptedBy", fields: [acceptedById], references: [id], onDelete: SetNull)
+  assignedTo   User?                     @relation("FollowUpAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  assignedBy   User?                     @relation("FollowUpAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
   actions      FuelTheftFollowUpAction[]
 
   /// Serves the follow-up list: one organisation, filtered by status, newest
@@ -2053,13 +2068,17 @@ model FuelTheftFollowUpAction {
   followUpId String                 @map("follow_up_id")
   kind       FuelFollowUpActionKind
   actorId    String?                @map("actor_id")
-  /// Required on ESCALATED and DEESCALATED (the reason for the decision) and
-  /// on NOTE; empty on OPENED and ACCEPTED.
+  /// Required on ESCALATED, DEESCALATED and DECLINED (the reason) and on
+  /// NOTE; optional on ASSIGNED; empty on OPENED and ACCEPTED.
   note       String?
+  /// The person an ASSIGNED entry handed it to. Null elsewhere, and null on
+  /// an ASSIGNED entry that took an assignment back.
+  subjectId  String?                @map("subject_id")
   at         DateTime               @default(now())
 
   followUp FuelTheftFollowUp @relation(fields: [followUpId], references: [id], onDelete: Cascade)
   actor    User?             @relation("FollowUpActions", fields: [actorId], references: [id], onDelete: SetNull)
+  subject  User?             @relation("FollowUpActionSubject", fields: [subjectId], references: [id], onDelete: SetNull)
 
   @@index([followUpId, at])
   @@map("fuel_theft_followup_actions")

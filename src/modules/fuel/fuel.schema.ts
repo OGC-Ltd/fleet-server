@@ -37,6 +37,13 @@ export const followUpNoteSchema = z.object({
 })
 export type FollowUpNoteDto = z.infer<typeof followUpNoteSchema>
 
+/** An administrator handing a follow-up to somebody; the note is optional. */
+export const assignFollowUpSchema = z.object({
+  assigneeId: z.string().trim().min(1),
+  note: z.string().trim().max(2000).optional(),
+})
+export type AssignFollowUpDto = z.infer<typeof assignFollowUpSchema>
+
 export const createTheftSchema = z.object({
   vehicleId: z.string().cuid(),
   driverId: z.string().cuid().optional(),
