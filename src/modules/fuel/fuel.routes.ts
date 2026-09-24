@@ -5,7 +5,7 @@ import { validateBody, validateQuery } from '../../middleware/validate.js'
 import { ingestLimiter } from '../../middleware/rateLimiter.js'
 import {
   createFillingSchema, listFillingQuerySchema, createTheftSchema, listTheftQuerySchema,
-  listFollowUpQuerySchema, followUpNoteSchema, theftOutcomesQuerySchema,
+  listFollowUpQuerySchema, followUpNoteSchema, assignFollowUpSchema, theftOutcomesQuerySchema,
 } from './fuel.schema.js'
 import * as ctrl from './fuel.controller.js'
 
@@ -46,6 +46,12 @@ const triage = requirePermissionStrict('fuel_theft:triage')
 router.get('/followups', triage, validateQuery(listFollowUpQuerySchema), ctrl.listFollowUps)
 router.get('/followups/:followUpId', triage, ctrl.getFollowUp)
 router.post('/followups/:followUpId/accept', triage, ctrl.acceptFollowUp)
+router.post('/followups/:followUpId/decline', triage, validateBody(followUpNoteSchema), ctrl.declineFollowUp)
+// Assigning is narrower than the slug: only the organisation's administrator
+// or the platform administrator, which the service checks by role (the
+// repairs rule, see repairs.authz). The slug keeps everybody else out first.
+router.get('/followups/:followUpId/assignees', triage, ctrl.listFollowUpAssignees)
+router.post('/followups/:followUpId/assign', triage, validateBody(assignFollowUpSchema), ctrl.assignFollowUp)
 router.post('/followups/:followUpId/notes', triage, validateBody(followUpNoteSchema), ctrl.noteFollowUp)
 router.post('/followups/:followUpId/escalate', triage, validateBody(followUpNoteSchema), ctrl.escalateFollowUp)
 router.post('/followups/:followUpId/deescalate', triage, validateBody(followUpNoteSchema), ctrl.deescalateFollowUp)
