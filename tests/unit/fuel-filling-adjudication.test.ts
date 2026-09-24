@@ -76,3 +76,157 @@ describe('adjudicateFilling', () => {
     expect(out.recoveredMl).toBe(54_500)
   })
 })
+
+/**
+ * The baseline window, added 2026-09-24.
+ *
+ * The baseline used to be the median of the whole 20-minute lookbehind. When a
+ * drain had just happened, that window straddled the fall and more than half
+ * its readings were pre-drop, so the median sat at the OLD level and a refill
+ * which merely restored what had been taken measured as a negative rise.
+ *
+ * Each case below is a real row from 2026-09-23 with its real levels; see
+ * docs/fuel-theft-alerting-gaps.md §4.2.
+ */
+describe('adjudicateFilling — the baseline is the tank before the pump, not 20 min ago', () => {
+  const FILLED_AT = new Date('2026-09-23T10:22:00Z')
+  const RIPE      = new Date('2026-09-23T12:00:00Z')
+
+  /**
+   * A tank that sat at `high`, was drained to `low` partway through the
+   * lookbehind, then refilled to `settled`. One reading a minute.
+   */
+  const drainThenFill = (high: number, low: number, settled: number): LevelSample[] => {
+    const at = (minutesBefore: number) =>
+      new Date(FILLED_AT.getTime() - minutesBefore * 60_000)
+    const out: LevelSample[] = []
+    // −20 → −9 min: the tank as it was before anything happened.
+    for (let m = 20; m > 8; m--) out.push({ capturedAt: at(m), fuelLevelMl: high })
+    // −8 → 0 min: drained, and sitting at the new low when the pump starts.
+    for (let m = 8; m >= 0; m--) out.push({ capturedAt: at(m), fuelLevelMl: low })
+    // the settle window, ignored, then the held new level.
+    for (let m = 1; m <= FILL_SETTLE_MINUTES; m++) out.push({ capturedAt: at(-m), fuelLevelMl: low })
+    for (let m = FILL_SETTLE_MINUTES + 1; m <= FILL_SETTLE_MINUTES + FILL_HOLD_MINUTES; m++) {
+      out.push({ capturedAt: at(-m), fuelLevelMl: settled })
+    }
+    return out
+  }
+
+  it('MTR 09 — 19.9 L into a tank that had just lost 20.7 L', () => {
+    const out = adjudicateFilling(
+      { filledAt: FILLED_AT, filledMl: 19_900 },
+      drainThenFill(60_100, 39_400, 59_300), RIPE,
+    )
+    expect(out).toMatchObject({ verdict: 'REFILL', reason: 'level-rose', confirmed: true })
+    expect(out.recoveredMl).toBe(19_900)
+  })
+
+  it('MTR 04 — 16.8 L restoring a tank drained from 60.1 to 40.7 L', () => {
+    const out = adjudicateFilling(
+      { filledAt: FILLED_AT, filledMl: 16_800 },
+      drainThenFill(60_100, 40_700, 57_800), RIPE,
+    )
+    expect(out).toMatchObject({ verdict: 'REFILL', reason: 'level-rose' })
+  })
+
+  it('FT 13 — 20.0 L, part of which the vehicle then drove away and burned', () => {
+    // Settles at 87.3 L rather than the 90.6 L peak: the truck left and was
+    // consuming. 15.9 of 20.0 L is still well clear of FILL_OBSERVED_MIN_RATIO.
+    const out = adjudicateFilling(
+      { filledAt: FILLED_AT, filledMl: 20_000 },
+      drainThenFill(91_000, 71_600, 87_300), RIPE,
+    )
+    expect(out).toMatchObject({ verdict: 'REFILL', reason: 'level-rose' })
+  })
+
+  it('CTR 14 — 25.6 L on a 385 L tank', () => {
+    const out = adjudicateFilling(
+      { filledAt: FILLED_AT, filledMl: 25_600 },
+      drainThenFill(260_900, 238_100, 263_600), RIPE,
+    )
+    expect(out).toMatchObject({ verdict: 'REFILL', reason: 'level-rose' })
+  })
+
+  it('still calls undulation undulation — a tank no fuller after the claim', () => {
+    // The guard that matters: shortening the baseline window must not turn the
+    // up-swing of an oscillating probe into a corroborated delivery. Here the
+    // tank ends where it started, so there is no rise to find however the
+    // baseline is measured.
+    const out = adjudicateFilling(
+      { filledAt: FILLED_AT, filledMl: 44_800 },
+      drainThenFill(91_700, 91_700, 91_400), RIPE,
+    )
+    expect(out).toMatchObject({ verdict: 'REDISTRIBUTION', reason: 'no-rise-observed' })
+  })
+
+  it('falls back to the whole window when a sparse reporter has too few readings', () => {
+    // One reading every 8 minutes, all at the same level: capping leaves fewer
+    // than MIN_SAMPLES readings to take a median over, so the whole window
+    // stands rather than a baseline measured off one or two points.
+    const at = (m: number) => new Date(FILLED_AT.getTime() - m * 60_000)
+    const sparse: LevelSample[] = [
+      { capturedAt: at(24), fuelLevelMl: 30_000 },
+      { capturedAt: at(16), fuelLevelMl: 30_000 },
+      { capturedAt: at(8),  fuelLevelMl: 30_000 },
+      { capturedAt: at(-25), fuelLevelMl: 80_000 },
+      { capturedAt: at(-35), fuelLevelMl: 80_000 },
+      { capturedAt: at(-45), fuelLevelMl: 80_000 },
+    ]
+    const out = adjudicateFilling({ filledAt: FILLED_AT, filledMl: 50_000 }, sparse, RIPE)
+    expect(out).toMatchObject({ verdict: 'REFILL', reason: 'level-rose' })
+  })
+})
+
+/**
+ * The trust gate on the baseline, added 2026-09-24 alongside it.
+ *
+ * Capping the baseline at the pre-fill level flips 66 rows to REFILL across 12
+ * days, and 54 of those sit on probes the trust gate distrusts — where the
+ * "level before the fill" is just the trough of a swing. Those units keep the
+ * old wide-window behaviour, so the up-swings this module exists to catch are
+ * not re-admitted as deliveries.
+ */
+describe('adjudicateFilling — the capped baseline applies only to a trusted probe', () => {
+  const FILLED_AT = new Date('2026-09-23T10:22:00Z')
+  const RIPE      = new Date('2026-09-23T12:00:00Z')
+
+  /** A tank at `high`, dropped to `low`, then reading `settled` afterwards. */
+  const drainThenFill = (high: number, low: number, settled: number): LevelSample[] => {
+    const at = (m: number) => new Date(FILLED_AT.getTime() - m * 60_000)
+    const out: LevelSample[] = []
+    for (let m = 20; m > 8; m--) out.push({ capturedAt: at(m), fuelLevelMl: high })
+    for (let m = 8; m >= 0; m--) out.push({ capturedAt: at(m), fuelLevelMl: low })
+    for (let m = 1; m <= FILL_SETTLE_MINUTES; m++) out.push({ capturedAt: at(-m), fuelLevelMl: low })
+    for (let m = FILL_SETTLE_MINUTES + 1; m <= FILL_SETTLE_MINUTES + FILL_HOLD_MINUTES; m++) {
+      out.push({ capturedAt: at(-m), fuelLevelMl: settled })
+    }
+    return out
+  }
+
+  /** Distrusted: >= MIN_SWING_WINDOWS swinging AND >= SWING_SHARE of them. */
+  const wanders = { parkedWindows: 20, swingWindows: 6, sustainedShare: null }
+  const steady  = { parkedWindows: 20, swingWindows: 0, sustainedShare: null }
+
+  const claim = { filledAt: FILLED_AT, filledMl: 19_900 }
+  const series = drainThenFill(60_100, 39_400, 59_300)
+
+  it('corroborates the delivery when the probe holds still', () => {
+    expect(adjudicateFilling(claim, series, RIPE, steady))
+      .toMatchObject({ verdict: 'REFILL', reason: 'level-rose' })
+  })
+
+  it('keeps the old reading on a probe that swings', () => {
+    // Same series, same claim — only the instrument's reputation differs.
+    expect(adjudicateFilling(claim, series, RIPE, wanders))
+      .toMatchObject({ verdict: 'REDISTRIBUTION', reason: 'no-rise-observed' })
+  })
+
+  it('assumes a trustworthy probe when no profile is supplied', () => {
+    // Every pre-existing caller omits the argument; none of them should change
+    // behaviour because this parameter was added.
+    expect(adjudicateFilling(claim, series, RIPE))
+      .toMatchObject({ verdict: 'REFILL', reason: 'level-rose' })
+    expect(adjudicateFilling(claim, series, RIPE, null))
+      .toMatchObject({ verdict: 'REFILL', reason: 'level-rose' })
+  })
+})
