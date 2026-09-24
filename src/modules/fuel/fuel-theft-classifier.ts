@@ -986,7 +986,59 @@ export const CLASS_CEILING_LPH: ReadonlyMap<MachineClass, number> = new Map([
  * the most extreme sensor faults on the fleet would be the loudest alerts.
  * p99 of implied burn is 858 L/h, which is what it is guarding against.
  */
-export const MAX_PLAUSIBLE_REMOVAL_LPH = 300
+export const MAX_PLAUSIBLE_REMOVAL_LPH = 3_000
+
+/**
+ * ## Raised from 300 on 2026-09-24
+ *
+ * 300 L/h is **five litres a minute** — a gravity hose. A small 12 V diesel
+ * transfer pump moves 40-60 L/min, which is 2,400-3,600 L/h, so the constant
+ * asserted "no pump could draw this fast" at a rate slower than every pump on
+ * the market. MUFINDI: CTR 12's 19.8 L in 181 s on 2026-09-23 — engine measured
+ * off, probe trusted — was ruled SLOSH by it, and SLOSH is in
+ * CAUSE_NO_FUEL_LEFT, so the volume left the loss figures entirely.
+ *
+ * 3,000 L/h is the sustained ceiling of a small transfer pump. It bounds the
+ * AVERAGE over the whole fall, which is what this gate has always measured.
+ *
+ * ## It cannot be raised alone
+ *
+ * At 300 this gate was aggressive enough to absorb the single-reading dropouts
+ * that `SIPHON_MAX_STEP_FRACTION` used to catch before it was retired. Raising
+ * it without a replacement would let a probe that falls off a cliff in one
+ * reading report a SIPHON. `MAX_PLAUSIBLE_BURST_LPH` below is that replacement,
+ * and the two ship together.
+ */
+
+/**
+ * The same question asked of the steepest INTERVAL rather than the average.
+ *
+ * A fall can average a plausible 200 L/h and still contain one interval at
+ * 40,000 L/h — that interval is the instrument, and the average hides it.
+ *
+ * Higher than the sustained ceiling on purpose: a short window catches a pump
+ * at full flow, while the whole-fall average is diluted by hose-positioning and
+ * the tail. Measured over 711 drains, 14 days to 2026-09-24
+ * (`prisma/measure-step-rate.ts`), peak rate over intervals of at least
+ * `MIN_RATE_INTERVAL_SECONDS`:
+ *
+ *   ceiling L/h   refuses trusted confirmed   refuses distrusted
+ *   1,000               78 of 147                  483 of 536
+ *   2,000               32 of 147                  379 of 536
+ *   3,000               15 of 147                  296 of 536
+ *   5,000                5 of 147                  137 of 536
+ *   8,000                2 of 147                   35 of 536
+ *
+ * 5,000 costs 3.4% of confirmed drains and still refuses a quarter of the
+ * distrusted population. Below it the cost climbs fast — 3,000 takes 10% of
+ * confirmed drains — and above it the guard stops catching much.
+ *
+ * NOTE the denominator matters more than the ceiling. Without
+ * `MIN_RATE_INTERVAL_SECONDS` the two populations are indistinguishable
+ * (p90 11,710 against 11,840), because both are dominated by one-second gaps
+ * from a probe that reports on change. See that constant for the measurement.
+ */
+export const MAX_PLAUSIBLE_BURST_LPH = 5_000
 
 /**
  * Engine seconds a fall needs before an implied rate means anything.
@@ -1012,9 +1064,16 @@ export const MIN_ENGINE_SECONDS = 120
  * announcements from drains with ZERO-LENGTH windows: 12.1 L and 15.1 L with
  * `beganAt` equal to `detectedAt`. It was half of all alerts on the fleet.
  *
- * Ten minutes, because that is the floor the parked branch already uses
- * (`SIPHON_MIN_SECONDS`) for the same reason: below it, a fall is an event we
- * watched too briefly to describe. A shorter fall still gets a CAUSE — it is
+ * Ten minutes, and it stands on its own arithmetic rather than on any other
+ * constant. This used to be justified by pointing at `SIPHON_MIN_SECONDS`,
+ * which was also ten minutes — but that one answers a different question ("was
+ * this fall sustained, or a blip") and moved to 120 s on 2026-09-24 when it was
+ * measured. This one is about a QUOTIENT: the shorter the window, the more a
+ * couple of noisy readings dominate the rate, and no amount of evidence that
+ * the fall was real makes a rate computed across two pings trustworthy.
+ *
+ * So the two are deliberately no longer equal, and the parked branch's floor
+ * moving does not drag this with it. A shorter fall still gets a CAUSE — it is
  * still classified and still on the ledger — it simply cannot be announced on
  * the strength of a rate measured across a couple of readings.
  */
@@ -1052,8 +1111,51 @@ export const SIPHON_MIN_DROP_ML = 15_000
 /** Least a parked fall must sustain, in litres per wall-clock hour. */
 export const SIPHON_MIN_LPH = 5
 
-/** Shortest parked fall that can be called sustained. */
-export const SIPHON_MIN_SECONDS = 10 * 60
+/**
+ * Shortest parked fall that can be called sustained.
+ *
+ * Two minutes, lowered from ten on 2026-09-24. Ten minutes was never measured
+ * against the falls it excluded; it was a round number standing in for "long
+ * enough to be an event rather than a blip".
+ *
+ * ## What it was excluding
+ *
+ * Three of the eight siphons hand-read on 2026-09-23 died here with
+ * `below-parked-floor`, on machines with the engine MEASURED off and a probe
+ * the trust gate trusts:
+ *
+ *   MUFINDI: MTR 04  302 s   19.1 L
+ *   MUFINDI: CTR 19  419 s   21.4 L
+ *   MUFINDI: MTR 20  429 s   20.6 L
+ *
+ * A transfer pump empties 20 L in well under seven minutes; the floor was
+ * asserting otherwise. CTR 19's is the clearest — 21.5 L over six minutes,
+ * stationary, engine off, the level flat for ten minutes afterwards and no
+ * filling anywhere in the window. See docs/fuel-theft-alerting-gaps.md §2.1.
+ *
+ * ## Why 120, measured
+ *
+ * Swept across the ledger on the shipped gates
+ * (`prisma/measure-alerting-gates.ts`, 30 days, KASULU):
+ *
+ *   floor   600   480   360   300   240   180   120    90    60    30
+ *   alerts    5     5     7     8     8     8     8     8     8     8
+ *
+ * Every alert at every floor is on a probe the trust gate trusts; none is on a
+ * wandering one. The curve is flat from 300 s downward, so this is a plateau
+ * rather than a spike and the exact figure inside it changes nothing today —
+ * the 5 → 7 step is CTR 19 and MTR 20, the 7 → 8 step is MTR 04.
+ *
+ * 120 rather than 300 because nothing is gained below it and a floor is still
+ * worth keeping: at a 30 s median reporting gap, 120 s is four readings, and a
+ * "fall" spanning fewer than that is a pair of samples, not an event. It bounds
+ * a shape the ledger does not contain today and might tomorrow.
+ *
+ * NOT the same number as `MIN_RATE_WINDOW_SECONDS`, which stayed at ten minutes
+ * — that one bounds a quotient, this one bounds an event. They were equal by
+ * coincidence and are now deliberately not.
+ */
+export const SIPHON_MIN_SECONDS = 2 * 60
 
 /**
  * Above this share of the drop landing in one interval, the fall is a STEP and
@@ -1066,6 +1168,66 @@ export const SIPHON_MIN_SECONDS = 10 * 60
  * that takes minutes; it does not empty a tank between two consecutive pings.
  */
 export const SIPHON_MAX_STEP_FRACTION = 0.6
+
+/**
+ * ## RETIRED 2026-09-24 — no longer consulted by `classifyDrain`
+ *
+ * Kept as an exported constant because `fall_seconds`, `measured_drop_ml` and
+ * `step_fraction` are still persisted on every drain and the number remains
+ * useful for auditing a verdict after the fact. It no longer decides one.
+ *
+ * ### What it was calibrated on, and why that no longer describes it
+ *
+ * The defence above cites "confirmed drains p50 0.25, distrusted probes p50
+ * 0.42". That was measured across the WHOLE ledger — but `probeSwings` runs at
+ * gate 1 and returns INDETERMINATE before any question about the fall is asked,
+ * so the distrusted population never reaches this test. It was calibrated on a
+ * population it is never applied to.
+ *
+ * Re-measured over 30 days, split by what the trust gate actually lets through
+ * (`prisma/measure-step-fraction.ts`, re-runnable):
+ *
+ *   probe        population          n      p25    p50    p75    > 0.6
+ *   TRUSTED      confirmed drain    258    0.310  0.522  0.716   109 (42%)
+ *   TRUSTED      everything else     26    0.558  0.747  0.946    18 (69%)
+ *   distrusted   confirmed drain    299    0.397  0.525  0.672   116 (39%)
+ *   distrusted   everything else  1,903    0.468  0.597  0.735   943 (50%)
+ *
+ * Confirmed drains now sit at p50 **0.522**, not 0.25 — the threshold was
+ * placed below the middle of the population it exists to admit, and refuses
+ * **109 of 258** events where our own telemetry watched the level fall and stay
+ * down. Some separation does survive (1.43x), but on n=26 and at that cost it
+ * is not a trade an alerting gate can make.
+ *
+ * ### Why the quantity cannot answer the question anyway
+ *
+ * `fuel-drop-shape`'s own docstring says it: the metric "measures the shape and
+ * says nothing about the cause", and telling a sharp siphon from a probe glitch
+ * "is the recovery test's job, which has already run by the time a drop reaches
+ * here". The two modules disagreed, and drop-shape is right.
+ *
+ * The share of a fall landing in one interval says nothing without the LENGTH
+ * of that interval. These probes report on CHANGE at a 30 s median gap, so a
+ * 20 L draw over five minutes puts 60-98% of itself in one reported interval by
+ * construction. MUFINDI: MTR 09's level moved 14.18 L across a **6-second** gap
+ * — 8,500 L/h, which is not fuel flow — while MUFINDI: CTR 19's moved 14.95 L
+ * across **two minutes**, 450 L/h, an ordinary transfer pump. Identical step
+ * fractions, opposite causes.
+ *
+ * ### What must replace it, and when
+ *
+ * A RATE test over the steepest interval: litres per hour implied by the
+ * largest single step, judged against `MAX_PLAUSIBLE_REMOVAL_LPH` the way
+ * gate 3 already judges the whole-fall average. That distinguishes the two
+ * cases above; this constant cannot.
+ *
+ * Retiring this is safe **only while gate 3's ceiling stays low**. At 300 L/h
+ * that gate is aggressive enough to catch the genuine single-reading dropouts
+ * this test used to absorb. Raising the ceiling — which
+ * docs/fuel-theft-alerting-gaps.md argues for, since 300 L/h is slower than any
+ * pump — without adding the per-interval rate test would let a dead probe
+ * report a SIPHON. **The two changes are coupled and must ship together.**
+ */
 
 /** `kT` at or above which a parked fall is settling rather than being drawn off. */
 export const SETTLING_MIN_KT = 1.0
@@ -1131,6 +1293,13 @@ export function classifyDrain(
   //    past by having no implied rate to test.
   if (wallLph > MAX_PLAUSIBLE_REMOVAL_LPH || (impliedLph != null && impliedLph > MAX_PLAUSIBLE_REMOVAL_LPH)) {
     return { cause: 'SLOSH', reason: 'rate-not-physical', confidence: 0.8, impliedLph }
+  }
+
+  // ...and the same question of the steepest INTERVAL, which an average hides.
+  // Null means no interval was long enough to divide by — an absence of
+  // evidence, not a slow fall, so it must not be read as passing.
+  if (ev.peakIntervalLph != null && ev.peakIntervalLph > MAX_PLAUSIBLE_BURST_LPH) {
+    return { cause: 'SLOSH', reason: 'burst-not-physical', confidence: 0.8, impliedLph }
   }
 
   // 4. THE PRIMARY RULE — unless this event belongs to the other denominator.
@@ -1256,10 +1425,10 @@ export function classifyDrain(
         ev.decayResidual != null && ev.decayResidual <= SETTLING_MAX_RESIDUAL) {
       return { cause: 'SETTLING', reason: 'decay-shaped', confidence: 0.7, ...none }
     }
-    if (ev.stepFraction > SIPHON_MAX_STEP_FRACTION) {
-      // A step is the instrument, not a hose — see SIPHON_MAX_STEP_FRACTION.
-      return { cause: 'INDETERMINATE', reason: 'step-shaped', confidence: 0.5, ...none }
-    }
+    // (The `step-shaped` refusal stood here until 2026-09-24. It refused 42% of
+    // the confirmed drains on trusted probes — see SIPHON_MAX_STEP_FRACTION for
+    // the measurement and for what must replace it before the rate ceiling is
+    // raised.)
     return {
       cause: 'SIPHON', reason: 'parked-sustained-fall', impliedLph: null,
       confidence: lerp(wallLph, SIPHON_MIN_LPH, SIPHON_MIN_LPH * 8, 0.55, 0.9),

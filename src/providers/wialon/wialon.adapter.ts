@@ -207,8 +207,10 @@ export class WialonLiveAdapter implements TelemetryProvider {
       } else {
         this.lastProbeFault.delete(u.id)
       }
-      // Ignition (`engine operation` → io_239). Present on 222/224 units and
-      // the only way to distinguish idling from parked.
+      // Ignition — `io_239` where the unit sends it, whatever the configured
+      // sensor points at, else a sensor that decodes to a genuine digital line.
+      // Readable on 174 of 211 KASULU units as of 2026-09-24; see readIgnition.
+      // The only way to distinguish idling from parked.
       const ign = readIgnition(u.sens, u.lmsg?.p)
       if (ign !== null) this.lastIgnition.set(u.id, ign)
       // On-board recorder, where one is fitted. Held per unit like every other
@@ -310,14 +312,16 @@ function toFrame(
     accuracyM:  null,
 
     speedKmh,
-    // Real ignition when the unit reports one (`engine operation` → io_239,
-    // fitted on 222/224 units). Only where it is genuinely unknown does this
-    // fall back to the old speed heuristic — which cannot see idling at all,
-    // since it makes "engine on" and "moving" the same signal.
+    // Real ignition when the unit reports one. Only where it is genuinely
+    // unknown does this fall back to the old speed heuristic — which cannot see
+    // idling at all, since it makes "engine on" and "moving" the same signal.
     engineOn:   ignitionOn ?? ((speedKmh ?? 0) > 0),
     // Whether that was a reading or a guess. `readIgnition` returns null when
-    // the unit has no usable ignition line, and on this fleet that is most of
-    // them — 78% of fuel falls carry no measured engine state.
+    // the unit has no usable ignition line: 37 of 211 KASULU units as of
+    // 2026-09-24, down from 107 before io_239 was read ahead of the configured
+    // sensor. This column is what `engineEvidence` counts, and `engineEvidence`
+    // gates the parked branch — the only route to a SIPHON verdict — so a unit
+    // reading false here can raise no fuel-theft alert at all.
     ignitionKnown:    ignitionOn !== null,
     engineHoursMeter: engineHours,
 
