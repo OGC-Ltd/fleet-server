@@ -24,5 +24,10 @@ router.get('/probe-health', requirePermission('sensor:read'), ctrl.listProbeHeal
 router.get('/thefts', requirePermission('fuel_theft:read'), validateQuery(listTheftQuerySchema), ctrl.listThefts)
 router.get('/thefts/:theftId', requirePermission('fuel_theft:read'), ctrl.getTheft)
 router.post('/thefts', requirePermission('fuel_theft:create'), ingestLimiter, validateBody(createTheftSchema), ctrl.createTheft)
+// "Delete" on the dashboard's incident window. Hides the incident for the whole
+// organisation and keeps the row; see FuelTheft.dismissedAt. Gated on the same
+// grant as raising a case: whoever may open a fuel case may close one, and the
+// read-only security role can do neither.
+router.post('/thefts/:theftId/dismiss', requirePermission('fuel_theft:create'), ctrl.dismissTheft)
 
 export default router

@@ -20,3 +20,16 @@ const cache = createWarmCache<Snapshot>({
 export function getFleetSnapshotCached(orgId: string): Promise<Snapshot> {
   return cache.get(orgId)
 }
+
+/**
+ * Take a dismissed fuel incident off the cached snapshot in place, rather than
+ * waiting up to a sweep for the rebuild (whose query already excludes it). The
+ * next rebuild replaces this patch either way.
+ */
+export function forgetSnapshotIncident(orgId: string, incidentId: string): void {
+  const snap = cache.peek(orgId)
+  if (!snap) return
+  for (const v of snap) {
+    if (v.fuelIncident?.id === incidentId) v.fuelIncident = null
+  }
+}
