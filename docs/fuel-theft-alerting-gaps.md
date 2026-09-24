@@ -367,7 +367,7 @@ MTR 09 passes all six at 12:21:42.
 | 5 | `parked` tolerant of stray speed samples | CTR 19 12:06 | open |
 | 6 | ignition fallback for the 54 blind vehicles | FT 13, CTR 14 | **shipped** `ec85742` |
 | 7 | the disturbance rule (§5) | stops the erasures recurring | open |
-| 8 | live two-stage detector (§7) | latency: hours → minutes | open |
+| 8 | live two-stage detector (§7) | latency: hours → minutes | **shipped** `lib/fuel-drop-watch` |
 
 ### What change 4 turned out to require
 
@@ -551,6 +551,27 @@ operator should see the number before it ships, but it is not a flood.
 the same file on a clean tree: `users.test.ts` DELETE endpoints, unrelated to
 fuel. `tests/unit/user.service.test.ts` also flakes intermittently in the full
 unit run on a 5 s timeout, a different test each time, likewise pre-existing.
+
+### The live detector, shipped 2026-09-24
+
+`lib/fuel-drop-watch` raises a PROVISIONAL warning within a few minutes of a
+tank dropping, from our own poller rather than the provider's report. It never
+uses the word theft, never writes to the ledger, and the adjudicator still
+decides. Three of its six gates are simply unavailable in a poll loop — the
+probe's 30-day profile, whether a filling explains the fall, whether the level
+comes back — so this says "a tank dropped and nobody was near it" and the slow
+half says what it was.
+
+What makes a fast signal safe is the operator's own rule: fuel does not
+reposition itself inside a tank that is sitting still. The whole window must be
+stationary with the engine MEASURED off, and it abandons the moment anything
+moves or runs. That also keeps it silent on the 54 of 147 units whose ignition
+cannot be read — "we do not know if the engine was off" is not "the engine was
+off".
+
+Its floor is **10 L**, below the adjudicator's 15 L, because 176 drains over 30
+days sit in the 10-15 L band the adjudicator excludes entirely — including
+MUFINDI - EX 16's 11 L on 2026-09-24, which prompted it.
 
 ### The filling/drain ordering
 
