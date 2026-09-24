@@ -364,6 +364,19 @@ const schema = z.object({
   FUEL_SYNC_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
 
   /**
+   * The live fuel-drop watcher (lib/fuel-drop-watch).
+   *
+   * Raises a PROVISIONAL warning within a few minutes of a tank dropping on a
+   * machine that is standing still with its engine measured off — the fast path
+   * beside `fuel-adjudication`, which is authoritative but takes a mean of 8.9
+   * hours because it waits for the provider's own report.
+   *
+   * It never uses the word theft and never writes to the ledger. Turning it off
+   * loses the early warning and changes no verdict.
+   */
+  LIVE_FUEL_WATCH_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+
+  /**
    * The speed above which a unit is overspeeding, km/h.
    *
    * 80 is not a new number: `analytics.repository` has applied it to the
@@ -422,6 +435,23 @@ const schema = z.object({
   // Every 15 minutes. The job executes a Wialon report only for vehicles whose
   // own fuel readings actually moved, so a quiet cycle costs nothing.
   FUEL_SYNC_CRON: z.string().optional().default('*/15 * * * *'),
+
+  /**
+   * How often verdicts are written, as opposed to how often Wialon is asked.
+   *
+   * Every minute. The adjudication pass used to ride on FUEL_SYNC_CRON, which
+   * is quarter-hourly because executing reports for 460 vehicles is expensive —
+   * a cost this pass does not incur, since it reads rows we already hold and
+   * asks the provider nothing.
+   *
+   * Sharing that cadence put up to fifteen minutes of dead wait between a drain
+   * becoming ripe and anything looking at it, on top of SETTLE_MINUTES. A drain
+   * detected at 14:48 ripened at 15:08 and was judged at 15:15.
+   *
+   * A tick with nothing ripe is two indexed queries and exits, so the floor is
+   * cheap. See lib/queues/fuel-events.ts's runAdjudication.
+   */
+  FUEL_ADJUDICATION_CRON: z.string().optional().default('* * * * *'),
 
   // The settle pass — see lib/queues/fuel-events.ts. Each cycle re-reads a
   // rotating slice of vehicles over a window that has finished maturing and
