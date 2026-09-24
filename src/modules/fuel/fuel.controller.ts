@@ -6,7 +6,7 @@ import { UnauthorizedError } from '../../core/errors/errors.js'
 import { getProbeReport } from './probe-report.service.js'
 import { getFleetTankState } from './fuel-tank-state.service.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
-import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, AssignFollowUpDto, RecallFollowUpDto, TheftOutcomesQuery } from './fuel.schema.js'
+import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, AssignFollowUpDto, RecallFollowUpDto, TheftOutcomesQuery, ReviewTheftDto } from './fuel.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -33,6 +33,20 @@ export const listThefts: RequestHandler = async (req, res, next) => {
   try {
     const { data, cursor, hasNextPage } = await service.listThefts(p(req, 'orgId'), req.query as unknown as ListTheftQuery)
     sendSuccess(res, data, 200, { cursor, hasNextPage })
+  } catch (err) { next(err) }
+}
+
+/** Whether the caller may escalate or de-escalate an alert here. */
+export const theftReviewRights: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, { canReview: await service.canReviewTheft(p(req, 'orgId'), req.user?.id ?? null) })
+  } catch (err) { next(err) }
+}
+
+export const reviewTheft: RequestHandler = async (req, res, next) => {
+  try {
+    const { outcome, note } = req.body as ReviewTheftDto
+    sendSuccess(res, await service.reviewTheft(p(req, 'orgId'), p(req, 'theftId'), actor(req), outcome, note))
   } catch (err) { next(err) }
 }
 
