@@ -36,6 +36,7 @@ import { startPollLoop }         from './poll-loop.js'
 import type { PollLoopHandle }   from './poll-loop.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
 import { noteSpeedFrame, sweepStaleEpisodes, flushEpisodes } from './speeding-episodes.js'
+import { noteFuelFrame } from './fuel-drop-watch.js'
 import { noteFaultFrame, noteAlive } from './sensor-faults.js'
 import { deriveAlertFlags } from './derived-alerts.js'
 
@@ -248,6 +249,17 @@ class TelemetryPoller {
         driverId:    meta.driverId,
         driverName:  meta.driverName,
       })
+
+      // A tank that has dropped while the machine stood still — the fast path
+      // beside the adjudicator, which is authoritative but waits on the
+      // provider's report. Provisional and never worded as theft; see
+      // lib/fuel-drop-watch. Published rather than awaited, like the rest.
+      const drop = noteFuelFrame(frame, {
+        orgId:     meta.orgId,
+        vehicleId: meta.vehicleId,
+        plate:     meta.plate ?? null,
+      })
+      if (drop) eventBus.publish('fuel:dropped', drop)
 
       // Sensor contradictions this frame proves on its own, and the fact that a
       // frame arrived at all — which is what closes a signal_lost the sweep

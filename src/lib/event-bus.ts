@@ -12,6 +12,7 @@ import type { VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
 import type { SimEvents } from './simulation.persistence.js'
 import type { ClosedEpisode } from './speeding-episodes.js'
 import type { FaultObservation, FaultResolution } from './sensor-faults.js'
+import type { LiveFuelDrop } from './fuel-drop-watch.js'
 
 // ─── event payload types ───────────────────────────────────────────────────
 
@@ -136,6 +137,9 @@ type EventMap = {
   'speeding:closed':     ClosedEpisode
   /** A sensor fault episode to open (or extend) / to close. Published from both
    *  detectors — the poll loop and the 15-minute sweep. */
+  /** A tank that dropped while the machine stood still, seen live rather than
+   *  waited for. Provisional — see lib/fuel-drop-watch. */
+  'fuel:dropped':        LiveFuelDrop
   'sensorFault:open':    FaultObservation
   'sensorFault:close':   FaultResolution
 }
