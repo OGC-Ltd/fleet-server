@@ -436,6 +436,23 @@ const schema = z.object({
   // own fuel readings actually moved, so a quiet cycle costs nothing.
   FUEL_SYNC_CRON: z.string().optional().default('*/15 * * * *'),
 
+  /**
+   * How often verdicts are written, as opposed to how often Wialon is asked.
+   *
+   * Every minute. The adjudication pass used to ride on FUEL_SYNC_CRON, which
+   * is quarter-hourly because executing reports for 460 vehicles is expensive —
+   * a cost this pass does not incur, since it reads rows we already hold and
+   * asks the provider nothing.
+   *
+   * Sharing that cadence put up to fifteen minutes of dead wait between a drain
+   * becoming ripe and anything looking at it, on top of SETTLE_MINUTES. A drain
+   * detected at 14:48 ripened at 15:08 and was judged at 15:15.
+   *
+   * A tick with nothing ripe is two indexed queries and exits, so the floor is
+   * cheap. See lib/queues/fuel-events.ts's runAdjudication.
+   */
+  FUEL_ADJUDICATION_CRON: z.string().optional().default('* * * * *'),
+
   // The settle pass — see lib/queues/fuel-events.ts. Each cycle re-reads a
   // rotating slice of vehicles over a window that has finished maturing and
   // makes the ledger EQUAL the provider's answer for it, deleting events
