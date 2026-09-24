@@ -986,7 +986,59 @@ export const CLASS_CEILING_LPH: ReadonlyMap<MachineClass, number> = new Map([
  * the most extreme sensor faults on the fleet would be the loudest alerts.
  * p99 of implied burn is 858 L/h, which is what it is guarding against.
  */
-export const MAX_PLAUSIBLE_REMOVAL_LPH = 300
+export const MAX_PLAUSIBLE_REMOVAL_LPH = 3_000
+
+/**
+ * ## Raised from 300 on 2026-09-24
+ *
+ * 300 L/h is **five litres a minute** — a gravity hose. A small 12 V diesel
+ * transfer pump moves 40-60 L/min, which is 2,400-3,600 L/h, so the constant
+ * asserted "no pump could draw this fast" at a rate slower than every pump on
+ * the market. MUFINDI: CTR 12's 19.8 L in 181 s on 2026-09-23 — engine measured
+ * off, probe trusted — was ruled SLOSH by it, and SLOSH is in
+ * CAUSE_NO_FUEL_LEFT, so the volume left the loss figures entirely.
+ *
+ * 3,000 L/h is the sustained ceiling of a small transfer pump. It bounds the
+ * AVERAGE over the whole fall, which is what this gate has always measured.
+ *
+ * ## It cannot be raised alone
+ *
+ * At 300 this gate was aggressive enough to absorb the single-reading dropouts
+ * that `SIPHON_MAX_STEP_FRACTION` used to catch before it was retired. Raising
+ * it without a replacement would let a probe that falls off a cliff in one
+ * reading report a SIPHON. `MAX_PLAUSIBLE_BURST_LPH` below is that replacement,
+ * and the two ship together.
+ */
+
+/**
+ * The same question asked of the steepest INTERVAL rather than the average.
+ *
+ * A fall can average a plausible 200 L/h and still contain one interval at
+ * 40,000 L/h — that interval is the instrument, and the average hides it.
+ *
+ * Higher than the sustained ceiling on purpose: a short window catches a pump
+ * at full flow, while the whole-fall average is diluted by hose-positioning and
+ * the tail. Measured over 711 drains, 14 days to 2026-09-24
+ * (`prisma/measure-step-rate.ts`), peak rate over intervals of at least
+ * `MIN_RATE_INTERVAL_SECONDS`:
+ *
+ *   ceiling L/h   refuses trusted confirmed   refuses distrusted
+ *   1,000               78 of 147                  483 of 536
+ *   2,000               32 of 147                  379 of 536
+ *   3,000               15 of 147                  296 of 536
+ *   5,000                5 of 147                  137 of 536
+ *   8,000                2 of 147                   35 of 536
+ *
+ * 5,000 costs 3.4% of confirmed drains and still refuses a quarter of the
+ * distrusted population. Below it the cost climbs fast — 3,000 takes 10% of
+ * confirmed drains — and above it the guard stops catching much.
+ *
+ * NOTE the denominator matters more than the ceiling. Without
+ * `MIN_RATE_INTERVAL_SECONDS` the two populations are indistinguishable
+ * (p90 11,710 against 11,840), because both are dominated by one-second gaps
+ * from a probe that reports on change. See that constant for the measurement.
+ */
+export const MAX_PLAUSIBLE_BURST_LPH = 5_000
 
 /**
  * Engine seconds a fall needs before an implied rate means anything.
@@ -1241,6 +1293,13 @@ export function classifyDrain(
   //    past by having no implied rate to test.
   if (wallLph > MAX_PLAUSIBLE_REMOVAL_LPH || (impliedLph != null && impliedLph > MAX_PLAUSIBLE_REMOVAL_LPH)) {
     return { cause: 'SLOSH', reason: 'rate-not-physical', confidence: 0.8, impliedLph }
+  }
+
+  // ...and the same question of the steepest INTERVAL, which an average hides.
+  // Null means no interval was long enough to divide by — an absence of
+  // evidence, not a slow fall, so it must not be read as passing.
+  if (ev.peakIntervalLph != null && ev.peakIntervalLph > MAX_PLAUSIBLE_BURST_LPH) {
+    return { cause: 'SLOSH', reason: 'burst-not-physical', confidence: 0.8, impliedLph }
   }
 
   // 4. THE PRIMARY RULE — unless this event belongs to the other denominator.

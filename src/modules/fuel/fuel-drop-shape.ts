@@ -299,6 +299,60 @@ export function fitDecay(samples: readonly ShapeSample[]): DecayFit | null {
  *
  * Returns 0 for a series that did not fall.
  */
+/**
+ * Shortest interval whose rate is worth computing.
+ *
+ * A rate is a quotient and these probes report on CHANGE, so consecutive
+ * readings can arrive one second apart. Dividing a real 15 L fall by a
+ * one-second gap yields 55,000 L/h, which measures the reporting cadence and
+ * nothing else.
+ *
+ * Measured over 711 drains, 14 days to 2026-09-24
+ * (`prisma/measure-step-rate.ts`), peak single-interval rate by population:
+ *
+ *   minimum gap        trusted confirmed drain        distrusted probe
+ *   none (>= 1 s)      p50  2,051   p90 11,710        p50 5,030   p90 11,840
+ *   >= 30 s            p50  1,158   p90  2,835        p50 3,389   p90  6,986
+ *   >= 60 s            p50    180   p90    871        p50   513   p90  2,023
+ *
+ * With no floor the two populations are indistinguishable at p90 — 11,710
+ * against 11,840 — because both are dominated by one- and two-second gaps. At
+ * 30 s they separate by about 2.5x and stay separated through the tail. At 60 s
+ * the separation holds but only 210 of 711 drains have any qualifying interval
+ * at all, so the test would be inert on 70% of the ledger.
+ *
+ * Thirty seconds is the median reporting gap on this fleet, which is why it is
+ * both the smallest usable denominator and the largest one that keeps coverage.
+ */
+export const MIN_RATE_INTERVAL_SECONDS = 30
+
+/**
+ * The steepest sustained rate inside a fall, litres per hour.
+ *
+ * Only intervals of at least `MIN_RATE_INTERVAL_SECONDS` are considered, and
+ * intervals longer than five minutes are skipped as well: a long gap is missing
+ * data, and dividing a real drop by a reporting outage invents a slow rate.
+ *
+ * Reads the SMOOTHED series, like `stepFraction`, so a single spurious reading
+ * cannot set it.
+ *
+ * Returns null when no interval in the fall qualifies — which is a different
+ * statement from "the fall was slow", and callers must not read it as one.
+ */
+export function peakIntervalLph(samples: readonly ShapeSample[]): number | null {
+  const ordered = [...samples].sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime())
+  let peak: number | null = null
+  for (let i = 0; i < ordered.length - 1; i++) {
+    const gapS = (ordered[i + 1]!.capturedAt.getTime() - ordered[i]!.capturedAt.getTime()) / 1000
+    if (gapS < MIN_RATE_INTERVAL_SECONDS || gapS > 300) continue
+    const dropMl = ordered[i]!.fuelLevelMl - ordered[i + 1]!.fuelLevelMl
+    if (dropMl <= 0) continue
+    const lph = (dropMl / 1000) / (gapS / 3600)
+    if (peak == null || lph > peak) peak = lph
+  }
+  return peak
+}
+
 export function stepFraction(samples: readonly ShapeSample[]): number {
   const ordered = [...samples].sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime())
   if (ordered.length < 2) return 0
@@ -369,6 +423,15 @@ export interface DropEvidence {
   moved:          boolean
   /** Largest single-interval drop ÷ total drop. */
   stepFraction:   number
+  /**
+   * Litres per hour implied by the steepest interval of at least
+   * `MIN_RATE_INTERVAL_SECONDS` — the physical companion to `stepFraction`,
+   * which measures the same steepest step but discards how long it took.
+   *
+   * Null when no interval in the fall is long enough to divide by, which on
+   * this fleet is about a third of drains.
+   */
+  peakIntervalLph: number | null
   /** Decay constant × window length, or null where it could not be fitted. */
   kT:             number | null
   /** Decay residual as a share of the drop. */
@@ -508,6 +571,7 @@ export function measureFall(
       engineEvidence: engineEvidenceRatio(fall, fallStart.capturedAt, lowest.capturedAt),
       moved:          fall.some(s => (s.speedKmh ?? 0) > 0),
       stepFraction:   stepFraction(fall),
+      peakIntervalLph: peakIntervalLph(fall),
       kT:             decay?.kT ?? null,
       decayResidual:  normalisedResidual(decay, dropMl),
       samples:        fall.length,
