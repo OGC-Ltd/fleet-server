@@ -3,8 +3,6 @@
 -- Every alert also carries its review outcome, for analytics. See
 -- FuelTheft.reviewStatus.
 
-Loaded Prisma config from prisma.config.ts.
-
 -- CreateEnum
 CREATE TYPE "FuelAlertReview" AS ENUM ('DISMISSED', 'UNDER_REVIEW', 'CONFIRMED_THEFT', 'NOT_THEFT');
 
