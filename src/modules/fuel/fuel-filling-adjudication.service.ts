@@ -14,6 +14,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
+import { getProbeProfile } from './fuel-adjudication.service.js'
 import {
   adjudicateFilling, FILL_HOLD_MINUTES, FILL_LOOKBEHIND_MINUTES, FILL_SETTLE_MINUTES,
   type FillingClaim,
@@ -78,7 +79,13 @@ export async function judgeFilling(
     capturedAt: r.capturedAt, fuelLevelMl: r.fuelLevelMl!, engineOn: r.engineOn,
   }))
 
-  return adjudicateFilling(filling, samples, now)
+  // The same profile the drain side already consults, for the same reason: on a
+  // probe that swings there is no meaningful pre-fill level to measure a
+  // delivery against. It decides the baseline window only — see
+  // FILL_BASELINE_TOLERANCE_ML — and never the verdict.
+  const profile = await getProbeProfile(filling.vehicleId, now)
+
+  return adjudicateFilling(filling, samples, now, profile)
 }
 
 export async function adjudicateFillings(opts: FillingAdjudicateOptions): Promise<FillingOutcome> {
