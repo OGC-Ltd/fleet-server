@@ -206,6 +206,10 @@ export function makeTheft(overrides: Partial<FuelTheft> = {}): FuelTheft {
     fallDistanceKm: null,
     dismissedAt: null,
     dismissedById: null,
+    reviewStatus: null,
+    reviewedAt: null,
+    reviewedById: null,
+    reviewNote: null,
     ...overrides,
   }
 }

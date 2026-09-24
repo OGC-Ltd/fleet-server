@@ -242,6 +242,14 @@ export function emitDashboardFuelIncidentDismissed(orgId: string, data: { vehicl
   broadcastDashboard(orgId, 'fuel_incident_dismissed', data)
 }
 
+/**
+ * A fuel follow-up opened or changed hands or status (see FuelTheftFollowUp).
+ * Clients re-read the follow-up list; the payload only says which one moved.
+ */
+export function emitDashboardFuelFollowUp(orgId: string, data: { vehicleId: string; followUpId: string; status: string }) {
+  broadcastDashboard(orgId, 'fuel_followup', data)
+}
+
 /** Alert notification — powers the alert feed and banner toasts. */
 export function emitDashboardAlert(orgId: string, data: unknown) {
   broadcastDashboard(orgId, 'alert', data)
