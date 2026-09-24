@@ -84,6 +84,12 @@ export const PERMISSION_CATALOGUE = {
   'fuel_filling:create':   'Record a fuel refill',
   'fuel_theft:read':       'View fuel loss investigations',
   'fuel_theft:create':     'Raise a fuel loss case',
+  // Accept a deleted alert's follow-up and escalate or de-escalate it. NOT in
+  // ORG_EVERYTHING: the operator named the case holders one by one (system
+  // administrator, manager, fleet manager, director, head of security,
+  // technician), and Head of Section is not among them. Granted to existing
+  // roles by migration 20260925090000_fuel_theft_followups.
+  'fuel_theft:triage':     'Take on and decide fuel alert follow-ups',
 
   // Repair reporting. A technician walks the yard with a list of faulty
   // probes, works through it, and files ONE report covering every unit they
@@ -223,6 +229,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'platform:read_all',
       ...ORG_EVERYTHING.filter((p) => !p.startsWith('user:') && !p.startsWith('role:')),
       'organisation:read',
+      'fuel_theft:triage',
     ],
   },
 
@@ -252,6 +259,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       // Lifted out of ORG_EVERYTHING — see the note there. This role and the
       // platform administrator are the only two that hand out a triage.
       'repair:assign',
+      'fuel_theft:triage',
       'user:create', 'user:update', 'user:delete', 'user:assign_role',
       'ingest_key:read', 'ingest_key:create', 'ingest_key:update', 'ingest_key:delete',
     ],
@@ -266,7 +274,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
   {
     slug: 'manager', name: 'Manager', platform: false, vehicleScopable: false,
     description: 'Everything within this organisation.',
-    permissions: [...ORG_EVERYTHING],
+    permissions: [...ORG_EVERYTHING, 'fuel_theft:triage'],
   },
 
   // ── Fleet operations ─────────────────────────────────────────────────────
@@ -275,7 +283,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     description: 'The whole fleet: vehicles, trips, routes, dispatch and fuel. Not its people.',
     // Manager minus the people: an organisation's fleet lead runs the units and
     // the work, and has no business reading or editing the user list.
-    permissions: ORG_EVERYTHING.filter((pm) => !pm.startsWith('user:') && !pm.startsWith('role:')),
+    permissions: [...ORG_EVERYTHING.filter((pm) => !pm.startsWith('user:') && !pm.startsWith('role:')), 'fuel_theft:triage'],
   },
 
   {
@@ -314,7 +322,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       ...TRACKING, ...MAP_TOOLS, 'map:playback',
       'dashboard:read', 'trip:read', 'sensor:read',
       'geofence:read', 'geofence:create', 'geofence:update',
-      'fuel_theft:read', 'fuel_theft:create', 'fuel_filling:read',
+      'fuel_theft:read', 'fuel_theft:create', 'fuel_theft:triage', 'fuel_filling:read',
       'driver:read',
       'report:read', 'report:export', 'report:operations',
     ],
@@ -443,6 +451,10 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       ...TRACKING.filter((pm) => pm !== 'map:read'),
       'sensor:read',
       'repair:read', 'repair:create', 'repair:resolve',
+      // Fuel alert follow-ups: named by the operator as a case holder. See
+      // fuel-followup.service. The follow-up carries its own copy of the
+      // incident, so this opens no fuel screen beyond the case itself.
+      'fuel_theft:triage',
     ],
   },
 
