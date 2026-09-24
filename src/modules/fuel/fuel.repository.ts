@@ -81,6 +81,58 @@ export async function findTheftById(orgId: string, id: string) {
 }
 
 /**
+ * An administrator's decision on a LIVE alert: escalated (a confirmed theft) or
+ * de-escalated (not a theft). Written to the same places a follow-up's outcome
+ * is (FuelTheft.reviewStatus for analytics, a FuelEventLabel for the detector)
+ * so the two routes to a decision are one record.
+ *
+ * Not for a deleted alert: that one has a follow-up, and its outcome belongs
+ * to whoever holds it. Returns 'dismissed' then, null when the alert is not in
+ * this organisation. Deciding again replaces the earlier decision: that is
+ * what escalating a de-escalated alert (or the reverse) is.
+ */
+export async function reviewTheft(args: {
+  orgId: string
+  id: string
+  userId: string
+  reviewer: string
+  outcome: 'ESCALATED' | 'DEESCALATED'
+  note: string
+}) {
+  const { orgId, id, userId, reviewer, outcome, note } = args
+  const row = await prisma.fuelTheft.findFirst({
+    where: { id, vehicle: { organisationId: orgId } },
+    select: { id: true, dismissedAt: true },
+  })
+  if (!row) return null
+  if (row.dismissedAt) return 'dismissed' as const
+  return prisma.$transaction(async (tx) => {
+    const now = new Date()
+    const reviewStatus = outcome === 'ESCALATED' ? 'CONFIRMED_THEFT' as const : 'NOT_THEFT' as const
+    // Conditional on still being live, so a deletion that lands first wins.
+    const { count } = await tx.fuelTheft.updateMany({
+      where: { id, dismissedAt: null },
+      data: { reviewStatus, reviewedAt: now, reviewedById: userId, reviewNote: note },
+    })
+    if (count === 0) return 'dismissed' as const
+    const label = outcome === 'ESCALATED' ? 'THEFT' : 'NOT_THEFT'
+    await tx.fuelEventLabel.upsert({
+      where: { eventId_eventType_labelledBy: { eventId: id, eventType: 'THEFT', labelledBy: reviewer } },
+      create: { eventId: id, eventType: 'THEFT', label, labelledBy: reviewer, note },
+      update: { label, note, labelledAt: now },
+    })
+    return tx.fuelTheft.findUniqueOrThrow({
+      where: { id },
+      select: {
+        id: true, vehicleId: true, stolenMl: true, reviewStatus: true, reviewedAt: true, reviewNote: true,
+        reviewedBy: { select: { fullName: true } },
+        vehicle: { select: { registrationPlate: true } },
+      },
+    })
+  })
+}
+
+/**
  * Mark one drain dismissed from the dashboard. Only a row that is not already
  * dismissed is touched, so the first person to dismiss it keeps the name and
  * the time against it. Returns the row either way (null if not in this org).

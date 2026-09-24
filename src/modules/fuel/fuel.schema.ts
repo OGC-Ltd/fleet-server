@@ -37,6 +37,14 @@ export const followUpNoteSchema = z.object({
 })
 export type FollowUpNoteDto = z.infer<typeof followUpNoteSchema>
 
+/** An administrator deciding a live alert from its window, without deleting it
+ *  first. The reason is required for the same reason as followUpNoteSchema. */
+export const reviewTheftSchema = z.object({
+  outcome: z.enum(['ESCALATED', 'DEESCALATED']),
+  note: z.string().trim().min(3).max(2000),
+})
+export type ReviewTheftDto = z.infer<typeof reviewTheftSchema>
+
 /** An administrator handing a follow-up to somebody; the note is optional. */
 export const assignFollowUpSchema = z.object({
   assigneeId: z.string().trim().min(1),

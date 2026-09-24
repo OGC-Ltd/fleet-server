@@ -1934,8 +1934,9 @@ model FuelTheft {
   /// detected.
   ///
   /// Distinct from `verdict`/`drainCause`, which are the DETECTOR's opinion
-  /// and are rewritten by the adjudication sweep. This one is a person's, and
-  /// nothing but the follow-up writes it.
+  /// and are rewritten by the adjudication sweep. This one is a person's:
+  /// written by the follow-up, and by an administrator escalating or
+  /// de-escalating a live alert from its window (fuel.service reviewTheft).
   reviewStatus FuelAlertReview? @map("review_status")
   /// When `reviewStatus` last changed, and who changed it.
   reviewedAt   DateTime?        @map("reviewed_at")

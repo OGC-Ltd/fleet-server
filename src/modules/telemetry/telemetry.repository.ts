@@ -865,14 +865,19 @@ export async function findFleetSnapshot(orgId: string) {
     verdict: string; verdict_reason: string | null; verdict_confidence: number | null
     recovered_ml: number | null
     initial_speed_kmh: number | null; final_speed_kmh: number | null
+    review_status: string | null; reviewed_at: Date | null; review_note: string | null
+    reviewed_by: string | null
   }>>`
     SELECT DISTINCT ON (t.vehicle_id)
            t.vehicle_id, t.id, t.drain_cause::text AS drain_cause, t.cause_reason,
            t.cause_confidence, t.stolen_ml, t.began_at, t.detected_at,
            t.initial_location, t.final_fuel_level_ml, t.initial_fuel_level_ml,
            t.verdict::text AS verdict, t.verdict_reason, t.verdict_confidence,
-           t.recovered_ml, t.initial_speed_kmh, t.final_speed_kmh
+           t.recovered_ml, t.initial_speed_kmh, t.final_speed_kmh,
+           t.review_status::text AS review_status, t.reviewed_at, t.review_note,
+           u.full_name AS reviewed_by
       FROM fuel_thefts t
+      LEFT JOIN users u ON u.id = t.reviewed_by_id
      WHERE t.vehicle_id = ANY(${vehicleIds}::text[])
        AND (t.drain_cause::text = ANY(${ANNOUNCED_CAUSES as unknown as string[]}::text[])
          OR t.cause_reason      = ANY(${ANNOUNCED_REASON_SLUGS as unknown as string[]}::text[]))
@@ -1053,6 +1058,16 @@ export async function findFleetSnapshot(orgId: string) {
                   || incident.verdict_reason === 'level-recovered',
           speedAtStart: incident.initial_speed_kmh,
           speedAtEnd:   incident.final_speed_kmh,
+          // An administrator's escalation or de-escalation, made from the
+          // incident window (fuel.service reviewTheft). Null until someone
+          // decides. A live alert is never DISMISSED/UNDER_REVIEW: those
+          // belong to deleted alerts, which this query excludes.
+          review: incident.review_status == null ? null : {
+            status: incident.review_status,
+            at:     incident.reviewed_at?.toISOString() ?? null,
+            by:     incident.reviewed_by,
+            note:   incident.review_note,
+          },
         },
       }
     })
