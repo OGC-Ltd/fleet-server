@@ -35,13 +35,59 @@ describe('readIgnition — only a genuine digital line is trusted', () => {
     expect(readIgnition(ign('pwr_ext'), { pwr_ext: 12.6 })).toBeNull()
   })
 
-  it('returns null when the parameter is absent (flg:1 is not in `p`)', () => {
-    expect(readIgnition(ign('flg:1'), { io_239: 1 })).toBeNull()
+  it('returns null when the sensor parameter is absent and so is io_239', () => {
+    expect(readIgnition(ign('flg:1'), { io_9: 131 })).toBeNull()
   })
 
-  it('returns null when there is no ignition sensor at all', () => {
-    expect(readIgnition({}, { io_239: 1 })).toBeNull()
-    expect(readIgnition(undefined, { io_239: 1 })).toBeNull()
+  it('returns null when there is no ignition sensor and no io_239', () => {
+    expect(readIgnition({}, { io_9: 131 })).toBeNull()
+    expect(readIgnition(undefined, { pwr_ext: 27.99 })).toBeNull()
+  })
+})
+
+/**
+ * The precedence change, 2026-09-24.
+ *
+ * These four assertions replace ones that expected `null` whenever the
+ * configured sensor could not be decoded. That contract left 70 of 211 KASULU
+ * units permanently unreadable — and because `engineEvidence` gates the parked
+ * branch, which is the only route to a SIPHON verdict, each was structurally
+ * incapable of raising a fuel-theft alert. See
+ * `prisma/measure-ignition-fallback.ts` and docs/fuel-theft-alerting-gaps.md.
+ */
+describe('readIgnition — io_239 is read ahead of the configured sensor', () => {
+  it('recovers a unit whose IGN sensor is bound to a parameter it cannot decode', () => {
+    // MUFINDI - FT 13: "1.IGN" -> io_9, while io_239 arrives in every message.
+    expect(readIgnition(ign('io_9'), { io_9: 131, io_239: 1 })).toBe(true)
+    expect(readIgnition(ign('pwr_ext'), { pwr_ext: 27.99, io_239: 0 })).toBe(false)
+    // …and with no sensor configured at all.
+    expect(readIgnition({}, { io_239: 1 })).toBe(true)
+    expect(readIgnition(undefined, { io_239: 1 })).toBe(true)
+  })
+
+  it('prefers io_239 over a sensor reading a false OFF', () => {
+    // The five live disagreements all take this shape: the sensor says off
+    // while io_239 says on. A false "off" is what makes `parked` true, and
+    // `parked` is what licenses a theft verdict — so the genuine line wins.
+    expect(readIgnition(ign('io_1'), { io_1: 0, io_239: 1 })).toBe(true)
+    // MUFINDI: MTR 14 — io_9 is not boolean, but it does take the value 0, and
+    // 0 passes the binary test, so the old order reported "off" from a
+    // parameter already judged untrustworthy.
+    expect(readIgnition(ign('io_9'), { io_9: 0, io_239: 1 })).toBe(true)
+  })
+
+  it('leaves the 99 units where both sources agree untouched', () => {
+    expect(readIgnition(ign('io_239'), { io_239: 1 })).toBe(true)
+    expect(readIgnition(ign('io_1'), { io_1: 1, io_239: 1 })).toBe(true)
+    expect(readIgnition(ign('io_1'), { io_1: 0, io_239: 0 })).toBe(false)
+  })
+
+  it('does not invent a reading from a non-binary io_239', () => {
+    // Measured across all 211 units io_239 carries only 0 and 1, but the guard
+    // must not depend on that holding for a device nobody has looked at yet.
+    expect(readIgnition(ign('io_1'), { io_1: 1, io_239: 27.99 })).toBe(true)
+    expect(readIgnition({}, { io_239: 174 })).toBeNull()
+    expect(readIgnition({}, { io_239: '' })).toBeNull()
   })
 
   it('still coerces string-valued digital lines', () => {
