@@ -277,12 +277,33 @@ describe('the rules that must not be relaxed', () => {
     expect(isAnnounced('SLOSH')).toBe(false)
   })
 
-  it('a parked STEP is the instrument, not a hose', () => {
-    // The inverse of the original hypothesis. Confirmed drains are the least
-    // steppy population on the ledger; the distrusted-probe population is the
-    // steppiest. A siphon takes minutes and does not empty a tank between two
-    // consecutive pings.
-    expect(causeOf(parked(40, 60, { stepFraction: 0.95 }))).toBe('INDETERMINATE')
+  it('a parked step is no longer refused on its shape alone', () => {
+    // RETIRED 2026-09-24, and this assertion is inverted rather than deleted so
+    // the change is visible to whoever reads the suite next.
+    //
+    // The rule was calibrated on "confirmed drains p50 0.25, distrusted probes
+    // p50 0.42" — measured across the whole ledger, while `probeSwings` returns
+    // INDETERMINATE at gate 1 and keeps the distrusted population away from
+    // this test entirely. Re-measured over the rows it actually sees, confirmed
+    // drains sit at p50 0.522 and the 0.6 threshold refused 109 of 258 of them.
+    //
+    // The quantity cannot answer the question either way: it discards the
+    // LENGTH of the interval it measures, and these probes report on change at
+    // a 30 s median gap. MTR 09 moved 14.18 L across 6 seconds (8,500 L/h, not
+    // fuel); CTR 19 moved 14.95 L across two minutes (450 L/h, a pump).
+    // Identical step fractions, opposite causes. See
+    // prisma/measure-step-fraction.ts and SIPHON_MAX_STEP_FRACTION.
+    expect(causeOf(parked(40, 60, { stepFraction: 0.95 }))).toBe('SIPHON')
+  })
+
+  it('the extreme fall is still caught — by rate, which is the physical test', () => {
+    // What retiring the step test leans on. A drop steep enough to be a dead
+    // probe rather than a pump is refused by gate 3 on its RATE, and that guard
+    // is unchanged. This is why the two must move together: raising
+    // MAX_PLAUSIBLE_REMOVAL_LPH without adding a per-interval rate test would
+    // leave nothing catching a probe that drops out in one reading.
+    const absurd = running(MAX_PLAUSIBLE_REMOVAL_LPH * 2)
+    expect(causeOf(absurd)).toBe('SLOSH')
   })
 
   it('ONLY a siphon may be described with the word theft', () => {
