@@ -44,6 +44,12 @@ export const assignFollowUpSchema = z.object({
 })
 export type AssignFollowUpDto = z.infer<typeof assignFollowUpSchema>
 
+/** An administrator taking a follow-up back; the reason is optional. */
+export const recallFollowUpSchema = z.object({
+  note: z.string().trim().max(2000).optional(),
+})
+export type RecallFollowUpDto = z.infer<typeof recallFollowUpSchema>
+
 export const createTheftSchema = z.object({
   vehicleId: z.string().cuid(),
   driverId: z.string().cuid().optional(),
