@@ -358,16 +358,45 @@ MTR 09 passes all six at 12:21:42.
 
 ## 8. Recommended order
 
-| # | change | unblocks |
-|---|---|---|
-| 1 | retire `SIPHON_MAX_STEP_FRACTION` as a hose/instrument test | **all eight** |
-| 2 | `SIPHON_MIN_SECONDS` 600 → 120 | MTR 04, CTR 19 16:53, MTR 20 |
-| 3 | filling baseline from last stable pre-rise level | MTR 09, CTR 14, FT 13, MTR 04 |
-| 4 | `MAX_PLAUSIBLE_REMOVAL_LPH` 300 → ≥3,000 | CTR 12 |
-| 5 | `parked` tolerant of stray speed samples | CTR 19 12:06 |
-| 6 | ignition fallback for the 54 blind vehicles | FT 13, CTR 14 |
-| 7 | the disturbance rule (§5) | stops the erasures recurring |
-| 8 | live two-stage detector (§7) | latency: hours → minutes |
+| # | change | unblocks | status |
+|---|---|---|---|
+| 1 | retire `SIPHON_MAX_STEP_FRACTION` as a hose/instrument test | **all eight** | **shipped** `0defb99` |
+| 2 | `SIPHON_MIN_SECONDS` 600 → 120 | MTR 04, CTR 19 16:53, MTR 20 | **shipped** `914613f` |
+| 3 | filling baseline from the pre-fill level, on trusted probes | MTR 09, CTR 14, FT 13, MTR 04 | **shipped** `8e17018` |
+| 4 | `MAX_PLAUSIBLE_REMOVAL_LPH` 300 → 3,000, **with** a per-interval burst test | CTR 12 | **shipped** |
+| 5 | `parked` tolerant of stray speed samples | CTR 19 12:06 | open |
+| 6 | ignition fallback for the 54 blind vehicles | FT 13, CTR 14 | **shipped** `ec85742` |
+| 7 | the disturbance rule (§5) | stops the erasures recurring | open |
+| 8 | live two-stage detector (§7) | latency: hours → minutes | open |
+
+### What change 4 turned out to require
+
+Raising the ceiling alone was not safe, and the replacement it needed was not
+the obvious one. The retirement note on `SIPHON_MAX_STEP_FRACTION` proposed a
+per-interval rate test; measured over 711 drains, that test **does not work as
+stated**. With no minimum interval the confirmed and distrusted populations are
+indistinguishable — p90 11,710 against 11,840 — because both are dominated by
+one- and two-second gaps from probes that report on change. Dividing a real
+15 L fall by a one-second gap yields 55,000 L/h, which measures the reporting
+cadence and nothing else.
+
+It works only with a denominator floor. At a 30 s minimum the populations
+separate ~2.5x and hold through the tail; at 60 s the separation survives but
+only 210 of 711 drains have any qualifying interval, so the test goes inert on
+70% of the ledger. Thirty seconds is the fleet's median reporting gap, and it is
+both the smallest usable denominator and the largest that keeps coverage.
+
+`MAX_PLAUSIBLE_BURST_LPH = 5,000` costs 3.4% of confirmed drains (5 of 147) and
+still refuses a quarter of the distrusted population. Below it the cost climbs
+fast — 3,000 takes 10% of confirmed drains — and above it the guard stops
+catching much.
+
+One consequence lands outside the parked branch and is worth stating: at
+300 L/h, four times a generator's band (380 L/h) already exceeded the ceiling,
+so the burn-multiple rule was **dead for that class** and only the operator-set
+`CLASS_CEILING_LPH` kept it reachable. At 3,000 the comparison happens, and a
+generator burning several hundred litres an hour becomes a finding rather than
+a discarded reading.
 
 ---
 

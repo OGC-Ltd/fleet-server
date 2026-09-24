@@ -201,6 +201,7 @@ export function makeTheft(overrides: Partial<FuelTheft> = {}): FuelTheft {
     engineSeconds: null,
     engineEvidence: null,
     stepFraction: null,
+    peakIntervalLph: null,
     impliedLph: null,
     fallDistanceKm: null,
     ...overrides,

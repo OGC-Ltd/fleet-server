@@ -11,7 +11,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   engineOnSeconds, engineEvidenceRatio, fitLinear, fitDecay, halfSlopeRatio,
-  stepFraction, normalisedResidual,
+  stepFraction, normalisedResidual, peakIntervalLph,
   MAX_ENGINE_GAP_SECONDS, type ShapeSample,
 } from '../../src/modules/fuel/fuel-drop-shape.js'
 
@@ -182,5 +182,49 @@ describe('the three shapes are distinguishable', () => {
     for (const at of [2, 20, 35]) {
       expect(normalisedResidual(fitDecay(stepAt(at))!, 40_000)!).toBeGreaterThan(0.1)
     }
+  })
+})
+
+/**
+ * `peakIntervalLph`, added 2026-09-24 to replace `stepFraction` as the
+ * instrument-versus-pump discriminator.
+ *
+ * The share of a fall landing in one interval discards how long that interval
+ * took, and these probes report on CHANGE — consecutive readings can be one
+ * second apart. Measured over 711 drains, with no minimum gap the confirmed and
+ * distrusted populations are indistinguishable at p90 (11,710 against 11,840);
+ * at a 30 s floor they separate by about 2.5x.
+ */
+describe('peakIntervalLph', () => {
+  const at = (s: number, ml: number) => ({ capturedAt: new Date(1_000_000 + s * 1000), fuelLevelMl: ml })
+
+  it('ignores intervals too short to be a denominator', () => {
+    // 15 L across one second is 54,000 L/h and measures the reporting cadence,
+    // not a flow. MUFINDI: MTR 09 produced exactly this on 2026-09-23.
+    expect(peakIntervalLph([at(0, 60_000), at(1, 45_000), at(2, 45_000)])).toBeNull()
+  })
+
+  it('measures a qualifying interval', () => {
+    // 15 L across 60 s = 900 L/h.
+    expect(peakIntervalLph([at(0, 60_000), at(60, 45_000)])).toBeCloseTo(900, 0)
+  })
+
+  it('takes the steepest qualifying interval, not the first or the average', () => {
+    const out = peakIntervalLph([
+      at(0, 100_000), at(60, 98_000),   //  2 L / 60 s =   120 L/h
+      at(120, 80_000),                  // 18 L / 60 s = 1,080 L/h
+      at(180, 79_000),                  //  1 L / 60 s =    60 L/h
+    ])
+    expect(out).toBeCloseTo(1_080, 0)
+  })
+
+  it('skips a reporting outage rather than inventing a slow rate', () => {
+    // A six-minute gap is missing data. Dividing a real drop by it would
+    // understate the rate and quietly excuse a burst.
+    expect(peakIntervalLph([at(0, 60_000), at(400, 20_000)])).toBeNull()
+  })
+
+  it('ignores rises', () => {
+    expect(peakIntervalLph([at(0, 40_000), at(60, 60_000)])).toBeNull()
   })
 })

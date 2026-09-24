@@ -42,6 +42,9 @@ function running(lph: number, hours = 1): DropEvidence {
     engineEvidence: 1,
     moved:          false,
     stepFraction:   0.2,
+    // Null: no interval long enough to divide by, so the burst gate stays
+    // silent unless a test sets it. See MAX_PLAUSIBLE_BURST_LPH.
+    peakIntervalLph: null,
     kT:             0.1,
     decayResidual:  0.02,
     samples:        60,
@@ -59,6 +62,7 @@ function parked(dropL: number, minutes: number, over: Partial<DropEvidence> = {}
     engineEvidence: 1,
     moved:          false,
     stepFraction:   0.2,
+    peakIntervalLph: null,
     kT:             0.1,
     decayResidual:  0.02,
     samples:        40,
@@ -121,26 +125,48 @@ describe('the parked branch — the only route to SIPHON', () => {
     expect(causeOf(parked(16, 8))).toBe('SIPHON')
   })
 
-  it('the duration floor is unreachable while the rate ceiling stands at 300 L/h', () => {
-    // Worth pinning, because it is not obvious and it decides what must ship
-    // alongside any change to the ceiling.
-    //
-    // To fail a 120 s floor a fall must be shorter than two minutes. To reach
-    // the floor at all it must already have dropped SIPHON_MIN_DROP_ML — 15 L.
-    // 15 L in under 120 s is at least 450 L/h, which exceeds
-    // MAX_PLAUSIBLE_REMOVAL_LPH and is caught by gate 3 as SLOSH first. So no
-    // input can land on `below-parked-floor` for duration alone today.
-    expect(causeOf(parked(15, 1.9))).toBe('SLOSH')
-    expect(causeOf(parked(20, 1))).toBe('SLOSH')
-    // It regains its effect the moment the ceiling is raised — which is exactly
-    // when a per-interval rate test must arrive too. See
-    // SIPHON_MAX_STEP_FRACTION's retirement note on that coupling.
+  it('the duration floor bites again now the rate ceiling is realistic', () => {
+    // This test was the inverse a commit ago. While MAX_PLAUSIBLE_REMOVAL_LPH
+    // sat at 300 L/h, anything short enough to fail a 120 s floor had already
+    // been caught as SLOSH — 15 L in under two minutes is at least 450 L/h — so
+    // `below-parked-floor` was unreachable for duration alone. At 3,000 L/h it
+    // is reachable, which is precisely why the burst gate had to ship with the
+    // raise. See MAX_PLAUSIBLE_BURST_LPH.
+    expect(causeOf(parked(15, 1.9))).toBe('INDETERMINATE')   // 474 L/h, 114 s
+    expect(causeOf(parked(20, 2.5))).toBe('SIPHON')          // 480 L/h, 150 s
   })
 
   it('the physical ceiling is checked before the duration floor', () => {
-    // 40 L in 5 minutes is 480 L/h. That is not a brief siphon, it is not a
-    // siphon at all — no hose draws it — so the reading is what is wrong.
-    expect(causeOf(parked(40, 5))).toBe('SLOSH')
+    // 40 L in 30 seconds is 4,800 L/h. Both gates would refuse it — the rate
+    // ceiling and the 120 s floor — and the rate is checked first, so the row
+    // is labelled for what is wrong with it rather than for being brief.
+    // (40 L in 5 minutes is 480 L/h, which used to land here and is now an
+    // ordinary pump; see MAX_PLAUSIBLE_REMOVAL_LPH.)
+    expect(causeOf(parked(40, 0.5))).toBe('SLOSH')
+  })
+
+  it('a burst no pump could produce is the instrument, even inside a plausible average', () => {
+    // The guard that made raising MAX_PLAUSIBLE_REMOVAL_LPH safe. A fall can
+    // average an entirely credible rate and still contain one interval at
+    // 40,000 L/h — that interval is the probe, and the average hides it.
+    // 20 L over 5 minutes is 240 L/h, well inside the sustained ceiling.
+    expect(causeOf(parked(20, 5))).toBe('SIPHON')
+    expect(causeOf(parked(20, 5, { peakIntervalLph: 40_000 }))).toBe('SLOSH')
+  })
+
+  it('a burst a pump COULD produce is left alone', () => {
+    // MUFINDI: CTR 19, 2026-09-23 — 14.95 L across 118 s is 456 L/h, an
+    // ordinary transfer pump. The retired step test refused it for shape; the
+    // rate test admits it, which is the whole reason for the swap.
+    expect(causeOf(parked(20, 5, { peakIntervalLph: 456 }))).toBe('SIPHON')
+    expect(causeOf(parked(20, 5, { peakIntervalLph: 4_999 }))).toBe('SIPHON')
+  })
+
+  it('an unmeasurable burst is not read as a slow one', () => {
+    // Null means no interval in the fall was long enough to divide by — about a
+    // third of drains — and that is an absence of evidence, not a finding. It
+    // must not be treated as passing OR failing the ceiling.
+    expect(causeOf(parked(20, 5, { peakIntervalLph: null }))).toBe('SIPHON')
   })
 
   it('a fall with no measured ignition can never be a siphon', () => {
@@ -162,7 +188,8 @@ describe('road vehicles — distance explains part of the drop', () => {
   /** A drop with no engine time, so only the distance rule can speak. */
   const drove = (dropL: number, km: number): DropEvidence => ({
     dropMl: dropL * 1000, fallSeconds: 3600, engineSeconds: 0, engineEvidence: 0,
-    moved: km > 0, stepFraction: 0.2, kT: 0.1, decayResidual: 0.02, samples: 40,
+    moved: km > 0, stepFraction: 0.2, peakIntervalLph: null,
+    kT: 0.1, decayResidual: 0.02, samples: 40,
     distanceKm: km,
   })
 
@@ -384,16 +411,25 @@ describe('generators — the class that can never be engine-off', () => {
     expect(announces(j)).toBe(true)
   })
 
-  it('still yields to the physical ceiling above 300 L/h', () => {
+  it('still yields to the physical ceiling', () => {
     // Beyond what any pump draws, so the reading is what is wrong.
-    expect(classifyDrain(running(400), GEN, STEADY).cause).toBe('SLOSH')
+    expect(classifyDrain(running(4_000), GEN, STEADY).cause).toBe('SLOSH')
   })
 
-  it('a MULTIPLE could not have done this job', () => {
-    // 4x the band's upper edge is 380 L/h, past MAX_PLAUSIBLE_REMOVAL_LPH, so
-    // every excursion would be dismissed as a sensor artifact before it was
-    // compared. The ceiling is what keeps the rule alive for this class.
-    expect(GEN.highLph * ANNOUNCE_MULTIPLE).toBeGreaterThan(MAX_PLAUSIBLE_REMOVAL_LPH)
+  it('a MULTIPLE can reach this class again, now the ceiling is realistic', () => {
+    // Inverted on 2026-09-24, and the inversion is the point.
+    //
+    // 4x the band's upper edge is 380 L/h. While MAX_PLAUSIBLE_REMOVAL_LPH sat
+    // at 300, every such excursion was dismissed as a sensor artifact BEFORE it
+    // was ever compared to the band, so the multiple rule was dead for
+    // generators and only the operator-set CLASS_CEILING_LPH kept the class
+    // reachable at all. At 3,000 the comparison happens.
+    //
+    // This is the one consequence of the raise that lands outside the parked
+    // branch: a generator burning several hundred litres an hour is now a
+    // finding rather than a discarded reading.
+    expect(GEN.highLph * ANNOUNCE_MULTIPLE).toBeLessThan(MAX_PLAUSIBLE_REMOVAL_LPH)
+    expect(classifyDrain(running(400), GEN, STEADY).cause).toBe('UNEXPLAINED_BURN')
   })
 })
 
@@ -419,7 +455,8 @@ describe('what reaches an operator', () => {
     const road: BurnBand = { lowLph: 8, highLph: 12, source: 'vehicle', kmPerL: 3 }
     const ev = (dropL: number, km: number): DropEvidence => ({
       dropMl: dropL * 1000, fallSeconds: 3600, engineSeconds: 0, engineEvidence: 0,
-      moved: km > 0, stepFraction: 0.2, kT: 0.1, decayResidual: 0.02, samples: 40, distanceKm: km,
+      moved: km > 0, stepFraction: 0.2, peakIntervalLph: null,
+      kT: 0.1, decayResidual: 0.02, samples: 40, distanceKm: km,
     })
     expect(announces(classifyDrain(ev(95, 50), road, STEADY))).toBe(true)   // beyond the distance
     // CHANGED 2026-08-26: a stationary drop is no longer announced on the
@@ -715,7 +752,7 @@ describe('which causes mean the fuel never left', () => {
   it('names causes the classifier can actually produce', () => {
     // A typo here removes nothing and reports success. Both must be reachable
     // outputs of classifyDrain, not strings that merely look like causes.
-    expect(causeOf(parked(40, 5))).toBe('SLOSH')                                  // 480 L/h
+    expect(causeOf(parked(40, 0.5))).toBe('SLOSH')                                // 4,800 L/h
     expect(causeOf(parked(40, 60, { kT: 3, decayResidual: 0.01 }))).toBe('SETTLING')
   })
 })
