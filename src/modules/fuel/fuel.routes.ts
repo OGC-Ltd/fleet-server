@@ -5,7 +5,7 @@ import { validateBody, validateQuery } from '../../middleware/validate.js'
 import { ingestLimiter } from '../../middleware/rateLimiter.js'
 import {
   createFillingSchema, listFillingQuerySchema, createTheftSchema, listTheftQuerySchema,
-  listFollowUpQuerySchema, followUpNoteSchema, assignFollowUpSchema, theftOutcomesQuerySchema,
+  listFollowUpQuerySchema, followUpNoteSchema, assignFollowUpSchema, recallFollowUpSchema, theftOutcomesQuerySchema,
 } from './fuel.schema.js'
 import * as ctrl from './fuel.controller.js'
 
@@ -52,6 +52,7 @@ router.post('/followups/:followUpId/decline', triage, validateBody(followUpNoteS
 // repairs rule, see repairs.authz). The slug keeps everybody else out first.
 router.get('/followups/:followUpId/assignees', triage, ctrl.listFollowUpAssignees)
 router.post('/followups/:followUpId/assign', triage, validateBody(assignFollowUpSchema), ctrl.assignFollowUp)
+router.post('/followups/:followUpId/recall', triage, validateBody(recallFollowUpSchema), ctrl.recallFollowUp)
 router.post('/followups/:followUpId/notes', triage, validateBody(followUpNoteSchema), ctrl.noteFollowUp)
 router.post('/followups/:followUpId/escalate', triage, validateBody(followUpNoteSchema), ctrl.escalateFollowUp)
 router.post('/followups/:followUpId/deescalate', triage, validateBody(followUpNoteSchema), ctrl.deescalateFollowUp)

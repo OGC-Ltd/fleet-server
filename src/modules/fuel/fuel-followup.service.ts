@@ -17,13 +17,16 @@
  *                active member of the organisation who holds case rights and
  *                did not delete the alert. Works on OPEN and ACCEPTED ones;
  *                reassigning an accepted one returns it to OPEN.
+ *   - recall:    the same administrators, taking it back from whoever holds
+ *                it (the assignee, or the reviewer who accepted it). It
+ *                returns to OPEN with nobody holding it.
  *   - note, escalate, de-escalate: only the account that accepted it.
  *
  * Every step is logged with its actor and mirrored onto the alert itself
  * (FuelTheft.reviewStatus), so the incident record always says where it stands.
  *
- * Every step is announced too: the opening, both outcomes, every assignment
- * and every decline go to the Live Feed, and every change goes to open
+ * Every step is announced too: the opening, both outcomes, every assignment,
+ * recall and decline go to the Live Feed, and every change goes to open
  * dashboards over SSE (`fuel_followup`) so the list updates without a reload.
  */
 
@@ -189,6 +192,27 @@ async function assertAssigner(orgId: string, userId: string) {
   }
 }
 
+/** An administrator takes the follow-up back from whoever holds it. */
+export async function recallFollowUp(
+  orgId: string, id: string, userId: string,
+  dto: { note?: string | null },
+) {
+  await assertAssigner(orgId, userId)
+  const row = await load(orgId, id)
+  if (row.status !== 'OPEN' && row.status !== 'ACCEPTED') throw new ConflictError('This follow-up is already closed')
+  const from = row.status === 'ACCEPTED' ? 'accepted' as const : 'assigned' as const
+  const fromId = row.status === 'ACCEPTED' ? row.acceptedById : row.assignedToId
+  if (!fromId) throw new ConflictError('Nobody holds this follow-up, so there is nothing to recall')
+
+  const ok = await repo.recallFollowUp({
+    id, theftId: row.theft.id, byId: userId, fromId, from, note: dto.note?.trim() || null,
+  })
+  if (!ok) throw new ConflictError('This follow-up changed while you were recalling it. Reload and try again')
+  const fresh = await changed(orgId, id)
+  announce(orgId, fresh, 'recalled')
+  return toDto(fresh, userId, true)
+}
+
 /** An administrator hands the follow-up to somebody. */
 export async function assignFollowUp(
   orgId: string, id: string, userId: string,
@@ -253,7 +277,7 @@ export async function resolveFollowUp(
  * Put a follow-up event on the Live Feed. Never allowed to fail the request
  * that caused it: the follow-up itself is already stored.
  */
-export type Announcement = 'opened' | 'escalated' | 'deescalated' | 'assigned' | 'declined'
+export type Announcement = 'opened' | 'escalated' | 'deescalated' | 'assigned' | 'declined' | 'recalled'
 
 export function announce(orgId: string, row: FollowUpRow, what: Announcement) {
   const t = row.theft
@@ -273,13 +297,18 @@ export function announce(orgId: string, row: FollowUpRow, what: Announcement) {
     declined:
       `FOLLOW-UP DECLINED: ${lastDecliner(row) ?? 'A reviewer'} declined the follow-up on the ${incident}. ` +
       `An administrator must assign it to someone.`,
+    recalled:
+      `FOLLOW-UP RECALLED: ${lastOf(row, 'RECALLED')?.actor?.fullName ?? 'An administrator'} took the follow-up on the ` +
+      `${incident} back from ${lastOf(row, 'RECALLED')?.subject?.fullName ?? 'its holder'}. It is open again.`,
   }[what]
   try {
     publishNotification({
       orgId,
       // Opening and the two outcomes happen once per follow-up; assigning and
       // declining can repeat, so those ids carry a time to stay unique.
-      id: what === 'assigned' || what === 'declined' ? `fu-${row.id}-${what}-${Date.now()}` : `fu-${row.id}-${what}`,
+      id: what === 'assigned' || what === 'declined' || what === 'recalled'
+        ? `fu-${row.id}-${what}-${Date.now()}`
+        : `fu-${row.id}-${what}`,
       source: 'fuel-followup',
       alertType: `FUEL_FOLLOWUP_${what.toUpperCase()}`,
       severity: what === 'escalated' ? 'critical' : what === 'opened' || what === 'declined' ? 'warning' : 'info',
@@ -302,8 +331,12 @@ export async function followUpOpened(orgId: string, followUpId: string) {
   announce(orgId, row, 'opened')
 }
 
+/** The most recent log entry of one kind. */
+function lastOf(row: FollowUpRow, kind: FollowUpRow['actions'][number]['kind']) {
+  return [...row.actions].reverse().find((a) => a.kind === kind) ?? null
+}
+
 /** Who declined most recently, for the feed line. */
 function lastDecliner(row: FollowUpRow): string | null {
-  const d = [...row.actions].reverse().find((a) => a.kind === 'DECLINED')
-  return d?.actor?.fullName ?? null
+  return lastOf(row, 'DECLINED')?.actor?.fullName ?? null
 }

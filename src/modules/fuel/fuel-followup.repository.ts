@@ -243,3 +243,39 @@ export async function isAssignable(orgId: string, userId: string): Promise<boole
   const row = await prisma.user.findFirst({ where: { ...assignableWhere(orgId), id: userId }, select: { id: true } })
   return row !== null
 }
+
+/**
+ * An administrator takes a follow-up back from whoever has it: the person it
+ * was assigned to (not yet accepted), or the reviewer who accepted it. It
+ * returns to OPEN with nobody holding it. Returns false when it no longer has
+ * that holder by the time this runs.
+ */
+export async function recallFollowUp(args: {
+  id: string
+  theftId: string
+  byId: string
+  fromId: string
+  from: 'assigned' | 'accepted'
+  note: string | null
+}): Promise<boolean> {
+  const { id, theftId, byId, fromId, from, note } = args
+  return prisma.$transaction(async (tx) => {
+    const now = new Date()
+    const { count } = await tx.fuelTheftFollowUp.updateMany({
+      where: from === 'assigned'
+        ? { id, status: 'OPEN', assignedToId: fromId }
+        : { id, status: 'ACCEPTED', acceptedById: fromId },
+      data: {
+        status: 'OPEN', acceptedById: null, acceptedAt: null,
+        assignedToId: null, assignedById: null, assignedAt: null,
+      },
+    })
+    if (count === 0) return false
+    // Nobody is reviewing it any more.
+    await tx.fuelTheft.update({ where: { id: theftId }, data: { reviewStatus: 'DISMISSED' } })
+    await tx.fuelTheftFollowUpAction.create({
+      data: { followUpId: id, kind: 'RECALLED', actorId: byId, subjectId: fromId, note, at: now },
+    })
+    return true
+  })
+}

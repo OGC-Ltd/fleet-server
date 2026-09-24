@@ -300,6 +300,77 @@ describe('Fuel follow-ups', () => {
     })
   })
 
+  describe('POST /fuel/followups/:id/recall', () => {
+    const recalled = (from: string, fromName: string) => row({
+      actions: [{ id: 'r1', kind: 'RECALLED', note: null, at: new Date(), actor: person(ME, 'Test User'), subject: person(from, fromName) }],
+    })
+
+    it('takes an assignment back from the assignee and logs who it was taken from', async () => {
+      asAdmin()
+      prismaMock.fuelTheftFollowUp.findFirst
+        .mockResolvedValueOnce(row({ assignedToId: 'tech', assignedTo: person('tech', 'Tess Tech') }) as never)
+        .mockResolvedValueOnce(recalled('tech', 'Tess Tech') as never)
+      prismaMock.fuelTheftFollowUp.updateMany.mockResolvedValue({ count: 1 })
+
+      const res = await request(app).post(`${BASE}/fu1/recall`).send({ note: 'Tess is off sick' })
+
+      expect(res.status).toBe(200)
+      expect(res.body.data).toMatchObject({ status: 'OPEN', assignedTo: null })
+      expect(prismaMock.fuelTheftFollowUp.updateMany).toHaveBeenCalledWith({
+        where: { id: 'fu1', status: 'OPEN', assignedToId: 'tech' },
+        data: {
+          status: 'OPEN', acceptedById: null, acceptedAt: null,
+          assignedToId: null, assignedById: null, assignedAt: null,
+        },
+      })
+      expect(prismaMock.fuelTheftFollowUpAction.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ kind: 'RECALLED', actorId: ME, subjectId: 'tech', note: 'Tess is off sick' }),
+      }))
+    })
+
+    it('takes an accepted follow-up back from its reviewer', async () => {
+      asAdmin()
+      prismaMock.fuelTheftFollowUp.findFirst
+        .mockResolvedValueOnce(row({ status: 'ACCEPTED', acceptedById: 'otto', acceptedBy: person('otto', 'Otto') }) as never)
+        .mockResolvedValueOnce(recalled('otto', 'Otto') as never)
+      prismaMock.fuelTheftFollowUp.updateMany.mockResolvedValue({ count: 1 })
+
+      const res = await request(app).post(`${BASE}/fu1/recall`).send({})
+
+      expect(res.status).toBe(200)
+      expect(prismaMock.fuelTheftFollowUp.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: 'fu1', status: 'ACCEPTED', acceptedById: 'otto' },
+      }))
+      expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith({ where: { id: 'th1' }, data: { reviewStatus: 'DISMISSED' } })
+    })
+
+    it('has nothing to recall when nobody holds it', async () => {
+      asAdmin()
+      prismaMock.fuelTheftFollowUp.findFirst.mockResolvedValue(row() as never)
+
+      const res = await request(app).post(`${BASE}/fu1/recall`).send({})
+
+      expect(res.status).toBe(409)
+      expect(prismaMock.fuelTheftFollowUp.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('is refused to anyone who is not an administrator', async () => {
+      const res = await request(app).post(`${BASE}/fu1/recall`).send({})
+
+      expect(res.status).toBe(403)
+      expect(prismaMock.fuelTheftFollowUp.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('does nothing to a closed follow-up', async () => {
+      asAdmin()
+      prismaMock.fuelTheftFollowUp.findFirst.mockResolvedValue(row({ status: 'DEESCALATED' }) as never)
+
+      const res = await request(app).post(`${BASE}/fu1/recall`).send({})
+
+      expect(res.status).toBe(409)
+    })
+  })
+
   describe('GET /fuel/followups/:id/assignees', () => {
     it('lists the organisation\'s case holders, leaving out the deleter', async () => {
       asAdmin()

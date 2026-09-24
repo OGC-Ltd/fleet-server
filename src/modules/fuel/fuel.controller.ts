@@ -6,7 +6,7 @@ import { UnauthorizedError } from '../../core/errors/errors.js'
 import { getProbeReport } from './probe-report.service.js'
 import { getFleetTankState } from './fuel-tank-state.service.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
-import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, AssignFollowUpDto, TheftOutcomesQuery } from './fuel.schema.js'
+import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, AssignFollowUpDto, RecallFollowUpDto, TheftOutcomesQuery } from './fuel.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -91,6 +91,12 @@ export const listFollowUpAssignees: RequestHandler = async (req, res, next) => {
 export const assignFollowUp: RequestHandler = async (req, res, next) => {
   try {
     sendSuccess(res, await followUps.assignFollowUp(p(req, 'orgId'), p(req, 'followUpId'), actor(req), req.body as AssignFollowUpDto))
+  } catch (err) { next(err) }
+}
+
+export const recallFollowUp: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await followUps.recallFollowUp(p(req, 'orgId'), p(req, 'followUpId'), actor(req), req.body as RecallFollowUpDto))
   } catch (err) { next(err) }
 }
 
