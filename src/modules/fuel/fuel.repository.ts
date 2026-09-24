@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma.js'
+import type { Prisma } from '../../../generated/prisma/client.js'
 import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery } from './fuel.schema.js'
 
 function buildDateFilter(from?: Date, to?: Date) {
@@ -48,6 +49,7 @@ export async function findAllThefts(orgId: string, q: ListTheftQuery) {
     ...(q.vehicleId ? { vehicleId: q.vehicleId } : {}),
     ...(q.reportingPeriodId ? { reportingPeriodId: q.reportingPeriodId } : {}),
     ...(dateFilter ? { beganAt: dateFilter } : {}),
+    ...(q.reviewStatus ? { reviewStatus: q.reviewStatus === 'none' ? null : q.reviewStatus } : {}),
   }
   const items = await prisma.fuelTheft.findMany({
     where,
@@ -57,6 +59,9 @@ export async function findAllThefts(orgId: string, q: ListTheftQuery) {
     include: {
       vehicle: { select: { id: true, name: true, registrationPlate: true } },
       driver: { select: { id: true, fullName: true } },
+      dismissedBy: { select: { id: true, fullName: true } },
+      reviewedBy: { select: { id: true, fullName: true } },
+      followUp: { select: { id: true, status: true, acceptedBy: { select: { id: true, fullName: true } } } },
     },
   })
   const hasNextPage = items.length > q.limit
@@ -80,17 +85,64 @@ export async function findTheftById(orgId: string, id: string) {
  * dismissed is touched, so the first person to dismiss it keeps the name and
  * the time against it. Returns the row either way (null if not in this org).
  */
+/**
+ * Dismiss a theft and open its follow-up, in one transaction: an incident is
+ * never off the dashboard without a follow-up waiting on it (see
+ * FuelTheftFollowUp). The first dismissal wins; a repeat returns it unchanged
+ * with `followUpId` null, because nothing new was opened.
+ */
 export async function dismissTheft(orgId: string, id: string, userId: string | null) {
   const row = await prisma.fuelTheft.findFirst({
     where: { id, vehicle: { organisationId: orgId } },
     select: { id: true, vehicleId: true, dismissedAt: true },
   })
   if (!row) return null
-  if (row.dismissedAt) return row
-  return prisma.fuelTheft.update({
-    where: { id },
-    data: { dismissedAt: new Date(), dismissedById: userId },
-    select: { id: true, vehicleId: true, dismissedAt: true },
+  if (row.dismissedAt) return { ...row, followUpId: null }
+  return prisma.$transaction(async (tx) => {
+    const now = new Date()
+    // Conditional, so two people deleting the same alert at once open one
+    // follow-up between them rather than one each.
+    const { count } = await tx.fuelTheft.updateMany({
+      where: { id, dismissedAt: null },
+      data: {
+        dismissedAt: now, dismissedById: userId,
+        reviewStatus: 'DISMISSED', reviewedAt: now, reviewedById: userId,
+      },
+    })
+    if (count === 0) {
+      const won = await tx.fuelTheft.findUnique({ where: { id }, select: { id: true, vehicleId: true, dismissedAt: true } })
+      return { ...(won ?? row), followUpId: null }
+    }
+    // The alert as the person deleting it saw it. Read inside the transaction,
+    // so it is the row exactly as it stood at the moment of the deletion.
+    const full = await tx.fuelTheft.findUnique({
+      where: { id },
+      include: {
+        vehicle: { select: { registrationPlate: true, name: true } },
+        driver: { select: { fullName: true } },
+      },
+    })
+    const followUp = await tx.fuelTheftFollowUp.create({
+      data: {
+        organisationId: orgId, theftId: id, openedAt: now, dismissedById: userId,
+        incidentSnapshot: full ? (JSON.parse(JSON.stringify(full)) as Prisma.InputJsonValue) : undefined,
+        actions: { create: { kind: 'OPENED', actorId: userId, at: now } },
+      },
+      select: { id: true },
+    })
+    return { id: row.id, vehicleId: row.vehicleId, dismissedAt: now, followUpId: followUp.id as string | null }
+  })
+}
+
+/** The rows `theftOutcomes` aggregates: one organisation, a `beganAt` window. */
+export function theftOutcomeRows(orgId: string, from?: Date, to?: Date) {
+  const dateFilter = buildDateFilter(from, to)
+  return prisma.fuelTheft.findMany({
+    where: { vehicle: { organisationId: orgId }, ...(dateFilter ? { beganAt: dateFilter } : {}) },
+    select: {
+      vehicleId: true, stolenMl: true, reviewStatus: true, dismissedAt: true, reviewedAt: true,
+      vehicle: { select: { registrationPlate: true } },
+    },
   })
 }
 
