@@ -75,6 +75,25 @@ export async function findTheftById(orgId: string, id: string) {
   })
 }
 
+/**
+ * Mark one drain dismissed from the dashboard. Only a row that is not already
+ * dismissed is touched, so the first person to dismiss it keeps the name and
+ * the time against it. Returns the row either way (null if not in this org).
+ */
+export async function dismissTheft(orgId: string, id: string, userId: string | null) {
+  const row = await prisma.fuelTheft.findFirst({
+    where: { id, vehicle: { organisationId: orgId } },
+    select: { id: true, vehicleId: true, dismissedAt: true },
+  })
+  if (!row) return null
+  if (row.dismissedAt) return row
+  return prisma.fuelTheft.update({
+    where: { id },
+    data: { dismissedAt: new Date(), dismissedById: userId },
+    select: { id: true, vehicleId: true, dismissedAt: true },
+  })
+}
+
 export async function createTheft(dto: CreateTheftDto) {
   return prisma.fuelTheft.create({ data: dto })
 }

@@ -880,6 +880,9 @@ export async function findFleetSnapshot(orgId: string) {
        -- The clean slate. Both bounds are on began_at, so this is the same
        -- index walk with a tighter floor — no extra cost. See the constant.
        AND t.began_at >= ${FUEL_INCIDENT_EPOCH}
+       -- Dismissed from the dashboard by an operator. The row stays (and still
+       -- counts in the 30-day history below); it is just no longer announced.
+       AND t.dismissed_at IS NULL
      ORDER BY t.vehicle_id, t.began_at DESC`
   const incidentByVehicle = new Map(incidents.map(i => [i.vehicle_id, i]))
 
