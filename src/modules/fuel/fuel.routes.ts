@@ -6,6 +6,7 @@ import { ingestLimiter } from '../../middleware/rateLimiter.js'
 import {
   createFillingSchema, listFillingQuerySchema, createTheftSchema, listTheftQuerySchema,
   listFollowUpQuerySchema, followUpNoteSchema, assignFollowUpSchema, recallFollowUpSchema, theftOutcomesQuerySchema,
+  reviewTheftSchema,
 } from './fuel.schema.js'
 import * as ctrl from './fuel.controller.js'
 
@@ -28,6 +29,9 @@ router.get('/thefts', requirePermission('fuel_theft:read'), validateQuery(listTh
 // What reviewers concluded about the fleet's fuel alerts, for analytics. Before
 // /thefts/:theftId so "outcomes" is not read as an id.
 router.get('/thefts/outcomes', requirePermission('fuel_theft:read'), validateQuery(theftOutcomesQuerySchema), ctrl.theftOutcomes)
+// Before /thefts/:theftId, like "outcomes". Read-only: tells the incident window
+// whether to draw Escalate / De-escalate for this viewer.
+router.get('/thefts/review-rights', requirePermission('fuel_theft:read'), ctrl.theftReviewRights)
 router.get('/thefts/:theftId', requirePermission('fuel_theft:read'), ctrl.getTheft)
 router.post('/thefts', requirePermission('fuel_theft:create'), ingestLimiter, validateBody(createTheftSchema), ctrl.createTheft)
 // "Delete" on the dashboard's incident window. Hides the incident for the whole
@@ -35,6 +39,11 @@ router.post('/thefts', requirePermission('fuel_theft:create'), ingestLimiter, va
 // grant as raising a case: whoever may open a fuel case may close one, and the
 // read-only security role can do neither.
 router.post('/thefts/:theftId/dismiss', requirePermission('fuel_theft:create'), ctrl.dismissTheft)
+// Escalate / de-escalate a live alert from its window. The triage slug keeps
+// out everyone who may not hold a case; the service narrows it to the
+// administrators, as it does for assigning one. Strict, being a new route.
+router.post('/thefts/:theftId/review', requirePermissionStrict('fuel_theft:triage'),
+  validateBody(reviewTheftSchema), ctrl.reviewTheft)
 
 // The follow-up every dismissal opens — see fuel-followup.service. The case
 // holders are the roles granted `fuel_theft:triage` (the operator named them;
