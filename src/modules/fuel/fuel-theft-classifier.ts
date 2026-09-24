@@ -1108,6 +1108,49 @@ export const MIN_ENGINE_EVIDENCE = 0.5
  */
 export const SIPHON_MIN_DROP_ML = 15_000
 
+/**
+ * ## Measured and DELIBERATELY LEFT ALONE, 2026-09-24
+ *
+ * 176 drains over 30 days sit in the 10-15 L band this floor excludes, and one
+ * of them — MUFINDI - EX 16's 11 L — is what prompted the question. Lowering it
+ * to 10 L looked obvious. Measured, it is not
+ * (`prisma/measure-drop-floor.ts`, re-runnable):
+ *
+ *   band           drains   trusted probe   parked   BOTH
+ *   10.0-12.5 L      133         65            5       4
+ *   12.5-15.0 L       62         34            2       1
+ *   15.0-20.0 L      151         53           11       8
+ *
+ * Dropping to 10 L admits **195 drains to gain 5** that are on a trusted probe
+ * AND standing still with the engine measured off. The other 190 are noise or
+ * unjudgeable. And of those 5, four already reach a verdict through the burn
+ * branch — only one is gated by this floor at all.
+ *
+ * ## What the band actually shows is that a FLAT floor is the wrong shape
+ *
+ * Those five, against their own probe's p90 parked swing:
+ *
+ *   MUFINDI - EX 21    11.9 L   p90 0.27 L    44x
+ *   MUFINDI - EX 30    14.8 L   p90 0.83 L    18x
+ *   MUFINDI : LMV 02   10.3 L   p90 0.97 L    11x
+ *   MUFINDI: COMP 01   11.8 L   p90 3.34 L     4x
+ *   MUFINDI: CTR 19    11.3 L   p90 11.45 L    1x   <- its own noise
+ *
+ * Across the candidates: p25 4x, p50 11x, p75 18x. A per-probe rule —
+ * `max(floor, k × p90)` — separates EX 21's 44x from CTR 19's 1x, and a flat
+ * number cannot ask that question at all. Diesel's thermal contraction makes
+ * the same point from physics: ~1.4 L on an 84 L tractor tank against ~6.6 L on
+ * a 400 L truck for the same 20 C overnight swing.
+ *
+ * It is not built yet because the evidence does not justify it: one blocked
+ * candidate in thirty days. It would need `p90` on `ProbeProfile`, which
+ * `getProbeProfile` does not currently compute.
+ *
+ * Meanwhile `lib/fuel-drop-watch` reports this band at a 10 L floor as a
+ * PROVISIONAL warning, which is where a drop this small belongs — reported, not
+ * adjudicated.
+ */
+
 /** Least a parked fall must sustain, in litres per wall-clock hour. */
 export const SIPHON_MIN_LPH = 5
 
