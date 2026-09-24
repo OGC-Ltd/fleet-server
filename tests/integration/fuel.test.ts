@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import request from 'supertest'
 import type { Express } from 'express'
-import { makeFilling, makeTheft, TEST_ORG_ID } from '../helpers/factories.js'
+import { makeFilling, makeTheft, TEST_ORG_ID, testAuthUser } from '../helpers/factories.js'
 import { authMock, authorizeMock } from '../helpers/auth-mock.js'
 
 vi.mock('../../src/lib/prisma.js')
@@ -102,17 +102,51 @@ describe('Fuel Thefts', () => {
   describe('POST /fuel/thefts/:id/dismiss', () => {
     it('marks the row dismissed and keeps it (update, never delete)', async () => {
       prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', vehicleId: 'v1', dismissedAt: null } as never)
-      prismaMock.fuelTheft.update.mockResolvedValue({ id: 'th1', vehicleId: 'v1', dismissedAt: new Date() } as never)
+      prismaMock.fuelTheft.updateMany.mockResolvedValue({ count: 1 })
+      prismaMock.fuelTheftFollowUp.create.mockResolvedValue({ id: 'fu1' } as never)
 
       const res = await request(app).post(`${THEFT_BASE}/th1/dismiss`)
 
       expect(res.status).toBe(200)
       expect(res.body.data.id).toBe('th1')
-      expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
-        where: { id: 'th1' },
+      expect(prismaMock.fuelTheft.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: 'th1', dismissedAt: null },
         data: expect.objectContaining({ dismissedAt: expect.any(Date) }),
       }))
       expect(prismaMock.fuelTheft.delete).not.toHaveBeenCalled()
+    })
+
+    it('opens a follow-up recording who deleted it', async () => {
+      prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', vehicleId: 'v1', dismissedAt: null } as never)
+      prismaMock.fuelTheft.updateMany.mockResolvedValue({ count: 1 })
+      prismaMock.fuelTheftFollowUp.create.mockResolvedValue({ id: 'fu1' } as never)
+      prismaMock.fuelTheft.findUnique.mockResolvedValue(makeTheft({ id: 'th1', stolenMl: 23_500 }) as never)
+
+      const res = await request(app).post(`${THEFT_BASE}/th1/dismiss`)
+
+      expect(res.body.data.followUpId).toBe('fu1')
+      expect(prismaMock.fuelTheft.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ reviewStatus: 'DISMISSED', reviewedById: testAuthUser.id }),
+      }))
+      expect(prismaMock.fuelTheftFollowUp.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          organisationId: TEST_ORG_ID, theftId: 'th1', dismissedById: testAuthUser.id,
+          incidentSnapshot: expect.objectContaining({ id: 'th1', stolenMl: 23_500 }),
+          actions: { create: expect.objectContaining({ kind: 'OPENED', actorId: testAuthUser.id }) },
+        }),
+      }))
+    })
+
+    it('opens no second follow-up when someone else dismissed it first', async () => {
+      prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', vehicleId: 'v1', dismissedAt: null } as never)
+      prismaMock.fuelTheft.updateMany.mockResolvedValue({ count: 0 })
+      prismaMock.fuelTheft.findUnique.mockResolvedValue({ id: 'th1', vehicleId: 'v1', dismissedAt: new Date() } as never)
+
+      const res = await request(app).post(`${THEFT_BASE}/th1/dismiss`)
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.followUpId).toBeNull()
+      expect(prismaMock.fuelTheftFollowUp.create).not.toHaveBeenCalled()
     })
 
     it('scopes the lookup to the path organisation', async () => {
@@ -124,7 +158,7 @@ describe('Fuel Thefts', () => {
       expect(prismaMock.fuelTheft.findFirst).toHaveBeenCalledWith(expect.objectContaining({
         where: { id: 'other-org-row', vehicle: { organisationId: TEST_ORG_ID } },
       }))
-      expect(prismaMock.fuelTheft.update).not.toHaveBeenCalled()
+      expect(prismaMock.fuelTheft.updateMany).not.toHaveBeenCalled()
     })
 
     it('keeps the first dismissal rather than overwriting it', async () => {
@@ -135,7 +169,8 @@ describe('Fuel Thefts', () => {
 
       expect(res.status).toBe(200)
       expect(res.body.data.dismissedAt).toBe(first.toISOString())
-      expect(prismaMock.fuelTheft.update).not.toHaveBeenCalled()
+      expect(prismaMock.fuelTheft.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.fuelTheftFollowUp.create).not.toHaveBeenCalled()
     })
   })
 })

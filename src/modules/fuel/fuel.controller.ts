@@ -1,10 +1,12 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as service from './fuel.service.js'
+import * as followUps from './fuel-followup.service.js'
+import { UnauthorizedError } from '../../core/errors/errors.js'
 import { getProbeReport } from './probe-report.service.js'
 import { getFleetTankState } from './fuel-tank-state.service.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
-import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery } from './fuel.schema.js'
+import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, TheftOutcomesQuery } from './fuel.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -37,6 +39,60 @@ export const listThefts: RequestHandler = async (req, res, next) => {
 export const dismissTheft: RequestHandler = async (req, res, next) => {
   try {
     sendSuccess(res, await service.dismissTheft(p(req, 'orgId'), p(req, 'theftId'), req.user?.id ?? null))
+  } catch (err) { next(err) }
+}
+
+// ── Follow-ups on dismissed incidents ──────────────────────────────────────
+
+/** Acting on a follow-up is recorded against an account, so there must be one. */
+const actor = (req: Parameters<RequestHandler>[0]): string => {
+  const id = req.user?.id
+  if (!id) throw new UnauthorizedError('An account is required to act on a follow-up')
+  return id
+}
+
+export const theftOutcomes: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await service.theftOutcomes(p(req, 'orgId'), req.query as unknown as TheftOutcomesQuery))
+  } catch (err) { next(err) }
+}
+
+export const listFollowUps: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await followUps.listFollowUps(p(req, 'orgId'), req.query as unknown as ListFollowUpQuery, req.user?.id ?? null))
+  } catch (err) { next(err) }
+}
+
+export const getFollowUp: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await followUps.getFollowUp(p(req, 'orgId'), p(req, 'followUpId'), req.user?.id ?? null))
+  } catch (err) { next(err) }
+}
+
+export const acceptFollowUp: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await followUps.acceptFollowUp(p(req, 'orgId'), p(req, 'followUpId'), actor(req)))
+  } catch (err) { next(err) }
+}
+
+export const noteFollowUp: RequestHandler = async (req, res, next) => {
+  try {
+    const { note } = req.body as FollowUpNoteDto
+    sendSuccess(res, await followUps.addNote(p(req, 'orgId'), p(req, 'followUpId'), actor(req), note))
+  } catch (err) { next(err) }
+}
+
+export const escalateFollowUp: RequestHandler = async (req, res, next) => {
+  try {
+    const { note } = req.body as FollowUpNoteDto
+    sendSuccess(res, await followUps.resolveFollowUp(p(req, 'orgId'), p(req, 'followUpId'), actor(req), 'ESCALATED', note))
+  } catch (err) { next(err) }
+}
+
+export const deescalateFollowUp: RequestHandler = async (req, res, next) => {
+  try {
+    const { note } = req.body as FollowUpNoteDto
+    sendSuccess(res, await followUps.resolveFollowUp(p(req, 'orgId'), p(req, 'followUpId'), actor(req), 'DEESCALATED', note))
   } catch (err) { next(err) }
 }
 
