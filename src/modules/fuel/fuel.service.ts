@@ -1,9 +1,14 @@
-import { NotFoundError } from '../../core/errors/errors.js'
+import { ConflictError, ForbiddenError, NotFoundError } from '../../core/errors/errors.js'
 import * as repo from './fuel.repository.js'
 import { emitDashboardFuelIncidentDismissed } from '../../lib/sse.js'
-import { forgetSnapshotIncident } from '../telemetry/fleet-snapshot.cache.js'
+import { forgetSnapshotIncident, patchSnapshotIncidentReview } from '../telemetry/fleet-snapshot.cache.js'
 import { followUpOpened } from './fuel-followup.service.js'
 import { logger } from '../../lib/logger.js'
+import { prisma } from '../../lib/prisma.js'
+import { publishNotification } from '../../lib/notifications/notification.store.js'
+// Who decides a live alert is who assigns a follow-up: the organisation's
+// administrator or the platform administrator (repairs.authz). One rule.
+import { canAssignTriage } from '../repairs/repairs.authz.js'
 import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, TheftOutcomesQuery } from './fuel.schema.js'
 
 export const listFillings = (orgId: string, q: ListFillingQuery) => repo.findAllFillings(orgId, q)
@@ -70,6 +75,65 @@ export async function theftOutcomes(orgId: string, q: TheftOutcomesQuery) {
       ? round(hoursToDecision[Math.floor(hoursToDecision.length / 2)])
       : null,
   }
+}
+
+/** May this account escalate or de-escalate a live alert here? */
+export async function canReviewTheft(orgId: string, userId: string | null) {
+  return userId != null && (await canAssignTriage(userId, orgId)).ok
+}
+
+/**
+ * Escalate (a confirmed theft) or de-escalate (not a theft) a live alert, from
+ * its window, without deleting it. Administrators only. The alert stays on the
+ * dashboard either way, now carrying the decision; see repo.reviewTheft.
+ */
+export async function reviewTheft(
+  orgId: string, id: string, userId: string,
+  outcome: 'ESCALATED' | 'DEESCALATED', note: string,
+) {
+  const check = await canAssignTriage(userId, orgId)
+  if (!check.ok) {
+    throw new ForbiddenError(check.reason === 'not_a_member'
+      ? 'Only an administrator of this organisation can escalate or de-escalate a fuel alert'
+      : 'Only a system administrator or the platform administrator can escalate or de-escalate a fuel alert')
+  }
+  const me = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, fullName: true } })
+  const reviewer = me?.email ?? me?.fullName ?? userId
+  const row = await repo.reviewTheft({ orgId, id, userId, reviewer, outcome, note })
+  if (!row) throw new NotFoundError('Fuel theft')
+  if (row === 'dismissed') {
+    throw new ConflictError('This alert was deleted, so it has a Case: escalate or de-escalate it there')
+  }
+
+  const review = {
+    status: row.reviewStatus ?? (outcome === 'ESCALATED' ? 'CONFIRMED_THEFT' : 'NOT_THEFT'),
+    at: row.reviewedAt?.toISOString() ?? null,
+    by: row.reviewedBy?.fullName ?? null,
+    note: row.reviewNote,
+  }
+  patchSnapshotIncidentReview(orgId, id, review)
+
+  const who = review.by ?? 'An administrator'
+  const incident = `${row.vehicle.registrationPlate} fuel incident (${(row.stolenMl / 1000).toFixed(1)} L)`
+  try {
+    publishNotification({
+      orgId,
+      id: `theft-${id}-${outcome.toLowerCase()}-${Date.now()}`,
+      source: 'fuel-review',
+      alertType: `FUEL_ALERT_${outcome}`,
+      severity: outcome === 'ESCALATED' ? 'critical' : 'info',
+      text: outcome === 'ESCALATED'
+        ? `CONFIRMED FUEL THEFT: ${who} escalated the ${incident}.`
+        : `NOT A THEFT: ${who} de-escalated the ${incident}.`,
+      at: new Date(),
+      plate: row.vehicle.registrationPlate,
+      vehicleId: row.vehicleId,
+      extra: { incidentId: id },
+    })
+  } catch (err) {
+    logger.warn({ err, theftId: id }, 'Fuel review: feed publish failed')
+  }
+  return { id, review }
 }
 
 /**
