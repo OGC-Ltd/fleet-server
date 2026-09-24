@@ -587,6 +587,7 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
         engineSeconds:     verdict.evidence?.engineSeconds  ?? null,
         engineEvidence:    verdict.evidence?.engineEvidence ?? null,
         stepFraction:      verdict.evidence?.stepFraction   ?? null,
+        peakIntervalLph:   verdict.evidence?.peakIntervalLph ?? null,
         fallDistanceKm:    verdict.evidence?.distanceKm     ?? null,
         impliedLph:        verdict.cause?.impliedLph        ?? null,
       },

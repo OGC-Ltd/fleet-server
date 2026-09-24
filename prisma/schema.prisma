@@ -1891,9 +1891,17 @@ model FuelTheft {
   /// what says whether the first can be trusted.
   engineSeconds  Int?   @map("engine_seconds")
   engineEvidence Float? @map("engine_evidence")
-  /// Largest single-interval drop over the total. A siphon is one step; a burn
-  /// is many.
+  /// Largest single-interval drop over the total. Retired as a VERDICT input on
+  /// 2026-09-24 — see SIPHON_MAX_STEP_FRACTION — and kept because it still
+  /// explains a fall after the fact.
   stepFraction   Float? @map("step_fraction")
+  /// Litres per hour implied by the steepest interval of at least
+  /// MIN_RATE_INTERVAL_SECONDS. What replaced `stepFraction` as the
+  /// instrument-versus-pump test: the share of a fall in one interval says
+  /// nothing without how long that interval took. Null where no interval in the
+  /// fall was long enough to divide by, which is about a third of drains — an
+  /// absence of evidence, not a slow fall.
+  peakIntervalLph Float? @map("peak_interval_lph")
   /// Litres per hour the fall implies. The figure the band is compared against,
   /// and until now it existed only inside a sentence.
   impliedLph     Float? @map("implied_lph")

@@ -1,0 +1,18 @@
+-- The steepest sustained rate inside a fall, litres per hour, measured over
+-- intervals of at least MIN_RATE_INTERVAL_SECONDS (30 s).
+--
+-- This is a VERDICT INPUT, not a diagnostic: `classifyDrain` refuses a fall as
+-- SLOSH / `burst-not-physical` when it exceeds MAX_PLAUSIBLE_BURST_LPH. It
+-- replaced `step_fraction`, which measured the same steepest step but discarded
+-- how long it took — and on probes that report on change, consecutive readings
+-- can be one second apart.
+--
+-- Persisted for the reason `drop_evidence` was added in the first place: a
+-- reviewer asked "why was this called a siphon" could otherwise be shown a slug
+-- and nothing else.
+--
+-- NULL on every row judged before this, and NULL wherever no interval in the
+-- fall was long enough to divide by. Never back-computed: the telemetry a drain
+-- was judged on may have aged out, and a figure derived now would describe a
+-- different fall from the one the verdict was about.
+ALTER TABLE "fuel_thefts" ADD COLUMN "peak_interval_lph" DOUBLE PRECISION;
