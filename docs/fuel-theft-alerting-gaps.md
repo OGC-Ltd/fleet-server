@@ -507,6 +507,71 @@ fixes rather than gate changes.**
 
 ---
 
+## 8b. Pre-merge verification
+
+Three things were outstanding when the constants were all shipped. All three are
+now settled, and one of them changed a number this document had asserted.
+
+### Alert volume, measured fleet-wide with the real code
+
+`prisma/backtest-units.ts` re-judges through the same `judgeDrain` and
+`judgeFilling` the live sweep calls — not the replay's reconstruction from
+stored columns — so every change is in scope at once. Over **224 KASULU
+vehicles, 3 days, 299 drains and 279 fillings**:
+
+```
+WHAT REACHES AN OPERATOR — 21 items, 7.0/day
+  burn-above-class-ceiling    11
+  burn-far-above-band          7
+  parked-sustained-fall        3   (may be worded as theft)
+```
+
+**§8a's "one alert a day" was wrong**, and the error is instructive.
+`measure-alerting-gates.ts` models the PARKED branch only, and counted `SIPHON`
+alone. But `announces()` is `ANNOUNCED.has(cause) || ANNOUNCED_REASONS.has(reason)`,
+and both `burn-far-above-band` and `burn-above-class-ceiling` announce. Raising
+`MAX_PLAUSIBLE_REMOVAL_LPH` moved rows out of `SLOSH` and into the burn branch,
+which the replay never modelled.
+
+The honest framing is the delta, not the total. Of the 21, **14 were already
+announcing under the old code**; 7 are new:
+
+| new alert | from | to |
+|---|---|---|
+| MTR 18, CTR 19, MTR 20 | INDETERMINATE | `parked-sustained-fall` (theft) |
+| CTR 23 ×2, EX 17, EX 02 | SLOSH | burn findings |
+
+So the change takes the feed from **4.7/day to 7.0/day — plus 2.3, a 49%
+increase**, of which one a day is a siphon. That is a real increase and the
+operator should see the number before it ships, but it is not a flood.
+
+### Integration suite
+
+138 passed, 18 skipped, **2 failed — both pre-existing**, verified by running
+the same file on a clean tree: `users.test.ts` DELETE endpoints, unrelated to
+fuel. `tests/unit/user.service.test.ts` also flakes intermittently in the full
+unit run on a 5 s timeout, a different test each time, likewise pre-existing.
+
+### The filling/drain ordering
+
+`tests/unit/fuel-ledger-ordering.test.ts` pins it. `adjudicateDrain` exempts a
+REDISTRIBUTION filling from truncating, which makes the drain's verdict depend
+on the filling's — and therefore on which ran first. The tests assert both
+directions on identical evidence: with the filling corroborated the drain stands
+as `DRAIN`/`level-stayed-down`; with it stale the refill's own rise reads as
+recovery and the drain is erased. That is MTR 09's real history, where the
+filling was judged 390 minutes before the drain.
+
+`lib/queues/fuel-events` already runs fillings first and its comment says why.
+Nothing tested it until now.
+
+**Note for anyone replaying history:** a dry-run backtest cannot settle this,
+because `judgeDrain` reads the filling's STORED verdict and a dry run does not
+write one. Rows with a filling in window will show as cancelled when they would
+stand in production. Up to 14 of the 7-day sample were affected.
+
+---
+
 ## 9. Scope, and what this document does not claim
 
 A fleet-wide sweep found **1,960 of 3,435 drains** in 30 days were settled as
