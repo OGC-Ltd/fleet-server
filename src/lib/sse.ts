@@ -233,6 +233,15 @@ export function emitDashboardDispatch(orgId: string, data: unknown) {
   broadcastDashboard(orgId, 'dispatch', data)
 }
 
+/**
+ * A fuel incident was dismissed from the dashboard. Every open client drops it
+ * from its alerts list and stops painting the unit red. Carries `vehicleId`,
+ * so a vehicle-scoped client only hears about units it can see.
+ */
+export function emitDashboardFuelIncidentDismissed(orgId: string, data: { vehicleId: string; incidentId: string }) {
+  broadcastDashboard(orgId, 'fuel_incident_dismissed', data)
+}
+
 /** Alert notification — powers the alert feed and banner toasts. */
 export function emitDashboardAlert(orgId: string, data: unknown) {
   broadcastDashboard(orgId, 'alert', data)

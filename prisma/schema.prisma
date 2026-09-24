@@ -434,6 +434,7 @@ model User {
   vehicleAssignments VehicleAssignment[] @relation("AssignedUser")
   trips              Trip[]              @relation("TripDriver")
   fuelThefts         FuelTheft[]         @relation("TheftDriver")
+  fuelTheftsDismissed FuelTheft[]        @relation("TheftDismissedBy")
   geofenceViolations GeofenceViolation[] @relation("ViolationDriver")
   speedingIncidents  SpeedingIncident[]  @relation("SpeedingDriver")
 
@@ -1909,8 +1910,17 @@ model FuelTheft {
   /// and null mean different things — see DropEvidence.distanceKm.
   fallDistanceKm Float? @map("fall_distance_km")
 
+  /// Deleted from the dashboard by an operator ("Delete" on the incident
+  /// window). The row itself is never deleted: the ledger, the reports, the
+  /// 30-day repeat count and the notification history all still count it.
+  /// Only the live announcement (the red unit, the fuel-alerts list) stops,
+  /// for everyone in the organisation. Null on every row nobody dismissed.
+  dismissedAt   DateTime? @map("dismissed_at")
+  dismissedById String?   @map("dismissed_by_id")
+
   vehicle         Vehicle         @relation(fields: [vehicleId], references: [id])
   driver          User?           @relation("TheftDriver", fields: [driverId], references: [id])
+  dismissedBy     User?           @relation("TheftDismissedBy", fields: [dismissedById], references: [id], onDelete: SetNull)
   reportingPeriod ReportingPeriod @relation(fields: [reportingPeriodId], references: [id])
 
   @@index([vehicleId, beganAt])
