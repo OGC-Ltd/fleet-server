@@ -1067,6 +1067,66 @@ export const SIPHON_MIN_SECONDS = 10 * 60
  */
 export const SIPHON_MAX_STEP_FRACTION = 0.6
 
+/**
+ * ## RETIRED 2026-09-24 — no longer consulted by `classifyDrain`
+ *
+ * Kept as an exported constant because `fall_seconds`, `measured_drop_ml` and
+ * `step_fraction` are still persisted on every drain and the number remains
+ * useful for auditing a verdict after the fact. It no longer decides one.
+ *
+ * ### What it was calibrated on, and why that no longer describes it
+ *
+ * The defence above cites "confirmed drains p50 0.25, distrusted probes p50
+ * 0.42". That was measured across the WHOLE ledger — but `probeSwings` runs at
+ * gate 1 and returns INDETERMINATE before any question about the fall is asked,
+ * so the distrusted population never reaches this test. It was calibrated on a
+ * population it is never applied to.
+ *
+ * Re-measured over 30 days, split by what the trust gate actually lets through
+ * (`prisma/measure-step-fraction.ts`, re-runnable):
+ *
+ *   probe        population          n      p25    p50    p75    > 0.6
+ *   TRUSTED      confirmed drain    258    0.310  0.522  0.716   109 (42%)
+ *   TRUSTED      everything else     26    0.558  0.747  0.946    18 (69%)
+ *   distrusted   confirmed drain    299    0.397  0.525  0.672   116 (39%)
+ *   distrusted   everything else  1,903    0.468  0.597  0.735   943 (50%)
+ *
+ * Confirmed drains now sit at p50 **0.522**, not 0.25 — the threshold was
+ * placed below the middle of the population it exists to admit, and refuses
+ * **109 of 258** events where our own telemetry watched the level fall and stay
+ * down. Some separation does survive (1.43x), but on n=26 and at that cost it
+ * is not a trade an alerting gate can make.
+ *
+ * ### Why the quantity cannot answer the question anyway
+ *
+ * `fuel-drop-shape`'s own docstring says it: the metric "measures the shape and
+ * says nothing about the cause", and telling a sharp siphon from a probe glitch
+ * "is the recovery test's job, which has already run by the time a drop reaches
+ * here". The two modules disagreed, and drop-shape is right.
+ *
+ * The share of a fall landing in one interval says nothing without the LENGTH
+ * of that interval. These probes report on CHANGE at a 30 s median gap, so a
+ * 20 L draw over five minutes puts 60-98% of itself in one reported interval by
+ * construction. MUFINDI: MTR 09's level moved 14.18 L across a **6-second** gap
+ * — 8,500 L/h, which is not fuel flow — while MUFINDI: CTR 19's moved 14.95 L
+ * across **two minutes**, 450 L/h, an ordinary transfer pump. Identical step
+ * fractions, opposite causes.
+ *
+ * ### What must replace it, and when
+ *
+ * A RATE test over the steepest interval: litres per hour implied by the
+ * largest single step, judged against `MAX_PLAUSIBLE_REMOVAL_LPH` the way
+ * gate 3 already judges the whole-fall average. That distinguishes the two
+ * cases above; this constant cannot.
+ *
+ * Retiring this is safe **only while gate 3's ceiling stays low**. At 300 L/h
+ * that gate is aggressive enough to catch the genuine single-reading dropouts
+ * this test used to absorb. Raising the ceiling — which
+ * docs/fuel-theft-alerting-gaps.md argues for, since 300 L/h is slower than any
+ * pump — without adding the per-interval rate test would let a dead probe
+ * report a SIPHON. **The two changes are coupled and must ship together.**
+ */
+
 /** `kT` at or above which a parked fall is settling rather than being drawn off. */
 export const SETTLING_MIN_KT = 1.0
 /** ...and how well the decay must fit, as a share of the drop, to be believed. */
@@ -1256,10 +1316,10 @@ export function classifyDrain(
         ev.decayResidual != null && ev.decayResidual <= SETTLING_MAX_RESIDUAL) {
       return { cause: 'SETTLING', reason: 'decay-shaped', confidence: 0.7, ...none }
     }
-    if (ev.stepFraction > SIPHON_MAX_STEP_FRACTION) {
-      // A step is the instrument, not a hose — see SIPHON_MAX_STEP_FRACTION.
-      return { cause: 'INDETERMINATE', reason: 'step-shaped', confidence: 0.5, ...none }
-    }
+    // (The `step-shaped` refusal stood here until 2026-09-24. It refused 42% of
+    // the confirmed drains on trusted probes — see SIPHON_MAX_STEP_FRACTION for
+    // the measurement and for what must replace it before the rate ceiling is
+    // raised.)
     return {
       cause: 'SIPHON', reason: 'parked-sustained-fall', impliedLph: null,
       confidence: lerp(wallLph, SIPHON_MIN_LPH, SIPHON_MIN_LPH * 8, 0.55, 0.9),

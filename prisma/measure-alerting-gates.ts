@@ -65,8 +65,12 @@ interface Gates {
   movedKm:          number
 }
 
+/**
+ * The gates as they stood before any of this shipped. Kept as the comparison
+ * baseline; it is NO LONGER production — see the SHIPPED markers below.
+ */
 const CURRENT: Gates = {
-  label: 'S0  current',
+  label: 'S0  before any change',
   minDropMl: 15_000, minLph: 5, minSeconds: 600,
   maxStepFraction: 0.6, maxRemovalLph: 300, movedKm: 0,
 }
@@ -74,7 +78,7 @@ const CURRENT: Gates = {
 /** Cumulative scenarios, each adding one change to the one before it. */
 const SCENARIOS: Gates[] = [
   CURRENT,
-  { ...CURRENT, label: 'S1  + step test retired',      maxStepFraction: Infinity },
+  { ...CURRENT, label: 'S1  + step retired  SHIPPED',      maxStepFraction: Infinity },
   { ...CURRENT, label: 'S2  + min fall 120 s',         maxStepFraction: Infinity, minSeconds: 120 },
   { ...CURRENT, label: 'S3  + removal ceiling 3000',   maxStepFraction: Infinity, minSeconds: 120, maxRemovalLph: 3_000 },
   { ...CURRENT, label: 'S4  + stray-speed tolerance',  maxStepFraction: Infinity, minSeconds: 120, maxRemovalLph: 3_000, movedKm: 0.1 },
