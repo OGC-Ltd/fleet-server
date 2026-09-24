@@ -38,6 +38,28 @@ const FUEL_SENSOR_TYPE = 'fuel level'
  */
 const IGNITION_SENSOR_TYPE = 'engine operation'
 
+/**
+ * Teltonika's ignition input, AVL id 239 — read directly by `readIgnition`
+ * ahead of whatever parameter a sensor is bound to. See that function for the
+ * measurement behind the precedence.
+ */
+const IGNITION_PARAM = 'io_239'
+
+/**
+ * A parameter's value as a digital line, or null when it is not one.
+ *
+ * The binary test is the whole guard: this account binds ignition sensors to
+ * parameters that are not booleans at all, and a value outside {0, 1} is
+ * evidence the parameter is measuring something else. Strings are coerced
+ * because some firmwares send the line as text.
+ */
+function asDigital(raw: unknown): boolean | null {
+  if (raw == null || raw === '') return null
+  const n = Number(raw)
+  if (!Number.isFinite(n) || (n !== 0 && n !== 1)) return null
+  return n === 1
+}
+
 /* ─────────────────────────── camera / MDVR ──────────────────────────────── */
 
 /**
@@ -389,22 +411,66 @@ export function readFuel(
  * or has one but its parameter is absent from this message: "we do not know"
  * and "the engine is off" are different claims, and only the first is honest
  * here. Callers fall back to the speed heuristic in that case.
+ *
+ * ## `io_239` is read FIRST, ahead of whatever a sensor is bound to
+ *
+ * AVL id 239 is Teltonika's ignition input. The account's sensors are not
+ * reliably bound to it — "1.IGN" points at five different parameters and only
+ * two are digital — so the sensor is the weaker source, not the stronger one.
+ *
+ * Measured against all 211 KASULU units, 2026-09-24
+ * (`prisma/measure-ignition-fallback.ts`, re-runnable):
+ *
+ *   ignition readable before          104
+ *   blind before                      107
+ *     recovered by reading io_239      70   (62 reporting within 7 days)
+ *     still blind, no io_239 at all    37
+ *   io_239 values across the fleet    0 and 1, nothing else
+ *
+ * That matters well beyond idling. `engineEvidence >= MIN_ENGINE_EVIDENCE` is a
+ * precondition of the parked branch in `fuel-theft-classifier`, and the parked
+ * branch is the only route to a SIPHON verdict — so each of those 70 units was
+ * structurally incapable of raising a fuel-theft alert, whatever happened to
+ * its tank. MUFINDI - FT 13 is one of them; see
+ * docs/fuel-theft-alerting-gaps.md.
+ *
+ * ## Why FIRST rather than as a fallback after the sensor
+ *
+ * Of the 104 units where both can be read, 99 agree. The five that disagree all
+ * disagree the same way — the sensor says OFF while io_239 says ON:
+ *
+ *   MUFINDI - EX 07, LMV 15, CM 05, FTT 05   sensor on io_1
+ *   MUFINDI: MTR 14                          sensor on io_9
+ *
+ * A false "engine off" is the dangerous direction here, not a harmless one: it
+ * is exactly what makes `parked` true, and `parked` is what licenses a theft
+ * verdict against whoever was driving. MTR 14 is the clearest case — io_9 is
+ * not boolean at all, but it does take the value 0, and 0 passes the binary
+ * test below, so a parameter this function has already judged untrustworthy
+ * still reports "off" whenever it happens to read zero.
+ *
+ * Reading io_239 first resolves all five toward the genuine line and leaves the
+ * 99 that agree untouched.
+ *
+ * Note the residual: a unit bound to io_9 that sends NO io_239 can still report
+ * a false "off" from io_9 = 0. None of the 37 still-blind units is in that
+ * position today, but the guard below remains per-value rather than
+ * per-parameter, and that is worth revisiting separately.
  */
 export function readIgnition(
   sensors: Record<string, WialonSensor> | undefined,
   params: Record<string, unknown> | undefined,
 ): boolean | null {
-  if (!sensors || !params) return null
+  if (!params) return null
+
+  // The genuine ignition line, wherever a sensor happens to point.
+  const direct = asDigital(params[IGNITION_PARAM])
+  if (direct !== null) return direct
+
+  if (!sensors) return null
 
   for (const sensor of Object.values(sensors)) {
     if (sensor.t !== IGNITION_SENSOR_TYPE) continue
-    const raw = params[sensor.p]
-    // Some firmwares send the line as a string, hence the coercion rather than
-    // a typeof-number guard.
-    if (raw == null || raw === '') continue
-    const n = Number(raw)
-    if (!Number.isFinite(n)) continue
-
     // ONLY a genuine digital line can answer this. `n !== 0` used to be the
     // test, and it silently accepted parameters that are not booleans at all.
     //
@@ -463,8 +529,9 @@ export function readIgnition(
     // never ran" correctly only 74.5% of the time — good enough for a rate,
     // nowhere near good enough to license a theft verdict. See
     // prisma/measure-meter-ignition.ts.
-    if (n !== 0 && n !== 1) continue
-    return n === 1
+    const value = asDigital(params[sensor.p])
+    if (value === null) continue
+    return value
   }
   return null
 }
