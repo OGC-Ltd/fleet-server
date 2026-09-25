@@ -16,30 +16,53 @@ import { logger } from '../../lib/logger.js'
 import { Prisma, WeighmentCategory } from '../../../generated/prisma/client.js'
 import { PROVIDER_UTC_OFFSET } from '../../lib/provider-time.js'
 import { normalisePlate } from '../../providers/wialon/wialon.unit-name.js'
-import { resolveOrgId } from '../webhooks/factory-map.js'
 import type {
   RaiFactorySuiteCaneDeliveryRow,
   RaiFactorySuiteCaneTransferRow,
 } from '../../providers/raifactorysuite/raifactorysuite.client.js'
 
-/** The factory these bridges belong to. Weighbridge tickets carry no factory
- *  code of their own — Sukari's scale software is the only thing that writes
- *  them, and it only knows its own sites. */
-const WEIGHBRIDGE_FACTORY = 'NDHIWA'
+/**
+ * The factories whose scale software feeds us, and whose tickets they are.
+ *
+ * Until ~2026-09-17 the feed was Ndhiwa's alone and carried no factory at all,
+ * so every ticket was filed under Sukari. Then Kabras and Nzoia joined it,
+ * each ticket now naming its `factoryCode`, and for a week West Kenya's
+ * tickets (~4,800 of them) were filed under Sukari too. Both new factories are
+ * West Kenya's: every plate on them that matches a unit we hold matches a
+ * WESTSUGAR one (571 Kabras, 47 Nzoia, measured 2026-09-25).
+ *
+ * `siteBase` keeps a yard's code unique within its organisation. The provider
+ * numbers centres PER FACTORY (101 is Ndhiwa's factory, Kabras Factory Yard
+ * and Nzoia Factory Yard) and Kabras and Nzoia share an organisation, so the
+ * stored `centerCode` is the provider's code plus this. Ndhiwa is 0 so Sukari's
+ * codes, and every link and tab built on them, are unchanged.
+ *
+ * A factory not listed is dropped with a warning rather than guessed at: a
+ * ticket filed under the wrong company is the bug this table exists to fix.
+ */
+export const WEIGHBRIDGE_FACTORIES: Record<string, { orgCode: string; siteBase: number }> = {
+  NDHIWA: { orgCode: 'SUKARI',    siteBase: 0 },
+  KABRAS: { orgCode: 'WESTSUGAR', siteBase: 1000 },
+  NZOIA:  { orgCode: 'WESTSUGAR', siteBase: 2000 },
+}
+
+/** Rows from before the feed named its factory were all Ndhiwa's. */
+export const LEGACY_FACTORY = 'NDHIWA'
+
+/** The provider's centre code as the site code we store. */
+export const siteCodeOf = (factoryCode: string, centerCode: number): number =>
+  (WEIGHBRIDGE_FACTORIES[factoryCode]?.siteBase ?? 0) + centerCode
 
 /**
- * Centre code → name.
+ * Site code -> name.
  *
- * A DELIVERY row carries both, so this table is not needed to read one. A
- * TRANSFER carries `centerFrom` and no name at all, which is the whole reason
- * this exists: without it every transfer would render as a number.
+ * A DELIVERY row carries both, so this table is not needed to read one. An
+ * Ndhiwa TRANSFER carries `centerFrom` and no name at all, which is the whole
+ * reason this exists: without it every transfer would render as a number.
  *
- * Measured against the live feed 2026-09-10 — 729 delivery rows across exactly
- * these four sites, and the three origins transfers use (102, 103, 104) are
- * all present. An unknown code is labelled rather than dropped: a fifth bridge
- * opening is a thing that happens, and "Centre 105" is a usable answer while
- * this table catches up. `learnCentre` below keeps it current from the
- * delivery feed itself, so that label is temporary in practice.
+ * Seeded with Ndhiwa's four, measured against the live feed 2026-09-10. An
+ * unknown code is labelled rather than dropped, and `learnCentre` below keeps
+ * it current from the feed itself, so that label is temporary in practice.
  */
 const CENTRE_NAMES = new Map<number, string>([
   [101, 'FACTORY'],
@@ -52,11 +75,10 @@ const CENTRE_NAMES = new Map<number, string>([
 // seed the page's tab strip, and a hardcoded list is the wrong authority for
 // WHOSE bridges these are — see `findOrgCentres` in the repository, which asks
 // the organisation's own tickets. The map below survives for the one job it is
-// genuinely the authority on: naming the centre a TRANSFER refers to by code,
-// since a transfer payload carries `centerFrom` and no name at all.
+// genuinely the authority on: naming the centre a TRANSFER refers to by code.
 
-/** Record a code→name pair seen on a delivery row, so a new bridge names
- *  itself the first time it weighs anything rather than waiting for a deploy. */
+/** Record a code->name pair seen on a row, so a new yard names itself the
+ *  first time it weighs anything rather than waiting for a deploy. */
 function learnCentre(code: number, name: string | null | undefined): void {
   if (!name || CENTRE_NAMES.get(code) === name) return
   if (CENTRE_NAMES.has(code)) {
@@ -125,9 +147,12 @@ export function normaliseWeighment(
 }
 
 function normaliseDelivery(row: RaiFactorySuiteCaneDeliveryRow, organisationId: string, vehicleId: string | null): WeighmentFields {
-  learnCentre(row.centerCode, row.centerName)
+  const factoryCode = row.factoryCode ?? LEGACY_FACTORY
+  const site = siteCodeOf(factoryCode, row.centerCode)
+  learnCentre(site, row.centerName)
   return {
     organisationId,
+    factoryCode,
     category:      WeighmentCategory.CANE_DELIVERY,
     tokenNumber:   BigInt(row.tokenNumber),
     tokenAt:       weighmentAt(row.tokenDate, row.tokenTime) ?? new Date(),
@@ -135,8 +160,8 @@ function normaliseDelivery(row: RaiFactorySuiteCaneDeliveryRow, organisationId: 
     vehiclePlate:  normalisePlate(row.vehicleNo),
     vehicleId,
     driverName:    row.driverName,
-    centerCode:    row.centerCode,
-    centerName:    row.centerName ?? centreName(row.centerCode),
+    centerCode:    site,
+    centerName:    row.centerName ?? centreName(site),
     grossWeightKg: row.grossWeight ?? null,
     grossAt:       weighmentAt(row.grossDate, row.grossTime),
     grossOperator: row.grossOperator ?? null,
@@ -157,8 +182,16 @@ function normaliseDelivery(row: RaiFactorySuiteCaneDeliveryRow, organisationId: 
  * it, and the centre tab a ticket appears under is the place it was loaded.
  */
 function normaliseTransfer(row: RaiFactorySuiteCaneTransferRow, organisationId: string, vehicleId: string | null): WeighmentFields {
+  const factoryCode = row.factoryCode ?? LEGACY_FACTORY
+  // Ndhiwa names the origin in `centerFrom`; Kabras and Nzoia leave that null
+  // and name the yard in `centerCode`, with its weights at the top level.
+  const from = row.centerFrom ?? row.centerCode
+  if (from == null) throw new Error(`Transfer ${row.tokenNumber} names no centre`)
+  const site = siteCodeOf(factoryCode, from)
+  learnCentre(site, row.centerName)
   return {
     organisationId,
+    factoryCode,
     category:      WeighmentCategory.CANE_TRANSFER,
     tokenNumber:   BigInt(row.tokenNumber),
     tokenAt:       weighmentAt(row.tokenDate, row.tokenTime) ?? new Date(),
@@ -166,17 +199,17 @@ function normaliseTransfer(row: RaiFactorySuiteCaneTransferRow, organisationId: 
     vehiclePlate:  normalisePlate(row.vehicleNo),
     vehicleId,
     driverName:    row.driverName,
-    centerCode:    row.centerFrom,
-    centerName:    centreName(row.centerFrom),
-    grossWeightKg: row.centerGrossWeight ?? null,
+    centerCode:    site,
+    centerName:    row.centerName ?? centreName(site),
+    grossWeightKg: row.centerGrossWeight ?? row.grossWeight ?? null,
     grossAt:       weighmentAt(row.centerGrossDate, row.centerGrossTime),
     grossOperator: row.centerGrossOperator ?? null,
     grossBridgeNo: row.centerGrossWeighbridgeNo ?? null,
-    tareWeightKg:  row.centerTareWeight ?? null,
+    tareWeightKg:  row.centerTareWeight ?? row.tareWeight ?? null,
     tareAt:        weighmentAt(row.centerTareDate, row.centerTareTime),
     tareOperator:  row.centerTareOperator ?? null,
     tareBridgeNo:  row.centerTareWeighbridgeNo ?? null,
-    netWeightKg:   row.centerNetWeight ?? null,
+    netWeightKg:   row.centerNetWeight ?? row.netWeight ?? null,
     factoryGrossWeightKg: row.factoryGrossWeight ?? null,
     factoryGrossAt:       weighmentAt(row.factoryGrossDate, row.factoryGrossTime),
     factoryGrossOperator: row.factoryGrossOperator ?? null,
@@ -195,7 +228,7 @@ function normaliseTransfer(row: RaiFactorySuiteCaneTransferRow, organisationId: 
  * Deliberately NOT `resolveEventOrg`. That function decides which
  * organisation an event belongs to from the unit's owner, which is right for a
  * dispatch — the event is about the lorry — and wrong here: a weighbridge
- * ticket is Sukari's record of its own scale, whoever's lorry drove onto it.
+ * ticket is the factory's record of its own scale, whoever's lorry drove onto it.
  * Most of these lorries are contractors' and match nothing we hold, so a null
  * is the normal case and not a failure.
  */
@@ -218,6 +251,25 @@ async function findVehicleId(organisationId: string, rawPlate: string): Promise<
   return rows.find(v => normalisePlate(v.registrationPlate) === wanted)?.id ?? null
 }
 
+/** Organisation id per factory. Cached: it cannot change without a deploy,
+ *  and a null is cached too so an unmapped factory does not query per row. */
+const orgIds = new Map<string, string | null>()
+async function weighbridgeOrgId(factoryCode: string): Promise<string | null> {
+  if (orgIds.has(factoryCode)) return orgIds.get(factoryCode) ?? null
+  const code = WEIGHBRIDGE_FACTORIES[factoryCode]?.orgCode
+  const org = code ? await prisma.organisation.findUnique({ where: { code }, select: { id: true } }) : null
+  orgIds.set(factoryCode, org?.id ?? null)
+  return org?.id ?? null
+}
+
+/** Once per factory per process: the reconciler re-serves every row each pass. */
+const warned = new Set<string>()
+function warnUnmapped(factoryCode: string): void {
+  if (warned.has(factoryCode)) return
+  warned.add(factoryCode)
+  logger.warn({ factoryCode }, 'Weighbridge tickets dropped: factory maps to no organisation; add it to WEIGHBRIDGE_FACTORIES')
+}
+
 export interface IngestOptions {
   /** 'webhook' when pushed, 'reconciler' on the poll that backstops it. */
   source?: string
@@ -238,9 +290,10 @@ export async function handleWeighment(
   const source = opts.source ?? 'reconciler'
   if (row?.tokenNumber == null || !row.vehicleNo) return false
 
-  const organisationId = await resolveOrgId(WEIGHBRIDGE_FACTORY)
+  const factoryCode = row.factoryCode ?? LEGACY_FACTORY
+  const organisationId = await weighbridgeOrgId(factoryCode)
   if (!organisationId) {
-    logger.warn({ factoryCode: WEIGHBRIDGE_FACTORY }, 'Weighbridge ticket dropped: factory maps to no organisation')
+    warnUnmapped(factoryCode)
     return false
   }
 

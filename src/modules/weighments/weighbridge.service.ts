@@ -88,6 +88,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { WEIGHBRIDGES, bridgeOf, unticketedScalesOf } from './weighbridge.geography.js'
+import { LEGACY_FACTORY } from './weighment.ingest.js'
 
 /** How far back to look for a scale's last ticket. */
 const LOOKBACK_DAYS = 30
@@ -161,7 +162,7 @@ export async function getWeighbridges(orgId: string): Promise<WeighbridgeDto[]> 
   const rows = await prisma.weighment.findMany({
     where:  { organisationId: orgId, tokenAt: { gte: since } },
     select: {
-      tokenNumber: true, category: true, tokenAt: true,
+      factoryCode: true, tokenNumber: true, category: true, tokenAt: true,
       vehicleNo: true, vehiclePlate: true, vehicleId: true, driverName: true,
       grossWeightKg: true, grossAt: true, grossOperator: true, grossBridgeNo: true,
       tareWeightKg: true, tareAt: true, tareOperator: true, tareBridgeNo: true,
@@ -177,6 +178,10 @@ export async function getWeighbridges(orgId: string): Promise<WeighbridgeDto[]> 
   const unplaced = new Set<number>()
 
   for (const row of rows) {
+    // Bridge numbers are Ndhiwa's numbering (see weighbridge.geography). A
+    // Kabras or Nzoia ticket sends none today; if one ever does, its "1" is
+    // not Sukari's Factory bridge 1, so it is not read against that table.
+    if ((row.factoryCode ?? LEGACY_FACTORY) !== LEGACY_FACTORY) continue
     const offered: Weighing[] = []
     const add = (bridgeNo: number | null, at: Date | null,
                  stage: 'gross' | 'tare', atFactoryLeg: boolean, operator: string | null) => {

@@ -17,7 +17,7 @@ vi.mock('../../src/modules/weighments/weighment.repository.js', () => ({
 
 import { findDay, findCapturedRange, findOrgCentres } from '../../src/modules/weighments/weighment.repository.js'
 import { getWeighmentDay } from '../../src/modules/weighments/weighment.service.js'
-import { weighmentAt, normaliseWeighment } from '../../src/modules/weighments/weighment.ingest.js'
+import { weighmentAt, normaliseWeighment, WEIGHBRIDGE_FACTORIES, siteCodeOf } from '../../src/modules/weighments/weighment.ingest.js'
 import fixtures from '../fixtures/weighment-rows.json' with { type: 'json' }
 
 const ORG = 'org_01'
@@ -387,5 +387,53 @@ describe('normaliseWeighment — real payloads', () => {
       expect(f.tokenAt).toBeInstanceOf(Date)
       expect(Number.isNaN((f.tokenAt as Date).getTime())).toBe(false)
     }
+  })
+})
+
+describe('normaliseWeighment: one feed, three factories', () => {
+  // Captured from the live feed 2026-09-25.
+  const kabrasDelivery = {
+    category: 'CANE_DELIVERY', factoryCode: 'KABRAS', tokenNumber: 20061084370,
+    tokenDate: '2026-09-25', tokenTime: 2021, vehicleNo: 'KTCC 743A', driverName: 'JOSEPH AYOO  OMAR',
+    grossDate: '2026-09-25', grossTime: 2025, grossOperator: null, grossWeight: 16840, grossWeighbridgeNo: null,
+    tareDate: '2026-09-25', tareTime: 2044, tareOperator: null, tareWeight: 6820, tareWeighbridgeNo: null,
+    netWeight: 10020, centerCode: 103, centerName: 'BUSIA YARD', productCode: null, productName: null,
+  }
+  const kabrasTransfer = {
+    category: 'CANE_TRANSFER', factoryCode: 'KABRAS', tokenNumber: 236271724,
+    tokenDate: '2026-09-25', tokenTime: 1850, vehicleNo: 'KDE 583S', driverName: 'JOTHAM WEKESA  NYONGESA',
+    centerFrom: null, grossWeight: 48320, tareWeight: 22820, netWeight: 25500,
+    status: 'In Transit', centerCode: 104, centerName: 'MISIKHU YARD',
+  }
+
+  it('stores the factory, and gives its yards codes of their own', () => {
+    const f = normaliseWeighment(kabrasDelivery as never, ORG, null)
+    expect(f.factoryCode).toBe('KABRAS')
+    // Kabras's 103 is Busia, not Sukari's Oyani and not Nzoia's Weyeta.
+    expect(f.centerCode).toBe(1103)
+    expect(f.centerName).toBe('BUSIA YARD')
+  })
+
+  it('reads a Kabras transfer, which names its yard in centerCode and carries its weights at the top', () => {
+    const f = normaliseWeighment(kabrasTransfer as never, ORG, null)
+    expect(f.centerCode).toBe(1104)
+    expect(f.centerName).toBe('MISIKHU YARD')
+    expect(f.grossWeightKg).toBe(48320)
+    expect(f.tareWeightKg).toBe(22820)
+    expect(f.netWeightKg).toBe(25500)
+  })
+
+  it('keeps Ndhiwa rows, which name no factory, on the codes Sukari has always had', () => {
+    const [row] = fixtures.delivery
+    const f = normaliseWeighment(row as never, ORG, null)
+    expect(f.factoryCode).toBe('NDHIWA')
+    expect(f.centerCode).toBe(101)
+  })
+
+  it('maps Kabras and Nzoia to West Kenya and Ndhiwa to Sukari', () => {
+    expect(WEIGHBRIDGE_FACTORIES.KABRAS.orgCode).toBe('WESTSUGAR')
+    expect(WEIGHBRIDGE_FACTORIES.NZOIA.orgCode).toBe('WESTSUGAR')
+    expect(WEIGHBRIDGE_FACTORIES.NDHIWA.orgCode).toBe('SUKARI')
+    expect(siteCodeOf('NZOIA', 101)).not.toBe(siteCodeOf('KABRAS', 101))
   })
 })
