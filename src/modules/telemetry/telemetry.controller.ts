@@ -1,8 +1,8 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import { registerSseClient, emitHeartbeat } from '../../lib/sse.js'
-import { listPings, getVehicleTrack, getVehiclePlayback, getLatestPing, getFleetSnapshot, getActiveAlerts, getAlertHistoryCounts, getMaintenanceHistory, getVehicleServiceHistory, getVehicleGarageVisits } from './telemetry.service.js'
-import type { TelemetryListQuery, TrackQuery, PlaybackQuery } from './telemetry.schema.js'
+import { listPings, getVehicleTrack, getVehiclePlayback, getVehicleDaySeries, getLatestPing, getFleetSnapshot, getActiveAlerts, getAlertHistoryCounts, getMaintenanceHistory, getVehicleServiceHistory, getVehicleGarageVisits } from './telemetry.service.js'
+import type { TelemetryListQuery, TrackQuery, PlaybackQuery, DaySeriesQuery } from './telemetry.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -45,6 +45,17 @@ export const getVehiclePlaybackHandler: RequestHandler = async (req, res, next) 
     const data = await getVehiclePlayback(
       p(req, 'vehicleId'), p(req, 'orgId'), req.query as unknown as PlaybackQuery,
     )
+    sendSuccess(res, data)
+  } catch (err) { next(err) }
+}
+
+export const getVehicleDaySeriesHandler: RequestHandler = async (req, res, next) => {
+  try {
+    const data = await getVehicleDaySeries(
+      p(req, 'vehicleId'), p(req, 'orgId'), req.query as unknown as DaySeriesQuery,
+    )
+    // A finished day never changes, so the browser may keep it; today's grows.
+    res.set('Cache-Control', data.complete ? 'private, max-age=86400' : 'no-store')
     sendSuccess(res, data)
   } catch (err) { next(err) }
 }
