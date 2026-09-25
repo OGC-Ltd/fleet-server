@@ -133,7 +133,7 @@ describe('speeding', () => {
     expect(fast).toHaveLength(1)
     expect(fast[0].kind).toBe('speeding')
     expect(fast[0].severity).toBe('warning')
-    expect(fast[0].detail).toBe('peak 110 km/h')
+    expect(fast[0].detail).toBe('peak 110 km/h, limit 80 km/h')
   })
 
   /**
