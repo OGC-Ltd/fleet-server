@@ -128,6 +128,17 @@ describe("West Kenya's yards", () => {
   })
 })
 
+describe("Nzoia's bridges", () => {
+  it('are the two the operator gave, at the factory yard site', () => {
+    const nz = WEIGHBRIDGES.filter(b => b.centerCode === 2101)
+    expect(nz.map(b => b.label).sort()).toEqual(['CW bridge', 'HD bridge'])
+    const cw = nz.find(b => b.label === 'CW bridge')!
+    // 0°34'08.56"N 34°39'16.84"E
+    expect(cw.lat).toBeCloseTo(0 + 34 / 60 + 8.56 / 3600, 6)
+    expect(cw.lng).toBeCloseTo(34 + 39 / 60 + 16.84 / 3600, 6)
+  })
+})
+
 describe('getWeighbridges', () => {
   it('gives an organisation the scales that will never send a ticket', async () => {
     // Kabras' two report to nobody, so no amount of reading the ticket feed
