@@ -100,7 +100,12 @@
  * Nzoia's two bridges were then GIVEN by the operator (2026-09-26), as CW and
  * HD, and replace the derived point: CW 0.5700258, 34.6544478 and HD
  * 0.5671175, 34.6562756, ~380 m apart (both corrected by the operator the same
- * day; their first DMS readings sat 112 m and 39 m off). The derived arrival point had
+ * day; their first DMS readings sat 112 m and 39 m off).
+ *
+ * Naitiri's weighbridge was likewise GIVEN by the operator (2026-09-26) at
+ * 0.7813181, 34.8778280. The arrival-fix point it replaces was 570 m off: at
+ * Naitiri the lorries queue across a ~200 m yard, so ticket-time fixes place
+ * the queue, not the deck. The derived arrival point had
  * landed 64 m from CW, which is the check on the method used for the others.
  *
  * Kitale is the check: two of our own units weighed there on DELIVERY tickets,
@@ -188,7 +193,7 @@ export const WEIGHBRIDGES: Weighbridge[] = [
 
   // West Kenya's other sites, from the feed's Kabras and Nzoia tickets. See
   // the note above for how each was measured and which were left out.
-  { key: 'naitiri',   orgCode: 'WESTSUGAR', centerCode: 1107, centerName: 'NAITIRI',        bridgeNo: null, label: 'Factory yard', lat: 0.785500, lng: 34.880800, spreadM: 200, samples: 114 },
+  { key: 'naitiri',   orgCode: 'WESTSUGAR', centerCode: 1107, centerName: 'NAITIRI',        bridgeNo: null, label: 'Weighbridge', lat: 0.7813181, lng: 34.8778280, spreadM: 0, samples: 0 },
   { key: 'misikhu',   orgCode: 'WESTSUGAR', centerCode: 1104, centerName: 'MISIKHU',        bridgeNo: null, label: 'Yard', lat: 0.723797, lng: 34.769075, spreadM: 31, samples: 46 },
   { key: 'selient',   orgCode: 'WESTSUGAR', centerCode: 1114, centerName: 'SELIENT',        bridgeNo: null, label: 'Yard', lat: 0.510809, lng: 35.025235, spreadM: 19, samples: 34 },
   { key: 'kitale',    orgCode: 'WESTSUGAR', centerCode: 1115, centerName: 'KITALE (AMUKA)', bridgeNo: null, label: 'Yard', lat: 1.098563, lng: 35.008331, spreadM: 24, samples: 33 },
