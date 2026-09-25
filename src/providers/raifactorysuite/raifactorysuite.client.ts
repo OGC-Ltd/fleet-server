@@ -74,6 +74,10 @@ export interface RaiFactorySuiteSaleRow {
  */
 export interface RaiFactorySuiteCaneDeliveryRow {
   category:            'CANE_DELIVERY'
+  /** Whose scale software wrote it: NDHIWA, KABRAS or NZOIA as of 2026-09-25.
+   *  Absent on the rows seen before ~2026-09-17, when the feed was Ndhiwa's
+   *  alone. Centre codes are per factory — 101 is a different yard at each. */
+  factoryCode?:        string | null
   tokenNumber:         number
   tokenDate:           string
   tokenTime:           number
@@ -90,7 +94,8 @@ export interface RaiFactorySuiteCaneDeliveryRow {
   tareWeight?:         number | null
   tareWeighbridgeNo?:  number | null
   netWeight?:          number | null
-  /** 101 FACTORY · 102 OPAPO · 103 OYANI · 104 NYAONDO, measured 2026-09-10. */
+  /** Ndhiwa: 101 FACTORY · 102 OPAPO · 103 OYANI · 104 NYAONDO, measured
+   *  2026-09-10. Per factory, not global — see `factoryCode`. */
   centerCode:          number
   centerName:          string
   /** Null on all 729 rows measured — modelled upstream, not populated. */
@@ -107,6 +112,7 @@ export interface RaiFactorySuiteCaneDeliveryRow {
  */
 export interface RaiFactorySuiteCaneTransferRow {
   category:                 'CANE_TRANSFER'
+  factoryCode?:             string | null
   tokenNumber:              number
   tokenDate:                string
   tokenTime:                number
@@ -134,8 +140,16 @@ export interface RaiFactorySuiteCaneTransferRow {
   factoryTareWeight?:       number | null
   factoryTareWeighbridgeNo?: number | null
   factoryNetWeight?:        number | null
-  /** The outstation the load came from, as a code. Never 101 (the factory). */
-  centerFrom:               number
+  /** The outstation the load came from, as a code. Never 101 (the factory).
+   *  Null on the Kabras and Nzoia rows, which name the yard in `centerCode` /
+   *  `centerName` instead and carry the yard's weights at the top level. */
+  centerFrom:               number | null
+  centerCode?:              number | null
+  centerName?:              string | null
+  grossWeight?:             number | null
+  tareWeight?:              number | null
+  netWeight?:               number | null
+  status?:                  string | null
 }
 
 export class RaiFactorySuiteClient {
