@@ -13,7 +13,8 @@
  *     "LMV nn" — 60 km/h inside the factory premises, 100 km/h on the
  *     national roads;
  *   · every other unit — buses, lorries, trucks, tractors, plant and the
- *     untyped — 40 km/h, wherever it is.
+ *     untyped — 40 km/h inside the factory premises, 80 km/h on the
+ *     highway (everywhere outside it; raised from 40 everywhere, same day).
  *
  * Kasulu's factory is the "Factory site Location" polygon, the only zone
  * lib/zone-taxonomy files as `factory` (the haulage road from the factory is
@@ -47,7 +48,7 @@ export interface SpeedPolicy {
 
 export const SPEED_POLICIES: Readonly<Record<string, SpeedPolicy>> = {
   KASULU: {
-    default: { outsideKmh: 40 },
+    default: { outsideKmh: 80, insideKmh: { factory: 40 } },
     byType:  { SALOON: { outsideKmh: 100, insideKmh: { factory: 60 } } },
   },
 }
