@@ -2708,6 +2708,11 @@ model Notification {
 model Weighment {
   id             String            @id @default(uuid())
   organisationId String            @map("organisation_id")
+  /// The provider factory whose scale software wrote the ticket — NDHIWA,
+  /// KABRAS or NZOIA. It decides the organisation, and it scopes `centerCode`,
+  /// which the provider numbers per factory. Null only on rows stored before
+  /// it was read (2026-09-25), all of which were backfilled.
+  factoryCode    String?           @map("factory_code")
   /// CANE_DELIVERY | CANE_TRANSFER — the endpoint that produced it, which is
   /// also what the badge on the grid reads. The provider states it in the
   /// payload (`category`) rather than leaving it to be inferred.
@@ -2736,8 +2741,12 @@ model Weighment {
   /// more.
   driverName   String  @map("driver_name")
 
-  /// Where the weighing happened: 101 FACTORY, 102 OPAPO, 103 OYANI,
-  /// 104 NYAONDO (measured 2026-09-10; the four bridges Sukari operates).
+  /// Where the weighing happened, as a SITE code unique within the
+  /// organisation: the provider's centre code plus the factory's `siteBase`
+  /// (weighment.ingest WEIGHBRIDGE_FACTORIES). Ndhiwa's base is 0, so Sukari's
+  /// stay 101 FACTORY, 102 OPAPO, 103 OYANI, 104 NYAONDO; Kabras's yards are
+  /// 1101… and Nzoia's 2101…, because both report 101-103 for different yards
+  /// and both belong to West Kenya.
   centerCode Int    @map("center_code")
   /// The provider's name for that centre. Denormalised deliberately: a
   /// transfer payload carries only `centerFrom`, so the name has to come from
