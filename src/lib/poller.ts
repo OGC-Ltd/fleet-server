@@ -36,6 +36,7 @@ import { startPollLoop }         from './poll-loop.js'
 import type { PollLoopHandle }   from './poll-loop.js'
 import type { TelemetryProvider, VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
 import { noteSpeedFrame, sweepStaleEpisodes, flushEpisodes } from './speeding-episodes.js'
+import { warmSpeedPolicy } from './speed-policy.js'
 import { noteFuelFrame } from './fuel-drop-watch.js'
 import { noteFaultFrame, noteAlive } from './sensor-faults.js'
 import { deriveAlertFlags } from './derived-alerts.js'
@@ -216,6 +217,9 @@ class TelemetryPoller {
     await runWithConcurrency(frames, POLL_CONCURRENCY, async (frame) => {
       const meta = await getDeviceMeta(frame.deviceId)
       if (!meta) { skipped++; return }
+      // Zone speed limits need the org's zones in memory (lib/speed-policy).
+      // A cache hit after the first frame; never throws.
+      await warmSpeedPolicy(meta.orgId)
 
       // Flags this fleet's own telemetry can answer, for providers that send
       // none. ORed on, never assigned: a provider that computes its own alerts
@@ -227,6 +231,7 @@ class TelemetryPoller {
       // after the write would give the two paths different answers for the
       // same fix.
       const derived = deriveAlertFlags(frame, {
+        orgId:          meta.orgId,
         vehicleId:      meta.vehicleId,
         tankCapacityMl: meta.tankCapacityMl,
         vehicleType:    meta.vehicleType,

@@ -36,6 +36,7 @@
 
 import { env } from '../config/env.js'
 import type { VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
+import { zoneLimitAt } from './speed-policy.js'
 
 /** What the derivation needs to know about the vehicle behind a frame. */
 export interface DerivationContext {
@@ -43,6 +44,8 @@ export interface DerivationContext {
   /** 0 when the tank is unknown — see the poller's note. Blocks `lowFuel`. */
   tankCapacityMl: number
   vehicleType:    string | null
+  /** For an org with a zone speed policy (lib/speed-policy). */
+  orgId?:         string
 }
 
 /** The flags this module is able to assert. */
@@ -67,8 +70,25 @@ const limitByType: ReadonlyMap<string, number> = new Map(
     .filter(([type, kmh]) => type.length > 0 && Number.isFinite(kmh) && kmh > 0),
 )
 
-/** The limit that applies to one vehicle. */
-export function overspeedLimitFor(vehicleType: string | null): number {
+/** Where a unit is, for an org whose limit depends on it. */
+export interface LimitPlace {
+  orgId: string
+  lat:   number | null | undefined
+  lng:   number | null | undefined
+}
+
+/**
+ * The limit that applies to one vehicle.
+ *
+ * With `at`, an org that has a zone policy (lib/speed-policy — Kasulu: 60 in
+ * the factory, 100 on the roads) is judged by where the unit is, and that
+ * outranks the per-type and fleet limits. Every other org, and every caller
+ * that cannot say where the unit is, gets the per-type or fleet limit as
+ * before.
+ */
+export function overspeedLimitFor(vehicleType: string | null, at?: LimitPlace): number {
+  const zone = at ? zoneLimitAt(at.orgId, at.lat, at.lng) : null
+  if (zone) return zone.kmh
   return limitByType.get((vehicleType ?? '').toUpperCase()) ?? env.OVERSPEED_LIMIT_KMH
 }
 
@@ -107,7 +127,10 @@ export function deriveAlertFlags(
   // ── overspeeding ─────────────────────────────────────────────────────────
   const speed = frame.speedKmh
   if (Number.isFinite(speed)) {
-    const limit = overspeedLimitFor(ctx.vehicleType)
+    const limit = overspeedLimitFor(
+      ctx.vehicleType,
+      ctx.orgId ? { orgId: ctx.orgId, lat: frame.lat, lng: frame.lng } : undefined,
+    )
     if ((speed as number) > limit) {
       const n = (overCount.get(ctx.vehicleId) ?? 0) + 1
       overCount.set(ctx.vehicleId, n)

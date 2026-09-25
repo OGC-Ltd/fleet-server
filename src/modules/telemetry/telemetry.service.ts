@@ -17,6 +17,9 @@ import { connectionStatus } from '../../lib/connection-state.js'
 import { getOpenTripsCached } from '../dispatches/open-trips.cache.js'
 import { tripGeometry } from '../../lib/dispatch-trip.js'
 import { fleetDayStart, fleetDayKey, fleetDayBounds as sharedFleetDayBounds } from '../../lib/provider-time.js'
+import { prisma } from '../../lib/prisma.js'
+import { overspeedLimitFor } from '../../lib/derived-alerts.js'
+import { warmSpeedPolicy, speedPolicyFor } from '../../lib/speed-policy.js'
 
 /** Fleet-local midnight as an ISO string, so it compares against `departedAt`
  *  (which is already an ISO instant) without re-parsing per vehicle. */
@@ -250,6 +253,17 @@ export async function getVehicleDaySeries(vehicleId: string, orgId: string, q: D
   const raw = await findDaySeries(vehicleId, orgId, from, to, after)
   if (!raw) throw new NotFoundError('Vehicle not found')
 
+  // Where the org's limit depends on place (lib/speed-policy), the limit at
+  // each reading, so the chart marks an overspeed by where it happened.
+  // Absent for every other org: the unit's one limit is on the snapshot.
+  await warmSpeedPolicy(orgId)
+  let lim: number[] | undefined
+  if (speedPolicyFor(orgId)) {
+    const v = await prisma.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleType: true } })
+    const type = v?.vehicleType ?? null
+    lim = raw.cols.t.map((_, i) => overspeedLimitFor(type, { orgId, lat: raw.cols.lat[i], lng: raw.cols.lng[i] }))
+  }
+
   return {
     vehicleId,
     day,
@@ -260,6 +274,7 @@ export async function getVehicleDaySeries(vehicleId: string, orgId: string, q: D
     count: raw.cols.t.length,
     truncated: raw.truncated,
     ...raw.cols,
+    ...(lim ? { lim } : {}),
   }
 }
 
