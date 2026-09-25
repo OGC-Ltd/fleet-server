@@ -97,6 +97,11 @@
  *     Naitiri factory yard       114           ~20   ~200 m    transfers on arrival
  *     Nzoia factory yard          17            4    ~80 m    transfers on arrival
  *
+ * Nzoia's two bridges were then GIVEN by the operator (2026-09-26), as CW and
+ * HD, and replace the derived point: CW 0°34'08.56"N 34°39'16.84"E, HD
+ * 0°34'00.36"N 34°39'22.39"E, ~300 m apart. The derived arrival point had
+ * landed 48 m from CW, which is the check on the method used for the others.
+ *
  * Kitale is the check: two of our own units weighed there on DELIVERY tickets,
  * and those fixes land 50 m from the loading-stop point.
  *
@@ -186,7 +191,9 @@ export const WEIGHBRIDGES: Weighbridge[] = [
   { key: 'misikhu',   orgCode: 'WESTSUGAR', centerCode: 1104, centerName: 'MISIKHU',        bridgeNo: null, label: 'Yard', lat: 0.723797, lng: 34.769075, spreadM: 31, samples: 46 },
   { key: 'selient',   orgCode: 'WESTSUGAR', centerCode: 1114, centerName: 'SELIENT',        bridgeNo: null, label: 'Yard', lat: 0.510809, lng: 35.025235, spreadM: 19, samples: 34 },
   { key: 'kitale',    orgCode: 'WESTSUGAR', centerCode: 1115, centerName: 'KITALE (AMUKA)', bridgeNo: null, label: 'Yard', lat: 1.098563, lng: 35.008331, spreadM: 24, samples: 33 },
-  { key: 'nzoia',     orgCode: 'WESTSUGAR', centerCode: 2101, centerName: 'NZOIA',          bridgeNo: null, label: 'Factory yard', lat: 0.569457, lng: 34.654539, spreadM: 78, samples: 17 },
+  // Operator-given, so no spread or sample count: 0 means "not measured".
+  { key: 'nzoia-cw',  orgCode: 'WESTSUGAR', centerCode: 2101, centerName: 'NZOIA',          bridgeNo: null, label: 'CW bridge', lat: 0.569044, lng: 34.654678, spreadM: 0, samples: 0 },
+  { key: 'nzoia-hd',  orgCode: 'WESTSUGAR', centerCode: 2101, centerName: 'NZOIA',          bridgeNo: null, label: 'HD bridge', lat: 0.566767, lng: 34.656219, spreadM: 0, samples: 0 },
   { key: 'weyeta-nz', orgCode: 'WESTSUGAR', centerCode: 2103, centerName: 'WEYETA',         bridgeNo: null, label: 'Yard', lat: 0.594721, lng: 34.475541, spreadM: 20, samples: 20 },
 ]
 
