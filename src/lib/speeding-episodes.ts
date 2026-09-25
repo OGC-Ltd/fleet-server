@@ -174,7 +174,7 @@ export function noteSpeedFrame(frame: VehicleTelemetryFrame, ctx: EpisodeContext
 
   const speed = frame.speedKmh
   const atMs  = frame.capturedAt.getTime()
-  const zone  = zoneLimitAt(ctx.orgId, frame.lat, frame.lng)
+  const zone  = zoneLimitAt(ctx.orgId, ctx.vehicleType, frame.lat, frame.lng)
   const limit = zone?.kmh ?? overspeedLimitFor(ctx.vehicleType)
   const ep    = open.get(ctx.vehicleId)
 
