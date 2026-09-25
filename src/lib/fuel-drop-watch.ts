@@ -36,9 +36,15 @@
  * The one rule that makes a fast signal safe is the operator's own: fuel does
  * not reposition itself inside a tank that is sitting still. Redistribution
  * needs a disturbance — the machine tilting, moving, or stopping. So this
- * demands the ENTIRE window be stationary with the engine MEASURED off, and
+ * demands the ENTIRE window be stationary with the ignition MEASURED, and
  * abandons the moment anything moves. A fall on a machine that is working is
  * left to the adjudicator, which has the burn bands to judge it against.
+ *
+ * The engine may have run BRIEFLY (MAX_ENGINE_ON_MS) on a machine that never
+ * moved. MUFINDI: CTR 12 on 2026-09-25: the engine was started for about two
+ * minutes at 15:08 EAT, then the tank fell 6 L over twenty minutes with it off.
+ * Idling burns a fraction of a litre in that time, so it cannot explain the
+ * fall — but an engine-off-throughout rule was blind to it until 15:24.
  *
  * That also means it is silent on the 54 of 147 units whose ignition we cannot
  * read (see `readIgnition`), which is correct: "we do not know if the engine was
@@ -74,22 +80,36 @@ export interface LiveFuelDrop {
   settledAt:  Date
   /** How long the machine had been standing still before the fall started. */
   stillForMs: number
+  /** How long the engine ran inside that time — zero on most. */
+  engineOnMs: number
 }
 
 /**
  * How much history each vehicle keeps.
+ *
+ * 45 minutes, raised from 15: a siphon is not always fast. CTR 12's fell 6 L
+ * over twenty minutes, so a 15-minute window never held the level before the
+ * fall and the level after it at once.
  *
  * Long enough to hold a settled baseline, a fall and its confirmation at a
  * ~30 s cadence; short enough that 1,500 units cost a few hundred KB between
  * them. A fall slower than this is not something a fast path should be judging
  * anyway — that is the adjudicator's work.
  */
-const WINDOW_MS = 15 * 60_000
+const WINDOW_MS = 45 * 60_000
+
+/** How long a machine must have stood still before a fall on it is believed. */
+const STILL_MIN_MS = 15 * 60_000
 
 /**
  * Least a drop must be before it is worth saying anything about.
  *
- * Ten litres, and deliberately BELOW the adjudicator's `SIPHON_MIN_DROP_ML` of
+ * Five litres (was ten until 2026-09-25, lowered after CTR 12's 6 L siphon went
+ * unseen). Safe on this path and only on this path: it fires only on a machine
+ * that never moved and whose ignition is measured, and it needs a settled
+ * plateau both before and after, so a single noisy step cannot make one.
+ *
+ * Deliberately BELOW the adjudicator's `SIPHON_MIN_DROP_ML` of
  * 15 L. The two answer different questions: 15 L is the floor for asserting a
  * theft on a probe whose noise has been characterised over 30 days, while this
  * only claims a tank dropped on a machine nobody was near. Measured across the
@@ -100,7 +120,15 @@ const WINDOW_MS = 15 * 60_000
  * 2.9 L; ten litres is three and a half times that and is not reachable by
  * ordinary probe noise on a stationary machine.
  */
-export const LIVE_DROP_MIN_ML = 10_000
+export const LIVE_DROP_MIN_ML = 5_000
+
+/**
+ * Most the engine may have run inside the window, on a machine that never
+ * moved: a START, not work. Three minutes — CTR 12's was two. Replayed over
+ * 24–25 Sep, five minutes let through machines that work without moving
+ * (compressors, excavators slewing in place) and roughly doubled the feed.
+ */
+export const MAX_ENGINE_ON_MS = 3 * 60_000
 
 /** Readings that must agree on the new low before the fall is believed. */
 const HOLD_READINGS = 3
@@ -190,11 +218,31 @@ export function noteFuelFrame(
   //
   // `known` is required, not assumed. On a unit whose ignition we cannot read,
   // "the engine was off" is not a fact we have.
-  for (const r of ring) {
-    if (!r.known || r.engineOn || r.moving) return null
-  }
+  //
+  // A brief engine run is tolerated (MAX_ENGINE_ON_MS), timed from each
+  // engine-on reading to the next reading. Never at the trough: the machine
+  // must be off when we say it fell.
+  //
+  // The window is judged from the last disturbance on, not across all 45
+  // minutes: a machine that parked half an hour ago has been still for half an
+  // hour, and a siphon in that half hour must not wait for its drive to roll out
+  // of the ring. But a disturbance inside the last STILL_MIN_MS still refuses,
+  // exactly as the old 15-minute all-still window did — the level straight after
+  // stopping is still settling.
+  let start = 0
+  for (const [i, r] of ring.entries()) if (!r.known || r.moving) start = i + 1
+  if (start > 0 && atMs - ring[start - 1]!.atMs < STILL_MIN_MS) return null
+  const win = ring.slice(start)
+  if (win.length < BASELINE_READINGS + HOLD_READINGS) return null
 
-  const last = ring.slice(-HOLD_READINGS)
+  let engineOnMs = 0
+  for (const [i, r] of win.entries()) {
+    if (r.engineOn) engineOnMs += (win[i + 1]?.atMs ?? r.atMs) - r.atMs
+  }
+  if (engineOnMs > MAX_ENGINE_ON_MS) return null
+
+  const last = win.slice(-HOLD_READINGS)
+  if (last.some(r => r.engineOn)) return null
   const lows = last.map(r => r.ml)
   // The fall has to have FINISHED. A level still moving is not a trough.
   if (spread(lows) > PLATEAU_TOLERANCE_ML) return null
@@ -202,7 +250,7 @@ export function noteFuelFrame(
 
   // The baseline is the highest settled plateau earlier in the window — not the
   // maximum reading, which a single spike would set.
-  const earlier = ring.slice(0, -HOLD_READINGS)
+  const earlier = win.slice(0, -HOLD_READINGS)
   let baselineMl = -1
   let baselineAtMs = 0
   for (let i = 0; i + BASELINE_READINGS <= earlier.length; i++) {
@@ -229,7 +277,8 @@ export function noteFuelFrame(
     troughMl,
     droppedMl,
     settledAt:  new Date(last[0]!.atMs),
-    stillForMs: atMs - ring[0]!.atMs,
+    stillForMs: atMs - win[0]!.atMs,
+    engineOnMs,
   }
 }
 

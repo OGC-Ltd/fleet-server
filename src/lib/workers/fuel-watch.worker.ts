@@ -58,7 +58,9 @@ export function startFuelWatchWorker(): () => void {
         text:
           `FUEL DROP SEEN: ${plate} fell ${L(d.droppedMl)} ` +
           `(${L(d.baselineMl)} to ${L(d.troughMl)}) while parked with the engine off ` +
-          `for ${mins(d.stillForMs)}. Unconfirmed — being checked against the tank's own history.`,
+          `for ${mins(d.stillForMs)}` +
+          (d.engineOnMs > 0 ? ` (the engine ran for ${mins(d.engineOnMs)} in that time, without moving)` : '') +
+          `. Unconfirmed — being checked against the tank's own history.`,
         at:        d.settledAt,
         plate:     d.plate,
         vehicleId: d.vehicleId,
