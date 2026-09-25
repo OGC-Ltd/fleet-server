@@ -128,7 +128,14 @@ export async function getNotifications(
   // may well be the ones it evicted. Filtered reads go to Postgres, where the
   // whole history is. They are also rare: this is a user selecting a view, not
   // the page every dashboard loads.
-  const filtered = Boolean(alertTypes?.length || severities?.length || vehicleId)
+  //
+  // A DAY is a filter too. It was missing from this test, so a first-page day
+  // read was answered from the org cache — the latest 200 rows whatever their
+  // day — and the Live Feed's "today" opened on last night and stopped there,
+  // with the day's cursor pointing before the day began. It also primed the
+  // cache from a day-bounded page, which for a past day is old history
+  // shadowing everything newer.
+  const filtered = Boolean(alertTypes?.length || severities?.length || vehicleId || dayRange)
 
   if (!before && !filtered) {
     const cached = await readCachedNotifications(orgId, capped)

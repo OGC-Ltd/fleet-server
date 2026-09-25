@@ -214,3 +214,26 @@ describe('one vehicle, one fleet day', () => {
     expect(primeCache).not.toHaveBeenCalled()
   })
 })
+
+describe('the whole fleet, one fleet day', () => {
+  it('is read from Postgres, not answered by the org cache whatever its day', async () => {
+    // The cache is full of the latest rows, which span midnight.
+    vi.mocked(readCachedNotifications).mockResolvedValue(Array.from({ length: 200 }, () => ({ id: 'x' })) as never)
+
+    const page = await getNotifications('org_1', { day: '2026-09-25', limit: 200 })
+
+    expect(readCachedNotifications).not.toHaveBeenCalled()
+    expect(page.source).toBe('database')
+    expect(prismaMock.notification.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        organisationId: 'org_1',
+        occurredAt: { gte: new Date('2026-09-24T21:00:00Z'), lt: new Date('2026-09-25T21:00:00Z') },
+      }),
+    }))
+  })
+
+  it('does not prime the org cache from a day-bounded page', async () => {
+    await getNotifications('org_1', { day: '2026-09-20' })
+    expect(primeCache).not.toHaveBeenCalled()
+  })
+})
