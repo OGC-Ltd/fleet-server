@@ -67,7 +67,9 @@ describe('weighbridge geography', () => {
     const unnumbered = WEIGHBRIDGES.filter(b => b.bridgeNo == null)
     expect(unnumbered.length).toBeGreaterThan(0)
     for (const b of unnumbered) {
-      expect(b.centerCode).toBeNull()
+      // A site code, when it has one, is West Kenya's (factory base 1000+),
+      // never one of Ndhiwa's 101-104 that a Sukari ticket could match.
+      if (b.centerCode != null) expect(b.centerCode).toBeGreaterThan(1000)
       expect(b.label).not.toMatch(/Bridge/)
       expect(WEIGHBRIDGES.filter(x => x.key === b.key)).toHaveLength(1)
     }
@@ -96,13 +98,32 @@ describe('weighbridge geography', () => {
     // E. A scale outside it is not a scale at this mill, whatever produced the
     // number — and these came from a clustering pass, which is exactly the kind
     // of derivation that can land somewhere plausible and wrong.
-    const kabras = WEIGHBRIDGES.filter(b => b.orgCode === 'WESTSUGAR')
+    const kabras = WEIGHBRIDGES.filter(b => b.centerName === 'KABRAS')
     expect(kabras).toHaveLength(2)
     for (const b of kabras) {
       expect(b.lat).toBeGreaterThan(0.376144)
       expect(b.lat).toBeLessThan(0.384550)
       expect(b.lng).toBeGreaterThan(34.826559)
       expect(b.lng).toBeLessThan(34.840029)
+    }
+  })
+})
+
+describe("West Kenya's yards", () => {
+  it('sit in West Kenya cane country, not on a factory they were confused with', () => {
+    // Western Kenya, Bungoma to Kitale: 0.3-1.2 N, 34.4-35.1 E. And no yard on
+    // top of another site, which is how the rejected Magut/Khalaba/Makhese
+    // derivations failed.
+    const west = WEIGHBRIDGES.filter(b => b.orgCode === 'WESTSUGAR')
+    for (const b of west) {
+      expect(b.lat).toBeGreaterThan(0.3); expect(b.lat).toBeLessThan(1.2)
+      expect(b.lng).toBeGreaterThan(34.4); expect(b.lng).toBeLessThan(35.1)
+    }
+    const sites = [...new Map(west.map(b => [b.centerCode, b])).values()]
+    for (const a of sites) for (const b of sites) {
+      if (a === b) continue
+      const km = Math.hypot(a.lat - b.lat, (a.lng - b.lng) * Math.cos(a.lat * Math.PI / 180)) * 111
+      expect(km).toBeGreaterThan(2)
     }
   })
 })
@@ -114,11 +135,29 @@ describe('getWeighbridges', () => {
     // `last` null permanently — which is the truthful answer, not a gap.
     ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ code: 'WESTSUGAR' })
     const out = await getWeighbridges('org_west')
-    expect(out.map(b => b.label).sort()).toEqual(['East scale', 'West scale'])
+    expect(out.filter(b => b.centerName === 'KABRAS').map(b => b.label).sort()).toEqual(['East scale', 'West scale'])
     expect(out.every(b => b.last === null)).toBe(true)
     expect(out.every(b => b.bridgeNo === null)).toBe(true)
     // And not one of Sukari's, which have tickets and are a county away.
-    expect(out.every(b => b.centerName === 'KABRAS')).toBe(true)
+    expect(out.every(b => b.lat > 0)).toBe(true)
+  })
+
+  it("hangs a West Kenya yard's newest weighing on that yard's pin", async () => {
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ code: 'WESTSUGAR' })
+    ;(prismaMock.weighment.findMany as any).mockResolvedValue([
+      ticket({ factoryCode: 'KABRAS', centerCode: 1104, grossBridgeNo: null, tareBridgeNo: null,
+               grossAt: new Date('2026-09-25T08:00:00Z'), tareAt: new Date('2026-09-25T09:30:00Z') }),
+      // Kabras's own 101 must not be read as Sukari's bridge 1 or its factory.
+      ticket({ factoryCode: 'KABRAS', centerCode: 1101, grossBridgeNo: 1, tareBridgeNo: 1,
+               grossAt: new Date('2026-09-25T07:00:00Z'), tareAt: null }),
+    ])
+    const out = await getWeighbridges('org_west')
+    const misikhu = out.find(b => b.id === 'misikhu')!
+    expect(misikhu.last?.at).toBe('2026-09-25T09:30:00.000Z')
+    expect(misikhu.last?.stage).toBe('tare')
+    // Both Kabras lanes show the yard's weighing; neither is claimed by bridge 1.
+    expect(out.filter(b => b.centerName === 'KABRAS').every(b => b.last?.at === '2026-09-25T07:00:00.000Z')).toBe(true)
+    expect(out.some(b => b.bridgeNo === 1)).toBe(false)
   })
 
   it('does not hand one mill the other mill\'s unticketed scales', async () => {

@@ -76,6 +76,43 @@
  * numbering, and a Kabras scale given a number would collide with a Sukari
  * scale that really has one.
  *
+ * ## West Kenya's yards, measured from the lorries that load there
+ *
+ * Since ~2026-09-17 the feed also carries Kabras and Nzoia (West Kenya), and
+ * neither sends a bridge number. Their yard deliveries are farmers' tractors we
+ * do not track, and a transfer ticket is raised when the lorry ARRIVES at the
+ * factory: at ticket time our lorries stood at Kabras, Naitiri and Nzoia, not
+ * at the yard the ticket names. That places the two factories below.
+ *
+ * The yard is where the lorry LOADED: its longest stop (15 min or more, over
+ * 2 km from where it arrived) in the 10 h before the ticket. Per yard, the
+ * densest cluster of those stops, and the median of the ones within 300 m.
+ * Measured on the box 2026-09-25:
+ *
+ *     site                      fixes / of   units   spread   method
+ *     Kitale (Amuka) yard         33 / 50      11     24 m    loading stop
+ *     Misikhu yard                46 / 64      13     31 m    loading stop
+ *     Weyeta yard (Nzoia)         20 / 24       4     20 m    loading stop
+ *     Selient yard                34 / 58      14     19 m    loading stop
+ *     Naitiri factory yard       114           ~20   ~200 m    transfers on arrival
+ *     Nzoia factory yard          17            4    ~80 m    transfers on arrival
+ *
+ * Kitale is the check: two of our own units weighed there on DELIVERY tickets,
+ * and those fixes land 50 m from the loading-stop point.
+ *
+ * Deliberately NOT placed:
+ *   - Magut and Khalaba: their lorries' three densest stops are the SAME
+ *     three places, one of them Selient's point, so the method finds where
+ *     that shared traffic stops, not either yard.
+ *   - Makhese: 3 transfers, and the "yard" came out on Naitiri factory.
+ *   - Busia, Lake Agro, and Kabras's own Weyeta code: delivery tickets only,
+ *     by lorries we do not track, so nothing to measure from.
+ *
+ * These carry the SITE code (weighment.ingest: provider code + factory base)
+ * so the service can hang each one's newest weighing on it. Arrival points sit
+ * where the ticket was raised, which at Kabras was ~60 m from the scales: read
+ * them as the site, not the deck.
+ *
  * ## Bridge numbers are GLOBAL, not per-centre
  *
  * They do not restart at each site. Factory runs 1 and 2, Opapo 3, Oyani 4 and
@@ -105,9 +142,10 @@ export interface Weighbridge {
   /** The organisation whose yard this scale stands in. Scales are one mill
    *  group's or another's, never the country's — see the service. */
   orgCode:    string
-  /** Provider centre code — 101 FACTORY, 102 OPAPO, 103 OYANI, 104 NYAONDO —
-   *  or null for a yard the scale software does not number because the yard
-   *  does not report to it. */
+  /** The SITE code as `weighments.center_code` stores it: Ndhiwa's are the
+   *  provider's own (101 FACTORY, 102 OPAPO, 103 OYANI, 104 NYAONDO), West
+   *  Kenya's carry their factory's base (1101 Kabras Factory Yard, 2101 Nzoia
+   *  Factory Yard). Null only for a site no ticket names. */
   centerCode: number | null
   /** The centre as the provider names it, and as the grid shows it. */
   centerName: string
@@ -139,8 +177,17 @@ export const WEIGHBRIDGES: Weighbridge[] = [
 
   // Kabras. Derived from the traffic rather than from tickets — see the note
   // above — and named for where they stand, because nothing numbers them.
-  { key: 'kabras-w', orgCode: 'WESTSUGAR', centerCode: null, centerName: 'KABRAS', bridgeNo: null, label: 'West scale', lat: 0.376930, lng: 34.834102, spreadM: 4.7, samples: 391 },
-  { key: 'kabras-e', orgCode: 'WESTSUGAR', centerCode: null, centerName: 'KABRAS', bridgeNo: null, label: 'East scale', lat: 0.376854, lng: 34.834258, spreadM: 5.1, samples: 425 },
+  { key: 'kabras-w', orgCode: 'WESTSUGAR', centerCode: 1101, centerName: 'KABRAS', bridgeNo: null, label: 'West scale', lat: 0.376930, lng: 34.834102, spreadM: 4.7, samples: 391 },
+  { key: 'kabras-e', orgCode: 'WESTSUGAR', centerCode: 1101, centerName: 'KABRAS', bridgeNo: null, label: 'East scale', lat: 0.376854, lng: 34.834258, spreadM: 5.1, samples: 425 },
+
+  // West Kenya's other sites, from the feed's Kabras and Nzoia tickets. See
+  // the note above for how each was measured and which were left out.
+  { key: 'naitiri',   orgCode: 'WESTSUGAR', centerCode: 1107, centerName: 'NAITIRI',        bridgeNo: null, label: 'Factory yard', lat: 0.785500, lng: 34.880800, spreadM: 200, samples: 114 },
+  { key: 'misikhu',   orgCode: 'WESTSUGAR', centerCode: 1104, centerName: 'MISIKHU',        bridgeNo: null, label: 'Yard', lat: 0.723797, lng: 34.769075, spreadM: 31, samples: 46 },
+  { key: 'selient',   orgCode: 'WESTSUGAR', centerCode: 1114, centerName: 'SELIENT',        bridgeNo: null, label: 'Yard', lat: 0.510809, lng: 35.025235, spreadM: 19, samples: 34 },
+  { key: 'kitale',    orgCode: 'WESTSUGAR', centerCode: 1115, centerName: 'KITALE (AMUKA)', bridgeNo: null, label: 'Yard', lat: 1.098563, lng: 35.008331, spreadM: 24, samples: 33 },
+  { key: 'nzoia',     orgCode: 'WESTSUGAR', centerCode: 2101, centerName: 'NZOIA',          bridgeNo: null, label: 'Factory yard', lat: 0.569457, lng: 34.654539, spreadM: 78, samples: 17 },
+  { key: 'weyeta-nz', orgCode: 'WESTSUGAR', centerCode: 2103, centerName: 'WEYETA',         bridgeNo: null, label: 'Yard', lat: 0.594721, lng: 34.475541, spreadM: 20, samples: 20 },
 ]
 
 /* The PROVIDER's numbering only. A scale with no number was never in the
