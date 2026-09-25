@@ -142,6 +142,15 @@ describe("Nzoia's bridges", () => {
   })
 })
 
+describe("Naitiri's bridge", () => {
+  it('is where the operator gave it', () => {
+    const nt = WEIGHBRIDGES.filter(b => b.centerCode === 1107)
+    expect(nt).toHaveLength(1)
+    expect(nt[0].lat).toBeCloseTo(0.7813181, 7)
+    expect(nt[0].lng).toBeCloseTo(34.8778280, 7)
+  })
+})
+
 describe('getWeighbridges', () => {
   it('gives an organisation the scales that will never send a ticket', async () => {
     // Kabras' two report to nobody, so no amount of reading the ticket feed
