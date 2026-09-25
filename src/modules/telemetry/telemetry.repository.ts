@@ -1,5 +1,6 @@
 import { prisma } from '../../lib/prisma.js'
 import { overspeedLimitFor } from '../../lib/derived-alerts.js'
+import { warmSpeedPolicy } from '../../lib/speed-policy.js'
 import { Prisma } from '../../../generated/prisma/client.js'
 import { ALERT_SOURCE } from '../../lib/alerts.js'
 import { logger } from '../../lib/logger.js'
@@ -787,6 +788,7 @@ export const FUEL_REPEAT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 export const FUEL_INCIDENT_EPOCH = new Date('2026-08-17T07:45:00.000Z')
 
 export async function findFleetSnapshot(orgId: string) {
+  await warmSpeedPolicy(orgId)
   // The live fleet is every ACTIVE vehicle in the org — the registry synced
   // from the RaiFactorySuite API (sync:vehicles). Vehicles the provider has
   // decommissioned/dropped stay in the DB for history but leave the fleet.
@@ -1008,7 +1010,9 @@ export async function findFleetSnapshot(orgId: string) {
         // copy of 80: vehicleMap, playback and two cards each had one, and a
         // per-TYPE limit set here would have left every one of them wrong.
         // A Map lookup on a string parsed once at boot — free.
-        speedLimitKmh:  overspeedLimitFor(v.vehicleType),
+        // Where the org's limit depends on place (lib/speed-policy), the one
+        // at the unit's last fix.
+        speedLimitKmh:  overspeedLimitFor(v.vehicleType, { orgId, lat: ping?.lat, lng: ping?.lng }),
         driver:             v.assignments[0]?.user.fullName          ?? null,
         driverRatingScore:  v.assignments[0]?.user.driverRatingScore ?? null,
         lat:            ping?.lat          ?? null,

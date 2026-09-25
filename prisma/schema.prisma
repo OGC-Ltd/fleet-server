@@ -1033,7 +1033,8 @@ model SpeedingIncident {
   /// deploy-time string, and re-reading it would silently restate history after
   /// somebody changes it.
   limitKmh    Float  @map("limit_kmh")
-  /// 'type' when OVERSPEED_LIMIT_BY_TYPE matched, 'fleet' for the default.
+  /// 'type' when OVERSPEED_LIMIT_BY_TYPE matched, 'fleet' for the default,
+  /// 'zone' / 'road' where the org's limit depends on place (lib/speed-policy).
   limitSource String @map("limit_source")
   /// peakKmh - limitKmh, stored so "worst offender" needs no expression index.
   overByKmh   Float  @map("over_by_kmh")
