@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission, requireVehicleInScope } from '../../middleware/authorize.js'
 import { validateQuery } from '../../middleware/validate.js'
-import { telemetryListQuerySchema, trackQuerySchema, playbackQuerySchema } from './telemetry.schema.js'
+import { telemetryListQuerySchema, trackQuerySchema, playbackQuerySchema, daySeriesQuerySchema } from './telemetry.schema.js'
 import * as ctrl from './telemetry.controller.js'
 
 const router = Router({ mergeParams: true })
@@ -16,6 +16,8 @@ router.get('/alerts/history', requirePermission('notification:read'), ctrl.getAl
 router.get('/maintenance/history', requirePermission('vehicle:read'), ctrl.getMaintenanceHistoryHandler)
 
 router.get('/vehicles/:vehicleId/telemetry', requirePermission('telemetry:read'), requireVehicleInScope, validateQuery(telemetryListQuerySchema), ctrl.getTelemetryHistory)
+// The vehicle panel's fuel & overspeed chart: one fleet day, chart columns only.
+router.get('/vehicles/:vehicleId/telemetry/day', requirePermission('telemetry:read'), requireVehicleInScope, validateQuery(daySeriesQuerySchema), ctrl.getVehicleDaySeriesHandler)
 router.get('/vehicles/:vehicleId/telemetry/latest', requirePermission('telemetry:read'), requireVehicleInScope, ctrl.getLatestTelemetry)
 // Breadcrumb polyline for the map: 3 columns over a window, thinned server-side.
 router.get('/vehicles/:vehicleId/track', requirePermission('telemetry:read'), requireVehicleInScope, validateQuery(trackQuerySchema), ctrl.getVehicleTrackHandler)
