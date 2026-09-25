@@ -1,14 +1,14 @@
 import {
   findPings, findTrack, findLatest, findActiveAlerts, findAlertHistoryCounts,
   findSampledFixes, findZoneTimeline, vehicleExistsInOrg, metresBetween,
-  findPlaybackFixes,
+  findPlaybackFixes, findDaySeries,
   type TrackPoint,
 } from './telemetry.repository.js'
 import { simplifyPath } from '../../lib/simplify-path.js'
 import { buildPlaybackEvents } from './playback-events.js'
 import { getMaintenanceHistoryCached, getOrgVehicleMaintenance } from './maintenance.cache.js'
 import { getFleetSnapshotCached } from './fleet-snapshot.cache.js'
-import type { TelemetryListQuery, TrackQuery, PlaybackQuery } from './telemetry.schema.js'
+import type { TelemetryListQuery, TrackQuery, PlaybackQuery, DaySeriesQuery } from './telemetry.schema.js'
 import { TRACK_MAX_WINDOW_DAYS, TRACK_FULL_FIDELITY_HOURS } from './telemetry.schema.js'
 import { NotFoundError, BadRequestError, ServiceUnavailableError } from '../../core/errors/errors.js'
 import { assignedZoneStatus } from '../../lib/zone-presence.js'
@@ -229,6 +229,37 @@ export async function getVehiclePlayback(
     events,
     /** The day held more than the cap; the least severe were dropped. */
     truncatedEvents,
+  }
+}
+
+/**
+ * One unit's day of chartable readings — see daySeriesQuerySchema.
+ *
+ * `complete` is true for a day that has ended: its rows will not change, so the
+ * caller may keep them for good. Today's are a running total, and `since` lets
+ * the caller fetch only what arrived after its last row.
+ */
+export async function getVehicleDaySeries(vehicleId: string, orgId: string, q: DaySeriesQuery) {
+  const day = q.day ?? fleetDayKey().toISOString().slice(0, 10)
+  const { from, to } = fleetDayBounds(day)
+  if (from.getTime() > Date.now()) {
+    throw new BadRequestError(`Fleet day ${day} has not started yet`)
+  }
+  const after = q.since != null && q.since >= from.getTime() ? new Date(q.since) : null
+
+  const raw = await findDaySeries(vehicleId, orgId, from, to, after)
+  if (!raw) throw new NotFoundError('Vehicle not found')
+
+  return {
+    vehicleId,
+    day,
+    from: from.getTime(),
+    to:   to.getTime(),
+    since: after?.getTime() ?? null,
+    complete: to.getTime() <= Date.now(),
+    count: raw.cols.t.length,
+    truncated: raw.truncated,
+    ...raw.cols,
   }
 }
 

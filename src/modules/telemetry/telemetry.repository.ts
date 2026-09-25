@@ -303,6 +303,53 @@ export async function findPlaybackFixes(
   return { points, fixes, truncated }
 }
 
+/**
+ * One unit's sensor channels over a window, ascending, as COLUMNS.
+ *
+ * Columnar because the payload is the cost: a row object repeats every key for
+ * every fix, and at ~3,000 fixes a day the keys outweigh the numbers. Times are
+ * seconds after `from`, positions are rounded to ~1 m. Nulls stay null — a
+ * missing reading is not a zero.
+ */
+export async function findDaySeries(
+  vehicleId: string, orgId: string, from: Date, to: Date, after: Date | null,
+) {
+  if (!(await vehicleExistsInOrg(vehicleId, orgId))) return null
+
+  const rows = await prisma.vehicleTelemetry.findMany({
+    where: { vehicleId, capturedAt: after ? { gt: after, lt: to } : { gte: from, lt: to } },
+    orderBy: { capturedAt: 'asc' },
+    take: PLAYBACK_SCAN_CAP + 1,
+    select: {
+      capturedAt: true, lat: true, lng: true, speedKmh: true,
+      engineOn: true, fuelLevelMl: true, engineHoursMeter: true,
+    },
+  })
+
+  const truncated = rows.length > PLAYBACK_SCAN_CAP
+  if (truncated) rows.pop()
+
+  const base = from.getTime()
+  const round = (v: number | null, dp: number) =>
+    v == null || !Number.isFinite(v) ? null : Math.round(v * 10 ** dp) / 10 ** dp
+  const cols = {
+    t:   [] as number[],
+    lat: [] as (number | null)[], lng: [] as (number | null)[],
+    spd: [] as (number | null)[], eng: [] as (0 | 1 | null)[],
+    fuelMl: [] as (number | null)[], hrs: [] as (number | null)[],
+  }
+  for (const r of rows) {
+    cols.t.push(Math.round((r.capturedAt.getTime() - base) / 1000))
+    cols.lat.push(round(r.lat, 5))
+    cols.lng.push(round(r.lng, 5))
+    cols.spd.push(round(r.speedKmh, 0))
+    cols.eng.push(r.engineOn == null ? null : r.engineOn ? 1 : 0)
+    cols.fuelMl.push(round(r.fuelLevelMl, 0))
+    cols.hrs.push(round(r.engineHoursMeter, 3))
+  }
+  return { cols, truncated }
+}
+
 // ───────────────────────── long windows & zone timeline ────────────────────
 
 /**
