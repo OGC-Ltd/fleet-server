@@ -108,3 +108,24 @@ export type PlaybackQuery = z.infer<typeof playbackQuerySchema>
  * rather than once per vehicle click.
  */
 export const PLAYBACK_SCAN_CAP = 20_000
+
+/**
+ * Query for a unit's DAY SERIES: the sensor channels the vehicle panel charts
+ * (fuel level, speed, ignition, engine hours) plus position, for one fleet day.
+ *
+ * The panel used to read these through the paged telemetry list — 500 full rows
+ * a page, one page after another — which on a busy unit was six sequential
+ * round trips and ~1.5 MB of JSON before the chart could draw. This is one
+ * request with only the columns the chart uses.
+ */
+export const daySeriesQuerySchema = z.object({
+  /** Fleet day, `YYYY-MM-DD`, Africa/Nairobi. See playbackQuerySchema. */
+  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'day must be YYYY-MM-DD').optional(),
+  /**
+   * Epoch ms. Only rows captured AFTER this are returned, so a client holding
+   * the first part of today asks for the rest instead of the whole day again.
+   */
+  since: z.coerce.number().int().min(0).optional(),
+})
+
+export type DaySeriesQuery = z.infer<typeof daySeriesQuerySchema>
