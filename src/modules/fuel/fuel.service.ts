@@ -151,8 +151,11 @@ export async function reviewTheft(
 export async function dismissTheft(orgId: string, id: string, userId: string | null) {
   const row = await repo.dismissTheft(orgId, id, userId)
   if (!row) throw new NotFoundError('Fuel theft')
-  forgetSnapshotIncident(orgId, id)
-  emitDashboardFuelIncidentDismissed(orgId, { vehicleId: row.vehicleId, incidentId: id })
+  // The clicked incident and every other one on the unit it swept along.
+  for (const incidentId of [id, ...row.dismissedIds]) {
+    forgetSnapshotIncident(orgId, incidentId)
+    emitDashboardFuelIncidentDismissed(orgId, { vehicleId: row.vehicleId, incidentId })
+  }
   if (row.followUpId) {
     void followUpOpened(orgId, row.followUpId)
       .catch((err) => logger.warn({ err, followUpId: row.followUpId }, 'Fuel follow-up: announcement failed'))
