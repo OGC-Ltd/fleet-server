@@ -3,8 +3,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 /**
  * Kasulu: LMVs (SALOON) 60 km/h inside the factory site and 100 km/h
  * everywhere else — the farms, haulage roads and logistic centres included;
- * every other unit 40 km/h, wherever it is. Geometry is synthetic but named as
- * Kasulu names its zones.
+ * every other unit 40 km/h inside the factory site and 80 km/h on the highway.
+ * Geometry is synthetic but named as Kasulu names its zones.
  */
 vi.mock('../../src/lib/notifications/notification.store.js', () => ({ publishNotification: vi.fn() }))
 vi.mock('../../src/lib/prisma.js', () => ({
@@ -67,12 +67,14 @@ describe('Kasulu speed limits', () => {
     expect(zoneLimitAt(KASULU, 'SALOON', null, null)?.kmh).toBe(100)
   })
 
-  it('holds every other unit to 40, in the factory and out of it', () => {
+  it('holds every other unit to 40 in the factory and 80 on the highway', () => {
     for (const type of ['TRUCK', 'LORRY', 'BUS', 'TRACTOR', 'PLANT', 'UNSPECIFIED', null]) {
-      for (const p of [IN_FACTORY, NATIONAL, ON_FARM]) {
-        expect(zoneLimitAt(KASULU, type, p.lat, p.lng)).toEqual({ kmh: 40, source: 'org', zone: null })
+      expect(zoneLimitAt(KASULU, type, IN_FACTORY.lat, IN_FACTORY.lng)).toEqual({ kmh: 40, source: 'zone', zone: 'factory' })
+      for (const p of [NATIONAL, ON_FARM, IN_LC1]) {
+        expect(zoneLimitAt(KASULU, type, p.lat, p.lng)).toEqual({ kmh: 80, source: 'road', zone: null })
       }
-      expect(zoneLimitAt(KASULU, type, null, null)?.kmh).toBe(40)
+      // No fix: the highway limit, never the stricter one — as for an LMV.
+      expect(zoneLimitAt(KASULU, type, null, null)?.kmh).toBe(80)
     }
   })
 
@@ -89,25 +91,28 @@ describe('Kasulu speed limits', () => {
   it('is what overspeedLimitFor answers when told the org and place', () => {
     expect(overspeedLimitFor('SALOON', { orgId: KASULU, ...IN_FACTORY })).toBe(60)
     expect(overspeedLimitFor('SALOON', { orgId: KASULU, ...NATIONAL })).toBe(100)
-    expect(overspeedLimitFor('TRUCK',  { orgId: KASULU, ...NATIONAL })).toBe(40)
+    expect(overspeedLimitFor('TRUCK',  { orgId: KASULU, ...IN_FACTORY })).toBe(40)
+    expect(overspeedLimitFor('TRUCK',  { orgId: KASULU, ...NATIONAL })).toBe(80)
     // Without an org, as before
     expect(overspeedLimitFor('TRUCK')).toBe(80)
   })
 
-  it('raises the live flag for an LMV at 70 in the factory but not at 90 on the road, and a truck at 50', () => {
+  it('raises the live flag for an LMV at 70 in the factory but not at 90 on the road, a truck at 50 in the factory but not at 70 on the highway', () => {
     const frame = (speedKmh: number, at: { lat: number; lng: number }) => ({
       speedKmh, ...at, capturedAt: new Date(), fuelLevelMl: null, engineOn: true, ignitionKnown: true, flags: {},
     }) as never
     const ctx = (vehicleId: string, vehicleType: string) => ({ orgId: KASULU, vehicleId, tankCapacityMl: 0, vehicleType })
-    let factory = {}, road = {}, truck = {}
+    let factory = {}, road = {}, truck = {}, truckRoad = {}
     for (let i = 0; i < 3; i++) {
       factory = deriveAlertFlags(frame(70, IN_FACTORY), ctx('v-factory', 'SALOON'))
       road    = deriveAlertFlags(frame(90, NATIONAL), ctx('v-road', 'SALOON'))
-      truck   = deriveAlertFlags(frame(50, NATIONAL), ctx('v-truck', 'TRUCK'))
+      truck   = deriveAlertFlags(frame(50, IN_FACTORY), ctx('v-truck', 'TRUCK'))
+      truckRoad = deriveAlertFlags(frame(70, NATIONAL), ctx('v-truck-road', 'TRUCK'))
     }
     expect(factory).toMatchObject({ overspeeding: true })
     expect(road).not.toHaveProperty('overspeeding')
     expect(truck).toMatchObject({ overspeeding: true })
+    expect(truckRoad).not.toHaveProperty('overspeeding')
   })
 
   it('replays each fix against the limit where it was', () => {
