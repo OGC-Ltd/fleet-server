@@ -80,14 +80,14 @@ export interface LimitPlace {
 /**
  * The limit that applies to one vehicle.
  *
- * With `at`, an org that has a zone policy (lib/speed-policy — Kasulu: 60 in
- * the factory, 100 on the roads) is judged by where the unit is, and that
- * outranks the per-type and fleet limits. Every other org, and every caller
- * that cannot say where the unit is, gets the per-type or fleet limit as
- * before.
+ * With `at`, an org that has its own policy (lib/speed-policy — Kasulu: LMVs
+ * 60 in the factory and 100 on the roads, every other unit 40) is judged by
+ * the unit's type and where it is, and that outranks the per-type and fleet
+ * limits. Every other org, and every caller that cannot say which org the
+ * unit is in, gets the per-type or fleet limit as before.
  */
 export function overspeedLimitFor(vehicleType: string | null, at?: LimitPlace): number {
-  const zone = at ? zoneLimitAt(at.orgId, at.lat, at.lng) : null
+  const zone = at ? zoneLimitAt(at.orgId, vehicleType, at.lat, at.lng) : null
   if (zone) return zone.kmh
   return limitByType.get((vehicleType ?? '').toUpperCase()) ?? env.OVERSPEED_LIMIT_KMH
 }
