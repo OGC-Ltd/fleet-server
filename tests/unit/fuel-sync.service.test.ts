@@ -110,6 +110,23 @@ describe('ledger writes', () => {
     expect(theft['stolenMl']).toBe(80_830)
   })
 
+  it('stores a re-report of a deleted drain as already deleted', async () => {
+    // The provider re-clamped the start, so the report misses the window's
+    // rows — but it overlaps a drain an operator deleted, and must not come
+    // back as a new alert.
+    const deletedAt = new Date(RECENT.getTime() - 60_000)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findFirst as any).mockResolvedValue({
+      dismissedAt: deletedAt, dismissedById: 'u1', reviewedAt: deletedAt, reviewedById: 'u1',
+    })
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [drain(RECENT)] })
+
+    await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
+
+    const theft = (prismaMock.fuelTheft.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data
+    expect(theft).toMatchObject({ dismissedAt: deletedAt, dismissedById: 'u1', reviewStatus: 'DISMISSED' })
+  })
+
   it('does not re-store an event already in the ledger', async () => {
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [filling(RECENT)], thefts: [] })
     // The ledger already holds this exact filling — matched on its timestamp,
@@ -330,6 +347,19 @@ describe('reconcile — the provider retracts an event', () => {
       { id: 'ft_1', beganAt: RECENT, detectedAt: RECENT, stolenMl: 80_830, finalFuelLevelMl: 679_090 },
     ])
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [drain(RECENT)] })
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ reconcile: true }))
+
+    expect(out.removed).toBe(0)
+    expect(prismaMock.fuelTheft.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('never deletes a drain an operator has deleted from the dashboard', async () => {
+    // That row carries who deleted it and its follow-up. Removing it is how a
+    // retracted-then-re-reported drain used to come back as a fresh alert.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([{ ...stale, dismissedAt: OLD }])
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
 
     const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ reconcile: true }))
 
