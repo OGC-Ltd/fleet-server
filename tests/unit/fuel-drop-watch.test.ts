@@ -12,7 +12,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
-  noteFuelFrame, resetFuelWatch, LIVE_DROP_MIN_ML,
+  noteFuelFrame, resetFuelWatch, LIVE_DROP_MIN_ML, MAX_ENGINE_ON_MS,
 } from '../../src/lib/fuel-drop-watch.js'
 import type { VehicleTelemetryFrame } from '../../src/providers/telemetry-provider.js'
 
@@ -90,6 +90,98 @@ describe('fuel-drop-watch — what it raises', () => {
   })
 })
 
+/**
+ * MUFINDI: CTR 12, 2026-09-25, as stored (EAT clock, litres). Parked all day;
+ * the engine ran for about two minutes at 15:08, then the tank fell 6 L over
+ * twenty minutes with it off. The 10 L floor, the 15-minute window and the
+ * engine-off-throughout rule each missed it on their own.
+ */
+const CTR12: [string, number, boolean?][] = [
+  ['14:56:00', 214.9], ['14:57:03', 214.9], ['14:58:02', 214.9], ['14:59:50', 214.9],
+  ['15:00:02', 214.9], ['15:01:02', 214.8], ['15:02:02', 214.8], ['15:03:03', 214.9],
+  ['15:04:03', 214.9], ['15:05:03', 214.9], ['15:06:03', 214.9], ['15:06:39', 214.9],
+  ['15:07:11', 214.9], ['15:07:39', 214.9], ['15:08:09', 214.9],
+  ['15:08:35', 215.3, true], ['15:09:35', 215.3, true],
+  ['15:10:33', 214.7], ['15:11:33', 214.7], ['15:12:33', 213.8], ['15:13:33', 213.8],
+  ['15:15:10', 213.0], ['15:15:33', 213.0], ['15:16:33', 212.5], ['15:17:33', 212.5],
+  ['15:18:33', 211.9], ['15:19:33', 211.9], ['15:20:35', 211.5], ['15:21:33', 211.5],
+  ['15:22:31', 210.5], ['15:22:37', 210.5], ['15:23:33', 210.5], ['15:24:33', 210.5],
+  ['15:25:34', 210.0], ['15:26:34', 210.0], ['15:27:35', 209.4], ['15:28:33', 209.4],
+]
+const eat = (hms: string) => Date.parse(`2026-09-25T${hms}+03:00`)
+
+describe('fuel-drop-watch — small, slow drains on a parked machine', () => {
+  it('sees CTR 12: 6 L over twenty minutes, after a two-minute engine run', () => {
+    let raised: ReturnType<typeof noteFuelFrame> = null
+    for (const [hms, l, engineOn] of CTR12) {
+      const out = noteFuelFrame({
+        capturedAt: new Date(eat(hms)), fuelLevelMl: Math.round(l * 1000),
+        speedKmh: 0, engineOn: engineOn ?? false, ignitionKnown: true,
+      } as VehicleTelemetryFrame, { ...CTX, plate: 'MUFINDI: CTR 12' })
+      if (out) raised = out
+    }
+    expect(raised).not.toBeNull()
+    expect(raised!.droppedMl).toBeGreaterThanOrEqual(LIVE_DROP_MIN_ML)
+    expect(raised!.engineOnMs).toBeGreaterThan(0)
+    expect(raised!.engineOnMs).toBeLessThanOrEqual(MAX_ENGINE_ON_MS)
+  })
+
+  it('catches 5 to 10 L', () => {
+    const out = run([
+      60_000, 60_000, 60_000, 60_000, 60_000, 60_000,
+      54_000, 54_000, 54_000,
+    ])
+    expect(out).not.toBeNull()
+    expect(out!.droppedMl).toBe(6_000)
+  })
+
+  it('refuses when the engine ran longer than a brief start', () => {
+    // Six minutes on, then the fall: longer than MAX_ENGINE_ON_MS.
+    let raised: ReturnType<typeof noteFuelFrame> = null
+    const mls = [60_000, 60_000, 60_000, 60_000, 60_000, 60_000, 60_000, 60_000, 49_000, 49_000, 49_000]
+    for (const [i, ml] of mls.entries()) {
+      const out = noteFuelFrame(frame(i * 60, ml, { engineOn: i >= 1 && i <= 6 }), CTX)
+      if (out) raised = out
+    }
+    expect(raised).toBeNull()
+  })
+
+  it('refuses when the engine is running at the trough', () => {
+    let raised: ReturnType<typeof noteFuelFrame> = null
+    const mls = [60_000, 60_000, 60_000, 60_000, 60_000, 60_000, 49_000, 49_000, 49_000]
+    for (const [i, ml] of mls.entries()) {
+      const out = noteFuelFrame(frame(i * 60, ml, { engineOn: i >= 7 }), CTX)
+      if (out) raised = out
+    }
+    expect(raised).toBeNull()
+  })
+
+  it('judges from when the machine parked, once it has been still 15 minutes', () => {
+    // Drove until minute 5, then parked for twenty minutes before the fall.
+    let raised: ReturnType<typeof noteFuelFrame> = null
+    const mls = [
+      ...Array(26).fill(60_000),
+      49_000, 49_000, 49_000,
+    ]
+    for (const [i, ml] of mls.entries()) {
+      const out = noteFuelFrame(frame(i * 60, ml, { speedKmh: i <= 5 ? 20 : 0 }), CTX)
+      if (out) raised = out
+    }
+    expect(raised).not.toBeNull()
+    expect(raised!.droppedMl).toBe(11_000)
+  })
+
+  it('refuses a fall within 15 minutes of the machine moving', () => {
+    let raised: ReturnType<typeof noteFuelFrame> = null
+    const mls = [...Array(10).fill(60_000), 49_000, 49_000, 49_000]
+    for (const [i, ml] of mls.entries()) {
+      const out = noteFuelFrame(frame(i * 60, ml, { speedKmh: i <= 1 ? 20 : 0 }), CTX)
+      if (out) raised = out
+    }
+    expect(raised).toBeNull()
+  })
+})
+
 describe('fuel-drop-watch — the disturbance rule', () => {
   it('refuses when the machine moved at any point in the window', () => {
     // A tank that is tilting, braking or being driven can redistribute, and
@@ -115,7 +207,8 @@ describe('fuel-drop-watch — the disturbance rule', () => {
 
 describe('fuel-drop-watch — what it refuses on shape', () => {
   it('refuses a drop too small to be anything but probe noise', () => {
-    // p99 of the level move between two consecutive readings is 2.9 L.
+    // p99 of the level move between two consecutive readings is 2.9 L; the
+    // floor is 5 L.
     const out = run([
       60_000, 60_000, 60_000, 60_000, 60_000, 60_000,
       57_000, 57_000, 57_000,
