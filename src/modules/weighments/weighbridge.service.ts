@@ -162,7 +162,7 @@ export async function getWeighbridges(orgId: string): Promise<WeighbridgeDto[]> 
   const rows = await prisma.weighment.findMany({
     where:  { organisationId: orgId, tokenAt: { gte: since } },
     select: {
-      factoryCode: true, tokenNumber: true, category: true, tokenAt: true,
+      factoryCode: true, centerCode: true, tokenNumber: true, category: true, tokenAt: true,
       vehicleNo: true, vehiclePlate: true, vehicleId: true, driverName: true,
       grossWeightKg: true, grossAt: true, grossOperator: true, grossBridgeNo: true,
       tareWeightKg: true, tareAt: true, tareOperator: true, tareBridgeNo: true,
@@ -177,7 +177,23 @@ export async function getWeighbridges(orgId: string): Promise<WeighbridgeDto[]> 
   const best = new Map<number, { w: Weighing; row: (typeof rows)[number] }>()
   const unplaced = new Set<number>()
 
+  /** Newest weighing per SITE, for the sites whose scales are not numbered. */
+  const bySite = new Map<number, { w: Omit<Weighing, 'bridgeNo'>; row: (typeof rows)[number] }>()
+
   for (const row of rows) {
+    if ((row.factoryCode ?? LEGACY_FACTORY) !== LEGACY_FACTORY) {
+      // West Kenya's tickets name no scale, only the yard, so their newest
+      // weighing belongs to the yard's pin(s). Gross and tare both count, as
+      // for a numbered scale.
+      for (const [at, stage, operator] of [
+        [row.grossAt, 'gross', row.grossOperator],
+        [row.tareAt,  'tare',  row.tareOperator],
+      ] as const) {
+        if (at == null) continue
+        const held = bySite.get(row.centerCode)
+        if (!held || at > held.w.at) bySite.set(row.centerCode, { w: { at, stage, atFactoryLeg: false, operator }, row })
+      }
+    }
     // Bridge numbers are Ndhiwa's numbering (see weighbridge.geography). A
     // Kabras or Nzoia ticket sends none today; if one ever does, its "1" is
     // not Sukari's Factory bridge 1, so it is not read against that table.
@@ -226,7 +242,10 @@ export async function getWeighbridges(orgId: string): Promise<WeighbridgeDto[]> 
   const scales = [...ticketed, ...unticketedScalesOf(org?.code)]
 
   return scales.map((b): WeighbridgeDto => {
-    const hit = b.bridgeNo == null ? undefined : best.get(b.bridgeNo)
+    // An unnumbered pin shows its SITE's newest weighing: at Kabras, both lanes
+    // show the yard's, because no ticket says which lane took it.
+    const hit = b.bridgeNo != null ? best.get(b.bridgeNo)
+      : b.centerCode != null ? bySite.get(b.centerCode) : undefined
     return {
       id:         b.key,
       centerCode: b.centerCode,
