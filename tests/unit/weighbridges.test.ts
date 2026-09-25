@@ -136,6 +136,9 @@ describe("Nzoia's bridges", () => {
     // As the operator corrected it, 2026-09-26
     expect(cw.lat).toBeCloseTo(0.5700258, 7)
     expect(cw.lng).toBeCloseTo(34.6544478, 7)
+    const hd = nz.find(b => b.label === 'HD bridge')!
+    expect(hd.lat).toBeCloseTo(0.5671175, 7)
+    expect(hd.lng).toBeCloseTo(34.6562756, 7)
   })
 })
 
