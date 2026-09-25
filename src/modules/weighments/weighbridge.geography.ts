@@ -98,9 +98,9 @@
  *     Nzoia factory yard          17            4    ~80 m    transfers on arrival
  *
  * Nzoia's two bridges were then GIVEN by the operator (2026-09-26), as CW and
- * HD, and replace the derived point: CW 0.5700258, 34.6544478 (corrected by
- * the operator the same day; their first DMS reading sat 112 m south), HD
- * 0°34'00.36"N 34°39'22.39"E, ~410 m apart. The derived arrival point had
+ * HD, and replace the derived point: CW 0.5700258, 34.6544478 and HD
+ * 0.5671175, 34.6562756, ~380 m apart (both corrected by the operator the same
+ * day; their first DMS readings sat 112 m and 39 m off). The derived arrival point had
  * landed 64 m from CW, which is the check on the method used for the others.
  *
  * Kitale is the check: two of our own units weighed there on DELIVERY tickets,
@@ -194,7 +194,7 @@ export const WEIGHBRIDGES: Weighbridge[] = [
   { key: 'kitale',    orgCode: 'WESTSUGAR', centerCode: 1115, centerName: 'KITALE (AMUKA)', bridgeNo: null, label: 'Yard', lat: 1.098563, lng: 35.008331, spreadM: 24, samples: 33 },
   // Operator-given, so no spread or sample count: 0 means "not measured".
   { key: 'nzoia-cw',  orgCode: 'WESTSUGAR', centerCode: 2101, centerName: 'NZOIA',          bridgeNo: null, label: 'CW bridge', lat: 0.5700258, lng: 34.6544478, spreadM: 0, samples: 0 },
-  { key: 'nzoia-hd',  orgCode: 'WESTSUGAR', centerCode: 2101, centerName: 'NZOIA',          bridgeNo: null, label: 'HD bridge', lat: 0.566767, lng: 34.656219, spreadM: 0, samples: 0 },
+  { key: 'nzoia-hd',  orgCode: 'WESTSUGAR', centerCode: 2101, centerName: 'NZOIA',          bridgeNo: null, label: 'HD bridge', lat: 0.5671175, lng: 34.6562756, spreadM: 0, samples: 0 },
   { key: 'weyeta-nz', orgCode: 'WESTSUGAR', centerCode: 2103, centerName: 'WEYETA',         bridgeNo: null, label: 'Yard', lat: 0.594721, lng: 34.475541, spreadM: 20, samples: 20 },
 ]
 
