@@ -25,6 +25,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { overspeedLimitFor } from '../../lib/derived-alerts.js'
+import { warmSpeedPolicy, speedPolicyFor } from '../../lib/speed-policy.js'
 import type { PlaybackPoint } from './telemetry.repository.js'
 import { STATIONARY_KMH } from '../../lib/simplify-path.js'
 
@@ -172,30 +173,37 @@ export function deriveStops(points: PlaybackPoint[]): PlaybackEvent[] {
 }
 
 /** Speeding runs, same shape and the same reason for using raw fixes. */
-export function deriveSpeeding(points: PlaybackPoint[], limitKmh = SPEEDING_KMH): PlaybackEvent[] {
+export function deriveSpeeding(
+  points: PlaybackPoint[],
+  limitKmh: number | ((p: PlaybackPoint) => number) = SPEEDING_KMH,
+): PlaybackEvent[] {
+  // A function where the limit depends on place (lib/speed-policy)
+  const limitAt = typeof limitKmh === 'function' ? limitKmh : () => limitKmh
   const out: PlaybackEvent[] = []
   let start: number | null = null
   let end = 0
   let n = 0
   let peak = 0
+  let lim = 0
 
   const flush = () => {
     if (start != null && n >= MIN_SPEEDING_FIXES) {
       out.push({
         t: start, endT: end, kind: 'speeding', severity: 'warning',
-        label: 'Over speed', detail: `peak ${Math.round(peak)} km/h`,
+        label: 'Over speed', detail: `peak ${Math.round(peak)} km/h, limit ${lim} km/h`,
       })
     }
-    start = null; n = 0; peak = 0
+    start = null; n = 0; peak = 0; lim = 0
   }
 
   for (const p of points) {
     if (p.gapBefore) flush()
-    if (p.spd != null && p.spd > limitKmh) {
+    const limit = limitAt(p)
+    if (p.spd != null && p.spd > limit) {
       if (start == null) start = p.t
       end = p.t
       n += 1
-      if (p.spd > peak) peak = p.spd
+      if (p.spd > peak) { peak = p.spd; lim = limit }
     } else {
       flush()
     }
@@ -330,9 +338,15 @@ export async function buildPlaybackEvents(
   // fourth hardcoded 80 drifting away from OVERSPEED_LIMIT_BY_TYPE.
   const [logged, vehicle] = await Promise.all([
     readLoggedEvents(vehicleId, from, to),
-    prisma.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleType: true } }),
+    prisma.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleType: true, organisationId: true } }),
   ])
-  const limitKmh = playbackLimitFor(vehicle?.vehicleType ?? null)
+  const type = vehicle?.vehicleType ?? null
+  const orgId = vehicle?.organisationId ?? null
+  if (orgId) await warmSpeedPolicy(orgId)
+  // Per fix where the org's limit depends on place, else one number.
+  const limitKmh = orgId && speedPolicyFor(orgId)
+    ? (p: PlaybackPoint) => overspeedLimitFor(type, { orgId, lat: p.lat, lng: p.lng })
+    : playbackLimitFor(type)
   const all = [...logged, ...deriveStops(points), ...deriveSpeeding(points, limitKmh)]
 
   const truncatedEvents = all.length > MAX_EVENTS

@@ -621,6 +621,30 @@ export async function resolveEstatePlaces(
     .map(z => ({ id: z.id, name: z.name, category: z.category }))
 }
 
+/**
+ * The categories of every zone containing a point, from the cache — for
+ * lib/speed-policy, which has to answer per frame and cannot wait on a query.
+ *
+ * Null while the org's zones have never been loaded, so the caller can tell
+ * "inside nothing" from "not known yet". Every zone counts, switched off or
+ * not, the same as presence: Kasulu's factory site polygon is inactive in the
+ * provider, and it is still where the factory is.
+ */
+export function zoneCategoriesAt(orgId: string, lat: number, lng: number): Set<ZoneCategory> | null {
+  const hit = zoneCache.get(orgId)
+  if (!hit) return null
+  const out = new Set<ZoneCategory>()
+  for (const z of hit.zones) {
+    if (isInsideFence(lat, lng, z.geometry)) out.add(z.category)
+  }
+  return out
+}
+
+/** Load (or refresh, once stale) an org's zones for zoneCategoriesAt. */
+export async function loadOrgZones(orgId: string): Promise<void> {
+  await getZones(orgId)
+}
+
 /** Drop cached zones for an org — call after a geofence sync. */
 export function invalidateZoneCache(orgId?: string): void {
   if (orgId) {

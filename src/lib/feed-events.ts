@@ -138,7 +138,7 @@ export function deriveFeedEvents(orgId: string, p: FeedSource): void {
       // figure someone would dispute the alert with.
       text: `ALERT: ${who} was recorded at ${Math.round(p.speedKmh ?? 0)} km/h`
           + `${to ? ` en route to ${to}` : ''}. `
-          + `The speed limit is ${overspeedLimitFor(p.vehicleType ?? null)} km/h.`,
+          + `The speed limit is ${overspeedLimitFor(p.vehicleType ?? null, { orgId, lat: p.lat, lng: p.lng })} km/h.`,
     })
   }
   if (p.flags.fuelInconsistency && !st.fuelInconsistency) {
