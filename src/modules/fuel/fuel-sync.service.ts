@@ -260,7 +260,7 @@ export async function syncVehicleFuelEvents(
     }),
     prisma.fuelTheft.findMany({
       where:  { vehicleId: vehicle.id, beganAt: { gte: opts.from, lte: opts.to } },
-      select: { id: true, beganAt: true, detectedAt: true, stolenMl: true, finalFuelLevelMl: true },
+      select: { id: true, beganAt: true, detectedAt: true, stolenMl: true, finalFuelLevelMl: true, dismissedAt: true },
     }),
   ])
   // Rows this pass has already bound to a reported event. Two distinct drains
@@ -420,8 +420,29 @@ export async function syncVehicleFuelEvents(
     else {
       out.thefts++
       if (opts.apply) {
+        // A drain an operator has already deleted must not come back as a new
+        // alert. The provider re-clamps a running drain's start, so a re-report
+        // can land outside this pass's window (knownThefts is keyed on beganAt)
+        // and miss the row it belongs to. Looked up without the window, and
+        // only here — a genuinely new drain is a few a day.
+        const deleted = await prisma.fuelTheft.findFirst({
+          where: {
+            vehicleId:  vehicle.id,
+            dismissedAt: { not: null },
+            beganAt:    { lte: t.detectedAt },
+            detectedAt: { gte: t.beganAt },
+          },
+          select: { dismissedAt: true, dismissedById: true, reviewedAt: true, reviewedById: true },
+        })
         const created = await prisma.fuelTheft.create({
           data: {
+            ...(deleted ? {
+              dismissedAt:   deleted.dismissedAt,
+              dismissedById: deleted.dismissedById,
+              reviewStatus:  'DISMISSED' as const,
+              reviewedAt:    deleted.reviewedAt ?? deleted.dismissedAt,
+              reviewedById:  deleted.reviewedById ?? deleted.dismissedById,
+            } : {}),
             vehicleId:         vehicle.id,
             reportingPeriodId: await periodFor(t.beganAt),
             // No driver: the report names a unit, not a person, and who was
@@ -443,6 +464,7 @@ export async function syncVehicleFuelEvents(
           knownThefts.push({
             id: created.id, beganAt: t.beganAt, detectedAt: t.detectedAt,
             stolenMl: t.stolenMl, finalFuelLevelMl: t.finalFuelLevelMl,
+            dismissedAt: created.dismissedAt ?? null,
           })
           claimedThefts.add(created.id)
         }
@@ -465,7 +487,12 @@ export async function syncVehicleFuelEvents(
   // SyncOptions.reconcile.
   if (opts.reconcile) {
     const staleFills  = knownFills.filter(r => !claimedFills.has(r.id)).map(r => r.id)
-    const staleThefts = knownThefts.filter(r => !claimedThefts.has(r.id)).map(r => r.id)
+    // Never a drain an operator deleted: that row carries who deleted it and
+    // its follow-up, and deleting it here is how a retracted-then-re-reported
+    // drain used to return as a fresh alert with no memory of the deletion.
+    const staleThefts = knownThefts
+      .filter(r => !claimedThefts.has(r.id) && r.dismissedAt == null)
+      .map(r => r.id)
     // Counted even in a dry run. This is the one branch that DELETES, so
     // "--reconcile without --apply" has to be able to answer "how much?"
     // before anyone runs it for real.

@@ -149,6 +149,28 @@ describe('Fuel Thefts', () => {
       expect(prismaMock.fuelTheftFollowUp.create).not.toHaveBeenCalled()
     })
 
+    it('clears every other open incident on the same unit, keeping the rows', async () => {
+      prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', vehicleId: 'v1', dismissedAt: null } as never)
+      prismaMock.fuelTheft.updateMany.mockResolvedValue({ count: 1 })
+      prismaMock.fuelTheft.findMany.mockResolvedValue([{ id: 'th2' }, { id: 'th3' }] as never)
+      prismaMock.fuelTheftFollowUp.create.mockResolvedValue({ id: 'fu1' } as never)
+
+      const res = await request(app).post(`${THEFT_BASE}/th1/dismiss`)
+
+      expect(res.status).toBe(200)
+      expect(prismaMock.fuelTheft.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ vehicleId: 'v1', id: { not: 'th1' }, dismissedAt: null }),
+      }))
+      expect(prismaMock.fuelTheft.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: { in: ['th2', 'th3'] }, dismissedAt: null },
+        data: expect.objectContaining({ dismissedAt: expect.any(Date), reviewStatus: 'DISMISSED' }),
+      }))
+      // One follow-up, for the alert somebody actually looked at.
+      expect(prismaMock.fuelTheftFollowUp.create).toHaveBeenCalledTimes(1)
+      expect(prismaMock.fuelTheft.delete).not.toHaveBeenCalled()
+      expect(prismaMock.fuelTheft.deleteMany).not.toHaveBeenCalled()
+    })
+
     it('scopes the lookup to the path organisation', async () => {
       prismaMock.fuelTheft.findFirst.mockResolvedValue(null)
 
