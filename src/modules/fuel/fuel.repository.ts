@@ -1,5 +1,7 @@
 import { prisma } from '../../lib/prisma.js'
 import type { Prisma } from '../../../generated/prisma/client.js'
+import { ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS } from './fuel-theft-classifier.js'
+import { FUEL_INCIDENT_WINDOW_MS, FUEL_INCIDENT_EPOCH } from '../telemetry/telemetry.repository.js'
 import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery } from './fuel.schema.js'
 
 function buildDateFilter(from?: Date, to?: Date) {
@@ -149,7 +151,7 @@ export async function dismissTheft(orgId: string, id: string, userId: string | n
     select: { id: true, vehicleId: true, dismissedAt: true },
   })
   if (!row) return null
-  if (row.dismissedAt) return { ...row, followUpId: null }
+  if (row.dismissedAt) return { ...row, followUpId: null, dismissedIds: [] as string[] }
   return prisma.$transaction(async (tx) => {
     const now = new Date()
     // Conditional, so two people deleting the same alert at once open one
@@ -163,7 +165,40 @@ export async function dismissTheft(orgId: string, id: string, userId: string | n
     })
     if (count === 0) {
       const won = await tx.fuelTheft.findUnique({ where: { id }, select: { id: true, vehicleId: true, dismissedAt: true } })
-      return { ...(won ?? row), followUpId: null }
+      return { ...(won ?? row), followUpId: null, dismissedIds: [] as string[] }
+    }
+    // Deleting an alert clears the UNIT, not just the one drain. The dashboard
+    // shows only a vehicle's newest open incident, so deleting that one used
+    // to uncover the next-newest on the same unit — which read to the operator
+    // as the alert they had just deleted coming straight back. Every other
+    // incident the dashboard could still show for this vehicle (the snapshot's
+    // own filter: announced, inside the window, after the epoch) is dismissed
+    // with it. The rows are kept, like any deletion; only the clicked one opens
+    // a follow-up, since it is the one somebody actually looked at.
+    const siblings = await tx.fuelTheft.findMany({
+      where: {
+        vehicleId: row.vehicleId,
+        id: { not: id },
+        dismissedAt: null,
+        beganAt: {
+          gte: new Date(Math.max(now.getTime() - FUEL_INCIDENT_WINDOW_MS, FUEL_INCIDENT_EPOCH.getTime())),
+        },
+        OR: [
+          { drainCause: { in: [...ANNOUNCED_CAUSES] } },
+          { causeReason: { in: [...ANNOUNCED_REASON_SLUGS] } },
+        ],
+      },
+      select: { id: true },
+    }) ?? []
+    const siblingIds = siblings.map((r) => r.id)
+    if (siblingIds.length > 0) {
+      await tx.fuelTheft.updateMany({
+        where: { id: { in: siblingIds }, dismissedAt: null },
+        data: {
+          dismissedAt: now, dismissedById: userId,
+          reviewStatus: 'DISMISSED', reviewedAt: now, reviewedById: userId,
+        },
+      })
     }
     // The alert as the person deleting it saw it. Read inside the transaction,
     // so it is the row exactly as it stood at the moment of the deletion.
@@ -182,7 +217,10 @@ export async function dismissTheft(orgId: string, id: string, userId: string | n
       },
       select: { id: true },
     })
-    return { id: row.id, vehicleId: row.vehicleId, dismissedAt: now, followUpId: followUp.id as string | null }
+    return {
+      id: row.id, vehicleId: row.vehicleId, dismissedAt: now, followUpId: followUp.id as string | null,
+      dismissedIds: siblingIds,
+    }
   })
 }
 
