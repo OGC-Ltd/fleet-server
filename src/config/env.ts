@@ -474,6 +474,13 @@ const schema = z.object({
   // verbatim, as it did before; nothing is deleted either way.
   FUEL_ADJUDICATION_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
 
+  // Stage two of the parked-fall rule (lib/queues/parked-falls): follow each
+  // fall the live watch raised to the machine's next start and give it a
+  // verdict. Off leaves the sightings on the feed with no verdict after them.
+  PARKED_FALL_VERDICTS_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+  // Every five minutes: a verdict waits on the machine starting, not on this.
+  PARKED_FALL_CRON: z.string().optional().default('*/5 * * * *'),
+
   // Completed dispatches → measured Trip rows (lib/queues/trips.ts). The trips
   // table had no writer once the simulator was retired, so every surface
   // reading it — the delivery half of Analytics, the Drivers roster, the org

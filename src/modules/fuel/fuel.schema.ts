@@ -89,3 +89,55 @@ export type CreateFillingDto = z.infer<typeof createFillingSchema>
 export type ListFillingQuery = z.infer<typeof listFillingQuerySchema>
 export type CreateTheftDto = z.infer<typeof createTheftSchema>
 export type ListTheftQuery = z.infer<typeof listTheftQuerySchema>
+
+// ── Signal alerts — see fuel-signal-alerts ──────────────────────────────────
+
+const profileType = z.enum(['truck', 'car', 'bus', 'motorcycle', 'excavator', 'generator', 'bulldozer', 'forklift'])
+
+/**
+ * Overrides for the profile a vehicle would otherwise resolve to. `consumption`
+ * is litres per the profile's work unit (km or engine-hour).
+ */
+const profileOverrides = {
+  profile:       profileType.optional(),
+  consumption:   z.coerce.number().positive().optional(),
+  tankCapacityL: z.coerce.number().positive().optional(),
+}
+
+/** GET /signal-alerts/vehicles/:vehicleId. Defaults to the last 24 hours. */
+export const signalAlertQuerySchema = z.object({
+  from: z.coerce.date().optional(),
+  to:   z.coerce.date().optional(),
+  ...profileOverrides,
+})
+export type SignalAlertQuery = z.infer<typeof signalAlertQuerySchema>
+
+const signalSampleSchema = z.object({
+  /** ISO string or epoch milliseconds. */
+  t:            z.coerce.date(),
+  fuelL:        z.number().nonnegative().nullable(),
+  ax:           z.number().nullable().optional(),
+  ay:           z.number().nullable().optional(),
+  az:           z.number().nullable().optional(),
+  /** Cumulative odometer km or engine-hours, in the profile's unit. */
+  work:         z.number().nullable().optional(),
+  workMeasured: z.boolean().optional(),
+  speedKmh:     z.number().nonnegative().nullable().optional(),
+  ignitionOff:  z.boolean().nullable().optional(),
+})
+
+/**
+ * POST /signal-alerts/evaluate and /signal-alerts/vehicles/:vehicleId/evaluate.
+ *
+ * The cap is set by the app-wide 1 MB JSON limit, not by the detector:
+ * measured, 10,000 samples with all three axes come to 1,057 KB even with
+ * epoch-ms `t` and floats at 2 dp, and 1,599 KB with ISO times and full
+ * precision. 8,000 compact samples fit; verbose ones hit the 413 first. Each
+ * request is a fresh detector, so a caller splitting a long series loses the
+ * filter state at every split.
+ */
+export const evaluateSignalsSchema = z.object({
+  ...profileOverrides,
+  samples: z.array(signalSampleSchema).min(1).max(8_000),
+})
+export type EvaluateSignalsDto = z.infer<typeof evaluateSignalsSchema>

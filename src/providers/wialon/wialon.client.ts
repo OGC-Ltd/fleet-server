@@ -87,6 +87,59 @@ export interface WialonUnit {
   bact?: number
 }
 
+/**
+ * One message off `avl_evts`: where the unit was, when, and what it reported.
+ */
+export interface WialonMessage {
+  unitId: number
+  /** Unix SECONDS: the time the message is stamped with — see messageTime. `pos.t` is the same. */
+  t:      number
+  /** Null for a message with no fix; its readings still count. */
+  pos:    WialonPosition | null
+  /** The message's raw parameters (`d.p`), the same ones the sweep reads from `lmsg.p`. */
+  params: Record<string, unknown> | null
+  /** False when the message's own time could not be believed and Wialon's batch time stood in. */
+  ownTime: boolean
+}
+
+/**
+ * How far a message's own time may run ahead of Wialon's clock and still be
+ * believed, seconds. Over nine live minutes on 2026-09-27, 27 of 7,384
+ * messages ran ahead of the batch that carried them, none by more than 1 s.
+ */
+export const MESSAGE_CLOCK_AHEAD_S = 60
+
+/**
+ * The time an `avl_evts` message is stamped with, and whether it is its own.
+ *
+ * `d.t` is when the TRACKER recorded the message. It is the only honest
+ * answer, and it is not when the message reached us: trackers record every
+ * few seconds and upload in batches, so a message arrives seconds to minutes
+ * after it was recorded — a median of 5 s at night and 104 s by day, p90 five
+ * to ten minutes, measured live on 2026-09-27 — and a tracker back in
+ * coverage uploads its backlog, days old at worst (3.3 d in that sample). A
+ * batch carries several messages per unit. Wialon's batch time `tm` used to
+ * stand in for all of them: every delta's position was the moment it arrived
+ * rather than the moment it was true, a backlog replayed as the present, and
+ * a batch's messages shared one time, so only one of them became a row.
+ *
+ * `tm` stands in now only where the message's own time cannot be believed:
+ *   · it has none, and neither does its position — the old behaviour;
+ *   · it claims to be from after Wialon received it, by more than
+ *     MESSAGE_CLOCK_AHEAD_S. A record cannot be made after it arrives, so the
+ *     tracker's clock is wrong, and believing it would stamp the fix in the
+ *     future and hold back every later one until the clock caught up.
+ *
+ * Returns null when there is no time at all.
+ */
+export function messageTime(own: unknown, posT: unknown, batchT: unknown): { t: number; own: boolean } | null {
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+  const tm = num(batchT)
+  const mine = num(own) ?? num(posT)
+  if (mine != null && (tm == null || mine <= tm + MESSAGE_CLOCK_AHEAD_S)) return { t: mine, own: true }
+  return tm != null ? { t: tm, own: false } : null
+}
+
 export class WialonClient {
   private sid: string | null = null
   private loginPromise: Promise<string> | null = null
@@ -242,30 +295,40 @@ export class WialonClient {
    * roughly five minutes, and a steady `avl_evts` loop is the documented way
    * to hold it open.
    *
-   * Shape: `{ tm, events: [{ i: unitId, t: 'm'|'u'|'d', d: { pos } }] }`.
-   * Only `u` (unit data changed) carries a position we care about; `m` is a
-   * raw message and `d` a deletion.
+   * Shape: `{ tm, events: [{ i: unitId, t: 'm'|'u'|'d', d }] }`.
+   *
+   * On this subscription every event arrives as `t: 'm'`, and `d` is the whole
+   * raw message: `t, f, tp, pos, lc, rt, p` (probed live on 2026-09-27, 60 of 60
+   * events). So `d.p` carries the same raw parameters the sweep reads from
+   * `lmsg.p`, for THIS message — which is what lets fuel, ignition and the
+   * accelerometer be read per message instead of once a sweep. It is returned
+   * as `params`.
+   *
+   * Every message in the batch is returned, each with its own time — see
+   * messageTime — including a message with no position, whose readings still
+   * count.
    */
-  async pollEvents(): Promise<Array<{ unitId: number; pos: WialonPosition }>> {
+  async pollEvents(): Promise<WialonMessage[]> {
     // NOTE: avl_evts is its OWN endpoint — /avl_evts?sid=… — not an
     // ajax.html service. Calling it as `svc=avl_evts` returns error 2
     // ("invalid service name").
     const sid = await this.login()
     const res = await this.fetchEvents(sid)
 
-    const out: Array<{ unitId: number; pos: WialonPosition }> = []
+    const out: WialonMessage[] = []
     for (const e of res.events ?? []) {
-      const pos = e.d?.pos
-      if (!pos || !Number.isFinite(pos.y) || !Number.isFinite(pos.x)) continue
+      const d = e.d
+      if (!d) continue
+      const time = messageTime(d.t, d.pos?.t, res.tm)
+      if (!time) continue                   // no defensible timestamp — drop it
 
-      // Unlike search_items, an avl_evts position often omits `t`. The
-      // response's top-level `tm` is when Wialon registered the batch, so it
-      // stands in — without it every delta produced an Invalid Date and was
-      // rejected at the database.
-      const t = Number.isFinite(pos.t) ? pos.t : res.tm
-      if (!Number.isFinite(t)) continue     // no defensible timestamp — drop it
-
-      out.push({ unitId: e.i, pos: { ...pos, t: t as number } })
+      const pos = d.pos && Number.isFinite(d.pos.y) && Number.isFinite(d.pos.x)
+        ? { ...d.pos, t: time.t }
+        : null
+      const p = d.p
+      const params = p != null && typeof p === 'object' && !Array.isArray(p) ? p : null
+      if (!pos && !params) continue
+      out.push({ unitId: e.i, t: time.t, pos, params, ownTime: time.own })
     }
     return out
   }
@@ -273,7 +336,7 @@ export class WialonClient {
   /** GET /avl_evts, re-authenticating once if the session has lapsed. */
   private async fetchEvents(sid: string, retry = true): Promise<{
     tm?: number
-    events?: Array<{ i: number; t: string; d?: { pos?: WialonPosition } }>
+    events?: Array<{ i: number; t: string; d?: { pos?: WialonPosition; p?: Record<string, unknown>; t?: number } }>
     error?: number
   }> {
     const res = await fetch(`${this.baseUrl}/avl_evts?sid=${encodeURIComponent(sid)}`)
@@ -288,7 +351,7 @@ export class WialonClient {
       }
       throw new WialonError(body.error, 'avl_evts')
     }
-    return body as { tm?: number; events?: Array<{ i: number; t: string; d?: { pos?: WialonPosition } }> }
+    return body as { tm?: number; events?: Array<{ i: number; t: string; d?: { pos?: WialonPosition; p?: Record<string, unknown>; t?: number } }> }
   }
 
   /**

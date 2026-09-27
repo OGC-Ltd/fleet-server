@@ -258,3 +258,50 @@ export function engineBurnMl(engineSeconds: number | null, rate: ResolvedRate | 
   if (engineSeconds == null || rate == null) return null
   return Math.round((engineSeconds / 3600) * rate.lPerHour * 1000)
 }
+
+/**
+ * What `resolveBand` needs about a vehicle: which org and machine it is, and
+ * what it has been measured to burn.
+ *
+ * `lPerKm` rides alongside the resolved rate rather than inside it: a type
+ * MEDIAN has no meaningful distance figure — it is pooled across machines that
+ * travel differently — so only a vehicle's OWN measured lPerKm is carried, and
+ * a vehicle without one gets no distance baseline and is judged on L/h alone.
+ */
+export interface BandInputs {
+  orgCode: string; plate: string; rate: ResolvedRate | null; lPerKm: number | null
+  /** Both carried because a class can be decided by either — see resolveClass. */
+  vehicleType: string | null; tankCapacityLitres: number | null
+}
+
+/**
+ * Every vehicle's BandInputs from the fleet's vehicle rows and measured rates.
+ *
+ * Pure, and separate from the query that feeds it in
+ * `fuel-adjudication.service.getBandInputs`, so that a measurement harness
+ * reading the same two tables by another route resolves the same rates. The
+ * resolution is the SAME one the trend rows use — per-vehicle where earned,
+ * type median otherwise.
+ */
+export function assembleBandInputs(
+  vehicles: readonly {
+    id: string; registrationPlate: string; vehicleType: string; organisationId: string
+    tankCapacityLitres: number | null; organisation: { code: string } | null
+  }[],
+  rates: readonly { vehicleId: string; lPerHour: number; lPerKm: number | null; runs: number }[],
+): Map<string, BandInputs> {
+  const resolved = resolveRates(
+    rates.map(r => ({ vehicleId: r.vehicleId, lPerHour: r.lPerHour, lPerKm: r.lPerKm, runs: r.runs })),
+    vehicles.map(v => ({ vehicleId: v.id, organisationId: v.organisationId, vehicleType: v.vehicleType })),
+  )
+  const ownKm = new Map(rates.filter(r => r.runs >= MIN_RUNS && r.lPerKm != null)
+    .map(r => [r.vehicleId, r.lPerKm!]))
+  return new Map(vehicles.map(v => [v.id, {
+    orgCode: v.organisation?.code ?? '',
+    plate:   v.registrationPlate,
+    rate:    resolved.get(v.id) ?? null,
+    lPerKm:  ownKm.get(v.id) ?? null,
+    vehicleType:        v.vehicleType,
+    tankCapacityLitres: v.tankCapacityLitres,
+  }]))
+}

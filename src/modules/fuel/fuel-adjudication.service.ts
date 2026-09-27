@@ -32,7 +32,7 @@ import {
   classifyDrain, resolveBand, resolveBasis, announces, mayUseTheftWording, type CauseJudgement,
   ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS,
 } from './fuel-theft-classifier.js'
-import { resolveRates, MIN_RUNS, type ResolvedRate } from './fuel-rate.js'
+import { assembleBandInputs, type BandInputs } from './fuel-rate.js'
 
 /**
  * How far before the drain to read levels. Needs to comfortably precede the
@@ -358,24 +358,15 @@ export async function judgeDrain(
 const BAND_TTL_MS = 6 * 60 * 60_000
 let bandCache: { at: number; byVehicle: Map<string, BandInputs> } | null = null
 
-/**
- * `lPerKm` rides alongside the resolved rate rather than inside it: a type
- * MEDIAN has no meaningful distance figure — it is pooled across machines that
- * travel differently — so only a vehicle's OWN measured lPerKm is carried, and
- * a vehicle without one gets no distance baseline and is judged on L/h alone.
- */
-interface BandInputs {
-  orgCode: string; plate: string; rate: ResolvedRate | null; lPerKm: number | null
-  /** Both carried because a class can be decided by either — see resolveClass. */
-  vehicleType: string | null; tankCapacityLitres: number | null
-}
+/** Now lives beside the pure assembly in fuel-rate; re-exported for callers. */
+export type { BandInputs }
 
 /** Test seam — the cache is module-global and would leak between cases. */
 export function __resetBandCache(): void {
   bandCache = null
 }
 
-async function getBandInputs(vehicleId: string, now: Date): Promise<BandInputs> {
+export async function getBandInputs(vehicleId: string, now: Date): Promise<BandInputs> {
   if (bandCache == null || now.getTime() - bandCache.at >= BAND_TTL_MS) {
     const [vehicles, rates] = await Promise.all([
       prisma.vehicle.findMany({
@@ -387,25 +378,7 @@ async function getBandInputs(vehicleId: string, now: Date): Promise<BandInputs> 
       }),
       prisma.vehicleFuelRate.findMany({ select: { vehicleId: true, lPerHour: true, lPerKm: true, runs: true } }),
     ])
-    // The SAME resolution the trend rows and the measurement harness use —
-    // per-vehicle where earned, type median otherwise.
-    const resolved = resolveRates(
-      rates.map(r => ({ vehicleId: r.vehicleId, lPerHour: r.lPerHour, lPerKm: r.lPerKm, runs: r.runs })),
-      vehicles.map(v => ({ vehicleId: v.id, organisationId: v.organisationId, vehicleType: v.vehicleType })),
-    )
-    const ownKm = new Map(rates.filter(r => r.runs >= MIN_RUNS && r.lPerKm != null)
-      .map(r => [r.vehicleId, r.lPerKm!]))
-    bandCache = {
-      at: now.getTime(),
-      byVehicle: new Map(vehicles.map(v => [v.id, {
-        orgCode: v.organisation?.code ?? '',
-        plate:   v.registrationPlate,
-        rate:    resolved.get(v.id) ?? null,
-        lPerKm:  ownKm.get(v.id) ?? null,
-        vehicleType:        v.vehicleType,
-        tankCapacityLitres: v.tankCapacityLitres,
-      }])),
-    }
+    bandCache = { at: now.getTime(), byVehicle: assembleBandInputs(vehicles, rates) }
   }
   return bandCache.byVehicle.get(vehicleId)
       ?? { orgCode: '', plate: '', rate: null, lPerKm: null, vehicleType: null, tankCapacityLitres: null }

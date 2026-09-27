@@ -16,6 +16,13 @@ export const telemetryPayloadSchema = z.object({
   ignitionKnown:  z.boolean().optional(),
   /** Cumulative engine-hours counter at this fix, in hours — absolute, not a delta. */
   engineHoursMeter: z.number().nonnegative().optional(),
+  /**
+   * Accelerometer axes at this fix, in g, from the same message as the
+   * position. ±16 g is the most a tracker accelerometer reports.
+   */
+  accelXG:        z.number().min(-16).max(16).optional(),
+  accelYG:        z.number().min(-16).max(16).optional(),
+  accelZG:        z.number().min(-16).max(16).optional(),
   fuelLevelMl:    z.number().int().nonnegative().optional(),
   fuelUsedMl:     z.number().int().optional(),
   cargoWeightKg:  z.number().nonnegative().optional(),

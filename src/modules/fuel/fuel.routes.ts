@@ -1,12 +1,12 @@
 import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
-import { requirePermission, requirePermissionStrict } from '../../middleware/authorize.js'
+import { requirePermission, requirePermissionStrict, requireVehicleInScope } from '../../middleware/authorize.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
 import { ingestLimiter } from '../../middleware/rateLimiter.js'
 import {
   createFillingSchema, listFillingQuerySchema, createTheftSchema, listTheftQuerySchema,
   listFollowUpQuerySchema, followUpNoteSchema, assignFollowUpSchema, recallFollowUpSchema, theftOutcomesQuerySchema,
-  reviewTheftSchema,
+  reviewTheftSchema, signalAlertQuerySchema, evaluateSignalsSchema,
 } from './fuel.schema.js'
 import * as ctrl from './fuel.controller.js'
 
@@ -65,5 +65,15 @@ router.post('/followups/:followUpId/recall', triage, validateBody(recallFollowUp
 router.post('/followups/:followUpId/notes', triage, validateBody(followUpNoteSchema), ctrl.noteFollowUp)
 router.post('/followups/:followUpId/escalate', triage, validateBody(followUpNoteSchema), ctrl.escalateFollowUp)
 router.post('/followups/:followUpId/deescalate', triage, validateBody(followUpNoteSchema), ctrl.deescalateFollowUp)
+
+// Signal alerts: the filter-and-residual detector (fuel-signal-alerts) run on
+// demand. Read-only — nothing here writes to the theft ledger or the feed.
+// Strict, being new routes.
+const fuelRead = requirePermissionStrict('fuel_theft:read')
+router.get('/signal-alerts/vehicles/:vehicleId', fuelRead, requireVehicleInScope,
+  validateQuery(signalAlertQuerySchema), ctrl.scanVehicleSignals)
+router.post('/signal-alerts/vehicles/:vehicleId/evaluate', fuelRead, requireVehicleInScope,
+  validateBody(evaluateSignalsSchema), ctrl.evaluateSignals)
+router.post('/signal-alerts/evaluate', fuelRead, validateBody(evaluateSignalsSchema), ctrl.evaluateSignals)
 
 export default router

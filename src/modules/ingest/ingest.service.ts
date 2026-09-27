@@ -39,6 +39,25 @@ export function ignitionColumns(dto: TelemetryPayload): {
   }
 }
 
+/**
+ * The three accelerometer columns for one frame, in g.
+ *
+ * Re-checked here rather than trusted, because the poller hands frames straight
+ * to processTelemetry without the HTTP route's schema parse: an axis that is not
+ * a finite number within the ±16 g a tracker can report becomes NULL instead of
+ * a value no accelerometer produced. Always all three keys, `null` when absent —
+ * the same reason as the camera columns below.
+ */
+export function accelColumns(dto: TelemetryPayload): {
+  accelXG: number | null
+  accelYG: number | null
+  accelZG: number | null
+} {
+  const g = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 16 ? v : null
+  return { accelXG: g(dto.accelXG), accelYG: g(dto.accelYG), accelZG: g(dto.accelZG) }
+}
+
 export async function processTelemetry(
   orgId: string,
   dto: TelemetryPayload,
@@ -100,6 +119,8 @@ export async function processTelemetry(
       // raw payload is documented as diagnostic and written fire-and-forget,
       // which is not a foundation for a column a theft verdict rests on.
       ...ignitionColumns(dto),
+      // Accelerometer axes, written in the same change that adds the columns.
+      ...accelColumns(dto),
       fuelLevelMl:   dto.fuelLevelMl,
       fuelUsedMl:    dto.fuelUsedMl,
       cargoWeightKg: dto.cargoWeightKg,
