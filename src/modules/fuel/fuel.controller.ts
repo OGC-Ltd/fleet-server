@@ -6,7 +6,8 @@ import { UnauthorizedError } from '../../core/errors/errors.js'
 import { getProbeReport } from './probe-report.service.js'
 import { getFleetTankState } from './fuel-tank-state.service.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
-import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, AssignFollowUpDto, RecallFollowUpDto, TheftOutcomesQuery, ReviewTheftDto } from './fuel.schema.js'
+import * as signals from './fuel-signal-alerts.service.js'
+import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, AssignFollowUpDto, RecallFollowUpDto, TheftOutcomesQuery, ReviewTheftDto, SignalAlertQuery, EvaluateSignalsDto } from './fuel.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -244,4 +245,19 @@ export function asOfFromQuery(raw: unknown): Date {
   if (Number.isNaN(dayStart.getTime())) return now
   const dayEnd = new Date(dayStart.getTime() + 86_400_000 - 1)
   return dayEnd < now ? dayEnd : now
+}
+
+// ── Signal alerts — see fuel-signal-alerts ─────────────────────────────────
+
+export const scanVehicleSignals: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await signals.scanVehicle(p(req, 'orgId'), p(req, 'vehicleId'), req.query as unknown as SignalAlertQuery))
+  } catch (err) { next(err) }
+}
+
+export const evaluateSignals: RequestHandler = async (req, res, next) => {
+  try {
+    const vehicleId = (req.params['vehicleId'] as string | undefined) ?? null
+    sendSuccess(res, await signals.evaluateSamples(p(req, 'orgId'), vehicleId, req.body as EvaluateSignalsDto))
+  } catch (err) { next(err) }
 }
