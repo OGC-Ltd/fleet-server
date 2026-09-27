@@ -1,7 +1,7 @@
 import { prisma } from '../../lib/prisma.js'
 import type { Prisma } from '../../../generated/prisma/client.js'
-import { ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS } from './fuel-theft-classifier.js'
-import { FUEL_INCIDENT_WINDOW_MS, FUEL_INCIDENT_EPOCH } from '../telemetry/telemetry.repository.js'
+import { ANNOUNCED_CAUSES } from './fuel-theft-classifier.js'
+import { FUEL_INCIDENT_WINDOW_MS, FUEL_INCIDENT_EPOCH, incidentReasonSlugs } from '../telemetry/telemetry.repository.js'
 import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery } from './fuel.schema.js'
 
 function buildDateFilter(from?: Date, to?: Date) {
@@ -185,7 +185,7 @@ export async function dismissTheft(orgId: string, id: string, userId: string | n
         },
         OR: [
           { drainCause: { in: [...ANNOUNCED_CAUSES] } },
-          { causeReason: { in: [...ANNOUNCED_REASON_SLUGS] } },
+          { causeReason: { in: incidentReasonSlugs() } },
         ],
       },
       select: { id: true },

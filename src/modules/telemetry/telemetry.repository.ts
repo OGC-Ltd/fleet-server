@@ -733,8 +733,28 @@ export async function findLatest(vehicleId: string, orgId: string) {
  * "did anyone look at this one".
  */
 import { ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS } from '../fuel/fuel-theft-classifier.js'
+import { env } from '../../config/env.js'
 
 export const FUEL_INCIDENT_WINDOW_MS = 24 * 60 * 60 * 1000
+
+/**
+ * The cause reasons, beyond the announced CAUSES, that make an open fuel
+ * incident — the red vehicle, the fuel alerts list, the incident window.
+ *
+ * Since FUEL RATE and FUEL DOWN went to the daily summary (FUEL_RATE_ALERTS,
+ * 2026-09-27), none: the fuel alerts are theft cases only (operator: "the fuel
+ * alert captures only theft cases and all other cases go into the daily
+ * summary"). The rule this file already follows — never tell an operator in
+ * colour what we decided not to tell them in words — applied to that change.
+ * With FUEL_RATE_ALERTS=live they count again, as they did before it.
+ *
+ * Shared with the dismissal in fuel.repository, which clears the same set: a
+ * dismissed theft must not also dismiss the unit's FUEL RATE / FUEL DOWN rows,
+ * which the summary would then leave out.
+ */
+export function incidentReasonSlugs(): string[] {
+  return env.FUEL_RATE_ALERTS === 'live' ? [...ANNOUNCED_REASON_SLUGS] : []
+}
 
 /**
  * How far back the card counts REPEATS, as opposed to how far back a vehicle
@@ -929,7 +949,7 @@ export async function findFleetSnapshot(orgId: string) {
       LEFT JOIN users u ON u.id = t.reviewed_by_id
      WHERE t.vehicle_id = ANY(${vehicleIds}::text[])
        AND (t.drain_cause::text = ANY(${ANNOUNCED_CAUSES as unknown as string[]}::text[])
-         OR t.cause_reason      = ANY(${ANNOUNCED_REASON_SLUGS as unknown as string[]}::text[]))
+         OR t.cause_reason      = ANY(${incidentReasonSlugs()}::text[]))
        AND t.began_at >= ${new Date(Date.now() - FUEL_INCIDENT_WINDOW_MS)}
        -- The clean slate. Both bounds are on began_at, so this is the same
        -- index walk with a tighter floor — no extra cost. See the constant.

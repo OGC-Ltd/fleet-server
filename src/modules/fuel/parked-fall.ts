@@ -117,6 +117,16 @@ export const STAND_GAP_MS = 20 * 60_000
  */
 export const SAME_ATTITUDE_G = 0.02
 /**
+ * How far the machine's angle may change across a fall before the fall is put
+ * down to the tilt. 0.03 g is under 2°; on the Mufindi plant (26 Sep) the fuel
+ * reading moved about 30 L per 0.06 g, so a shift this size can make a fall on
+ * its own. GPS cannot see it: a truck loaded or jacked where it stands has not
+ * moved, and its tank still reads a different level with the same fuel in it.
+ * The live watch withholds such a fall (lib/fuel-drop-watch); the standing-fall
+ * call vetoes one (standing-theft).
+ */
+export const TILT_SHIFT_G = 0.03
+/**
  * Spread of the accelerometer above which a standing machine is working in
  * place, not idling. Idling and parked units read 0.01–0.02 g; digging and
  * dozing 0.1–0.4 g (DZ 09, EX 04, 26 Sep).
