@@ -13,6 +13,8 @@
  * capacity available, and without it a percentage cannot be computed at all.
  */
 
+import type { AccelAxes } from '../telemetry-provider.js'
+
 /** One calibration point: for readings from `x` upward, litres = a·raw + b. */
 export interface CalibrationPoint { x: number; a: number; b: number }
 
@@ -369,6 +371,26 @@ export function readFuelProbeFault(
   return null
 }
 
+/** Whether the unit has a fuel probe configured at all. */
+export function hasFuelSensor(sensors: Record<string, WialonSensor> | undefined): boolean {
+  return sensors != null && Object.values(sensors).some(s => s?.t === FUEL_SENSOR_TYPE)
+}
+
+/**
+ * Whether a message carries a raw value for any of the unit's fuel probes.
+ *
+ * A message that does not says nothing about the tank or the probe — neither
+ * that the level changed nor that a fault cleared — so a caller holding the
+ * last reading keeps it.
+ */
+export function carriesFuelReading(
+  sensors: Record<string, WialonSensor> | undefined,
+  params: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!sensors || !params) return false
+  return Object.values(sensors).some(s => s?.t === FUEL_SENSOR_TYPE && typeof params[s.p] === 'number')
+}
+
 /**
  * Best fuel reading for a unit: its main-tank probe, calibrated.
  *
@@ -546,4 +568,71 @@ export function tankCapacityOf(sensors: Record<string, WialonSensor> | undefined
     if (cap != null && (max == null || cap > max)) max = cap
   }
   return max
+}
+
+/* ─────────────────────────── accelerometer ──────────────────────────────── */
+
+/** Teltonika's accelerometer axes, AVL ids 17/18/19, in X/Y/Z order. */
+const ACCEL_PARAMS = ['io_17', 'io_18', 'io_19'] as const
+
+/**
+ * The most a tracker accelerometer can report, in g. Teltonika's range tops out
+ * at ±16 g; a value past it is not a reading.
+ */
+const ACCEL_LIMIT_G = 16
+
+/** A parameter as a finite number, or null. Some firmwares send numbers as text. */
+function asNumber(raw: unknown): number | null {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    const n = Number(raw)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+/**
+ * The accelerometer axes of one message, in g, or null when it carries none.
+ *
+ * Pass the params of the message whose POSITION the frame records. An axis
+ * reading describes one instant, so it must never be held over onto a later
+ * fix the way fuel and ignition are.
+ *
+ * ## Two encodings, told apart per message
+ *
+ * Wialon hands the axes on in one of two forms, and each unit keeps to one.
+ * Measured over the 237 units that sent all three on 2026-09-27:
+ *
+ *   · in g, as decimals: `0.017, -0.004, -1.695`. All but eight units.
+ *   · the tracker's own milli-g as whole numbers, negatives in 16-bit two's
+ *     complement: `44, 65517, 65503` is +0.044, -0.019, -0.033 g. Eight
+ *     MENENGAI units, e.g. CPO - MENENGAI - KCH 045A.
+ *
+ * So a message whose axes are ALL whole numbers is read as milli-g, and any
+ * decimal means g. The one misread would be a g-unit reporting three exact
+ * whole numbers at once, which a sensor quantised to 0.001 g does not do in
+ * practice; all zeros is zero either way.
+ *
+ * ## Not `accel_x/y/z`
+ *
+ * Those are a different stream: bursts of ~1,000 raw samples sharing one
+ * timestamp, in milli-g with gravity included, sent around harsh events
+ * (MUFINDI: GR 01 and MUFINDI : MTR 18, 2026-09-27). They trace an event rather
+ * than describe the fix, so they are deliberately not read here.
+ */
+export function readAccelerometer(params: Record<string, unknown> | null | undefined): AccelAxes | null {
+  if (!params) return null
+  const raw = ACCEL_PARAMS.map(k => asNumber(params[k]))
+  const present = raw.filter((v): v is number => v != null)
+  if (present.length === 0) return null
+
+  const milliG = present.every(v => Number.isInteger(v))
+  const toG = (v: number | null): number | null => {
+    if (v == null) return null
+    const g = milliG ? (v > 32767 ? v - 65536 : v) / 1000 : v
+    return Math.abs(g) <= ACCEL_LIMIT_G ? g : null
+  }
+  const [x, y, z] = raw.map(toG) as [number | null, number | null, number | null]
+  if (x == null && y == null && z == null) return null
+  return { x, y, z }
 }
