@@ -92,12 +92,17 @@ describe('WialonLiveAdapter — axes ride on the fix they were measured at', () 
 
   const T = 1_790_464_315 // unix seconds, 2026-09-27
 
-  /** A fetch stub answering the handful of Wialon calls the adapter makes. */
-  function stubWialon(units: unknown[], events: unknown) {
+  /**
+   * A fetch stub answering the handful of Wialon calls the adapter makes.
+   * `avl_evts` answers `batches` in turn, then empty; the first call is the
+   * drain inside the first sweep.
+   */
+  function stubWialon(units: unknown[], ...batches: unknown[]) {
     const reply = (body: unknown) => ({ ok: true, status: 200, json: async () => body })
+    let b = 0
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
       const url = String(input)
-      if (url.includes('/avl_evts?')) return reply(events)
+      if (url.includes('/avl_evts?')) return reply(batches[b++] ?? { tm: T, events: [] })
       switch (new URL(url).searchParams.get('svc')) {
         case 'token/login':       return reply({ eid: 'sid-test', au: 'test' })
         case 'core/search_items': return reply({ items: units, totalItemsCount: units.length })
@@ -118,7 +123,7 @@ describe('WialonLiveAdapter — axes ride on the fix they were measured at', () 
       { id: 29000001, nm: 'CPO - MENENGAI - KCH 045A', pos: pos(T), lmsg: { t: T, p: { io_17: 44, io_18: 65517, io_19: 65503 } } },
       // A unit with no axes at all.
       { id: 30311756, nm: 'MUFINDI - EX 01', pos: pos(T), lmsg: { t: T, p: { io_270: 2990, io_239: 1 } } },
-    ], { tm: T, events: [] })
+    ])
 
     const frames = await new WialonLiveAdapter('test-token', 'https://wialon.test').fetchAll()
     const by = (id: number) => frames.find(f => f.deviceId === `wialon:${id}`)!
@@ -134,6 +139,7 @@ describe('WialonLiveAdapter — axes ride on the fix they were measured at', () 
   it('reads a delta frame\'s axes from the message the event carries', async () => {
     stubWialon(
       [{ id: 30364291, nm: 'MUFINDI - EX 03', pos: pos(T), lmsg: { t: T, p: {} } }],
+      { tm: T, events: [] },
       // The shape avl_evts returns on this subscription: the raw message as `d`,
       // its position without a `t`, its params in `p`.
       { tm: T + 120, events: [
@@ -145,14 +151,14 @@ describe('WialonLiveAdapter — axes ride on the fix they were measured at', () 
     const [delta] = await adapter.fetchAll() // the delta
 
     expect(delta?.accelG).toEqual({ x: 0.12, y: 0.66, z: -1.7 })
-    // The timestamp rule is unchanged by this: a delta position has no `t`,
-    // so the batch time stands in (see WialonClient.pollEvents).
-    expect(delta?.capturedAt.getTime()).toBe((T + 120) * 1000)
+    // Stamped when the tracker recorded the message, not when the batch arrived.
+    expect(delta?.capturedAt.getTime()).toBe((T + 60) * 1000)
   })
 
   it('leaves a delta frame without axes when its message has none', async () => {
     stubWialon(
       [{ id: 30311756, nm: 'MUFINDI - EX 01', pos: pos(T), lmsg: { t: T, p: {} } }],
+      { tm: T, events: [] },
       { tm: T + 30, events: [{ i: 30311756, t: 'm', d: { t: T + 30, pos: pos(), p: { io_270: 2990 } } }] },
     )
     const adapter = new WialonLiveAdapter('test-token', 'https://wialon.test')

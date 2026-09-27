@@ -73,6 +73,24 @@ async function runWithConcurrency<T>(
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => runNext()))
 }
 
+/**
+ * A cycle's frames, one group per device, each group oldest first. Groups keep
+ * the order their devices first appear in; the sort is stable, so frames with
+ * equal times keep the provider's order.
+ */
+export function framesByDevice(frames: VehicleTelemetryFrame[]): VehicleTelemetryFrame[][] {
+  const groups = new Map<string, VehicleTelemetryFrame[]>()
+  for (const frame of frames) {
+    const group = groups.get(frame.deviceId)
+    if (group) group.push(frame)
+    else groups.set(frame.deviceId, [frame])
+  }
+  for (const group of groups.values()) {
+    if (group.length > 1) group.sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime())
+  }
+  return [...groups.values()]
+}
+
 // ─── device metadata cache ─────────────────────────────────────────────────
 // Avoids a DB hit on every frame.  Refreshed every 5 min.
 //
@@ -214,7 +232,7 @@ class TelemetryPoller {
 
     let processed = 0, skipped = 0, errors = 0
 
-    await runWithConcurrency(frames, POLL_CONCURRENCY, async (frame) => {
+    const handle = async (frame: VehicleTelemetryFrame): Promise<void> => {
       const meta = await getDeviceMeta(frame.deviceId)
       if (!meta) { skipped++; return }
       // Zone speed limits need the org's zones in memory (lib/speed-policy).
@@ -439,6 +457,16 @@ class TelemetryPoller {
         errors++
         logger.error({ err, deviceId: frame.deviceId }, 'processTelemetry error')
       }
+    }
+
+    // Different vehicles in parallel, one vehicle's frames in turn. A cycle can
+    // carry several fixes for one unit — Wialon delivers the records a tracker
+    // sent together in one batch — and everything per vehicle above reads its
+    // frames as a sequence: the fuel and speed watchers, the alert edges, the
+    // dashboard's marker. Handed to separate workers, a newer fix could finish
+    // before an older one and the vehicle would appear to step back in time.
+    await runWithConcurrency(framesByDevice(frames), POLL_CONCURRENCY, async (group) => {
+      for (const frame of group) await handle(frame)
     })
 
     // A unit that stops reporting mid-episode never produces a falling edge, so
