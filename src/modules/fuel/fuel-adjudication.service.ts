@@ -22,6 +22,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
+import { env } from '../../config/env.js'
 import { publishNotificationDurable } from '../../lib/notifications/notification.store.js'
 import {
   adjudicateDrain, applyProbeTrustGate, smoothLevels, SETTLE_MINUTES, SWING_ML,
@@ -591,6 +592,10 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     // spread across 31 vehicles. Reversible in one line if it proves wrong.
     if (!opts.notify || verdict.cause == null || !announces(verdict.cause)) continue
     if (opts.notifyCutoff && t.beganAt < opts.notifyCutoff) continue
+    // FUEL RATE and FUEL DOWN reach the feed once a day as a summary, not one
+    // by one (FUEL_RATE_ALERTS, lib/queues/fuel-rate-digest). Only a SIPHON is
+    // still posted as it happens. The ledger row above is written either way.
+    if (!mayUseTheftWording(verdict.cause.cause) && env.FUEL_RATE_ALERTS !== 'live') continue
 
     const cause = verdict.cause
     const plate = t.vehicle.registrationPlate
