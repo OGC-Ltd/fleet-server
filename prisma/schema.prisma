@@ -2262,6 +2262,31 @@ model VehicleTelemetry {
   /// delta from it.
   engineHoursMeter Float?          @map("engine_hours_meter")
 
+  /// ── Accelerometer ───────────────────────────────────────────────────────
+  /// The tracker's three accelerometer axes at this fix, in g — Teltonika AVL
+  /// 17/18/19, sent on every record by 237 of the 892 units that reported on
+  /// 2026-09-27 (KASULU 96, MENENGAI 101, SUKARI 31, WESTSUGAR 9).
+  ///
+  /// Taken from the SAME message as the row's position, never carried forward:
+  /// an axis reading describes one instant, and stamping an old one on a newer
+  /// fix would invent a tilt. NULL means the unit sent no such axis.
+  ///
+  /// What the numbers are: the tracker reports acceleration with its
+  /// calibrated gravity vector already removed, so a machine parked in the pose
+  /// it was calibrated in reads near 0 on all three axes, and a change in the
+  /// STILL reading is a change of attitude. That is the use — on the Mufindi
+  /// plant of 26 Sep, attitude explained 61–86% of the scatter in parked fuel
+  /// readings (fuel redistributing in the tank, not leaving it). Some units read
+  /// a constant offset of up to ~1.9 g when parked; compare a unit with itself,
+  /// never against an absolute threshold. See providers/wialon/wialon.sensors
+  /// readAccelerometer for the unit conversion.
+  ///
+  /// REAL rather than double: three decimals of g is all the tracker sends, and
+  /// this is the widest table in the database.
+  accelXG Float? @map("accel_x_g") @db.Real
+  accelYG Float? @map("accel_y_g") @db.Real
+  accelZG Float? @map("accel_z_g") @db.Real
+
   // Fuel (FLS sensor reading)
   fuelLevelMl Int? @map("fuel_level_ml") // calibrated tank level in millilitres
   fuelUsedMl  Int? @map("fuel_used_ml") // delta vs. previous ping (negative = impossible → flag)

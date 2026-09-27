@@ -30,9 +30,9 @@
 
 import { logger } from '../../lib/logger.js'
 import { env } from '../../config/env.js'
-import type { TelemetryProvider, VehicleTelemetryFrame } from '../telemetry-provider.js'
+import type { AccelAxes, TelemetryProvider, VehicleTelemetryFrame } from '../telemetry-provider.js'
 import { WialonClient, type WialonPosition } from './wialon.client.js'
-import { readFuel, readIgnition, readFuelProbeFault, readCamera, type FuelProbeFault, type CameraState } from './wialon.sensors.js'
+import { readFuel, readIgnition, readFuelProbeFault, readCamera, readAccelerometer, type FuelProbeFault, type CameraState } from './wialon.sensors.js'
 import { noteConnection, connectionCounts } from '../../lib/connection-state.js'
 
 /** Mirrors sync-wialon.ts — the device key a Wialon unit is registered under. */
@@ -53,8 +53,11 @@ export class WialonLiveAdapter implements TelemetryProvider {
    * unitId → last calibrated fuel reading, in millilitres.
    *
    * Fuel comes from the unit's sensors and the last message's raw parameters,
-   * which only the full `search_items` sweep returns — an `avl_evts` delta
-   * carries position alone. Since the fleet snapshot reads the NEWEST
+   * and is read only on the full `search_items` sweep, the one call that
+   * returns the sensors its calibration needs. (An `avl_evts` delta does carry
+   * its message's raw parameters — see WialonClient.pollEvents — so reading
+   * fuel per delta against sensors cached from the sweep is possible; it has
+   * not been done.) Since the fleet snapshot reads the NEWEST
    * telemetry row, emitting null on every delta would blank the fuel gauge two
    * seconds after each reconcile refreshed it. The last known reading is
    * therefore carried forward, which is ordinary last-known-value telemetry
@@ -86,10 +89,10 @@ export class WialonLiveAdapter implements TelemetryProvider {
   /**
    * unitId → last known ignition state.
    *
-   * Carried forward for the same reason as fuel: the sensor's parameter lives
-   * in the unit's last message, which only the full `search_items` sweep
-   * returns — an `avl_evts` delta carries position alone. Without carrying it,
-   * ignition would blink to unknown two seconds after every reconcile.
+   * Carried forward for the same reason as fuel: it is read on the full
+   * `search_items` sweep only, against the unit's sensor config. Without
+   * carrying it, ignition would blink to unknown two seconds after every
+   * reconcile.
    */
   private lastIgnition = new Map<number, boolean>()
   /**
@@ -232,7 +235,13 @@ export class WialonLiveAdapter implements TelemetryProvider {
       if (seen != null && u.pos.t <= seen) { unchanged++; continue }
       this.lastFixAt.set(u.id, u.pos.t)
 
-      const frame = toFrame(u.id, u.nm, u.pos, this.lastFuelMl.get(u.id) ?? null, this.lastOdometerKm.get(u.id) ?? null, this.lastEngineHours.get(u.id) ?? null, this.lastIgnition.get(u.id) ?? null, this.lastProbeFault.has(u.id), this.lastCamera.get(u.id) ?? null)
+      // The accelerometer describes one instant, so it rides on this frame
+      // only when the last message IS the record this position came from. A
+      // newer message without a fix would otherwise stamp its reading on an
+      // older position.
+      const accel = u.lmsg?.t === u.pos.t ? accelOf(u.lmsg?.p) : NO_ACCEL
+
+      const frame = toFrame(u.id, u.nm, u.pos, this.lastFuelMl.get(u.id) ?? null, this.lastOdometerKm.get(u.id) ?? null, this.lastEngineHours.get(u.id) ?? null, this.lastIgnition.get(u.id) ?? null, this.lastProbeFault.has(u.id), this.lastCamera.get(u.id) ?? null, accel)
       if (frame) frames.push(frame)
     }
 
@@ -254,12 +263,13 @@ export class WialonLiveAdapter implements TelemetryProvider {
     const frames: VehicleTelemetryFrame[] = []
     let unchanged = 0
 
-    for (const { unitId, pos } of events) {
+    for (const { unitId, pos, params } of events) {
       const seen = this.lastFixAt.get(unitId)
       if (seen != null && pos.t <= seen) { unchanged++; continue }
       this.lastFixAt.set(unitId, pos.t)
 
-      const frame = toFrame(unitId, this.unitNames.get(unitId) ?? String(unitId), pos, this.lastFuelMl.get(unitId) ?? null, this.lastOdometerKm.get(unitId) ?? null, this.lastEngineHours.get(unitId) ?? null, this.lastIgnition.get(unitId) ?? null, this.lastProbeFault.has(unitId), this.lastCamera.get(unitId) ?? null)
+      // The event is the raw message itself, so its params are this fix's own.
+      const frame = toFrame(unitId, this.unitNames.get(unitId) ?? String(unitId), pos, this.lastFuelMl.get(unitId) ?? null, this.lastOdometerKm.get(unitId) ?? null, this.lastEngineHours.get(unitId) ?? null, this.lastIgnition.get(unitId) ?? null, this.lastProbeFault.has(unitId), this.lastCamera.get(unitId) ?? null, accelOf(params))
       if (frame) frames.push(frame)
     }
 
@@ -271,6 +281,23 @@ export class WialonLiveAdapter implements TelemetryProvider {
     }
     return frames
   }
+}
+
+/** A message's accelerometer axes in g, with the raw values they were read from. */
+interface AccelRead {
+  axes: AccelAxes | null
+  /** The params as received, kept in the raw payload so the unit conversion can be audited. */
+  raw: Record<string, unknown> | null
+}
+
+const NO_ACCEL: AccelRead = { axes: null, raw: null }
+
+function accelOf(params: Record<string, unknown> | null | undefined): AccelRead {
+  const axes = readAccelerometer(params)
+  if (!axes || !params) return NO_ACCEL
+  const raw: Record<string, unknown> = {}
+  for (const k of ['io_17', 'io_18', 'io_19']) if (params[k] != null) raw[k] = params[k]
+  return { axes, raw }
 }
 
 /**
@@ -290,6 +317,7 @@ function toFrame(
   ignitionOn: boolean | null,
   fuelProbeFault: boolean,
   camera: CameraState | null,
+  accel: AccelRead = NO_ACCEL,
 ): VehicleTelemetryFrame | null {
   if (!p || !Number.isFinite(p.y) || !Number.isFinite(p.x)) return null
   // A frame without a usable timestamp is unwritable (capturedAt is part of
@@ -324,6 +352,8 @@ function toFrame(
     // reading false here can raise no fuel-theft alert at all.
     ignitionKnown:    ignitionOn !== null,
     engineHoursMeter: engineHours,
+    // This message's own accelerometer, never a carried-forward one.
+    accelG:           accel.axes,
 
     // Calibrated probe reading; null when the unit has no fuel sensor or no
     // calibration table — never a raw ADC value.
@@ -377,6 +407,9 @@ function toFrame(
     // snapshot reads it from (telemetry.repository's LATERAL join).
     // `ignition_known` lets consumers distinguish a measured engine state from
     // the speed-derived fallback — idling can only be claimed for the former.
-    rawPayload: { source: 'wialon', unitId, name: unitName, pos: p, odometer_km: odometerKm, engine_hours: engineHours, ignition_known: ignitionOn !== null },
+    // `accel_raw` is the axis params exactly as received, only on units that
+    // send them — the columns hold the values converted to g.
+    rawPayload: { source: 'wialon', unitId, name: unitName, pos: p, odometer_km: odometerKm, engine_hours: engineHours, ignition_known: ignitionOn !== null,
+      ...(accel.raw ? { accel_raw: accel.raw } : {}) },
   }
 }

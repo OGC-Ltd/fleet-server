@@ -12,6 +12,18 @@
 export type DoorStatus = 'CLOSED' | 'OPEN' | 'AJAR' | 'UNKNOWN'
 export type NetworkType = 'GSM' | '3G' | '4G' | '5G' | null
 
+/**
+ * Accelerometer axes at one instant, in g. Each axis is independently nullable
+ * because units exist that send only some of them (MUFINDI - FT 05 sends Y and
+ * Z, never X). A reading belongs to one message: carrying it onto a later fix
+ * would claim an attitude nobody measured.
+ */
+export interface AccelAxes {
+  x: number | null
+  y: number | null
+  z: number | null
+}
+
 /** One normalised telemetry snapshot per device per poll cycle. */
 export interface VehicleTelemetryFrame {
   // ── Core identity ──────────────────────────────────────────────────────────
@@ -51,6 +63,13 @@ export interface VehicleTelemetryFrame {
    * of a twenty-minute run — see fuel-rate.service.
    */
   engineHoursMeter:  number | null
+
+  /**
+   * The tracker's accelerometer at this fix, in g, from the same message as
+   * the position. Absent or null when the unit sends no axes — most of the
+   * fleet. Never carried forward from an earlier message: see AccelAxes.
+   */
+  accelG?:           AccelAxes | null
 
   // ── Fuel / FLS sensor ─────────────────────────────────────────────────────
   fuelLevelMl:       number | null
