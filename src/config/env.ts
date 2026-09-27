@@ -481,6 +481,19 @@ const schema = z.object({
   // Every five minutes: a verdict waits on the machine starting, not on this.
   PARKED_FALL_CRON: z.string().optional().default('*/5 * * * *'),
 
+  // FUEL RATE and FUEL DOWN: the adjudicator's drops beyond a machine's
+  // measured burn or distance. Over the 30 days to 2026-09-27 they were 800
+  // feed items, 499 of them critical, and none was ever marked a theft.
+  //   digest  one summary per organisation a day, never critical (the
+  //           operator's choice, 2026-09-27) — see lib/queues/fuel-rate-digest
+  //   live    one alert per drop, as before
+  //   off     neither
+  // A SIPHON's POSSIBLE THEFT is posted as it happens under all three.
+  FUEL_RATE_ALERTS: z.enum(['digest', 'live', 'off']).optional().default('digest'),
+  // 04:00 UTC = 07:00 EAT. The fleet day it covers closed seven hours earlier,
+  // which the drains ledger's usual lag behind Wialon fits inside.
+  FUEL_RATE_DIGEST_CRON: z.string().optional().default('0 4 * * *'),
+
   // Completed dispatches → measured Trip rows (lib/queues/trips.ts). The trips
   // table had no writer once the simulator was retired, so every surface
   // reading it — the delivery half of Analytics, the Drivers roster, the org

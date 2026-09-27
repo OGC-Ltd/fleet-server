@@ -7,6 +7,7 @@ vi.mock('../../src/lib/notifications/notification.store.js', () => ({
 }))
 
 import { prismaMock } from '../helpers/prisma.mock.js'
+import { env } from '../../src/config/env.js'
 import { publishNotificationDurable } from '../../src/lib/notifications/notification.store.js'
 import {
   adjudicatePendingDrains, __resetProbeProfileCache, __resetBandCache,
@@ -99,6 +100,10 @@ const setProbeProfile = (parked: number, swinging: number) => {
 }
 
 beforeEach(() => {
+  // These cases pin the LIVE wording and gate. The default since 2026-09-27
+  // posts FUEL RATE / FUEL DOWN as a daily summary instead — see the block at
+  // the end, and lib/queues/fuel-rate-digest.
+  env.FUEL_RATE_ALERTS = 'live'
   vi.mocked(publishNotificationDurable).mockClear()
   __resetProbeProfileCache()   // module-global, keyed by vehicle — would leak between cases
   __resetBandCache()           // ...and so would the fleet-wide band lookup
@@ -328,6 +333,52 @@ describe('adjudicatePendingDrains', () => {
     const out = await adjudicatePendingDrains({ apply: true, notify: false, now: NOW })
 
     expect(out.drain).toBe(1)
+    expect(prismaMock.fuelTheft.update).toHaveBeenCalled()
+    expect(publishNotificationDurable).not.toHaveBeenCalled()
+  })
+})
+
+describe('adjudicatePendingDrains — FUEL RATE / FUEL DOWN as a daily summary', () => {
+  // The operator's choice on 2026-09-27 (FUEL_RATE_ALERTS=digest): 800 of these
+  // in 30 days, 499 critical, none ever marked a theft.
+  beforeEach(() => { env.FUEL_RATE_ALERTS = 'digest' })
+
+  const SIPHONING = [
+    197_000, 194_000, 191_000, 188_000, 185_000, 182_000, 179_000,
+    176_000, 173_000, 170_000, 167_000, 164_000, 161_000, 158_000,
+  ]
+
+  it('records a burn far above the machine’s rate but leaves it to the daily summary', async () => {
+    setLevels([...STEADY, ...DRAINING, 160_000, 159_000, 158_000, 158_000])
+
+    const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    expect(out).toMatchObject({ drain: 1, drainConfirmed: 1, published: 0 })
+    // The ledger row the summary is built from is written exactly as before.
+    expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ drainCause: 'UNEXPLAINED_BURN' }),
+    }))
+    expect(publishNotificationDurable).not.toHaveBeenCalled()
+  })
+
+  it('still posts a SIPHON as it happens, as POSSIBLE THEFT', async () => {
+    setLevelsParked([...STEADY, ...SIPHONING])
+
+    const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    expect(out.published).toBe(1)
+    const item = published()[0]![0]
+    expect(item['severity']).toBe('critical')
+    expect(item['text']).toContain('POSSIBLE THEFT: KDL 182X')
+  })
+
+  it('posts neither when switched off, and still records the verdict', async () => {
+    env.FUEL_RATE_ALERTS = 'off'
+    setLevels([...STEADY, ...DRAINING, 160_000, 159_000, 158_000, 158_000])
+
+    const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    expect(out).toMatchObject({ drain: 1, published: 0 })
     expect(prismaMock.fuelTheft.update).toHaveBeenCalled()
     expect(publishNotificationDurable).not.toHaveBeenCalled()
   })
