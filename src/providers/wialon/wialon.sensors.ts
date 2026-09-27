@@ -371,6 +371,26 @@ export function readFuelProbeFault(
   return null
 }
 
+/** Whether the unit has a fuel probe configured at all. */
+export function hasFuelSensor(sensors: Record<string, WialonSensor> | undefined): boolean {
+  return sensors != null && Object.values(sensors).some(s => s?.t === FUEL_SENSOR_TYPE)
+}
+
+/**
+ * Whether a message carries a raw value for any of the unit's fuel probes.
+ *
+ * A message that does not says nothing about the tank or the probe — neither
+ * that the level changed nor that a fault cleared — so a caller holding the
+ * last reading keeps it.
+ */
+export function carriesFuelReading(
+  sensors: Record<string, WialonSensor> | undefined,
+  params: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!sensors || !params) return false
+  return Object.values(sensors).some(s => s?.t === FUEL_SENSOR_TYPE && typeof params[s.p] === 'number')
+}
+
 /**
  * Best fuel reading for a unit: its main-tank probe, calibrated.
  *
