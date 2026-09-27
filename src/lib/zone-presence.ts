@@ -27,7 +27,7 @@
 import { prisma } from './prisma.js'
 import { logger } from './logger.js'
 import { publishNotification } from './notifications/notification.store.js'
-import { isInsideFence, haversineM, type FenceGeometry } from './geofence.js'
+import { isInsideFence, haversineM, fenceBox, inBox, type FenceBox, type FenceGeometry } from './geofence.js'
 import { categorise, isEstateFeature, ringAreaHa, type ZoneCategory } from './zone-taxonomy.js'
 
 interface CachedZone {
@@ -49,6 +49,16 @@ interface CachedZone {
    * and circles, which are ranked after polygons.
    */
   areaHa: number | null
+  /** Where the fence can be at all — tried before the exact test. See fenceBox. */
+  box: FenceBox
+}
+
+/**
+ * isInsideFence, with the zone's box tried first. Same answer; most zones are
+ * nowhere near the point, and Mufindi's 97 hold 8,189 corners between them.
+ */
+function contains(z: CachedZone, lat: number, lng: number): boolean {
+  return inBox(z.box, lat, lng) && isInsideFence(lat, lng, z.geometry)
 }
 
 const zoneCache = new Map<string, { zones: CachedZone[]; loadedAt: number }>()
@@ -361,6 +371,7 @@ async function getZones(orgId: string): Promise<CachedZone[]> {
       category,
       estate: isEstateFeature(category),
       areaHa: geometry.type === 'POLYGON' ? ringAreaHa(geometry.polygonCoords) : null,
+      box: fenceBox(geometry),
     })
   }
   zoneCache.set(orgId, { zones, loadedAt: Date.now() })
@@ -407,7 +418,7 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
 
   const now = new Set<string>()
   for (const z of zones) {
-    if (isInsideFence(lat, lng, z.geometry)) now.add(z.id)
+    if (contains(z, lat, lng)) now.add(z.id)
   }
 
   const before = presence.get(p.vehicleId)
@@ -616,7 +627,7 @@ export async function resolveEstatePlaces(
 
   const zones = await getZones(orgId)
   return zones
-    .filter(z => z.estate && isInsideFence(lat, lng, z.geometry))
+    .filter(z => z.estate && contains(z, lat, lng))
     .sort((a, b) => (a.areaHa ?? Infinity) - (b.areaHa ?? Infinity))
     .map(z => ({ id: z.id, name: z.name, category: z.category }))
 }
@@ -635,7 +646,7 @@ export function zoneCategoriesAt(orgId: string, lat: number, lng: number): Set<Z
   if (!hit) return null
   const out = new Set<ZoneCategory>()
   for (const z of hit.zones) {
-    if (isInsideFence(lat, lng, z.geometry)) out.add(z.category)
+    if (contains(z, lat, lng)) out.add(z.category)
   }
   return out
 }

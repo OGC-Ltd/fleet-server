@@ -68,12 +68,13 @@ export type FenceGeometry = CircleFence | PolygonFence | CorridorFence
  * correction on longitude is accurate to well under a metre, and avoids the
  * cost and complexity of a spherical cross-track calculation per segment.
  */
+const M_PER_DEG_LAT = 111_320
+
 function distanceToSegmentM(
   lat: number, lng: number,
   aLat: number, aLng: number,
   bLat: number, bLng: number,
 ): number {
-  const M_PER_DEG_LAT = 111_320
   const mPerDegLng = M_PER_DEG_LAT * Math.cos((lat * Math.PI) / 180)
 
   const px = (lng - aLng) * mPerDegLng
@@ -101,12 +102,65 @@ export function isInsideCorridor(
     const [lng0, lat0] = pathCoords[0]!
     return haversineM(lat, lng, lat0, lng0) <= tolerance
   }
+  // A segment whose extent, widened by the tolerance, misses the point cannot
+  // be within the tolerance of it — in the same flat metres distanceToSegmentM
+  // measures in — so it is passed over without the arithmetic. The answer is
+  // unchanged; a long road corridor stops costing one projection per segment
+  // for every reading near it (MUFINDI: EX 10, 27 Sep: 2,316 readings against
+  // 97 zones took 1.0 s, nearly all of it here and in the zone loop).
+  const padLat = (tolerance / M_PER_DEG_LAT) * 1.000001
+  const mPerDegLng = M_PER_DEG_LAT * Math.cos((lat * Math.PI) / 180)
+  const padLng = mPerDegLng > 0 ? (tolerance / mPerDegLng) * 1.000001 : Infinity
   for (let i = 1; i < pathCoords.length; i++) {
     const [aLng, aLat] = pathCoords[i - 1]!
     const [bLng, bLat] = pathCoords[i]!
+    if (lat < Math.min(aLat, bLat) - padLat || lat > Math.max(aLat, bLat) + padLat) continue
+    if (lng < Math.min(aLng, bLng) - padLng || lng > Math.max(aLng, bLng) + padLng) continue
     if (distanceToSegmentM(lat, lng, aLat, aLng, bLat, bLng) <= tolerance) return true
   }
   return false
+}
+
+/** Latitude and longitude bounds, in degrees. */
+export interface FenceBox { minLat: number; maxLat: number; minLng: number; maxLng: number }
+
+/** Fewer metres than a degree of latitude ever spans, so margins built on it err wide. */
+const M_PER_DEG_FLOOR = 110_000
+
+/**
+ * A box no point inside the fence lies outside of — the cheap first test
+ * before `isInsideFence`, for code that asks the same fences about many points.
+ *
+ * A polygon's box is its corners' extent, exactly: ray-casting can only call a
+ * point inside that is within it. A circle's and a corridor's edges are metres
+ * from a centre, so their boxes are widened by that reach half again over,
+ * converted on a short degree and at the box's poleward edge, where a degree
+ * of longitude is shortest. Never too small; a little large is only a wasted
+ * exact test.
+ */
+export function fenceBox(fence: FenceGeometry): FenceBox {
+  const pts: [number, number][] = fence.type === 'CIRCLE'
+    ? [[fence.centerLng, fence.centerLat]]
+    : fence.type === 'LINE' ? fence.pathCoords : fence.polygonCoords
+  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity
+  for (const [lng, lat] of pts) {
+    if (lat < minLat) minLat = lat
+    if (lat > maxLat) maxLat = lat
+    if (lng < minLng) minLng = lng
+    if (lng > maxLng) maxLng = lng
+  }
+  const reach = fence.type === 'CIRCLE' ? fence.radiusM
+    : fence.type === 'LINE' ? Math.max(fence.widthM, 1) / 2 : 0
+  if (!(reach > 0) || !Number.isFinite(minLat)) return { minLat, maxLat, minLng, maxLng }
+  const dLat = (reach * 1.5) / M_PER_DEG_FLOOR
+  const poleward = Math.min(89, Math.max(Math.abs(minLat), Math.abs(maxLat)) + dLat)
+  const dLng = (reach * 1.5) / (M_PER_DEG_FLOOR * Math.cos((poleward * Math.PI) / 180))
+  return { minLat: minLat - dLat, maxLat: maxLat + dLat, minLng: minLng - dLng, maxLng: maxLng + dLng }
+}
+
+/** True when the point is within the box — see fenceBox. */
+export function inBox(box: FenceBox, lat: number, lng: number): boolean {
+  return lat >= box.minLat && lat <= box.maxLat && lng >= box.minLng && lng <= box.maxLng
 }
 
 /** Returns true when the point is INSIDE the fence boundary. */

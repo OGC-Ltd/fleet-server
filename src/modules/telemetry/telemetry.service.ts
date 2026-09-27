@@ -261,7 +261,21 @@ export async function getVehicleDaySeries(vehicleId: string, orgId: string, q: D
   if (speedPolicyFor(orgId)) {
     const v = await prisma.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleType: true } })
     const type = v?.vehicleType ?? null
-    lim = raw.cols.t.map((_, i) => overspeedLimitFor(type, { orgId, lat: raw.cols.lat[i], lng: raw.cols.lng[i] }))
+    // Each position asked once. A parked unit reports the same (5-dp) spot
+    // hundreds of times a day, and this was the whole cost of the route on
+    // Mufindi (27 Sep: 0.6–1.0 s of a 0.8–1.3 s response, against 10–23 ms
+    // for the query itself).
+    const byPlace = new Map<string, number>()
+    lim = raw.cols.t.map((_, i) => {
+      const lat = raw.cols.lat[i], lng = raw.cols.lng[i]
+      const key = `${lat},${lng}`
+      let kmh = byPlace.get(key)
+      if (kmh === undefined) {
+        kmh = overspeedLimitFor(type, { orgId, lat, lng })
+        byPlace.set(key, kmh)
+      }
+      return kmh
+    })
   }
 
   return {
