@@ -97,6 +97,27 @@ enum ConsumptionBasis {
   DISTANCE
 }
 
+/// Stage two's answer for a fall on a parked machine — see
+/// modules/fuel/parked-fall. PENDING until the machine next starts, moves, or a
+/// day passes.
+enum ParkedFallVerdict {
+  PENDING
+  /// Still gone after the machine started: fuel left the tank.
+  CONFIRMED
+  /// Came back while it stood, with no filling recorded: drained and replaced.
+  TOPPED_UP
+  /// A filling was recorded before it next started.
+  REFUELLED
+  /// Came back once it worked: the gauge, not the fuel.
+  CLEARED
+  /// Did not start within a day, and is still down.
+  UNRESOLVED
+  /// Stage one found it but a gate outside the poll loop refused it — the
+  /// probe's 30-day profile, a probe reading empty, or a counter that does not
+  /// track the engine. Kept for audit; never announced.
+  WITHHELD
+}
+
 enum FuelEventVerdict {
   PENDING // too recent to judge — the level may still come back
   REFILL // a filling explains it: fuel went IN, it did not leave
@@ -304,6 +325,7 @@ model Organisation {
   alerts               VehicleAlert[]
   speedingIncidents    SpeedingIncident[]
   sensorFaultEpisodes  SensorFaultEpisode[]
+  parkedFuelFalls      ParkedFuelFall[]
   silos                Silo[]
   providerAlerts       ProviderAlert[]
   notifications        Notification[]
@@ -732,6 +754,7 @@ model Vehicle {
   engineHourSessions EngineHourSession[]
   fuelFillings       FuelFilling[]
   fuelThefts         FuelTheft[]
+  parkedFuelFalls    ParkedFuelFall[]
   fuelDailyTrends    FuelDailyTrend[]
   dailyStats         VehicleDailyStat[]
   fuelRate           VehicleFuelRate?
@@ -1152,6 +1175,58 @@ model SensorFaultEpisode {
   @@index([organisationId, kind, recoveredAt])
   @@index([organisationId, day])
   @@map("sensor_fault_episodes")
+}
+
+/// A fall of fuel on a PARKED machine, from the live watch to its verdict — the
+/// two-stage parked-fall rule (modules/fuel/parked-fall).
+///
+/// Its own table rather than a `fuel_thefts` row: that ledger holds the
+/// provider's drain reports and the adjudicator's verdicts on them, and this rule
+/// exists because the provider never reported the one theft an operator did
+/// (CTR 12, 25 Sep 2026). One row per fall, written when stage one raises it and
+/// updated once, by stage two.
+model ParkedFuelFall {
+  id             String @id @default(cuid())
+  organisationId String @map("organisation_id")
+  vehicleId      String @map("vehicle_id")
+
+  /// First reading at the new low.
+  settledAt  DateTime @map("settled_at")
+  /// The reading that found it still down STILL_DOWN_CONFIRM_MS later — when
+  /// stage one raised it.
+  flaggedAt  DateTime @map("flagged_at")
+  baselineMl Int      @map("baseline_ml")
+  troughMl   Int      @map("trough_ml")
+  droppedMl  Int      @map("dropped_ml")
+  stillForMs Int      @map("still_for_ms")
+  engineOnMs Int      @map("engine_on_ms")
+  /// 'sensor' (the ignition line) or 'counter' (the engine-hours counter).
+  engineEvidence String @map("engine_evidence")
+  /// How far the counter moved across stage one's window, where it reported.
+  meterAdvanceH  Float? @map("meter_advance_h")
+
+  verdict       ParkedFallVerdict @default(PENDING)
+  verdictAt     DateTime?         @map("verdict_at")
+  /// Plain words, for the feed and for auditing which branch decided.
+  verdictReason String?           @map("verdict_reason")
+  nextStartAt   DateTime?         @map("next_start_at")
+  /// 'engine' or 'moved'.
+  nextStartBy   String?           @map("next_start_by")
+  /// Level change across the start, where one was measured.
+  jumpMl        Int?              @map("jump_ml")
+  /// When the level came back, where it did.
+  backAt        DateTime?         @map("back_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  vehicle      Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@unique([vehicleId, settledAt])
+  /// Stage two's work list.
+  @@index([verdict, settledAt])
+  @@index([organisationId, settledAt])
+  @@map("parked_fuel_falls")
 }
 
 /// One technician's trip to the yard, filed as one report.

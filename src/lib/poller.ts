@@ -278,9 +278,10 @@ class TelemetryPoller {
       // provider's report. Provisional and never worded as theft; see
       // lib/fuel-drop-watch. Published rather than awaited, like the rest.
       const drop = noteFuelFrame(frame, {
-        orgId:     meta.orgId,
-        vehicleId: meta.vehicleId,
-        plate:     meta.plate ?? null,
+        orgId:          meta.orgId,
+        vehicleId:      meta.vehicleId,
+        plate:          meta.plate ?? null,
+        tankCapacityMl: meta.tankCapacityMl ?? null,
       })
       if (drop) eventBus.publish('fuel:dropped', drop)
 
