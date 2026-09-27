@@ -372,6 +372,60 @@ describe('adjudicatePendingDrains — FUEL RATE / FUEL DOWN as a daily summary',
     expect(item['text']).toContain('POSSIBLE THEFT: KDL 182X')
   })
 
+  /**
+   * KDE 585S's shape (27 Sep), on the fixture clock: refuelled from 20 L to
+   * 200 L at the pump by 12:48 UTC, standing with the engine off; 30 L gone by
+   * 13:01, still standing; then driven off at 13:02, the level easing to 160 L.
+   * The drain the provider reports takes in the driving, so the classifier
+   * judges it against the road — and the fall at the pump is found by the
+   * standing-fall call instead.
+   */
+  const atThePump = (engineOnWhileStanding: boolean) => {
+    const rows: Array<{ min: number; L: number; kmh: number; on: boolean }> = []
+    for (let m = -25; m <= -16; m++) rows.push({ min: m, L: 20, kmh: 0, on: false })
+    ;[60, 120, 180, 200].forEach((L, i) => rows.push({ min: -15 + i, L, kmh: 0, on: false }))
+    for (let m = -11; m <= -2; m++) rows.push({ min: m, L: 200, kmh: 0, on: engineOnWhileStanding })
+    ;[185, 172, 170].forEach((L, i) => rows.push({ min: -1 + i, L, kmh: 0, on: engineOnWhileStanding }))
+    for (let m = 2; m <= 17; m++) rows.push({ min: m, L: 170 - (m - 2) * (10 / 15), kmh: 30, on: true })
+    for (let m = 18; m <= 35; m++) rows.push({ min: m, L: 160, kmh: 0, on: false })
+    telemetryRows = rows.map(r => ({
+      captured_at: new Date(BEGAN.getTime() + r.min * 60_000), fuel_level_ml: Math.round(r.L * 1000),
+      engine_on: r.on, speed_kmh: r.kmh, ignition_known: true,
+    }))
+  }
+
+  it('posts a fall at the pump as POSSIBLE THEFT, though the drain ran on into driving', async () => {
+    atThePump(false)
+
+    const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    expect(out.drain).toBe(1)
+    expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ drainCause: 'SIPHON', causeReason: 'fell-after-refuel' }),
+    }))
+    expect(out.published).toBe(1)
+    const item = published()[0]![0]
+    expect(item['severity']).toBe('critical')
+    // The levels and the times, which can be checked against the gauge and the
+    // pump's records — not the drain's figure, which takes in the driving.
+    expect(item['text']).toContain('POSSIBLE THEFT: KDL 182X was refuelled to 200 L, then its tank fell to')
+    expect(item['text']).toContain('while it stood with its engine off at Nyalulanga')
+  })
+
+  it('leaves the same fall to the daily summary when the engine ran and nothing shows it only idled', async () => {
+    // No accelerometer on this unit: a running engine at a stand cannot be
+    // told from a machine burning its fuel, so no theft is called.
+    atThePump(true)
+
+    const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    expect(out.drain).toBe(1)
+    expect(prismaMock.fuelTheft.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ drainCause: 'SIPHON' }),
+    }))
+    expect(publishNotificationDurable).not.toHaveBeenCalled()
+  })
+
   it('posts neither when switched off, and still records the verdict', async () => {
     env.FUEL_RATE_ALERTS = 'off'
     setLevels([...STEADY, ...DRAINING, 160_000, 159_000, 158_000, 158_000])

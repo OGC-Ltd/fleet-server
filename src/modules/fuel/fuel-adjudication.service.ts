@@ -34,6 +34,8 @@ import {
   ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS,
 } from './fuel-theft-classifier.js'
 import { assembleBandInputs, type BandInputs } from './fuel-rate.js'
+import { standingTheft, standingTheftText, type StandingTheft } from './standing-theft.js'
+import type { FallReading } from './parked-fall.js'
 
 /**
  * How far before the drain to read levels. Needs to comfortably precede the
@@ -233,7 +235,7 @@ export async function getProbeProfile(vehicleId: string, now: Date): Promise<Pro
 export async function judgeDrain(
   drain: DrainClaim & { vehicleId: string },
   now: Date,
-): Promise<Adjudication & { cause: CauseJudgement | null; evidence: DropEvidence | null }> {
+): Promise<Adjudication & { cause: CauseJudgement | null; evidence: DropEvidence | null; standing: StandingTheft | null }> {
   const from = new Date(drain.beganAt.getTime() - LOOKBEHIND_MS)
   const to   = new Date(drain.detectedAt.getTime() + LOOKAHEAD_MS)
 
@@ -253,12 +255,19 @@ export async function judgeDrain(
     // dead-probe rules behave exactly as before, and only the classifier sees
     // the stricter ignition-aware version. Narrowing what adjudication sees
     // would change verdicts, which this step must not do.
+    //
+    // Position, the accelerometer and the engine-hours counter ride along for
+    // the standing-fall call alone (standing-theft): where the vehicle stood,
+    // and whether it only idled there without changing its angle.
     prisma.$queryRaw<Array<{
       captured_at: Date; fuel_level_ml: number; engine_on: boolean
       speed_kmh: number | null; ignition_known: boolean | null
+      lat: number | null; lng: number | null; engine_hours_meter: number | null
+      accel_x_g: number | null; accel_y_g: number | null; accel_z_g: number | null
     }>>`
       SELECT t.captured_at, t.fuel_level_ml, t.engine_on, t.speed_kmh,
-             (r.payload->>'ignition_known')::boolean AS ignition_known
+             (r.payload->>'ignition_known')::boolean AS ignition_known,
+             t.lat, t.lng, t.engine_hours_meter, t.accel_x_g, t.accel_y_g, t.accel_z_g
         FROM vehicle_telemetries t
         JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
        WHERE t.vehicle_id = ${drain.vehicleId}
@@ -300,7 +309,7 @@ export async function judgeDrain(
   // Only a DRAIN has a cause to determine. A REDISTRIBUTION means the fuel came
   // back and a SENSOR_FAULT means the probe lied, so neither poses the question
   // "where did it go" that this answers.
-  if (verdict.verdict !== 'DRAIN') return { ...verdict, cause: null, evidence: null }
+  if (verdict.verdict !== 'DRAIN') return { ...verdict, cause: null, evidence: null, standing: null }
 
   // The trust gate, asked only of the rows it can act on. It costs a second
   // query, and the great majority never need it: on the ledger as it stands 417
@@ -317,28 +326,69 @@ export async function judgeDrain(
     speedKmh:    r.speed_kmh,
   }))
   const measured = measureFall(fallSamples, drain, smoothLevels)
+  const { orgCode, plate, rate, lPerKm, vehicleType, tankCapacityLitres } =
+    await getBandInputs(drain.vehicleId, now)
+
+  let cause: CauseJudgement
   if (measured == null) {
     // No measurable fall in our own series. The verdict stands — the provider
     // saw something we could not — but there is nothing to attribute it to.
-    return { ...gated, cause: { cause: 'INDETERMINATE', reason: 'no-measurable-fall', confidence: 0.5, impliedLph: null }, evidence: null }
+    cause = { cause: 'INDETERMINATE', reason: 'no-measurable-fall', confidence: 0.5, impliedLph: null }
+  } else {
+    const band = resolveBand(orgCode, { plate, vehicleType, tankCapacityLitres },
+      rate == null ? null : { lPerHour: rate.lPerHour, basis: rate.basis, lPerKm })
+    const profile = await getProbeProfile(drain.vehicleId, now)
+    // Which denominator this machine is judged in, and — inside classifyDrain —
+    // whether THIS fall belongs to it. A truck on the open road is judged per
+    // kilometre; the same truck idling is judged per hour.
+    const basis = resolveBasis(orgCode, { plate, vehicleType, tankCapacityLitres })
+    cause = classifyDrain(measured.evidence, band, profile, basis)
   }
 
-  const { orgCode, plate, rate, lPerKm, vehicleType, tankCapacityLitres } =
-    await getBandInputs(drain.vehicleId, now)
-  const band = resolveBand(orgCode, { plate, vehicleType, tankCapacityLitres },
-    rate == null ? null : { lPerHour: rate.lPerHour, basis: rate.basis, lPerKm })
-  const profile = await getProbeProfile(drain.vehicleId, now)
-  // Which denominator this machine is judged in, and — inside classifyDrain —
-  // whether THIS fall belongs to it. A truck on the open road is judged per
-  // kilometre; the same truck idling is judged per hour.
-  const basis = resolveBasis(orgCode, { plate, vehicleType, tankCapacityLitres })
+  // ── a fall that happened STANDING, inside a drain judged as something else ──
+  //
+  // The classifier judges the provider's whole stretch, and a stretch that
+  // takes in driving is judged per kilometre even when the fuel went while the
+  // vehicle stood at the pump (KDE 585S, 27 Sep). See standing-theft. Not asked
+  // of a SIPHON, which already is the call; nor on a probe that swings while
+  // parked, which reads no better standing than moving; nor of a SLOSH, a fall
+  // the classifier already found faster than any pump draws — the reading.
+  const swinging = gated.reason === 'probe-swings' || cause.reason === 'probe-swings'
+  const began = drain.beganAt.getTime()
+  const skip = cause.cause === 'SIPHON' || cause.cause === 'SLOSH' || swinging
+  const standing = skip ? null : standingTheft(rows.map(toFallReading), {
+    spanFrom:       began,
+    spanTo:         Math.max(drain.detectedAt.getTime(), began + 10 * 60_000,
+                      began + (measured?.evidence.fallSeconds ?? 0) * 1000),
+    fuelRateOrDown: cause.cause === 'UNEXPLAINED_BURN' && (ANNOUNCED_REASON_SLUGS as readonly string[]).includes(cause.reason),
+    tankCapacityL:  tankCapacityLitres,
+  })
+  if (standing) cause = { cause: 'SIPHON', reason: standing.rule, confidence: standing.confidence, impliedLph: null }
+
   // The evidence rides out alongside the cause so the caller can PERSIST what
   // the verdict was reached on. Computed here for every drain since the
   // classifier was written and discarded every time until 2026-08-28.
+  return { ...gated, cause, evidence: measured?.evidence ?? null, standing }
+}
+
+/** One evidence row as the parked-fall rules read it. */
+function toFallReading(r: {
+  captured_at: Date; fuel_level_ml: number; engine_on: boolean; speed_kmh: number | null
+  ignition_known: boolean | null; lat: number | null; lng: number | null; engine_hours_meter: number | null
+  accel_x_g: number | null; accel_y_g: number | null; accel_z_g: number | null
+}): FallReading {
   return {
-    ...gated,
-    cause: classifyDrain(measured.evidence, band, profile, basis),
-    evidence: measured.evidence,
+    t:             r.captured_at.getTime(),
+    fuelMl:        r.fuel_level_ml,
+    speedKmh:      r.speed_kmh,
+    engineOn:      r.engine_on,
+    ignitionKnown: r.ignition_known === true,
+    meterH:        r.engine_hours_meter ?? null,
+    lat:           r.lat ?? null,
+    lng:           r.lng ?? null,
+    accel:         r.accel_x_g == null && r.accel_y_g == null && r.accel_z_g == null
+      ? null
+      : { x: r.accel_x_g ?? null, y: r.accel_y_g ?? null, z: r.accel_z_g ?? null },
   }
 }
 
@@ -594,7 +644,10 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     if (opts.notifyCutoff && t.beganAt < opts.notifyCutoff) continue
     // FUEL RATE and FUEL DOWN reach the feed once a day as a summary, not one
     // by one (FUEL_RATE_ALERTS, lib/queues/fuel-rate-digest). Only a SIPHON is
-    // still posted as it happens. The ledger row above is written either way.
+    // still posted as it happens — which by now includes a FUEL RATE / FUEL
+    // DOWN whose fuel went while the vehicle stood (standing-theft), so the
+    // summary keeps only what nobody can call a theft. The ledger row above is
+    // written either way.
     if (!mayUseTheftWording(verdict.cause.cause) && env.FUEL_RATE_ALERTS !== 'live') continue
 
     const cause = verdict.cause
@@ -634,7 +687,11 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     // "PLATE — 22.1 L at 60 L/h" put a dash where the verb belonged. The event
     // is a measured fall in the tank, which is the one word that covers a burn,
     // a drain and a siphon alike, so it is the verb all four headlines take.
-    const headline = mayUseTheftWording(cause.cause)
+    // A fall found standing inside a longer drain states its own levels and
+    // times — the drain's figure takes in driving the theft did not.
+    const headline = verdict.standing
+      ? `${standingTheftText(plate, verdict.standing, where)}${tank}`
+      : mayUseTheftWording(cause.cause)
       ? `POSSIBLE THEFT: ${plate} recorded a drop of ${L(t.stolenMl)}, drawn off while parked${where}${tank}`
       : cause.reason === 'drop-while-stationary'
       ? `FUEL DOWN: ${plate} recorded a drop of ${L(t.stolenMl)} while stationary, with nothing driven${where}${tank}`

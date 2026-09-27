@@ -78,7 +78,7 @@
 
 import { env } from '../config/env.js'
 import type { AccelAxes, VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
-import { stillDown, STILL_DOWN_CONFIRM_MS, type EngineEvidence } from '../modules/fuel/parked-fall.js'
+import { stillDown, STILL_DOWN_CONFIRM_MS, TILT_SHIFT_G, type EngineEvidence } from '../modules/fuel/parked-fall.js'
 
 export interface DropWatchContext {
   orgId:     string
@@ -234,15 +234,6 @@ interface Reading {
   /** The tracker's accelerometer, in g, where the unit sends one — its angle. */
   accel:    AccelAxes | null
 }
-
-/**
- * How far the machine's angle may change across a fall before the fall is put
- * down to the tilt. 0.03 g is under 2°; on the Mufindi plant (26 Sep) the fuel
- * reading moved about 30 L per 0.06 g, so a shift this size can make a fall on
- * its own. GPS cannot see it: a truck loaded or jacked where it stands has not
- * moved, and its tank still reads a different level with the same fuel in it.
- */
-const TILT_SHIFT_G = 0.03
 
 /** The median of each axis over readings with all three, or null without two such readings. */
 function attitude(rs: Reading[]): [number, number, number] | null {
