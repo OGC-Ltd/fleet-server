@@ -20,6 +20,7 @@ import { startRaiFactorySuiteReconciler } from './providers/raifactorysuite/raif
 import { startRetentionSweep } from './lib/queues/retention.js'
 import { startFuelSync, startFuelAdjudication } from './lib/queues/fuel-events.js'
 import { startParkedFallVerdicts } from './lib/queues/parked-falls.js'
+import { startFuelRateDigest } from './lib/queues/fuel-rate-digest.js'
 import { startTripBuild } from './lib/queues/trips.js'
 import { startOutboundWorker } from './lib/queues/outbound.js'
 import { disconnectRedis } from './lib/redis.js'
@@ -103,6 +104,9 @@ async function main() {
   // Stage two of the parked-fall rule: what each fall the live watch raised
   // turned out to be, once the machine next started — see lib/queues/parked-falls.
   const parkedFalls = await startParkedFallVerdicts()
+  // FUEL RATE and FUEL DOWN as one summary a day instead of one alert per
+  // drop (FUEL_RATE_ALERTS) — see lib/queues/fuel-rate-digest.
+  const fuelRateDigest = await startFuelRateDigest()
   // Completed dispatches → measured trips. Nothing else writes that table
   // since the simulator was retired — see lib/queues/trips.
   const tripBuild = await startTripBuild()
@@ -123,6 +127,7 @@ async function main() {
     await fuelSync.stop().catch((err) => logger.warn({ err }, 'Fuel sync shutdown failed'))
     await fuelAdjudication.stop().catch((err) => logger.warn({ err }, 'Fuel adjudication shutdown failed'))
     await parkedFalls.stop().catch((err) => logger.warn({ err }, 'Parked fall verdicts shutdown failed'))
+    await fuelRateDigest.stop().catch((err) => logger.warn({ err }, 'Fuel rate digest shutdown failed'))
     await tripBuild.stop().catch((err) => logger.warn({ err }, 'Trip build shutdown failed'))
     // Before disconnectRedis below, so in-flight mail is finished rather than
     // having its connection pulled out from under it.
