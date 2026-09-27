@@ -242,18 +242,28 @@ export class WialonClient {
    * roughly five minutes, and a steady `avl_evts` loop is the documented way
    * to hold it open.
    *
-   * Shape: `{ tm, events: [{ i: unitId, t: 'm'|'u'|'d', d: { pos } }] }`.
-   * Only `u` (unit data changed) carries a position we care about; `m` is a
-   * raw message and `d` a deletion.
+   * Shape: `{ tm, events: [{ i: unitId, t: 'm'|'u'|'d', d }] }`.
+   *
+   * On this subscription every event arrives as `t: 'm'`, and `d` is the whole
+   * raw message: `t, f, tp, pos, lc, rt, p` (probed live on 2026-09-27, 60 of 60
+   * events). So `d.p` carries the same raw parameters the sweep reads from
+   * `lmsg.p`, for THIS message — which is what lets the accelerometer be read
+   * per fix instead of once a sweep. It is returned as `params`.
+   *
+   * `d.t` is the message's own time. It is not used for the timestamp yet: on
+   * units that deliver in batches it runs a median 104 s (p90 586 s) behind the
+   * `tm` fallback below, and switching to it would move every delta's
+   * captured_at and stop same-batch messages collapsing into one row. That is
+   * worth doing, but as its own change.
    */
-  async pollEvents(): Promise<Array<{ unitId: number; pos: WialonPosition }>> {
+  async pollEvents(): Promise<Array<{ unitId: number; pos: WialonPosition; params: Record<string, unknown> | null }>> {
     // NOTE: avl_evts is its OWN endpoint — /avl_evts?sid=… — not an
     // ajax.html service. Calling it as `svc=avl_evts` returns error 2
     // ("invalid service name").
     const sid = await this.login()
     const res = await this.fetchEvents(sid)
 
-    const out: Array<{ unitId: number; pos: WialonPosition }> = []
+    const out: Array<{ unitId: number; pos: WialonPosition; params: Record<string, unknown> | null }> = []
     for (const e of res.events ?? []) {
       const pos = e.d?.pos
       if (!pos || !Number.isFinite(pos.y) || !Number.isFinite(pos.x)) continue
@@ -265,7 +275,9 @@ export class WialonClient {
       const t = Number.isFinite(pos.t) ? pos.t : res.tm
       if (!Number.isFinite(t)) continue     // no defensible timestamp — drop it
 
-      out.push({ unitId: e.i, pos: { ...pos, t: t as number } })
+      const p = e.d?.p
+      const params = p != null && typeof p === 'object' && !Array.isArray(p) ? p : null
+      out.push({ unitId: e.i, pos: { ...pos, t: t as number }, params })
     }
     return out
   }
@@ -273,7 +285,7 @@ export class WialonClient {
   /** GET /avl_evts, re-authenticating once if the session has lapsed. */
   private async fetchEvents(sid: string, retry = true): Promise<{
     tm?: number
-    events?: Array<{ i: number; t: string; d?: { pos?: WialonPosition } }>
+    events?: Array<{ i: number; t: string; d?: { pos?: WialonPosition; p?: Record<string, unknown>; t?: number } }>
     error?: number
   }> {
     const res = await fetch(`${this.baseUrl}/avl_evts?sid=${encodeURIComponent(sid)}`)
@@ -288,7 +300,7 @@ export class WialonClient {
       }
       throw new WialonError(body.error, 'avl_evts')
     }
-    return body as { tm?: number; events?: Array<{ i: number; t: string; d?: { pos?: WialonPosition } }> }
+    return body as { tm?: number; events?: Array<{ i: number; t: string; d?: { pos?: WialonPosition; p?: Record<string, unknown>; t?: number } }> }
   }
 
   /**
