@@ -19,6 +19,7 @@ import { WialonLiveAdapter } from './providers/wialon/wialon.adapter.js'
 import { startRaiFactorySuiteReconciler } from './providers/raifactorysuite/raifactorysuite.reconciler.js'
 import { startRetentionSweep } from './lib/queues/retention.js'
 import { startFuelSync, startFuelAdjudication } from './lib/queues/fuel-events.js'
+import { startParkedFallVerdicts } from './lib/queues/parked-falls.js'
 import { startTripBuild } from './lib/queues/trips.js'
 import { startOutboundWorker } from './lib/queues/outbound.js'
 import { disconnectRedis } from './lib/redis.js'
@@ -99,6 +100,9 @@ async function main() {
   // put up to fifteen minutes of dead wait between a drain ripening and
   // anything looking at it. See lib/queues/fuel-events.ts.
   const fuelAdjudication = await startFuelAdjudication()
+  // Stage two of the parked-fall rule: what each fall the live watch raised
+  // turned out to be, once the machine next started — see lib/queues/parked-falls.
+  const parkedFalls = await startParkedFallVerdicts()
   // Completed dispatches → measured trips. Nothing else writes that table
   // since the simulator was retired — see lib/queues/trips.
   const tripBuild = await startTripBuild()
@@ -118,6 +122,7 @@ async function main() {
     await retention.stop().catch((err) => logger.warn({ err }, 'Retention sweep shutdown failed'))
     await fuelSync.stop().catch((err) => logger.warn({ err }, 'Fuel sync shutdown failed'))
     await fuelAdjudication.stop().catch((err) => logger.warn({ err }, 'Fuel adjudication shutdown failed'))
+    await parkedFalls.stop().catch((err) => logger.warn({ err }, 'Parked fall verdicts shutdown failed'))
     await tripBuild.stop().catch((err) => logger.warn({ err }, 'Trip build shutdown failed'))
     // Before disconnectRedis below, so in-flight mail is finished rather than
     // having its connection pulled out from under it.
