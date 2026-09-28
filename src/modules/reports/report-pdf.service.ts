@@ -1,6 +1,7 @@
 // report-pdf.service.ts – Data assembly for all report kinds
 // Includes analytics, drivers, maintenance, and plant.
 
+import { env } from '../../config/env.js'
 import { prisma } from '../../lib/prisma.js'
 import { BadRequestError } from '../../core/errors/errors.js'
 import { getDeliveriesAnalytics } from '../analytics/deliveries.cache.js'
@@ -23,8 +24,10 @@ export const PDF_REPORT_KINDS = ['analytics', 'drivers', 'maintenance', 'plant',
 export type PdfReportKind = (typeof PDF_REPORT_KINDS)[number]
 
 // Fuel-cost model — mirrors fleettrack's AnalyticsScreen constants exactly so
-// the PDF and the page never disagree.
-const FUEL_RATES_KES = { diesel: 179.36, petrol: 189.84 }
+// the PDF and the page never disagree. Petrol is the configured pump price
+// (env.FUEL_PRICE_PER_LITRE, 214.03 from 28 Sep 2026), the one the Analytics
+// page and the vehicle panel cost at; diesel keeps its own EPRA rate.
+const FUEL_RATES_KES = { diesel: 179.36, petrol: env.FUEL_PRICE_PER_LITRE }
 const LITRES_PER_100KM = 35
 
 // Same wear catalog the Maintenance pages grade with (fleettrack
@@ -573,10 +576,10 @@ async function collectPlantAnalytics(orgId: string, days: number): Promise<Repor
     getFleetState(orgId, { days, to: undefined }),
   ])
 
-  // Price the fuel data using the server's default price
+  // Price the fuel data at the server's configured price, as the Analytics page does
   const fuel = priceFuelConsumption(fuelRaw, {
-    pricePerLitre: 179.36, // or env.FUEL_PRICE_PER_LITRE
-    currency: 'KES',
+    pricePerLitre: env.FUEL_PRICE_PER_LITRE,
+    currency: env.FUEL_CURRENCY,
     source: 'configured',
   })
 

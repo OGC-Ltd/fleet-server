@@ -508,10 +508,11 @@ const schema = z.object({
   // Pump price for costing the fuel ledger (analytics/fuel-cost). NOTHING in
   // the schema records what fuel cost — a filling stores litres, not money —
   // so cost is always litres × a price supplied here, and the endpoint echoes
-  // the price it used. The default is the EPRA Nairobi diesel rate; set this
-  // on the box when the rate moves rather than editing the frontend constant
-  // the dashboard used to hardcode. A caller can still override per request.
-  FUEL_PRICE_PER_LITRE: z.coerce.number().positive().optional().default(179.36),
+  // the price it used. The default is EPRA's Nairobi pump price as the
+  // operator gave it on 28 Sep 2026 (petrol, 214.03; it was the 179.36 diesel
+  // rate), the same the vehicle panel costs a day at. Set this on the box when
+  // the rate moves. A caller can still override per request.
+  FUEL_PRICE_PER_LITRE: z.coerce.number().positive().optional().default(214.03),
   FUEL_CURRENCY:        z.string().optional().default('KES'),
 })
 

@@ -45,6 +45,10 @@ export interface FuelPricing {
  */
 export function priceFuelConsumption(data: FuelConsumption, { pricePerLitre, currency, source }: FuelPricing) {
   const { totals } = data
+  // Suspected theft is a PART of the drains (`stolenMl`), carried on its own
+  // so a client can show it apart and the rest as "drained" — litresLost minus
+  // litresSuspectedTheft.
+  const suspectedMl = totals.suspectedTheftMl
   // Per-day means divide by ACTIVE days, not window days: a fleet that fuelled
   // on 4 days out of 30 burns its fuel on those 4: dividing by 30 would report
   // a daily rate no day ever saw. Matches deliveriesAnalytics' perDayKm.
@@ -64,6 +68,10 @@ export function priceFuelConsumption(data: FuelConsumption, { pricePerLitre, cur
       lossCost:     cost(totals.stolenMl, pricePerLitre),
       fillings:     totals.fillings,
       thefts:       totals.thefts,
+      // The SIPHON drains inside litresLost / lossCost / thefts above.
+      litresSuspectedTheft: litres(suspectedMl),
+      suspectedTheftCost:   cost(suspectedMl, pricePerLitre),
+      suspectedThefts:      totals.suspectedThefts,
       windowDays:   totals.windowDays,
       activeDays:   totals.activeDays,
     },
@@ -81,6 +89,9 @@ export function priceFuelConsumption(data: FuelConsumption, { pricePerLitre, cur
       lossCost:     cost(d.stolenMl, pricePerLitre),
       fillings:     d.fillings,
       thefts:       d.thefts,
+      litresSuspectedTheft: litres(d.suspectedTheftMl),
+      suspectedTheftCost:   cost(d.suspectedTheftMl, pricePerLitre),
+      suspectedThefts:      d.suspectedThefts,
       // Mean per-vehicle probe slosh that day, and the vehicles behind it.
       // NOT priced: turbulence is fuel moving INSIDE a tank, not fuel bought or
       // lost, and costing it would invent a number. Null, never 0, where the
@@ -100,6 +111,9 @@ export function priceFuelConsumption(data: FuelConsumption, { pricePerLitre, cur
       lossCost:          cost(v.stolenMl, pricePerLitre),
       fillings:          v.fillings,
       thefts:            v.thefts,
+      litresSuspectedTheft: litres(v.suspectedTheftMl),
+      suspectedTheftCost:   cost(v.suspectedTheftMl, pricePerLitre),
+      suspectedThefts:      v.suspectedThefts,
     })),
 
     /**
