@@ -15,7 +15,7 @@ const PRICE = { pricePerLitre: 179.36, currency: 'KES', source: 'configured' as 
 /** A window with `filled`/`stolen` millilitres on one day, and two vehicles. */
 function consumption(overrides: Partial<Consumption> = {}): Consumption {
   return {
-    totals: { filledMl: 0, stolenMl: 0, fillings: 0, thefts: 0, windowDays: 30, activeDays: 0 },
+    totals: { filledMl: 0, stolenMl: 0, fillings: 0, thefts: 0, suspectedTheftMl: 0, suspectedThefts: 0, windowDays: 30, activeDays: 0 },
     byDay: [],
     byVehicle: [],
     drains: [],
@@ -38,7 +38,7 @@ function drain(over: Partial<Consumption['drains'][number]> = {}) {
 describe('priceFuelConsumption', () => {
   it('costs millilitres at the given rate', () => {
     const out = priceFuelConsumption(consumption({
-      totals: { filledMl: 42_130, stolenMl: 13_090, fillings: 1, thefts: 1, windowDays: 30, activeDays: 1 },
+      totals: { filledMl: 42_130, stolenMl: 13_090, fillings: 1, thefts: 1, suspectedTheftMl: 0, suspectedThefts: 0, windowDays: 30, activeDays: 1 },
     }), PRICE)
 
     expect(out.totals.litresFilled).toBe(42.1)
@@ -56,11 +56,11 @@ describe('priceFuelConsumption', () => {
   it('keeps per-vehicle costs summing to the total', () => {
     // Three awkward volumes: rounding each to 0.1 L before pricing would drift.
     const out = priceFuelConsumption(consumption({
-      totals: { filledMl: 33_333 * 3, stolenMl: 0, fillings: 3, thefts: 0, windowDays: 7, activeDays: 3 },
+      totals: { filledMl: 33_333 * 3, stolenMl: 0, fillings: 3, thefts: 0, suspectedTheftMl: 0, suspectedThefts: 0, windowDays: 7, activeDays: 3 },
       byVehicle: [
-        { vehicleId: 'v1', registrationPlate: 'KDL 201X', name: null, filledMl: 33_333, stolenMl: 0, fillings: 1, thefts: 0 },
-        { vehicleId: 'v2', registrationPlate: 'KDL 208X', name: null, filledMl: 33_333, stolenMl: 0, fillings: 1, thefts: 0 },
-        { vehicleId: 'v3', registrationPlate: 'KDL 708E', name: null, filledMl: 33_333, stolenMl: 0, fillings: 1, thefts: 0 },
+        { vehicleId: 'v1', registrationPlate: 'KDL 201X', name: null, filledMl: 33_333, stolenMl: 0, fillings: 1, thefts: 0, suspectedTheftMl: 0, suspectedThefts: 0 },
+        { vehicleId: 'v2', registrationPlate: 'KDL 208X', name: null, filledMl: 33_333, stolenMl: 0, fillings: 1, thefts: 0, suspectedTheftMl: 0, suspectedThefts: 0 },
+        { vehicleId: 'v3', registrationPlate: 'KDL 708E', name: null, filledMl: 33_333, stolenMl: 0, fillings: 1, thefts: 0, suspectedTheftMl: 0, suspectedThefts: 0 },
       ],
     }), PRICE)
 
@@ -72,7 +72,7 @@ describe('priceFuelConsumption', () => {
   it('averages over active days, not window days', () => {
     const out = priceFuelConsumption(consumption({
       // 400 L across 4 fuelling days inside a 30-day window.
-      totals: { filledMl: 400_000, stolenMl: 0, fillings: 4, thefts: 0, windowDays: 30, activeDays: 4 },
+      totals: { filledMl: 400_000, stolenMl: 0, fillings: 4, thefts: 0, suspectedTheftMl: 0, suspectedThefts: 0, windowDays: 30, activeDays: 4 },
     }), PRICE)
 
     expect(out.averages.perDayLitres).toBe(100)
@@ -88,11 +88,11 @@ describe('priceFuelConsumption', () => {
 
   it('prices each day of the zero-filled series', () => {
     const out = priceFuelConsumption(consumption({
-      totals: { filledMl: 50_000, stolenMl: 0, fillings: 1, thefts: 0, windowDays: 2, activeDays: 1 },
+      totals: { filledMl: 50_000, stolenMl: 0, fillings: 1, thefts: 0, suspectedTheftMl: 0, suspectedThefts: 0, windowDays: 2, activeDays: 1 },
       byDay: [
-        { day: '2026-08-02', filledMl: 0,      stolenMl: 0,      fillings: 0, thefts: 0,
+        { day: '2026-08-02', filledMl: 0,      stolenMl: 0,      fillings: 0, thefts: 0, suspectedTheftMl: 0, suspectedThefts: 0,
           turbulenceMl: 2_500, turbulenceVehicles: 160 },
-        { day: '2026-08-03', filledMl: 50_000, stolenMl: 10_000, fillings: 1, thefts: 1,
+        { day: '2026-08-03', filledMl: 50_000, stolenMl: 10_000, fillings: 1, thefts: 1, suspectedTheftMl: 0, suspectedThefts: 0,
           turbulenceMl: null,  turbulenceVehicles: 0 },
       ],
     }), PRICE)
@@ -112,9 +112,9 @@ describe('priceFuelConsumption', () => {
   it('converts turbulence to litres and leaves a day without a reading null', () => {
     const out = priceFuelConsumption(consumption({
       byDay: [
-        { day: '2026-08-02', filledMl: 0, stolenMl: 0, fillings: 0, thefts: 0,
+        { day: '2026-08-02', filledMl: 0, stolenMl: 0, fillings: 0, thefts: 0, suspectedTheftMl: 0, suspectedThefts: 0,
           turbulenceMl: 6_149, turbulenceVehicles: 126 },
-        { day: '2026-08-03', filledMl: 0, stolenMl: 0, fillings: 0, thefts: 0,
+        { day: '2026-08-03', filledMl: 0, stolenMl: 0, fillings: 0, thefts: 0, suspectedTheftMl: 0, suspectedThefts: 0,
           turbulenceMl: null,  turbulenceVehicles: 0 },
       ],
     }), PRICE)
@@ -138,7 +138,7 @@ describe('priceFuelConsumption', () => {
 describe('the drains behind the total', () => {
   it('passes each drain through, priced like every other level', () => {
     const out = priceFuelConsumption(consumption({
-      totals: { filledMl: 0, stolenMl: 40_000, fillings: 0, thefts: 1, windowDays: 30, activeDays: 1 },
+      totals: { filledMl: 0, stolenMl: 40_000, fillings: 0, thefts: 1, suspectedTheftMl: 0, suspectedThefts: 0, windowDays: 30, activeDays: 1 },
       drains: [drain()],
     }), PRICE)
 
@@ -173,7 +173,7 @@ describe('the drains behind the total', () => {
                     drain({ id: 'b', stolenMl: 13_050 }),   // ties, rounds up
                     drain({ id: 'c', stolenMl: 7_550 })]    // ties, rounds up
     const out = priceFuelConsumption(consumption({
-      totals: { filledMl: 0, stolenMl: 60_650, fillings: 0, thefts: 3, windowDays: 30, activeDays: 2 },
+      totals: { filledMl: 0, stolenMl: 60_650, fillings: 0, thefts: 3, suspectedTheftMl: 0, suspectedThefts: 0, windowDays: 30, activeDays: 2 },
       drains,
     }), PRICE)
 
@@ -236,5 +236,25 @@ describe('recorded is not announced', () => {
     }), PRICE)
 
     expect(out.drains.map(d => d.announced)).toEqual([true, false])
+  })
+})
+
+describe('suspected theft, apart from the rest of the drains', () => {
+  it('prices the SIPHON part of the drains on its own, inside the drained total', () => {
+    // 30 L drained in the window, 12 L of it suspected theft
+    const out = priceFuelConsumption(consumption({
+      totals: { filledMl: 100_000, stolenMl: 30_000, fillings: 2, thefts: 3, windowDays: 7, activeDays: 2,
+        suspectedTheftMl: 12_000, suspectedThefts: 1 },
+      byDay: [{ day: '2026-09-27', filledMl: 100_000, stolenMl: 30_000, fillings: 2, thefts: 3,
+        suspectedTheftMl: 12_000, suspectedThefts: 1, turbulenceMl: null, turbulenceVehicles: 0 }],
+      byVehicle: [{ vehicleId: 'v1', registrationPlate: 'KDE 585S', name: null, filledMl: 100_000, stolenMl: 30_000,
+        fillings: 2, thefts: 3, suspectedTheftMl: 12_000, suspectedThefts: 1 }],
+    }), PRICE)
+
+    expect(out.totals).toMatchObject({ litresLost: 30, thefts: 3, litresSuspectedTheft: 12, suspectedThefts: 1 })
+    // 12 L × 179.36 = 2 152.32
+    expect(out.totals.suspectedTheftCost).toBe(2152)
+    expect(out.byDay[0]).toMatchObject({ litresLost: 30, litresSuspectedTheft: 12, suspectedThefts: 1, suspectedTheftCost: 2152 })
+    expect(out.byVehicle[0]).toMatchObject({ litresSuspectedTheft: 12, suspectedThefts: 1 })
   })
 })

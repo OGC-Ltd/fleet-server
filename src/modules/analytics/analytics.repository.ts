@@ -357,6 +357,17 @@ function manifestKg(m: { arrivalWeightKg?: number | null; declaredWeightKg?: num
   return m?.arrivalWeightKg ?? m?.declaredWeightKg ?? 0
 }
 
+/**
+ * A drain the product may call possible theft: its cause was judged SIPHON —
+ * engine provably off and the fall sustained, or one of the standing / after-
+ * refuel rules (fuel-theft-classifier's mayUseTheftWording, the same test the
+ * live alerts use). The Fuel Consumption chart shows these apart from the rest
+ * of what drained (operator, 28 Sep: "one of these should read suspected theft
+ * ... subtract and have it as independent"), so a litre is in one bar or the
+ * other, never both.
+ */
+export const isSuspectedTheft = (cause: string | null | undefined): boolean => cause === 'SIPHON'
+
 export async function fuelConsumption(
   orgId: string, q: DeliveriesQuery, vehicleIds: string[] | null = null,
 ) {
@@ -495,8 +506,10 @@ export async function fuelConsumption(
       .catch(() => [] as Array<{ day: string; turb_ml: number; vehicles: bigint }>),
   ])
 
-  interface Bucket { filledMl: number; stolenMl: number; fillings: number; thefts: number }
-  const empty = (): Bucket => ({ filledMl: 0, stolenMl: 0, fillings: 0, thefts: 0 })
+  // `stolenMl`/`thefts` are EVERY drain, as they always were; the suspected
+  // theft among them is carried beside them — see isSuspectedTheft.
+  interface Bucket { filledMl: number; stolenMl: number; fillings: number; thefts: number; suspectedTheftMl: number; suspectedThefts: number }
+  const empty = (): Bucket => ({ filledMl: 0, stolenMl: 0, fillings: 0, thefts: 0, suspectedTheftMl: 0, suspectedThefts: 0 })
   const byDay     = new Map<string, Bucket>()
   const byVehicle = new Map<string, Bucket & { registrationPlate: string | null; name: string | null }>()
 
@@ -511,7 +524,7 @@ export async function fuelConsumption(
     return e
   }
 
-  let totalFilledMl = 0, totalStolenMl = 0
+  let totalFilledMl = 0, totalStolenMl = 0, totalSuspectedMl = 0, totalSuspected = 0
   for (const f of fillings) {
     const d = dayBucket(fleetDayKey(f.filledAt)); d.filledMl += f.filledMl; d.fillings += 1
     const v = vehicleBucket(f.vehicleId, f.vehicle); v.filledMl += f.filledMl; v.fillings += 1
@@ -521,6 +534,11 @@ export async function fuelConsumption(
     const d = dayBucket(fleetDayKey(t.beganAt)); d.stolenMl += t.stolenMl; d.thefts += 1
     const v = vehicleBucket(t.vehicleId, t.vehicle); v.stolenMl += t.stolenMl; v.thefts += 1
     totalStolenMl += t.stolenMl
+    if (isSuspectedTheft(t.drainCause)) {
+      d.suspectedTheftMl += t.stolenMl; d.suspectedThefts += 1
+      v.suspectedTheftMl += t.stolenMl; v.suspectedThefts += 1
+      totalSuspectedMl += t.stolenMl; totalSuspected += 1
+    }
   }
 
   // Days that saw ANY fuel movement — the zero-filled series below is
@@ -544,6 +562,8 @@ export async function fuelConsumption(
       stolenMl:   totalStolenMl,
       fillings:   fillings.length,
       thefts:     thefts.length,
+      suspectedTheftMl: totalSuspectedMl,
+      suspectedThefts:  totalSuspected,
       windowDays: q.days,
       activeDays,
     },
@@ -560,6 +580,7 @@ export async function fuelConsumption(
       const t = turbulenceByDay.get(day)
       return {
         day, filledMl: v.filledMl, stolenMl: v.stolenMl, fillings: v.fillings, thefts: v.thefts,
+        suspectedTheftMl: v.suspectedTheftMl, suspectedThefts: v.suspectedThefts,
         turbulenceMl:       t ? Math.round(t.turbMl) : null,
         turbulenceVehicles: t ? t.vehicles : 0,
       }
@@ -573,6 +594,8 @@ export async function fuelConsumption(
       stolenMl:          v.stolenMl,
       fillings:          v.fillings,
       thefts:            v.thefts,
+      suspectedTheftMl:  v.suspectedTheftMl,
+      suspectedThefts:   v.suspectedThefts,
     })).sort((a, b) => b.filledMl - a.filledMl),
     /**
      * Every drain behind `totals.stolenMl`, one row each, newest first.
