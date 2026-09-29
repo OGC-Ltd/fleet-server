@@ -24,6 +24,22 @@ import { BILLING_PROPS_FLAG } from './wialon.account.js'
 
 const DEFAULT_BASE = 'https://hst-api.wialon.com'
 
+/**
+ * How long one request may take, body included, before it is abandoned.
+ *
+ * `fetch` has no timeout of its own, and a request Wialon never answers used
+ * to wait forever. On 2026-09-28 at 15:15 EAT one did, inside a fuel sync
+ * cycle: the cycle never finished, the queue runs one job at a time, and no
+ * filling or drain reached the ledger for eighteen hours — the Fuel FSL table
+ * empty for every organisation — with not one log line, because nothing had
+ * failed. A timeout turns that into one failed request, logged, and the next
+ * cycle runs as usual.
+ *
+ * Two minutes because the slowest legitimate call is a fuel report executed
+ * over a day of messages; a whole sync cycle of ~150 of them takes 2.5-3 min.
+ */
+const REQUEST_TIMEOUT_MS = 120_000
+
 /** Wialon error codes worth naming; the rest are reported numerically. */
 const ERRORS: Record<number, string> = {
   1: 'Invalid session',
@@ -190,7 +206,8 @@ export class WialonClient {
     const qs = new URLSearchParams({ svc, params: JSON.stringify(params) })
     if (sid) qs.set('sid', sid)
 
-    const res = await fetch(`${this.baseUrl}/wialon/ajax.html?${qs.toString()}`)
+    const res = await fetch(`${this.baseUrl}/wialon/ajax.html?${qs.toString()}`,
+      { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
     if (!res.ok) throw new Error(`Wialon ${svc} responded HTTP ${res.status}`)
 
     const body = await res.json() as T & { error?: number }
@@ -339,7 +356,8 @@ export class WialonClient {
     events?: Array<{ i: number; t: string; d?: { pos?: WialonPosition; p?: Record<string, unknown>; t?: number } }>
     error?: number
   }> {
-    const res = await fetch(`${this.baseUrl}/avl_evts?sid=${encodeURIComponent(sid)}`)
+    const res = await fetch(`${this.baseUrl}/avl_evts?sid=${encodeURIComponent(sid)}`,
+      { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
     if (!res.ok) throw new Error(`Wialon avl_evts responded HTTP ${res.status}`)
     const body = await res.json() as { error?: number; events?: unknown }
 
