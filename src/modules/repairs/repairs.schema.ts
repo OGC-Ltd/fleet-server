@@ -241,8 +241,37 @@ export const listItemsQuerySchema = z.object({
 export type CreateRepairReport = z.infer<typeof createRepairReportSchema>
 export type RepairItemInput    = CreateRepairReport['items'][number]
 export type ResolveItem        = z.infer<typeof resolveItemSchema>
+export type SetInspection      = z.infer<typeof setInspectionSchema>
+export type AddSparePart       = z.infer<typeof addSparePartSchema>
+export type UpdateSparePart    = z.infer<typeof updateSparePartSchema>
 export type SetStage           = z.infer<typeof setStageSchema>
 export type AssignRepairItem   = z.infer<typeof assignRepairItemSchema>
 export type RespondToAssignment = z.infer<typeof respondToAssignmentSchema>
 export type ListReportsQuery   = z.infer<typeof listReportsQuerySchema>
 export type ListItemsQuery     = z.infer<typeof listItemsQuerySchema>
+
+// ── Overhaul audit (repairs.overhaul) ───────────────────────────────────────
+
+/** The checklist. Also a CHECK constraint (migration 20260930200000_repair_overhaul). */
+export const INSPECTION_COMPONENTS = ['probe', 'probe_cable', 'tank_bracket', 'tracker', 'calibration'] as const
+
+export const setInspectionSchema = z.object({
+  component: z.enum(INSPECTION_COMPONENTS),
+  verdict:   z.enum(['ok', 'faulty', 'replaced']),
+  note:      z.string().trim().max(1000).optional(),
+})
+
+export const addSparePartSchema = z.object({
+  name:       z.string().trim().min(1).max(200),
+  quantity:   z.coerce.number().int().min(1).max(1000).default(1),
+  supplier:   z.string().trim().max(200).optional(),
+  costKes:    z.coerce.number().int().min(0).max(100_000_000).optional(),
+  /** The supplier's promised day, YYYY-MM-DD, today or later. */
+  expectedAt: calendarDay.optional(),
+  note:       z.string().trim().max(1000).optional(),
+})
+
+export const updateSparePartSchema = z.object({
+  status: z.enum(['received', 'fitted', 'cancelled']),
+  note:   z.string().trim().max(1000).optional(),
+})

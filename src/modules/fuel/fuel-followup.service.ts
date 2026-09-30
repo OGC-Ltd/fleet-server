@@ -48,6 +48,7 @@ import * as repo from './fuel-followup.repository.js'
 import type { FollowUpRow } from './fuel-followup.repository.js'
 import type { ListFollowUpQuery } from './fuel.schema.js'
 import { withEffectiveStage } from '../repairs/effective-stage.js'
+import { overhaulFor } from '../repairs/repairs.overhaul.js'
 
 const litres = (ml: number) => `${(ml / 1000).toFixed(1)} L`
 
@@ -369,6 +370,9 @@ export async function listAudit(orgId: string, viewerId: string | null) {
   const cases = rows.map((r) => toDto(r, viewerId, canAssign))
   const vehicleIds = [...new Set(cases.map((c) => c.incident.vehicleId))]
   const { jobs, episodes } = await repo.probeHistory(orgId, vehicleIds)
+  // The overhaul record (checklist and spares) of every job a case points at.
+  const jobIds = [...new Set(cases.map((c) => c.repairItem?.id).filter((x): x is string => !!x))]
+  const { parts, inspections } = await overhaulFor(jobIds)
 
   const units = vehicleIds.map((vehicleId) => {
     const mine = cases.filter((c) => c.incident.vehicleId === vehicleId)
@@ -381,6 +385,12 @@ export async function listAudit(orgId: string, viewerId: string | null) {
       lastAlertAt,
       cases: mine,
       repairs: jobs.filter((j) => j.vehicleId === vehicleId),
+      overhaul: Object.fromEntries(
+        [...new Set(mine.map((c) => c.repairItem?.id).filter((x): x is string => !!x))].map((id) => [id, {
+          parts: parts.filter((x) => x.repairItemId === id),
+          inspections: inspections.filter((x) => x.repairItemId === id),
+        }]),
+      ),
       probeFaults: episodes.filter((e) => e.vehicleId === vehicleId),
     }
   })

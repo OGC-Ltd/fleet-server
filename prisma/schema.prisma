@@ -1393,6 +1393,10 @@ model RepairReportItem {
   /// Fuel cases that found this probe faulty (Fuel Audit). Signing the job
   /// off fixed closes them.
   fuelFollowUps FuelTheftFollowUp[]
+  /// The overhaul audit: what was inspected on the unit, and the spares
+  /// ordered for the fix. See RepairInspection and RepairSparePart.
+  inspections   RepairInspection[]
+  spareParts    RepairSparePart[]
 
   @@index([reportId])
   /// The open-jobs list, and the "Reported" badge on the probe table.
@@ -1402,6 +1406,66 @@ model RepairReportItem {
   /// One unit's repair history.
   @@index([vehicleId, createdAt])
   @@map("repair_report_items")
+}
+
+/// One component checked during a job's overhaul audit, and what was found.
+///
+/// One row per component per job, overwritten when it is checked again: the
+/// checklist says where the unit stands NOW. `by`/`byName` are copied rather
+/// than joined so a removed user does not blank the record.
+model RepairInspection {
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  repairItemId   String   @map("repair_item_id")
+  /// probe | probe_cable | tank_bracket | tracker | calibration (CHECK)
+  component      String
+  /// ok | faulty | replaced (CHECK)
+  verdict        String
+  note           String?
+  inspectedById  String?  @map("inspected_by_id")
+  inspectedBy    String?  @map("inspected_by_name")
+  inspectedAt    DateTime @default(now()) @map("inspected_at")
+
+  repairItem RepairReportItem @relation(fields: [repairItemId], references: [id], onDelete: Cascade)
+
+  @@unique([repairItemId, component])
+  @@index([organisationId])
+  @@map("repair_inspections")
+}
+
+/// A spare part outsourced for a repair job, from the order to the fitting.
+///
+/// ordered -> received -> fitted, or cancelled from either of the first two.
+/// The job follows its parts: the first order moves it to spare_outsourced,
+/// the last arrival to fixing, and it cannot be signed off fixed while a part
+/// is ordered or received but not fitted (repairs.overhaul).
+model RepairSparePart {
+  id             String    @id @default(cuid())
+  organisationId String    @map("organisation_id")
+  repairItemId   String    @map("repair_item_id")
+  name           String
+  quantity       Int       @default(1)
+  supplier       String?
+  /// Whole shillings.
+  costKes        Int?      @map("cost_kes")
+  /// The supplier's promised day. DATE for the reason expectedResolutionAt is.
+  expectedAt     DateTime? @map("expected_at") @db.Date
+  /// ordered | received | fitted | cancelled (CHECK)
+  status         String    @default("ordered")
+  note           String?
+  orderedById    String?   @map("ordered_by_id")
+  orderedBy      String?   @map("ordered_by_name")
+  orderedAt      DateTime  @default(now()) @map("ordered_at")
+  receivedAt     DateTime? @map("received_at")
+  fittedAt       DateTime? @map("fitted_at")
+  cancelledAt    DateTime? @map("cancelled_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  repairItem RepairReportItem @relation(fields: [repairItemId], references: [id], onDelete: Cascade)
+
+  @@index([repairItemId])
+  @@index([organisationId, status])
+  @@map("repair_spare_parts")
 }
 
 /// Per-unit-per-day incident counts, so month-over-month survives the 90-day
