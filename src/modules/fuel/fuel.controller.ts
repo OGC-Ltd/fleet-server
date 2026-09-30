@@ -2,7 +2,7 @@ import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as service from './fuel.service.js'
 import * as followUps from './fuel-followup.service.js'
-import { UnauthorizedError } from '../../core/errors/errors.js'
+import { UnauthorizedError, GoneError } from '../../core/errors/errors.js'
 import { getProbeReport } from './probe-report.service.js'
 import { getFleetTankState } from './fuel-tank-state.service.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
@@ -51,10 +51,17 @@ export const reviewTheft: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
-export const dismissTheft: RequestHandler = async (req, res, next) => {
-  try {
-    sendSuccess(res, await service.dismissTheft(p(req, 'orgId'), p(req, 'theftId'), req.user?.id ?? null))
-  } catch (err) { next(err) }
+/**
+ * ARCHIVED (operator, 2026-10-01): "Delete" on a fuel alert is retired. An
+ * alert now leaves the dashboard only by being escalated or de-escalated
+ * (reviewTheft), so every one that goes carries a decision, a reason and a
+ * name. The route still answers, with 410 Gone and what to do instead, so an
+ * old dashboard still showing the button says why rather than failing blind.
+ * Nothing is written. service.dismissTheft and repo.dismissTheft are kept,
+ * unreached, should the operator ever want deletion back.
+ */
+export const dismissTheft: RequestHandler = (_req, _res, next) => {
+  next(new GoneError('Deleting a fuel alert has been retired. Escalate or de-escalate it instead, so the decision is on record.'))
 }
 
 // ── Follow-ups on dismissed incidents ──────────────────────────────────────
