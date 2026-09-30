@@ -258,3 +258,173 @@ export function repairReportEmail(opts: {
     ),
   }
 }
+
+// ── Fuel Audit report ───────────────────────────────────────────────────────
+
+/** One signed-off Fuel Audit, as fuel-audit-mail gathers it. */
+export interface FuelAuditReport {
+  orgName: string
+  plate: string
+  verdict: 'fixed' | 'unsuccessful'
+  signedOffBy: string | null
+  signedOffAt: Date
+  fixNote: string | null
+  recommendation: string | null
+  job: {
+    raisedAt: Date
+    raisedBy: string | null
+    technician: string | null
+    problemNote: string | null
+    fixDate: Date | null
+    stages: Array<{ stage: string; at: Date; by: string | null; note: string | null }>
+  }
+  alerts: Array<{
+    beganAt: Date
+    litres: number
+    cause: string | null
+    trail: Array<{ kind: string; at: Date; by: string | null; note: string | null }>
+  }>
+  inspections: Array<{ component: string; verdict: string; note: string | null; by: string | null; at: Date }>
+  parts: Array<{
+    name: string; quantity: number; supplier: string | null; costKes: number | null; status: string
+    orderedAt: Date; receivedAt: Date | null; fittedAt: Date | null; fixPlannedAt: Date | null
+  }>
+  link?: string
+}
+
+const NAIROBI = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Africa/Nairobi', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+})
+/** Fleet time, since that is where every reader is. */
+const eat = (d: Date): string => `${NAIROBI.format(d)} EAT`
+/** DATE columns are midnight UTC: print the day as stored. */
+const isoDay = (d: Date): string => d.toISOString().slice(0, 10)
+
+const AUDIT_STAGE: Record<string, string> = {
+  pending: 'Pending', spare_outsourced: 'Spare outsourced', fixing: 'Fixing', fixed: 'Fixed', failed: 'Unsuccessful',
+}
+const AUDIT_ACTION: Record<string, string> = {
+  ACCEPTED: 'Taken on', ASSIGNED: 'Assigned', DECLINED: 'Declined', NOTE: 'Note', RECALLED: 'Recalled',
+  PROBE_FAULT: 'Found to be a faulty probe', REPAIR_RAISED: 'Repair raised',
+  PROBE_FIXED: 'Closed: probe repaired', REPAIR_FAILED: 'Repair unsuccessful',
+}
+const COMPONENT: Record<string, string> = {
+  probe: 'Probe', probe_cable: 'Probe cable', tank_bracket: 'Tank bracket', tracker: 'Tracker', calibration: 'Calibration',
+}
+const kes = (n: number): string => `KES ${n.toLocaleString('en-KE')}`
+
+/**
+ * The Fuel Audit report (operator, 2026-10-01): mailed when an audit is done,
+ * with everything on it. See modules/fuel/fuel-audit-mail.
+ */
+export function fuelAuditReportEmail(r: FuelAuditReport): RenderedMail {
+  const outcome = r.verdict === 'fixed' ? 'Probe repaired' : 'Repair unsuccessful'
+  const litres = r.alerts.reduce((s, a) => s + a.litres, 0)
+  const live = r.parts.filter((p) => p.status !== 'cancelled')
+  const cost = live.reduce((s, p) => s + (p.costKes ?? 0), 0)
+  const subject = `[${r.orgName}] Fuel Audit done — ${r.plate} · ${outcome}`
+  const head = `The Fuel Audit on ${r.plate} is done: ${outcome.toLowerCase()}, signed off by ${r.signedOffBy ?? 'unknown'} on ${eat(r.signedOffAt)}.`
+
+  // ── text ──
+  const t: string[] = [head, '', 'SUMMARY']
+  t.push(`  Unit: ${r.plate}`, `  Outcome: ${outcome}`,
+    `  Fuel alerts found to be a faulty probe: ${r.alerts.length} (${litres.toFixed(1)} L reported lost, not a theft)`)
+  if (live.length) t.push(`  Spare parts: ${live.length}${cost ? ` · ${kes(cost)}` : ''}`)
+  if (r.fixNote) t.push(`  What was done: ${r.fixNote}`)
+  if (r.recommendation) t.push(`  Recommendation: ${r.recommendation}`)
+  t.push('', 'FUEL ALERTS')
+  r.alerts.forEach((a, i) => {
+    t.push(`  ${i + 1}. ${eat(a.beganAt)} · ${a.litres.toFixed(1)} L${a.cause ? ` · ${a.cause}` : ''}`)
+    for (const x of a.trail) {
+      t.push(`     - ${eat(x.at)} ${AUDIT_ACTION[x.kind] ?? x.kind}${x.by ? ` by ${x.by}` : ''}${x.note ? `: ${x.note}` : ''}`)
+    }
+  })
+  t.push('', 'REPAIR JOB')
+  t.push(`  Raised ${eat(r.job.raisedAt)}${r.job.raisedBy ? ` by ${r.job.raisedBy}` : ''}`)
+  t.push(`  Technician: ${r.job.technician ?? 'not assigned'}`)
+  if (r.job.problemNote) t.push(`  Problem: ${r.job.problemNote}`)
+  if (r.job.fixDate) t.push(`  Fix date: ${isoDay(r.job.fixDate)}`)
+  for (const s of r.job.stages) {
+    t.push(`  - ${AUDIT_STAGE[s.stage] ?? s.stage} · ${eat(s.at)}${s.by ? ` · ${s.by}` : ''}${s.note ? ` · ${s.note}` : ''}`)
+  }
+  t.push('', 'PROBE INSPECTION')
+  if (r.inspections.length === 0) t.push('  Nothing recorded.')
+  for (const i of r.inspections) {
+    t.push(`  ${COMPONENT[i.component] ?? i.component}: ${i.verdict}${i.note ? ` · ${i.note}` : ''}${i.by ? ` (${i.by}, ${eat(i.at)})` : ''}`)
+  }
+  t.push('', 'SPARE PARTS')
+  if (r.parts.length === 0) t.push('  None ordered.')
+  for (const p of r.parts) {
+    t.push(`  ${p.quantity > 1 ? `${p.quantity} × ` : ''}${p.name} · ${p.status}${p.supplier ? ` · ${p.supplier}` : ''}${p.costKes != null ? ` · ${kes(p.costKes)}` : ''}`)
+    t.push(`     ordered ${isoDay(p.orderedAt)}${p.receivedAt ? `, received ${isoDay(p.receivedAt)}` : ''}${p.fixPlannedAt ? `, fix planned ${isoDay(p.fixPlannedAt)}` : ''}${p.fittedAt ? `, fitted ${isoDay(p.fittedAt)}` : ''}`)
+  }
+  if (r.link) t.push('', `Open the Fuel Audit: ${r.link}`)
+
+  // ── html ──
+  const h2 = (s: string): string =>
+    `<h2 style="font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:#475569;margin:20px 0 8px">${esc(s)}</h2>`
+  const row = (k: string, v: string): string =>
+    `<tr><td style="padding:3px 12px 3px 0;color:#64748b;white-space:nowrap;vertical-align:top">${esc(k)}</td><td style="padding:3px 0">${esc(v)}</td></tr>`
+  const tone = r.verdict === 'fixed' ? '#15803d' : '#b91c1c'
+
+  const alerts = r.alerts.map((a) => {
+    const trail = a.trail.map((x) =>
+      `<li>${esc(eat(x.at))} — ${esc(AUDIT_ACTION[x.kind] ?? x.kind)}${x.by ? ` by ${esc(x.by)}` : ''}${x.note ? `: ${esc(x.note)}` : ''}</li>`).join('')
+    return `<li style="margin:0 0 10px"><strong>${esc(eat(a.beganAt))}</strong> · ${esc(a.litres.toFixed(1))} L${a.cause ? ` · ${esc(a.cause)}` : ''}
+      <ul style="margin:4px 0 0;padding-left:16px;color:#475569;font-size:13px">${trail}</ul></li>`
+  }).join('')
+
+  const stages = r.job.stages.map((s) =>
+    `<li>${esc(AUDIT_STAGE[s.stage] ?? s.stage)} · ${esc(eat(s.at))}${s.by ? ` · ${esc(s.by)}` : ''}${s.note ? `<br><span style="color:#64748b">${esc(s.note)}</span>` : ''}</li>`).join('')
+
+  const insp = r.inspections.length
+    ? `<table style="border-collapse:collapse;font-size:13px">${r.inspections.map((i) =>
+        row(COMPONENT[i.component] ?? i.component, `${i.verdict}${i.note ? ` · ${i.note}` : ''}${i.by ? ` (${i.by})` : ''}`)).join('')}</table>`
+    : '<p style="margin:0;color:#64748b">Nothing recorded.</p>'
+
+  const partRows = r.parts.map((p) => {
+    const dates = `ordered ${isoDay(p.orderedAt)}${p.receivedAt ? `, received ${isoDay(p.receivedAt)}` : ''}${p.fittedAt ? `, fitted ${isoDay(p.fittedAt)}` : ''}`
+    return `<tr style="border-top:1px solid #e2e8f0">
+      <td style="padding:4px 8px 4px 0">${esc(`${p.quantity > 1 ? `${p.quantity} × ` : ''}${p.name}`)}<br><span style="color:#64748b;font-size:12px">${esc(dates)}</span></td>
+      <td style="padding:4px 8px">${esc(p.status)}</td>
+      <td style="padding:4px 8px">${esc(p.supplier ?? '—')}</td>
+      <td style="padding:4px 0;text-align:right">${p.costKes != null ? esc(kes(p.costKes)) : '—'}</td></tr>`
+  }).join('')
+  const total = cost
+    ? `<tr style="border-top:1px solid #e2e8f0"><td colspan="3" style="padding:4px 0;font-weight:600">Total (not cancelled)</td><td style="padding:4px 0;text-align:right;font-weight:600">${esc(kes(cost))}</td></tr>`
+    : ''
+  const parts = r.parts.length
+    ? `<table style="border-collapse:collapse;font-size:13px;width:100%">
+        <tr style="text-align:left;color:#64748b"><th style="padding:4px 8px 4px 0">Part</th><th style="padding:4px 8px">Status</th><th style="padding:4px 8px">Supplier</th><th style="padding:4px 0;text-align:right">Cost</th></tr>
+        ${partRows}${total}</table>`
+    : '<p style="margin:0;color:#64748b">None ordered.</p>'
+
+  const summary = [
+    row('Unit', r.plate),
+    row('Fuel alerts', `${r.alerts.length} · ${litres.toFixed(1)} L reported lost, found to be a faulty probe (not a theft)`),
+    live.length ? row('Spare parts', `${live.length}${cost ? ` · ${kes(cost)}` : ''}`) : '',
+    r.fixNote ? row('What was done', r.fixNote) : '',
+    r.recommendation ? row('Recommendation', r.recommendation) : '',
+  ].join('')
+  const job = [
+    row('Raised', `${eat(r.job.raisedAt)}${r.job.raisedBy ? ` by ${r.job.raisedBy}` : ''}`),
+    row('Technician', r.job.technician ?? 'Not assigned'),
+    r.job.problemNote ? row('Problem', r.job.problemNote) : '',
+    r.job.fixDate ? row('Fix date', isoDay(r.job.fixDate)) : '',
+  ].join('')
+
+  const html = shell(
+    `Fuel Audit done — ${esc(r.plate)}`,
+    `<p style="margin:0 0 12px"><span style="display:inline-block;padding:3px 10px;border-radius:999px;background:${tone};color:#fff;font-weight:600;font-size:13px">${esc(outcome)}</span></p>
+     <p style="margin:0 0 12px">${esc(head)}</p>
+     <table style="border-collapse:collapse;font-size:14px">${summary}</table>
+     ${h2('Fuel alerts')}<ol style="margin:0;padding-left:18px">${alerts}</ol>
+     ${h2('Repair job')}<table style="border-collapse:collapse;font-size:14px">${job}</table>
+     <ul style="margin:8px 0 0;padding-left:18px;font-size:13px">${stages}</ul>
+     ${h2('Probe inspection')}${insp}
+     ${h2('Spare parts')}${parts}`,
+    r.link ? { href: r.link, label: 'Open the Fuel Audit' } : undefined,
+  )
+
+  return { category: 'fuel-audit-report', subject, text: t.join('\n'), html }
+}
