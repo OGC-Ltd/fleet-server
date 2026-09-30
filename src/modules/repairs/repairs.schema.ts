@@ -272,6 +272,10 @@ export const addSparePartSchema = z.object({
 })
 
 export const updateSparePartSchema = z.object({
-  status: z.enum(['received', 'fitted', 'cancelled']),
-  note:   z.string().trim().max(1000).optional(),
+  status:  z.enum(['received', 'fitted', 'cancelled']),
+  note:    z.string().trim().max(1000).optional(),
+  /** When the fix will happen, YYYY-MM-DD, today or later. Required on 'received'. */
+  fixDate: calendarDay.optional(),
+}).refine((b) => b.status !== 'received' || b.fixDate, {
+  message: 'Pick the date the fix will happen', path: ['fixDate'],
 })

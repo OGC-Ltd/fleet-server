@@ -1450,6 +1450,10 @@ model RepairSparePart {
   costKes        Int?      @map("cost_kes")
   /// The supplier's promised day. DATE for the reason expectedResolutionAt is.
   expectedAt     DateTime? @map("expected_at") @db.Date
+  /// When the fix is planned, given when the part is collected (received).
+  /// Required on that step: a collected part with no date to fit it by is a
+  /// part that sits in a store. The job's expectedResolutionAt follows it.
+  fixPlannedAt   DateTime? @map("fix_planned_at") @db.Date
   /// ordered | received | fitted | cancelled (CHECK)
   status         String    @default("ordered")
   note           String?

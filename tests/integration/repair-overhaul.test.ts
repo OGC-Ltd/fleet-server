@@ -60,12 +60,29 @@ describe('Repair overhaul: spare parts', () => {
     prismaMock.repairSparePart.findMany.mockResolvedValue([{ status: 'received', name: 'FLS probe', quantity: 1, expectedAt: null }] as never)
     prismaMock.repairSparePart.findUniqueOrThrow.mockResolvedValue({ id: 'sp1', status: 'received' } as never)
 
-    const res = await request(app).post(`${BASE}/ri1/parts/sp1`).send({ status: 'received' })
+    const res = await request(app).post(`${BASE}/ri1/parts/sp1`).send({ status: 'received', fixDate: inAWeek })
 
     expect(res.status).toBe(200)
-    expect(prismaMock.repairReportItem.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ stage: 'fixing' }),
+    expect(prismaMock.repairSparePart.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: 'received', fixPlannedAt: new Date(`${inAWeek}T00:00:00.000Z`) }),
     }))
+    expect(prismaMock.repairReportItem.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        stage: 'fixing',
+        stageHistory: [expect.objectContaining({ note: `All spare parts received; fix planned for ${inAWeek}` })],
+      }),
+    }))
+  })
+
+  it('will not mark a part collected without the date the fix will happen', async () => {
+    const res = await request(app).post(`${BASE}/ri1/parts/sp1`).send({ status: 'received' })
+    expect(res.status).toBe(400)
+    expect(prismaMock.repairSparePart.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('refuses a fix date in the past', async () => {
+    const res = await request(app).post(`${BASE}/ri1/parts/sp1`).send({ status: 'received', fixDate: '2020-01-01' })
+    expect(res.status).toBe(400)
   })
 
   it('refuses a move a part cannot make', async () => {
