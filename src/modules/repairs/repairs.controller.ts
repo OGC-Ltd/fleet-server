@@ -1,11 +1,12 @@
 import type { RequestHandler } from 'express'
+import * as overhaul from './repairs.overhaul.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { ConflictError, NotFoundError, UnprocessableError } from '../../core/errors/errors.js'
 import * as repo from './repairs.repository.js'
 import * as svc from './repairs.service.js'
 import type {
   AssignRepairItem, CreateRepairReport, ResolveItem, SetStage, ListReportsQuery, ListItemsQuery,
-  RespondToAssignment,
+  RespondToAssignment, SetInspection, AddSparePart, UpdateSparePart,
 } from './repairs.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -156,5 +157,36 @@ export const respondToAssignment: RequestHandler = async (req, res, next) => {
     if (result.item) { sendSuccess(res, result.item); return }
     if (result.reason === 'not_assignee') throw new ConflictError('Only the assigned person can respond to this task')
     throw new ConflictError('This repair task is no longer open')
+  } catch (err) { next(err) }
+}
+
+// ── Overhaul audit ──────────────────────────────────────────────────────────
+
+export const getOverhaul: RequestHandler = async (req, res, next) => {
+  try {
+    const orgId = p(req, 'orgId')
+    const itemId = p(req, 'itemId')
+    if (!(await repo.itemExists(itemId, orgId))) throw new NotFoundError('Repair job not found')
+    sendSuccess(res, await overhaul.overhaulFor([itemId]))
+  } catch (err) { next(err) }
+}
+
+export const setInspection: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await overhaul.setInspection(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as SetInspection))
+  } catch (err) { next(err) }
+}
+
+export const addSparePart: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await overhaul.addSparePart(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as AddSparePart), 201)
+  } catch (err) { next(err) }
+}
+
+export const updateSparePart: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await overhaul.updateSparePart(
+      p(req, 'orgId'), p(req, 'itemId'), p(req, 'partId'), req.user!.id, req.body as UpdateSparePart,
+    ))
   } catch (err) { next(err) }
 }

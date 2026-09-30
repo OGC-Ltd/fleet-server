@@ -58,7 +58,7 @@ export type AssignmentResponseEvent = {
  * spreading a string would produce an array of characters and the tracking
  * line would render one node per letter.
  */
-function appendStage<T extends StageEvent | AssignmentEvent | AssignmentRevokedEvent | AssignmentResponseEvent>(history: unknown, event: T): T[] {
+export function appendStage<T extends StageEvent | AssignmentEvent | AssignmentRevokedEvent | AssignmentResponseEvent>(history: unknown, event: T): T[] {
   const prior = Array.isArray(history) ? (history as T[]) : []
   // 200 moves is a job somebody is fighting with a button, not a repair. The
   // cap bounds the column rather than expressing a belief about repairs.

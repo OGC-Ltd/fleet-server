@@ -11,6 +11,7 @@ import { notifyRepairAssignment } from './repairs.assignment-mail.js'
 import { canAssignTriage, canReceiveTriage, canSignOffTriage } from './repairs.authz.js'
 import { ForbiddenError } from '../../core/errors/errors.js'
 import { repairSignedOff } from '../fuel/fuel-followup.service.js'
+import { assertNoOutstandingParts } from './repairs.overhaul.js'
 import type { AssignRepairItem, CreateRepairReport, ResolveItem, SetStage, RespondToAssignment } from './repairs.schema.js'
 
 export { notifyRepairAssignment }
@@ -357,6 +358,9 @@ export async function closeItem(itemId: string, orgId: string, userId: string, d
       )
     }
   }
+
+  // A fixed probe has its spares fitted; a failed sign-off never waits on them.
+  if (dto.verdict === 'fixed') await assertNoOutstandingParts(itemId, orgId)
 
   const item = await repo.resolveItem(itemId, orgId, userId, dto)
   if (!item) return null
