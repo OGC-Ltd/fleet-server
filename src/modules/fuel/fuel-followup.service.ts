@@ -36,6 +36,7 @@
  * dashboards over SSE (`fuel_followup`) so the list updates without a reload.
  */
 
+import { sendFuelAuditReport } from './fuel-audit-mail.js'
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { emitDashboardFuelFollowUp } from '../../lib/sse.js'
@@ -350,6 +351,8 @@ export async function repairSignedOff(orgId: string, repairItemId: string) {
       const row = await changed(orgId, id)
       announce(orgId, row, row.status === 'PROBE_FIXED' ? 'probe_fixed' : 'repair_failed')
     }
+    // The audit is done: mail the full report to the named roles (fuel-audit-mail).
+    await sendFuelAuditReport(orgId, repairItemId, ids)
   } catch (err) {
     logger.warn({ err, repairItemId }, 'Fuel audit: could not apply a repair sign-off')
   }
