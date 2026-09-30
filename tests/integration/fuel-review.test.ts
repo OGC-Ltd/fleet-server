@@ -39,9 +39,9 @@ function reviewed(status: 'CONFIRMED_THEFT' | 'NOT_THEFT', note: string) {
 }
 
 describe('POST /fuel/thefts/:id/review', () => {
-  it('escalates a live alert: confirmed theft on the row, THEFT label for the detector', async () => {
+  it('escalates a live alert: confirmed theft on the row, THEFT label, and off the dashboard', async () => {
     asAdmin()
-    prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', dismissedAt: null } as never)
+    prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', vehicleId: 'v1', dismissedAt: null } as never)
     prismaMock.fuelTheft.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.user.findUnique.mockResolvedValue({ email: 'test@fleet.dev', fullName: 'Test User' } as never)
     prismaMock.fuelTheft.findUniqueOrThrow.mockResolvedValue(reviewed('CONFIRMED_THEFT', 'Seen on camera') as never)
@@ -52,20 +52,42 @@ describe('POST /fuel/thefts/:id/review', () => {
     expect(res.body.data.review).toMatchObject({ status: 'CONFIRMED_THEFT', by: 'Test User', note: 'Seen on camera' })
     expect(prismaMock.fuelTheft.updateMany).toHaveBeenCalledWith({
       where: { id: 'th1', dismissedAt: null },
-      data: expect.objectContaining({ reviewStatus: 'CONFIRMED_THEFT', reviewedById: ME, reviewNote: 'Seen on camera' }),
+      // The decision is the trail: status, note, who; and it leaves the dashboard.
+      data: expect.objectContaining({
+        reviewStatus: 'CONFIRMED_THEFT', reviewedById: ME, reviewNote: 'Seen on camera',
+        dismissedAt: expect.any(Date), dismissedById: ME,
+      }),
     })
     expect(prismaMock.fuelEventLabel.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({ eventId: 'th1', eventType: 'THEFT', label: 'THEFT', labelledBy: 'test@fleet.dev' }),
     }))
-    // Escalating does not take it off the dashboard.
-    expect(prismaMock.fuelTheft.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ dismissedAt: expect.anything() }),
-    }))
+    // No case is opened: a decided alert is finished, not waiting on anybody.
+    expect(prismaMock.fuelTheftFollowUp.create).not.toHaveBeenCalled()
   })
 
-  it('de-escalates as not a theft, and a later decision replaces the earlier one', async () => {
+  it("takes the unit's older live alerts off the dashboard with the one decided", async () => {
     asAdmin()
-    prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', dismissedAt: null } as never)
+    prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', vehicleId: 'v1', dismissedAt: null } as never)
+    prismaMock.fuelTheft.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.fuelTheft.findMany.mockResolvedValue([{ id: 'th0' }] as never)
+    prismaMock.user.findUnique.mockResolvedValue({ email: 'test@fleet.dev', fullName: 'Test User' } as never)
+    prismaMock.fuelTheft.findUniqueOrThrow.mockResolvedValue(reviewed('NOT_THEFT', 'Slosh on a slope') as never)
+
+    const res = await request(app).post(`${BASE}/th1/review`).send({ outcome: 'DEESCALATED', note: 'Slosh on a slope' })
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.fuelTheft.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ vehicleId: 'v1', id: { not: 'th1' }, dismissedAt: null }),
+    }))
+    expect(prismaMock.fuelTheft.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['th0'] }, dismissedAt: null },
+      data: expect.objectContaining({ dismissedAt: expect.any(Date), dismissedById: ME }),
+    })
+  })
+
+  it('de-escalates as not a theft, off the dashboard with the decision kept', async () => {
+    asAdmin()
+    prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', vehicleId: 'v1', dismissedAt: null } as never)
     prismaMock.fuelTheft.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.user.findUnique.mockResolvedValue({ email: 'test@fleet.dev', fullName: 'Test User' } as never)
     prismaMock.fuelTheft.findUniqueOrThrow.mockResolvedValue(reviewed('NOT_THEFT', 'Probe recalibrated') as never)
@@ -74,6 +96,10 @@ describe('POST /fuel/thefts/:id/review', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data.review.status).toBe('NOT_THEFT')
+    expect(prismaMock.fuelTheft.updateMany).toHaveBeenCalledWith({
+      where: { id: 'th1', dismissedAt: null },
+      data: expect.objectContaining({ reviewStatus: 'NOT_THEFT', reviewNote: 'Probe recalibrated', dismissedAt: expect.any(Date) }),
+    })
     expect(prismaMock.fuelEventLabel.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: expect.objectContaining({ label: 'NOT_THEFT', note: 'Probe recalibrated' }),
     }))
@@ -130,7 +156,7 @@ describe('POST /fuel/thefts/:id/review', () => {
     expect(prismaMock.fuelTheft.updateMany).not.toHaveBeenCalled()
   })
 
-  it('sends a deleted alert to its Case instead', async () => {
+  it('refuses an alert already off the dashboard', async () => {
     asAdmin()
     prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', dismissedAt: new Date() } as never)
     prismaMock.user.findUnique.mockResolvedValue({ email: 'test@fleet.dev', fullName: 'Test User' } as never)

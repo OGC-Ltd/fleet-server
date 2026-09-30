@@ -104,26 +104,33 @@ export async function reviewTheft(args: {
   const { orgId, id, userId, reviewer, outcome, note } = args
   const row = await prisma.fuelTheft.findFirst({
     where: { id, vehicle: { organisationId: orgId } },
-    select: { id: true, dismissedAt: true },
+    select: { id: true, vehicleId: true, dismissedAt: true },
   })
   if (!row) return null
   if (row.dismissedAt) return 'dismissed' as const
   return prisma.$transaction(async (tx) => {
     const now = new Date()
     const reviewStatus = outcome === 'ESCALATED' ? 'CONFIRMED_THEFT' as const : 'NOT_THEFT' as const
-    // Conditional on still being live, so a deletion that lands first wins.
+    // Deciding an alert is the ONLY way it leaves the dashboard (operator,
+    // 2026-09-30: no Delete button, so nothing goes without a trail). The
+    // decision, its note and who made it stay on the row. Conditional on still
+    // being live, so a decision that lands first wins.
     const { count } = await tx.fuelTheft.updateMany({
       where: { id, dismissedAt: null },
-      data: { reviewStatus, reviewedAt: now, reviewedById: userId, reviewNote: note },
+      data: {
+        reviewStatus, reviewedAt: now, reviewedById: userId, reviewNote: note,
+        dismissedAt: now, dismissedById: userId,
+      },
     })
     if (count === 0) return 'dismissed' as const
+    const dismissedIds = await sweepUnitSiblings(tx, { id, vehicleId: row.vehicleId, userId, now })
     const label = outcome === 'ESCALATED' ? 'THEFT' : 'NOT_THEFT'
     await tx.fuelEventLabel.upsert({
       where: { eventId_eventType_labelledBy: { eventId: id, eventType: 'THEFT', labelledBy: reviewer } },
       create: { eventId: id, eventType: 'THEFT', label, labelledBy: reviewer, note },
       update: { label, note, labelledAt: now },
     })
-    return tx.fuelTheft.findUniqueOrThrow({
+    const decided = await tx.fuelTheft.findUniqueOrThrow({
       where: { id },
       select: {
         id: true, vehicleId: true, stolenMl: true, reviewStatus: true, reviewedAt: true, reviewNote: true,
@@ -131,7 +138,49 @@ export async function reviewTheft(args: {
         vehicle: { select: { registrationPlate: true } },
       },
     })
+    return { ...decided, dismissedIds }
   })
+}
+
+/**
+ * Take the unit's OTHER live alerts off the dashboard with the one just
+ * cleared. The dashboard shows only a vehicle's newest open incident, so
+ * clearing that one alone uncovers the next-newest on the same unit, which
+ * reads as the alert coming straight back. Every other incident the dashboard
+ * could still show for this vehicle (the snapshot's own filter: announced,
+ * inside the window, after the epoch) goes with it. The rows are kept.
+ */
+export async function sweepUnitSiblings(
+  tx: Prisma.TransactionClient,
+  args: { id: string; vehicleId: string; userId: string | null; now: Date },
+): Promise<string[]> {
+  const { id, vehicleId, userId, now } = args
+  const siblings = await tx.fuelTheft.findMany({
+    where: {
+      vehicleId,
+      id: { not: id },
+      dismissedAt: null,
+      beganAt: {
+        gte: new Date(Math.max(now.getTime() - FUEL_INCIDENT_WINDOW_MS, FUEL_INCIDENT_EPOCH.getTime())),
+      },
+      OR: [
+        { drainCause: { in: [...ANNOUNCED_CAUSES] } },
+        { causeReason: { in: incidentReasonSlugs() } },
+      ],
+    },
+    select: { id: true },
+  }) ?? []
+  const siblingIds = siblings.map((r) => r.id)
+  if (siblingIds.length > 0) {
+    await tx.fuelTheft.updateMany({
+      where: { id: { in: siblingIds }, dismissedAt: null },
+      data: {
+        dismissedAt: now, dismissedById: userId,
+        reviewStatus: 'DISMISSED', reviewedAt: now, reviewedById: userId,
+      },
+    })
+  }
+  return siblingIds
 }
 
 /**
@@ -167,39 +216,10 @@ export async function dismissTheft(orgId: string, id: string, userId: string | n
       const won = await tx.fuelTheft.findUnique({ where: { id }, select: { id: true, vehicleId: true, dismissedAt: true } })
       return { ...(won ?? row), followUpId: null, dismissedIds: [] as string[] }
     }
-    // Deleting an alert clears the UNIT, not just the one drain. The dashboard
-    // shows only a vehicle's newest open incident, so deleting that one used
-    // to uncover the next-newest on the same unit — which read to the operator
-    // as the alert they had just deleted coming straight back. Every other
-    // incident the dashboard could still show for this vehicle (the snapshot's
-    // own filter: announced, inside the window, after the epoch) is dismissed
-    // with it. The rows are kept, like any deletion; only the clicked one opens
-    // a follow-up, since it is the one somebody actually looked at.
-    const siblings = await tx.fuelTheft.findMany({
-      where: {
-        vehicleId: row.vehicleId,
-        id: { not: id },
-        dismissedAt: null,
-        beganAt: {
-          gte: new Date(Math.max(now.getTime() - FUEL_INCIDENT_WINDOW_MS, FUEL_INCIDENT_EPOCH.getTime())),
-        },
-        OR: [
-          { drainCause: { in: [...ANNOUNCED_CAUSES] } },
-          { causeReason: { in: incidentReasonSlugs() } },
-        ],
-      },
-      select: { id: true },
-    }) ?? []
-    const siblingIds = siblings.map((r) => r.id)
-    if (siblingIds.length > 0) {
-      await tx.fuelTheft.updateMany({
-        where: { id: { in: siblingIds }, dismissedAt: null },
-        data: {
-          dismissedAt: now, dismissedById: userId,
-          reviewStatus: 'DISMISSED', reviewedAt: now, reviewedById: userId,
-        },
-      })
-    }
+    // Deleting an alert clears the UNIT, not just the one drain (see
+    // sweepUnitSiblings). Only the clicked one opens a follow-up, since it is
+    // the one somebody actually looked at.
+    const siblingIds = await sweepUnitSiblings(tx, { id, vehicleId: row.vehicleId, userId, now })
     // The alert as the person deleting it saw it. Read inside the transaction,
     // so it is the row exactly as it stood at the moment of the deletion.
     const full = await tx.fuelTheft.findUnique({
