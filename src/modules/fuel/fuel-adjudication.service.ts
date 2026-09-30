@@ -20,6 +20,7 @@
  * the severity say so rather than implying we corroborated it.
  */
 
+import { isOnProbeHold } from './probe-hold.js'
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { env } from '../../config/env.js'
@@ -80,6 +81,8 @@ export interface AdjudicateOutcome {
   sensorFault:    number
   stillPending:   number
   published:      number
+  /** Not announced: the unit is on probe hold (fuel/probe-hold). */
+  probeHold?:     number
   /** Millilitres reclassified as never having left the tank. */
   recoveredMl:    number
   /**
@@ -649,6 +652,10 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     // summary keeps only what nobody can call a theft. The ledger row above is
     // written either way.
     if (!mayUseTheftWording(verdict.cause.cause) && env.FUEL_RATE_ALERTS !== 'live') continue
+    // Probe hold (operator, 2026-10-01): a unit flagged for a fuel probe
+    // repair is never announced as a fuel theft until the repair resolves it.
+    // The ledger row above is still written. See fuel/probe-hold.
+    if (await isOnProbeHold(t.vehicleId)) { out.probeHold = (out.probeHold ?? 0) + 1; continue }
 
     const cause = verdict.cause
     const plate = t.vehicle.registrationPlate

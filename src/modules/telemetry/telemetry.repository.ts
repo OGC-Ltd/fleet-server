@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma.js'
+import { probeHoldVehicleIds } from '../fuel/probe-hold.js'
 import { overspeedLimitFor } from '../../lib/derived-alerts.js'
 import { warmSpeedPolicy } from '../../lib/speed-policy.js'
 import { Prisma } from '../../../generated/prisma/client.js'
@@ -958,7 +959,10 @@ export async function findFleetSnapshot(orgId: string) {
        -- counts in the 30-day history below); it is just no longer announced.
        AND t.dismissed_at IS NULL
      ORDER BY t.vehicle_id, t.began_at DESC`
-  const incidentByVehicle = new Map(incidents.map(i => [i.vehicle_id, i]))
+  // Probe hold: a unit flagged for a fuel probe repair shows no fuel theft
+  // incident until the repair resolves it (fuel/probe-hold).
+  const onHold = await probeHoldVehicleIds(incidents.map(i => i.vehicle_id))
+  const incidentByVehicle = new Map(incidents.filter(i => !onHold.has(i.vehicle_id)).map(i => [i.vehicle_id, i]))
 
   /**
    * The unit's recent record, for the vehicles that have an open incident.
@@ -980,7 +984,7 @@ export async function findFleetSnapshot(orgId: string) {
    * describing the same unit must not disagree because one of them respects a
    * one-off display cutoff.
    */
-  const flaggedIds = incidents.map(i => i.vehicle_id)
+  const flaggedIds = [...incidentByVehicle.keys()]
   const historyByVehicle = new Map<string, { n: number; ml: number; siphons: number; firstAt: Date }>()
   if (flaggedIds.length > 0) {
     const hist = await prisma.$queryRaw<Array<{
