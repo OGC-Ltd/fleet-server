@@ -144,3 +144,35 @@ describe('Repair overhaul: inspection checklist', () => {
   })
 })
 
+
+// A part named when the job is filed is an order (operator, 2026-10-01).
+describe('Repair report: a part named at filing', () => {
+  it('records it as an ordered spare part on the job', async () => {
+    const { createReport } = await import('../../src/modules/repairs/repairs.repository.js')
+    prismaMock.repairReport.create.mockResolvedValue({ id: 'rr1', items: [] } as never)
+
+    await createReport(TEST_ORG_ID, 'u1', {
+      items: [{ targetKind: 'probe', vehicleId: 'v1', outcome: 'needs_spare', sparePart: 'Capacitive fuel probe' }],
+    } as never)
+
+    const data = (prismaMock.repairReport.create.mock.calls[0][0] as { data: { items: { create: Array<Record<string, unknown>> } } }).data
+    expect(data.items.create[0]).toEqual(expect.objectContaining({
+      sparePart: 'Capacitive fuel probe',
+      spareParts: { create: [expect.objectContaining({
+        organisationId: TEST_ORG_ID, name: 'Capacitive fuel probe', orderedById: 'u1', orderedBy: 'Test User',
+      })] },
+    }))
+  })
+
+  it('orders nothing for a job filed as being fixed', async () => {
+    const { createReport } = await import('../../src/modules/repairs/repairs.repository.js')
+    prismaMock.repairReport.create.mockResolvedValue({ id: 'rr1', items: [] } as never)
+
+    await createReport(TEST_ORG_ID, 'u1', {
+      items: [{ targetKind: 'probe', vehicleId: 'v1', outcome: 'fixing' }],
+    } as never)
+
+    const data = (prismaMock.repairReport.create.mock.calls[0][0] as { data: { items: { create: Array<Record<string, unknown>> } } }).data
+    expect(data.items.create[0]).not.toHaveProperty('spareParts')
+  })
+})

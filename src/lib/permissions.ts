@@ -90,6 +90,13 @@ export const PERMISSION_CATALOGUE = {
   // technician), and Head of Section is not among them. Granted to existing
   // roles by migration 20260925090000_fuel_theft_followups.
   'fuel_theft:triage':     'Take on and decide fuel alert follow-ups',
+  // Open the Fuel Audit page. NOT in ORG_EVERYTHING: the operator named its
+  // readers one by one (2026-10-01) — platform administrator (wildcard),
+  // director, system administrator, manager, fleet manager, fleet analyst,
+  // head of security and assistant head of security. Seeing the page decides
+  // nothing: every action on it keeps its own slug (triage, repair:*).
+  // Granted by migration 20261001090000_fuel_audit_read.
+  'fuel_audit:read':       'Open the Fuel Audit',
 
   // Repair reporting. A technician walks the yard with a list of faulty
   // probes, works through it, and files ONE report covering every unit they
@@ -230,6 +237,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       ...ORG_EVERYTHING.filter((p) => !p.startsWith('user:') && !p.startsWith('role:')),
       'organisation:read',
       'fuel_theft:triage',
+      'fuel_audit:read',
     ],
   },
 
@@ -260,6 +268,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       // platform administrator are the only two that hand out a triage.
       'repair:assign',
       'fuel_theft:triage',
+      'fuel_audit:read',
       'user:create', 'user:update', 'user:delete', 'user:assign_role',
       'ingest_key:read', 'ingest_key:create', 'ingest_key:update', 'ingest_key:delete',
     ],
@@ -274,7 +283,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
   {
     slug: 'manager', name: 'Manager', platform: false, vehicleScopable: false,
     description: 'Everything within this organisation.',
-    permissions: [...ORG_EVERYTHING, 'fuel_theft:triage'],
+    permissions: [...ORG_EVERYTHING, 'fuel_theft:triage', 'fuel_audit:read'],
   },
 
   // ── Fleet operations ─────────────────────────────────────────────────────
@@ -283,7 +292,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     description: 'The whole fleet: vehicles, trips, routes, dispatch and fuel. Not its people.',
     // Manager minus the people: an organisation's fleet lead runs the units and
     // the work, and has no business reading or editing the user list.
-    permissions: [...ORG_EVERYTHING.filter((pm) => !pm.startsWith('user:') && !pm.startsWith('role:')), 'fuel_theft:triage'],
+    permissions: [...ORG_EVERYTHING.filter((pm) => !pm.startsWith('user:') && !pm.startsWith('role:')), 'fuel_theft:triage', 'fuel_audit:read'],
   },
 
   {
@@ -304,7 +313,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'analytics:read', 'analytics:export',
       'report:read', 'report:export', 'report:operations',
       'driver:read', 'driver:export',
-      'fuel_filling:read', 'fuel_theft:read',
+      'fuel_filling:read', 'fuel_theft:read', 'fuel_audit:read',
       'weighbridge:read', 'weighbridge:export',
       'geofence:read', 'route:read', 'dispatch:read',
     ],
@@ -322,7 +331,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       ...TRACKING, ...MAP_TOOLS, 'map:playback',
       'dashboard:read', 'trip:read', 'sensor:read',
       'geofence:read', 'geofence:create', 'geofence:update',
-      'fuel_theft:read', 'fuel_theft:create', 'fuel_theft:triage', 'fuel_filling:read',
+      'fuel_theft:read', 'fuel_theft:create', 'fuel_theft:triage', 'fuel_audit:read', 'fuel_filling:read',
       'driver:read',
       'report:read', 'report:export', 'report:operations',
     ],
@@ -333,7 +342,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     permissions: [
       ...TRACKING, ...MAP_TOOLS, 'map:playback',
       'dashboard:read', 'trip:read', 'sensor:read',
-      'geofence:read', 'fuel_theft:read', 'fuel_filling:read',
+      'geofence:read', 'fuel_theft:read', 'fuel_audit:read', 'fuel_filling:read',
       'driver:read',
       'report:read', 'report:operations',
     ],

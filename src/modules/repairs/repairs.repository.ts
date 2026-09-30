@@ -124,6 +124,19 @@ export async function createReport(orgId: string, userId: string, dto: CreateRep
    */
   const filedAt = new Date()
 
+  /*
+   * A part named when the job is filed ("needs a spare: Capacitive fuel
+   * probe") is an ORDER, and is recorded as one (operator, 2026-10-01): a
+   * RepairSparePart row, status ordered, so the job's Spare parts column
+   * shows it and it is collected and fitted like any part ordered later. It
+   * used to live only in the sparePart text, and the column read "No spare
+   * parts ordered" on a job waiting on one.
+   */
+  const ordersPart = dto.items.some((i) => i.outcome === 'needs_spare' && i.sparePart)
+  const reporter = ordersPart
+    ? await prisma.user.findUnique({ where: { id: userId }, select: { fullName: true } })
+    : null
+
   return prisma.repairReport.create({
     data: {
       organisationId: orgId,
@@ -153,6 +166,20 @@ export async function createReport(orgId: string, userId: string, dto: CreateRep
           // `calendarDay` did the parsing, so nothing below this line has to
           // know that the wire format was a string.
           ...(i.expectedResolutionAt ? { expectedResolutionAt: i.expectedResolutionAt } : {}),
+          ...(i.outcome === 'needs_spare' && i.sparePart ? {
+            spareParts: {
+              create: [{
+                organisationId: orgId,
+                name:           i.sparePart,
+                // The job's estimate is the only promised day the form asks for.
+                ...(i.expectedResolutionAt ? { expectedAt: i.expectedResolutionAt } : {}),
+                note:           'Filed as: Needs a spare part',
+                orderedById:    userId,
+                orderedBy:      reporter?.fullName ?? null,
+                orderedAt:      filedAt,
+              }],
+            },
+          } : {}),
         })),
       },
     },

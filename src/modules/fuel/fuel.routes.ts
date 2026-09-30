@@ -69,7 +69,9 @@ router.post('/followups/:followUpId/deescalate', triage, validateBody(followUpNo
 // a probe job in Repairs; a case whose job failed can have a new one raised.
 router.post('/followups/:followUpId/probe-fault', triage, validateBody(followUpNoteSchema), ctrl.probeFaultFollowUp)
 router.post('/followups/:followUpId/repair', triage, validateBody(followUpNoteSchema), ctrl.reraiseFollowUpRepair)
-router.get('/audit', triage, ctrl.listFuelAudit)
+// Reading the audit is its own grant (operator, 2026-10-01): the analyst and
+// the assistant head of security read it without holding a case.
+router.get('/audit', requirePermissionStrict('fuel_audit:read'), ctrl.listFuelAudit)
 
 // Signal alerts: the filter-and-residual detector (fuel-signal-alerts) run on
 // demand. Read-only — nothing here writes to the theft ledger or the feed.
