@@ -25,7 +25,7 @@ export const listFillingQuerySchema = cursorListBase
 // ── Follow-ups on dismissed incidents — see FuelTheftFollowUp ───────────────
 
 export const listFollowUpQuerySchema = z.object({
-  status: z.enum(['open', 'active', 'closed', 'all']).default('active'),
+  status: z.enum(['open', 'active', 'closed', 'audit', 'all']).default('active'),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 })
 export type ListFollowUpQuery = z.infer<typeof listFollowUpQuerySchema>
@@ -37,11 +37,29 @@ export const followUpNoteSchema = z.object({
 })
 export type FollowUpNoteDto = z.infer<typeof followUpNoteSchema>
 
+/**
+ * What an escalation is FOR. Escalating no longer means only "confirmed
+ * theft": a false alert escalated as a faulty probe goes to Repairs and the
+ * Fuel Audit instead. One button with a reason under it, not a button per
+ * reason, so the next kind of escalation is one more value here.
+ */
+export const ESCALATION_REASONS = ['theft', 'probe_fault'] as const
+export type EscalationReason = (typeof ESCALATION_REASONS)[number]
+
+/** Escalating a case: the note, and what it is escalated as. */
+export const escalateFollowUpSchema = z.object({
+  note: z.string().trim().min(3).max(2000),
+  reason: z.enum(ESCALATION_REASONS).default('theft'),
+})
+export type EscalateFollowUpDto = z.infer<typeof escalateFollowUpSchema>
+
 /** An administrator deciding a live alert from its window, without deleting it
- *  first. The reason is required for the same reason as followUpNoteSchema. */
+ *  first. The note is required for the same reason as followUpNoteSchema;
+ *  `reason` says what an escalation is for and is ignored on a de-escalation. */
 export const reviewTheftSchema = z.object({
   outcome: z.enum(['ESCALATED', 'DEESCALATED']),
   note: z.string().trim().min(3).max(2000),
+  reason: z.enum(ESCALATION_REASONS).default('theft'),
 })
 export type ReviewTheftDto = z.infer<typeof reviewTheftSchema>
 
@@ -75,7 +93,7 @@ export const createTheftSchema = z.object({
 export const listTheftQuerySchema = cursorListBase.extend({
   /** Filter by what reviewers concluded; `none` = never deleted. See
    *  FuelTheft.reviewStatus. */
-  reviewStatus: z.enum(['none', 'DISMISSED', 'UNDER_REVIEW', 'CONFIRMED_THEFT', 'NOT_THEFT']).optional(),
+  reviewStatus: z.enum(['none', 'DISMISSED', 'UNDER_REVIEW', 'CONFIRMED_THEFT', 'NOT_THEFT', 'PROBE_FAULT']).optional(),
 })
 
 /** The review-outcome analytics window, on when the fuel left (`beganAt`). */

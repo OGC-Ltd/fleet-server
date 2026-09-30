@@ -475,6 +475,158 @@ describe('Fuel follow-ups', () => {
     })
   })
 
+  describe('POST /fuel/followups/:id/probe-fault', () => {
+    const accepted = row({ status: 'ACCEPTED', acceptedById: ME, acceptedBy: person(ME, 'Test User') })
+    const job = {
+      id: 'ri1', stage: 'pending', outcome: 'audit', resolvedAt: null, fixNote: null, assignmentStatus: 'accepted',
+      expectedResolutionAt: null, stageChangedAt: new Date(), stageHistory: [], createdAt: new Date(),
+      assignedTo: null, resolvedBy: null,
+    }
+
+    it('keeps the case open in audit and raises a pending probe job in Repairs', async () => {
+      prismaMock.fuelTheftFollowUp.findFirst
+        .mockResolvedValueOnce(accepted as never)
+        .mockResolvedValueOnce({ ...accepted, status: 'PROBE_FAULT', repairItemId: 'ri1', repairItem: job } as never)
+      prismaMock.user.findUnique.mockResolvedValue({ email: 'test@fleet.dev', fullName: 'Test User' } as never)
+      prismaMock.fuelTheftFollowUp.updateMany.mockResolvedValue({ count: 1 })
+      prismaMock.repairReportItem.findFirst.mockResolvedValue(null)
+      prismaMock.repairReport.create.mockResolvedValue({ items: [{ id: 'ri1' }] } as never)
+
+      const res = await request(app).post(`${BASE}/fu1/probe-fault`).send({ note: 'Level jumps 40 L while driving' })
+
+      expect(res.status).toBe(200)
+      expect(res.body.data).toMatchObject({ status: 'PROBE_FAULT', repairItem: { id: 'ri1', stage: 'pending' } })
+      expect(prismaMock.fuelTheftFollowUp.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: 'fu1', status: 'ACCEPTED', acceptedById: ME },
+        data: { status: 'PROBE_FAULT' },
+      }))
+      expect(prismaMock.repairReport.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          items: { create: [expect.objectContaining({ targetKind: 'probe', vehicleId: 'v1', outcome: 'audit', stage: 'pending' })] },
+        }),
+      }))
+      expect(prismaMock.fuelTheftFollowUp.update).toHaveBeenCalledWith({ where: { id: 'fu1' }, data: { repairItemId: 'ri1' } })
+      expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ reviewStatus: 'PROBE_FAULT' }),
+      }))
+      expect(prismaMock.fuelEventLabel.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        create: expect.objectContaining({ label: 'NOT_THEFT' }),
+      }))
+    })
+
+    it('joins the probe job already open for the unit instead of raising a second', async () => {
+      prismaMock.fuelTheftFollowUp.findFirst
+        .mockResolvedValueOnce(accepted as never)
+        .mockResolvedValueOnce({ ...accepted, status: 'PROBE_FAULT', repairItemId: 'open1', repairItem: { ...job, id: 'open1' } } as never)
+      prismaMock.user.findUnique.mockResolvedValue({ email: 'test@fleet.dev', fullName: 'Test User' } as never)
+      prismaMock.fuelTheftFollowUp.updateMany.mockResolvedValue({ count: 1 })
+      prismaMock.repairReportItem.findFirst.mockResolvedValue({ id: 'open1' } as never)
+
+      const res = await request(app).post(`${BASE}/fu1/probe-fault`).send({ note: 'Same probe as last week' })
+
+      expect(res.status).toBe(200)
+      expect(prismaMock.repairReport.create).not.toHaveBeenCalled()
+      expect(prismaMock.fuelTheftFollowUp.update).toHaveBeenCalledWith({ where: { id: 'fu1' }, data: { repairItemId: 'open1' } })
+    })
+
+    it('is reserved for the account that accepted it', async () => {
+      prismaMock.fuelTheftFollowUp.findFirst.mockResolvedValue(row({ status: 'ACCEPTED', acceptedById: 'other', acceptedBy: person('other', 'Otto') }) as never)
+
+      const res = await request(app).post(`${BASE}/fu1/probe-fault`).send({ note: 'Probe fault' })
+
+      expect(res.status).toBe(403)
+      expect(prismaMock.repairReport.create).not.toHaveBeenCalled()
+    })
+
+    it('is what escalating with reason probe_fault does', async () => {
+      prismaMock.fuelTheftFollowUp.findFirst
+        .mockResolvedValueOnce(accepted as never)
+        .mockResolvedValueOnce({ ...accepted, status: 'PROBE_FAULT', repairItemId: 'ri1', repairItem: job } as never)
+      prismaMock.user.findUnique.mockResolvedValue({ email: 'test@fleet.dev', fullName: 'Test User' } as never)
+      prismaMock.fuelTheftFollowUp.updateMany.mockResolvedValue({ count: 1 })
+      prismaMock.repairReportItem.findFirst.mockResolvedValue(null)
+      prismaMock.repairReport.create.mockResolvedValue({ items: [{ id: 'ri1' }] } as never)
+
+      const res = await request(app).post(`${BASE}/fu1/escalate`).send({ reason: 'probe_fault', note: 'Probe flatlines' })
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.status).toBe('PROBE_FAULT')
+      expect(prismaMock.fuelTheftFollowUp.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        data: { status: 'PROBE_FAULT' },
+      }))
+    })
+
+    it('cannot be escalated or de-escalated while it waits on its repair', async () => {
+      prismaMock.fuelTheftFollowUp.findFirst.mockResolvedValue({ ...accepted, status: 'PROBE_FAULT', repairItemId: 'ri1', repairItem: job } as never)
+
+      const res = await request(app).post(`${BASE}/fu1/deescalate`).send({ note: 'Closing it' })
+
+      expect(res.status).toBe(409)
+    })
+  })
+
+  describe('repair sign-off', () => {
+    it('closes the cases waiting on a probe job when it is signed off fixed', async () => {
+      const { repairSignedOff } = await import('../../src/modules/fuel/fuel-followup.service.js')
+      const at = new Date('2026-09-30T08:00:00Z')
+      prismaMock.repairReportItem.findUnique.mockResolvedValue({ stage: 'fixed', resolvedAt: at, resolvedById: 'tech', fixNote: 'New probe fitted' } as never)
+      prismaMock.fuelTheftFollowUp.findMany.mockResolvedValue([{ id: 'fu1', actions: [] }] as never)
+      prismaMock.fuelTheftFollowUp.updateMany.mockResolvedValue({ count: 1 })
+      prismaMock.fuelTheftFollowUp.findFirst.mockResolvedValue(row({ status: 'PROBE_FIXED' }) as never)
+
+      await repairSignedOff(TEST_ORG_ID, 'ri1')
+
+      expect(prismaMock.fuelTheftFollowUp.updateMany).toHaveBeenCalledWith({
+        where: { id: 'fu1', status: 'PROBE_FAULT', repairItemId: 'ri1' },
+        data: { status: 'PROBE_FIXED', resolvedAt: at },
+      })
+      expect(prismaMock.fuelTheftFollowUpAction.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ followUpId: 'fu1', kind: 'PROBE_FIXED', actorId: 'tech' }),
+      }))
+    })
+
+    it('leaves them in audit, logged once, when it is signed off without a fix', async () => {
+      const { repairSignedOff } = await import('../../src/modules/fuel/fuel-followup.service.js')
+      const at = new Date('2026-09-30T08:00:00Z')
+      prismaMock.repairReportItem.findUnique.mockResolvedValue({ stage: 'failed', resolvedAt: at, resolvedById: 'tech', fixNote: 'Needs a new tank' } as never)
+      prismaMock.fuelTheftFollowUp.findMany.mockResolvedValue([
+        { id: 'fu1', actions: [] },
+        { id: 'fu2', actions: [{ at }] },
+      ] as never)
+      prismaMock.fuelTheftFollowUp.findFirst.mockResolvedValue(row({ status: 'PROBE_FAULT' }) as never)
+
+      await repairSignedOff(TEST_ORG_ID, 'ri1')
+
+      expect(prismaMock.fuelTheftFollowUp.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.fuelTheftFollowUpAction.create).toHaveBeenCalledTimes(1)
+      expect(prismaMock.fuelTheftFollowUpAction.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ followUpId: 'fu1', kind: 'REPAIR_FAILED' }),
+      }))
+    })
+  })
+
+  describe('GET /fuel/audit', () => {
+    it('groups the probe-fault cases by unit with the unit\'s probe repairs', async () => {
+      prismaMock.fuelTheftFollowUp.findMany
+        .mockResolvedValueOnce([] as never) // no sign-offs to catch up
+        .mockResolvedValueOnce([row({ status: 'PROBE_FAULT' }), row({ id: 'fu2', status: 'PROBE_FIXED' })] as never)
+      prismaMock.repairReportItem.findMany.mockResolvedValue([{ id: 'ri1', vehicleId: 'v1', stage: 'pending' }] as never)
+      prismaMock.sensorFaultEpisode.findMany.mockResolvedValue([] as never)
+
+      const res = await request(app).get(`/api/v1/organisations/${TEST_ORG_ID}/fuel/audit`)
+
+      expect(res.status).toBe(200)
+      expect(res.body.data).toHaveLength(1)
+      expect(res.body.data[0]).toMatchObject({
+        vehicleId: 'v1', plate: 'MUFINDI - DZ 20', openCases: 1, fixedCases: 1,
+        repairs: [{ id: 'ri1' }],
+      })
+      expect(prismaMock.fuelTheftFollowUp.findMany).toHaveBeenLastCalledWith(expect.objectContaining({
+        where: { organisationId: TEST_ORG_ID, status: { in: ['PROBE_FAULT', 'PROBE_FIXED'] } },
+      }))
+    })
+  })
+
   describe('POST /fuel/followups/:id/notes', () => {
     it('logs a note from the owner', async () => {
       const accepted = row({ status: 'ACCEPTED', acceptedById: ME, acceptedBy: person(ME, 'Test User') })

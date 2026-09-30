@@ -7,7 +7,7 @@ import { getProbeReport } from './probe-report.service.js'
 import { getFleetTankState } from './fuel-tank-state.service.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import * as signals from './fuel-signal-alerts.service.js'
-import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, AssignFollowUpDto, RecallFollowUpDto, TheftOutcomesQuery, ReviewTheftDto, SignalAlertQuery, EvaluateSignalsDto } from './fuel.schema.js'
+import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, AssignFollowUpDto, RecallFollowUpDto, TheftOutcomesQuery, ReviewTheftDto, SignalAlertQuery, EvaluateSignalsDto, EscalateFollowUpDto } from './fuel.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -46,8 +46,8 @@ export const theftReviewRights: RequestHandler = async (req, res, next) => {
 
 export const reviewTheft: RequestHandler = async (req, res, next) => {
   try {
-    const { outcome, note } = req.body as ReviewTheftDto
-    sendSuccess(res, await service.reviewTheft(p(req, 'orgId'), p(req, 'theftId'), actor(req), outcome, note))
+    const { outcome, note, reason } = req.body as ReviewTheftDto
+    sendSuccess(res, await service.reviewTheft(p(req, 'orgId'), p(req, 'theftId'), actor(req), outcome, note, reason))
   } catch (err) { next(err) }
 }
 
@@ -124,8 +124,10 @@ export const noteFollowUp: RequestHandler = async (req, res, next) => {
 
 export const escalateFollowUp: RequestHandler = async (req, res, next) => {
   try {
-    const { note } = req.body as FollowUpNoteDto
-    sendSuccess(res, await followUps.resolveFollowUp(p(req, 'orgId'), p(req, 'followUpId'), actor(req), 'ESCALATED', note))
+    const { note, reason } = req.body as EscalateFollowUpDto
+    sendSuccess(res, reason === 'probe_fault'
+      ? await followUps.markProbeFault(p(req, 'orgId'), p(req, 'followUpId'), actor(req), note)
+      : await followUps.resolveFollowUp(p(req, 'orgId'), p(req, 'followUpId'), actor(req), 'ESCALATED', note))
   } catch (err) { next(err) }
 }
 
@@ -133,6 +135,26 @@ export const deescalateFollowUp: RequestHandler = async (req, res, next) => {
   try {
     const { note } = req.body as FollowUpNoteDto
     sendSuccess(res, await followUps.resolveFollowUp(p(req, 'orgId'), p(req, 'followUpId'), actor(req), 'DEESCALATED', note))
+  } catch (err) { next(err) }
+}
+
+export const probeFaultFollowUp: RequestHandler = async (req, res, next) => {
+  try {
+    const { note } = req.body as FollowUpNoteDto
+    sendSuccess(res, await followUps.markProbeFault(p(req, 'orgId'), p(req, 'followUpId'), actor(req), note))
+  } catch (err) { next(err) }
+}
+
+export const reraiseFollowUpRepair: RequestHandler = async (req, res, next) => {
+  try {
+    const { note } = req.body as FollowUpNoteDto
+    sendSuccess(res, await followUps.reraiseRepair(p(req, 'orgId'), p(req, 'followUpId'), actor(req), note))
+  } catch (err) { next(err) }
+}
+
+export const listFuelAudit: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await followUps.listAudit(p(req, 'orgId'), req.user?.id ?? null))
   } catch (err) { next(err) }
 }
 

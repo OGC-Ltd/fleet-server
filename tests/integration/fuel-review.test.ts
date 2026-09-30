@@ -79,6 +79,50 @@ describe('POST /fuel/thefts/:id/review', () => {
     }))
   })
 
+  it('escalated as a faulty probe: off the dashboard, a case in Fuel Audit and a probe job in Repairs', async () => {
+    asAdmin()
+    prismaMock.fuelTheft.findFirst.mockResolvedValue({ id: 'th1', dismissedAt: null } as never)
+    prismaMock.fuelTheft.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.user.findUnique.mockResolvedValue({ email: 'test@fleet.dev', fullName: 'Test User' } as never)
+    prismaMock.fuelTheft.findUniqueOrThrow.mockResolvedValue({
+      id: 'th1', vehicleId: 'v1', vehicle: { registrationPlate: 'MUFINDI: EX 10', name: null }, driver: null,
+    } as never)
+    prismaMock.repairReportItem.findFirst.mockResolvedValue(null)
+    prismaMock.repairReport.create.mockResolvedValue({ items: [{ id: 'ri1' }] } as never)
+    prismaMock.fuelTheftFollowUp.create.mockResolvedValue({ id: 'fu9' } as never)
+    prismaMock.fuelTheftFollowUp.findFirst.mockResolvedValue({
+      id: 'fu9', status: 'PROBE_FAULT', acceptedBy: { id: ME, fullName: 'Test User' }, actions: [],
+      theft: { id: 'th1', vehicleId: 'v1', stolenMl: 10_700, vehicle: { registrationPlate: 'MUFINDI: EX 10' } },
+    } as never)
+
+    const res = await request(app).post(`${BASE}/th1/review`)
+      .send({ outcome: 'ESCALATED', reason: 'probe_fault', note: 'Level jumps on rough road' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({ review: { status: 'PROBE_FAULT', by: 'Test User' }, followUpId: 'fu9' })
+    expect(prismaMock.fuelTheft.updateMany).toHaveBeenCalledWith({
+      where: { id: 'th1', dismissedAt: null },
+      data: expect.objectContaining({ dismissedAt: expect.any(Date), reviewStatus: 'PROBE_FAULT' }),
+    })
+    expect(prismaMock.fuelTheftFollowUp.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ theftId: 'th1', status: 'PROBE_FAULT', acceptedById: ME, repairItemId: 'ri1' }),
+    }))
+    expect(prismaMock.repairReport.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        items: { create: [expect.objectContaining({ targetKind: 'probe', vehicleId: 'v1', outcome: 'audit', stage: 'pending' })] },
+      }),
+    }))
+    expect(prismaMock.fuelEventLabel.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ label: 'NOT_THEFT' }),
+    }))
+  })
+
+  it('rejects an escalation reason it does not know', async () => {
+    asAdmin()
+    const res = await request(app).post(`${BASE}/th1/review`).send({ outcome: 'ESCALATED', reason: 'aliens', note: 'Seen on camera' })
+    expect(res.status).toBe(400)
+  })
+
   it('is for administrators only', async () => {
     const res = await request(app).post(`${BASE}/th1/review`).send({ outcome: 'ESCALATED', note: 'Seen on camera' })
 

@@ -1310,7 +1310,11 @@ model RepairReportItem {
   /// what the technician was sent out for.
   faultKind      String? @map("fault_kind")
 
-  /// 'fixing' | 'needs_spare' | 'cannot_fix'
+  /// 'fixing' | 'needs_spare' | 'cannot_fix' | 'audit'
+  ///
+  /// 'audit' is the one outcome no technician recorded: the job was raised by
+  /// a fuel case decided as a faulty probe (Fuel Audit), and nobody has been
+  /// out to the unit yet. It lands on 'pending'.
   ///
   /// What the technician DID on the day, frozen. Not where the job is — that
   /// is `stage`, which keeps moving after the report is filed. The first
@@ -1386,6 +1390,9 @@ model RepairReportItem {
   assignedBy   User?               @relation("RepairItemsAssignedBy", fields: [assignedById], references: [id])
   resolvedBy   User?               @relation("RepairItemsResolved", fields: [resolvedById], references: [id])
   faultEpisode SensorFaultEpisode? @relation(fields: [faultEpisodeId], references: [id], onDelete: SetNull)
+  /// Fuel cases that found this probe faulty (Fuel Audit). Signing the job
+  /// off fixed closes them.
+  fuelFollowUps FuelTheftFollowUp[]
 
   @@index([reportId])
   /// The open-jobs list, and the "Reported" badge on the probe table.
@@ -2055,6 +2062,8 @@ enum FuelAlertReview {
   CONFIRMED_THEFT
   /// De-escalated: not a theft.
   NOT_THEFT
+  /// Not a theft: a faulty fuel probe, sent to Repairs.
+  PROBE_FAULT
 }
 
 /// Where a follow-up stands. See FuelTheftFollowUp.
@@ -2067,6 +2076,12 @@ enum FuelFollowUpStatus {
   ESCALATED
   /// Closed by its owner as not a theft.
   DEESCALATED
+  /// Decided by its owner as a faulty fuel probe, not a theft. Still OPEN
+  /// work: it sits on the Fuel Audit page with a probe job in Repairs, and
+  /// closes only when that job is signed off fixed.
+  PROBE_FAULT
+  /// A PROBE_FAULT whose repair job was signed off fixed. Closed.
+  PROBE_FIXED
 }
 
 /// One entry in a follow-up's log. See FuelTheftFollowUpAction.
@@ -2083,6 +2098,15 @@ enum FuelFollowUpActionKind {
   /// An administrator took it back from the person it was with (`subjectId`),
   /// assigned or already reviewing, and returned it to the open pool.
   RECALLED
+  /// The owner found the cause was a faulty fuel probe (the reason, `note`).
+  PROBE_FAULT
+  /// A probe job was raised in Repairs for it, or it was linked to the one
+  /// already open for the unit (`note` says which).
+  REPAIR_RAISED
+  /// Its repair job was signed off without a fix. The case stays in audit.
+  REPAIR_FAILED
+  /// Its repair job was signed off fixed, which closed the case.
+  PROBE_FIXED
 }
 
 /// The follow-up a dismissed fuel incident triggers.
@@ -2127,9 +2151,14 @@ model FuelTheftFollowUp {
   /// being rewritten by the adjudication sweep, so without this nobody could
   /// later say what the person who deleted it was actually looking at.
   incidentSnapshot Json?              @map("incident_snapshot")
+  /// The probe job in Repairs a PROBE_FAULT decision raised or joined. Not
+  /// unique: two cases on one unit share its one open probe job (the open-
+  /// target index allows one). Kept after the job closes, as the record.
+  repairItemId     String?            @map("repair_item_id")
 
   organisation Organisation              @relation(fields: [organisationId], references: [id])
   theft        FuelTheft                 @relation(fields: [theftId], references: [id])
+  repairItem   RepairReportItem?         @relation(fields: [repairItemId], references: [id], onDelete: SetNull)
   dismissedBy  User?                     @relation("FollowUpDismissedBy", fields: [dismissedById], references: [id], onDelete: SetNull)
   acceptedBy   User?                     @relation("FollowUpAcceptedBy", fields: [acceptedById], references: [id], onDelete: SetNull)
   assignedTo   User?                     @relation("FollowUpAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
@@ -2139,6 +2168,7 @@ model FuelTheftFollowUp {
   /// Serves the follow-up list: one organisation, filtered by status, newest
   /// first.
   @@index([organisationId, status, openedAt])
+  @@index([repairItemId])
   @@map("fuel_theft_followups")
 }
 
