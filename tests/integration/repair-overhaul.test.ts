@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import request from 'supertest'
 import type { Express } from 'express'
 import { TEST_ORG_ID } from '../helpers/factories.js'
-import { authMock, authorizeMock, resetTestSubject } from '../helpers/auth-mock.js'
+import { authMock, authorizeMock, resetTestSubject, setTestSubject, currentTestSubject } from '../helpers/auth-mock.js'
 
 vi.mock('../../src/lib/prisma.js')
 
@@ -174,5 +174,48 @@ describe('Repair report: a part named at filing', () => {
 
     const data = (prismaMock.repairReport.create.mock.calls[0][0] as { data: { items: { create: Array<Record<string, unknown>> } } }).data
     expect(data.items.create[0]).not.toHaveProperty('spareParts')
+  })
+})
+
+// Technicians work only jobs assigned to them and accepted (operator, 2026-10-01).
+describe('Repair jobs: a technician works only an accepted job of their own', () => {
+  const TECH = ['repair:read', 'repair:create', 'repair:resolve']
+  const me = () => currentTestSubject().user.id
+
+  it('refuses a job assigned to somebody else', async () => {
+    setTestSubject({ permissions: TECH })
+    prismaMock.repairReportItem.findFirst.mockResolvedValue({ assignedToId: 'someone-else', assignmentStatus: 'accepted' } as never)
+    const res = await request(app).post(`${BASE}/ri1/stage`).send({ stage: 'fixing' })
+    expect(res.status).toBe(403)
+    expect(JSON.stringify(res.body)).toMatch(/not assigned to you/)
+  })
+
+  it('refuses their own job until they accept it', async () => {
+    setTestSubject({ permissions: TECH })
+    prismaMock.repairReportItem.findFirst.mockResolvedValue({ assignedToId: me(), assignmentStatus: 'pending' } as never)
+    const res = await request(app).post(`${BASE}/ri1/parts`).send({ name: 'FLS probe', quantity: 1 })
+    expect(res.status).toBe(403)
+    expect(JSON.stringify(res.body)).toMatch(/Accept this job/)
+    expect(prismaMock.repairSparePart.create).not.toHaveBeenCalled()
+  })
+
+  it('lets them work it once accepted', async () => {
+    setTestSubject({ permissions: TECH })
+    prismaMock.repairReportItem.findFirst
+      .mockResolvedValueOnce({ assignedToId: me(), assignmentStatus: 'accepted' } as never)
+      .mockResolvedValue(job('pending') as never)
+    prismaMock.repairSparePart.create.mockResolvedValue({ id: 'sp1', name: 'FLS probe', status: 'ordered' } as never)
+    prismaMock.repairSparePart.findMany.mockResolvedValue([] as never)
+    const res = await request(app).post(`${BASE}/ri1/parts`).send({ name: 'FLS probe', quantity: 1 })
+    expect(res.status).toBe(201)
+  })
+
+  it('does not hold back a role with repair:work_any', async () => {
+    setTestSubject({ permissions: [...TECH, 'repair:work_any'] })
+    prismaMock.repairReportItem.findFirst.mockResolvedValue(job('pending') as never)
+    prismaMock.repairSparePart.create.mockResolvedValue({ id: 'sp1', name: 'FLS probe', status: 'ordered' } as never)
+    prismaMock.repairSparePart.findMany.mockResolvedValue([] as never)
+    const res = await request(app).post(`${BASE}/ri1/parts`).send({ name: 'FLS probe', quantity: 1 })
+    expect(res.status).toBe(201)
   })
 })

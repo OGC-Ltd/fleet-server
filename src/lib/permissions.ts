@@ -111,6 +111,7 @@ export const PERMISSION_CATALOGUE = {
   'repair:create':         'File a repair report',
   'repair:assign':         'Assign a repair job to a technician',
   'repair:resolve':        'Close a repair job',
+  'repair:work_any':       'Work any open repair job, not only an accepted one of your own',
 
   // Device credentials. Minting one is a way to write telemetry for a whole
   // organisation, so it stays with administration rather than operations.
@@ -190,6 +191,9 @@ const ORG_EVERYTHING: PermissionSlug[] = [
   // wildcard. Heads of section, managers and fleet managers keep every other
   // repair verb: they read the board, file a report and sign one off.
   'repair:read', 'repair:create', 'repair:resolve',
+  // Work ANY open job, not only one assigned to you and accepted
+  // (repairs.authz requireWorkableJob). Not held by the technician.
+  'repair:work_any',
   'vehicle:create', 'vehicle:update', 'vehicle:delete',
   'trip:create',
   'cargo:read', 'cargo:update', 'cargo:delete',

@@ -61,7 +61,10 @@
  * somebody who has never been granted anything beyond their own employer.
  */
 
+import type { RequestHandler } from 'express'
 import { prisma } from '../../lib/prisma.js'
+import { holdsPermission } from '../../middleware/authorize.js'
+import { ForbiddenError, NotFoundError } from '../../core/errors/errors.js'
 
 /** Roles whose holders may hand a triage out. */
 export const TRIAGE_ASSIGNER_ROLE_SLUGS = ['admin', 'super_admin'] as const
@@ -218,4 +221,40 @@ export async function canSignOffTriage(
   // somebody who may close it when the person it was given to cannot.
   const admin = await canAssignTriage(userId, orgId)
   return admin.ok ? { ok: true, as: 'administrator' } : { ok: false, reason: 'not_yours' }
+}
+
+
+/**
+ * Working a job is the accepted assignee's (operator, 2026-10-01).
+ *
+ * A technician may move a job's stage, record its inspections, order and
+ * collect its parts, and sign it off ONLY when the job is assigned to them
+ * and they have accepted it. Every other job they can read, and nothing more.
+ *
+ * `repair:work_any` lifts the rule: held by every role that could resolve
+ * repairs before this rule existed (system administrator, head of section,
+ * manager, fleet manager, director), and by the platform administrator
+ * through its wildcard. NOT by the technician. Sign-off keeps its own finer
+ * rule for those roles (canSignOffTriage).
+ *
+ * Sits after the route's permission gate, on every route that writes to a job.
+ */
+export const requireWorkableJob: RequestHandler = async (req, _res, next) => {
+  try {
+    if (await holdsPermission(req, 'repair:work_any')) return next()
+    const orgId = req.params['orgId'] as string
+    const itemId = req.params['itemId'] as string
+    const job = await prisma.repairReportItem.findFirst({
+      where: { id: itemId, organisationId: orgId },
+      select: { assignedToId: true, assignmentStatus: true },
+    })
+    if (!job) throw new NotFoundError('Repair job not found')
+    if (job.assignedToId !== req.user?.id) {
+      throw new ForbiddenError('This job is not assigned to you. You can read it, but only the technician it is assigned to can work it')
+    }
+    if (job.assignmentStatus !== 'accepted') {
+      throw new ForbiddenError('Accept this job before working it')
+    }
+    next()
+  } catch (err) { next(err) }
 }

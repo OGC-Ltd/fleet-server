@@ -187,6 +187,20 @@ export function requirePermissionStrict(slug: string | PermissionResolver): Requ
 }
 
 /**
+ * Does the caller hold `slug` in the path organisation? A question, not a
+ * gate: for rules that widen with a permission rather than stop without one
+ * (repairs.authz requireWorkableJob: `repair:work_any` lifts the
+ * accepted-assignment rule).
+ */
+export async function holdsPermission(req: Parameters<RequestHandler>[0], slug: string): Promise<boolean> {
+  const userId = req.user?.id
+  const orgId = (req.params['orgId'] as string | undefined) ?? null
+  if (!userId || !orgId) return false
+  const subject = await resolveSubject(userId)
+  return canReachOrg(subject, orgId) && can(subject, orgId, slug)
+}
+
+/**
  * Populate `req.authz` without demanding a particular permission.
  *
  * For routes whose access is settled by `requireOrgAccess` alone but which

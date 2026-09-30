@@ -155,6 +155,8 @@ export function authorizeMock() {
       }
       next()
     }),
+    holdsPermission: vi.fn(async (_req: unknown, slug: string) =>
+      subject.permissions.includes('*') || subject.permissions.includes(slug)),
     attachAuthz: vi.fn((req: Record<string, unknown>, _res: unknown, next: () => void) => {
       req['authz'] = {
         userId:     subject.user.id,

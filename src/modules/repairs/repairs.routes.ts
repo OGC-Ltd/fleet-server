@@ -28,6 +28,7 @@ import {
   setInspectionSchema, addSparePartSchema, updateSparePartSchema,
 } from './repairs.schema.js'
 import * as ctrl from './repairs.controller.js'
+import { requireWorkableJob } from './repairs.authz.js'
 import { emitDashboardRepairChanged } from '../../lib/sse.js'
 
 const router = Router({ mergeParams: true })
@@ -63,17 +64,17 @@ router.get('/assignees', requirePermission('repair:assign'), ctrl.listAssignees)
 router.post('/', requirePermissionStrict('repair:create'), validateBody(createRepairReportSchema), ctrl.createReport)
 router.post('/items/:itemId/assign', requirePermissionStrict('repair:assign'), validateBody(assignRepairItemSchema), ctrl.assignItem)
 router.post('/items/:itemId/assignment-response', requirePermissionStrict('repair:read'), validateBody(respondToAssignmentSchema), ctrl.respondToAssignment)
-router.post('/items/:itemId/resolve', requirePermissionStrict('repair:resolve'), validateBody(resolveItemSchema), ctrl.resolveItem)
+router.post('/items/:itemId/resolve', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(resolveItemSchema), ctrl.resolveItem)
 // Strict for the same reason resolve is, and it is the weaker claim of the two
 // — but it writes a line onto a durable trail under a named person, and the
 // stage is what the people ordering spares read to decide whether to order.
-router.post('/items/:itemId/stage', requirePermissionStrict('repair:resolve'), validateBody(setStageSchema), ctrl.setStage)
+router.post('/items/:itemId/stage', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(setStageSchema), ctrl.setStage)
 // The overhaul audit: the checklist and the spares ordered for the fix (repairs.overhaul).
 // Whoever may work a job may record its overhaul, so the same slug as a stage move.
 router.get('/items/:itemId/overhaul', requirePermissionStrict('repair:read'), ctrl.getOverhaul)
-router.post('/items/:itemId/inspections', requirePermissionStrict('repair:resolve'), validateBody(setInspectionSchema), ctrl.setInspection)
-router.post('/items/:itemId/parts', requirePermissionStrict('repair:resolve'), validateBody(addSparePartSchema), ctrl.addSparePart)
-router.post('/items/:itemId/parts/:partId', requirePermissionStrict('repair:resolve'), validateBody(updateSparePartSchema), ctrl.updateSparePart)
+router.post('/items/:itemId/inspections', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(setInspectionSchema), ctrl.setInspection)
+router.post('/items/:itemId/parts', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(addSparePartSchema), ctrl.addSparePart)
+router.post('/items/:itemId/parts/:partId', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(updateSparePartSchema), ctrl.updateSparePart)
 // Last: `/items` would otherwise be swallowed by `/:reportId`.
 router.get('/:reportId', requirePermission('repair:read'), ctrl.getReport)
 
