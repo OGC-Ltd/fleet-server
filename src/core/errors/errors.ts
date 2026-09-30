@@ -30,6 +30,12 @@ export class ConflictError extends AppError {
   }
 }
 
+export class GoneError extends AppError {
+  constructor(message = 'Gone') {
+    super(message, 410)
+  }
+}
+
 export class UnprocessableError extends AppError {
   constructor(message = 'Unprocessable entity') {
     super(message, 422)
