@@ -2,14 +2,14 @@ import { ConflictError, ForbiddenError, NotFoundError } from '../../core/errors/
 import * as repo from './fuel.repository.js'
 import { emitDashboardFuelIncidentDismissed } from '../../lib/sse.js'
 import { forgetSnapshotIncident, patchSnapshotIncidentReview } from '../telemetry/fleet-snapshot.cache.js'
-import { followUpOpened } from './fuel-followup.service.js'
+import { escalateLiveAsProbeFault, followUpOpened } from './fuel-followup.service.js'
 import { logger } from '../../lib/logger.js'
 import { prisma } from '../../lib/prisma.js'
 import { publishNotification } from '../../lib/notifications/notification.store.js'
 // Who decides a live alert is who assigns a follow-up: the organisation's
 // administrator or the platform administrator (repairs.authz). One rule.
 import { canAssignTriage } from '../repairs/repairs.authz.js'
-import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, TheftOutcomesQuery } from './fuel.schema.js'
+import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, TheftOutcomesQuery, EscalationReason } from './fuel.schema.js'
 
 export const listFillings = (orgId: string, q: ListFillingQuery) => repo.findAllFillings(orgId, q)
 
@@ -51,7 +51,8 @@ export async function theftOutcomes(orgId: string, q: TheftOutcomesQuery) {
       v.count++; v.litres += r.stolenMl / 1000
       confirmedByVehicle.set(r.vehicleId, v)
     }
-    if ((r.reviewStatus === 'CONFIRMED_THEFT' || r.reviewStatus === 'NOT_THEFT') && r.dismissedAt && r.reviewedAt) {
+    if ((r.reviewStatus === 'CONFIRMED_THEFT' || r.reviewStatus === 'NOT_THEFT' || r.reviewStatus === 'PROBE_FAULT')
+      && r.dismissedAt && r.reviewedAt) {
       hoursToDecision.push((r.reviewedAt.getTime() - r.dismissedAt.getTime()) / 3_600_000)
     }
   }
@@ -62,7 +63,7 @@ export async function theftOutcomes(orgId: string, q: TheftOutcomesQuery) {
     to: q.to ?? null,
     total: rows.length,
     byStatus: Object.fromEntries(
-      ['unreviewed', 'DISMISSED', 'UNDER_REVIEW', 'CONFIRMED_THEFT', 'NOT_THEFT'].map((k) => {
+      ['unreviewed', 'DISMISSED', 'UNDER_REVIEW', 'CONFIRMED_THEFT', 'NOT_THEFT', 'PROBE_FAULT'].map((k) => {
         const s = byStatus.get(k) ?? { count: 0, litres: 0 }
         return [k, { count: s.count, litres: round(s.litres) }]
       }),
@@ -90,6 +91,7 @@ export async function canReviewTheft(orgId: string, userId: string | null) {
 export async function reviewTheft(
   orgId: string, id: string, userId: string,
   outcome: 'ESCALATED' | 'DEESCALATED', note: string,
+  reason: EscalationReason = 'theft',
 ) {
   const check = await canAssignTriage(userId, orgId)
   if (!check.ok) {
@@ -97,6 +99,7 @@ export async function reviewTheft(
       ? 'Only an administrator of this organisation can escalate or de-escalate a fuel alert'
       : 'Only a system administrator or the platform administrator can escalate or de-escalate a fuel alert')
   }
+  if (outcome === 'ESCALATED' && reason === 'probe_fault') return escalateAsProbeFault(orgId, id, userId, note)
   const me = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, fullName: true } })
   const reviewer = me?.email ?? me?.fullName ?? userId
   const row = await repo.reviewTheft({ orgId, id, userId, reviewer, outcome, note })
@@ -134,6 +137,23 @@ export async function reviewTheft(
     logger.warn({ err, theftId: id }, 'Fuel review: feed publish failed')
   }
   return { id, review }
+}
+
+/**
+ * Escalated as a faulty fuel probe: not a theft, so the alert leaves the
+ * dashboard like a deletion, and its case opens straight onto the Fuel Audit
+ * page with a probe job in Repairs. See escalateLiveAsProbeFault.
+ */
+async function escalateAsProbeFault(orgId: string, id: string, userId: string, note: string) {
+  const done = await escalateLiveAsProbeFault(orgId, id, userId, note)
+  if (!done) throw new NotFoundError('Fuel theft')
+  if (done === 'dismissed') {
+    throw new ConflictError('This alert was deleted, so it has a Case: escalate or de-escalate it there')
+  }
+  forgetSnapshotIncident(orgId, id)
+  emitDashboardFuelIncidentDismissed(orgId, { vehicleId: done.vehicleId, incidentId: id })
+  const review = { status: 'PROBE_FAULT', at: new Date().toISOString(), by: done.reviewedBy, note }
+  return { id, review, followUpId: done.followUpId }
 }
 
 /**

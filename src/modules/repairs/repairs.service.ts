@@ -10,6 +10,7 @@ import { reportResolution, reportStageChange } from './repairs.notify.js'
 import { notifyRepairAssignment } from './repairs.assignment-mail.js'
 import { canAssignTriage, canReceiveTriage, canSignOffTriage } from './repairs.authz.js'
 import { ForbiddenError } from '../../core/errors/errors.js'
+import { repairSignedOff } from '../fuel/fuel-followup.service.js'
 import type { AssignRepairItem, CreateRepairReport, ResolveItem, SetStage, RespondToAssignment } from './repairs.schema.js'
 
 export { notifyRepairAssignment }
@@ -52,6 +53,7 @@ const OUTCOME_LABEL: Record<string, string> = {
   fixing:      'Fixing',
   needs_spare: 'Needs a spare part',
   cannot_fix:  'Cannot be fixed',
+  audit:       'Raised by Fuel Audit',
 }
 
 /** The ladder, for anything on this side that has to name a stage. */
@@ -358,6 +360,10 @@ export async function closeItem(itemId: string, orgId: string, userId: string, d
 
   const item = await repo.resolveItem(itemId, orgId, userId, dto)
   if (!item) return null
+
+  // Fuel Audit: a fixed probe closes the fuel cases that found it faulty; a
+  // failed sign-off is logged on them. Best-effort, see repairSignedOff.
+  await repairSignedOff(orgId, itemId)
 
   const withVehicle = item as typeof item & {
     vehicle?: { registrationPlate?: string }

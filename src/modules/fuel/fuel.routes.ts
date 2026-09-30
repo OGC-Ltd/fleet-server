@@ -6,7 +6,7 @@ import { ingestLimiter } from '../../middleware/rateLimiter.js'
 import {
   createFillingSchema, listFillingQuerySchema, createTheftSchema, listTheftQuerySchema,
   listFollowUpQuerySchema, followUpNoteSchema, assignFollowUpSchema, recallFollowUpSchema, theftOutcomesQuerySchema,
-  reviewTheftSchema, signalAlertQuerySchema, evaluateSignalsSchema,
+  reviewTheftSchema, signalAlertQuerySchema, evaluateSignalsSchema, escalateFollowUpSchema,
 } from './fuel.schema.js'
 import * as ctrl from './fuel.controller.js'
 
@@ -63,8 +63,13 @@ router.get('/followups/:followUpId/assignees', triage, ctrl.listFollowUpAssignee
 router.post('/followups/:followUpId/assign', triage, validateBody(assignFollowUpSchema), ctrl.assignFollowUp)
 router.post('/followups/:followUpId/recall', triage, validateBody(recallFollowUpSchema), ctrl.recallFollowUp)
 router.post('/followups/:followUpId/notes', triage, validateBody(followUpNoteSchema), ctrl.noteFollowUp)
-router.post('/followups/:followUpId/escalate', triage, validateBody(followUpNoteSchema), ctrl.escalateFollowUp)
+router.post('/followups/:followUpId/escalate', triage, validateBody(escalateFollowUpSchema), ctrl.escalateFollowUp)
 router.post('/followups/:followUpId/deescalate', triage, validateBody(followUpNoteSchema), ctrl.deescalateFollowUp)
+// Fuel Audit: the owner decides the case was a faulty fuel probe, which raises
+// a probe job in Repairs; a case whose job failed can have a new one raised.
+router.post('/followups/:followUpId/probe-fault', triage, validateBody(followUpNoteSchema), ctrl.probeFaultFollowUp)
+router.post('/followups/:followUpId/repair', triage, validateBody(followUpNoteSchema), ctrl.reraiseFollowUpRepair)
+router.get('/audit', triage, ctrl.listFuelAudit)
 
 // Signal alerts: the filter-and-residual detector (fuel-signal-alerts) run on
 // demand. Read-only — nothing here writes to the theft ledger or the feed.

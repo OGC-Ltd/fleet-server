@@ -2,8 +2,14 @@
  * The follow-up a dismissed fuel incident opens — see FuelTheftFollowUp.
  *
  *   dismiss ─▶ OPEN ─accept─▶ ACCEPTED ─escalate───▶ ESCALATED   (confirmed theft)
- *               ▲                     └─de-escalate─▶ DEESCALATED (not a theft)
+ *               ▲                     ├─de-escalate─▶ DEESCALATED (not a theft)
+ *               │                     └─probe fault─▶ PROBE_FAULT ─job fixed─▶ PROBE_FIXED
  *               └──── assign (administrator) ◀──┘
+ *
+ * PROBE_FAULT is the Fuel Audit: the owner found the "theft" was a faulty fuel
+ * probe. It raises a pending probe job in Repairs (or joins the unit's open
+ * one) and stays open until a technician signs that job off fixed; a sign-off
+ * without a fix leaves it in audit for a new job to be raised.
  *
  * Who may do what:
  *   - accept:    anyone holding `fuel_theft:triage` (checked on the route),
@@ -41,6 +47,7 @@ import { canAssignTriage } from '../repairs/repairs.authz.js'
 import * as repo from './fuel-followup.repository.js'
 import type { FollowUpRow } from './fuel-followup.repository.js'
 import type { ListFollowUpQuery } from './fuel.schema.js'
+import { withEffectiveStage } from '../repairs/effective-stage.js'
 
 const litres = (ml: number) => `${(ml / 1000).toFixed(1)} L`
 
@@ -86,6 +93,7 @@ export function toDto(row: FollowUpRow, viewerId: string | null, canAssign = fal
       location: t.initialLocation,
     },
     actions: row.actions,
+    repairItem: row.repairItem ? withEffectiveStage(row.repairItem) : null,
     // Computed here so the rule lives in one place. The permission half
     // (`fuel_theft:triage`) is the client's to know; these are the parts only
     // the server can say.
@@ -242,6 +250,7 @@ export async function assignFollowUp(
 /** The owner check shared by notes and decisions. */
 function assertOwner(row: FollowUpRow, userId: string) {
   if (row.status === 'OPEN') throw new ConflictError('Accept this follow-up before acting on it')
+  if (row.status === 'PROBE_FAULT') throw new ConflictError('This case is in Fuel Audit, waiting on its probe repair')
   if (row.status !== 'ACCEPTED') throw new ConflictError('This follow-up is already closed')
   if (row.acceptedById !== userId) {
     throw new ForbiddenError(`Only ${row.acceptedBy?.fullName ?? 'the account that accepted it'} can act on this follow-up`)
@@ -273,11 +282,120 @@ export async function resolveFollowUp(
   return toDto(fresh, userId, await viewerCanAssign(orgId, userId))
 }
 
+// ── Fuel Audit ──────────────────────────────────────────────────────────────
+
+async function whoIs(userId: string) {
+  const me = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, fullName: true } })
+  return { reviewer: me?.email ?? me?.fullName ?? userId, name: me?.fullName ?? null }
+}
+
+/** The owner decides the case was a faulty fuel probe: see PROBE_FAULT. */
+export async function markProbeFault(orgId: string, id: string, userId: string, note: string) {
+  const row = await load(orgId, id)
+  assertOwner(row, userId)
+  const me = await whoIs(userId)
+  const done = await repo.markProbeFault({
+    id, orgId, theftId: row.theft.id, vehicleId: row.theft.vehicleId, plate: row.theft.vehicle.registrationPlate,
+    userId, userName: me.name, reviewer: me.reviewer, note,
+  })
+  if (!done) throw new ConflictError('This follow-up changed while you were deciding it. Reload and try again')
+  const fresh = await changed(orgId, id)
+  announce(orgId, fresh, 'probe_fault')
+  return toDto(fresh, userId, await viewerCanAssign(orgId, userId))
+}
+
+/**
+ * A live alert escalated as a faulty probe from its window (administrators;
+ * the caller checks). Opens its case straight into PROBE_FAULT: see
+ * repo.openAsProbeFault. Returns null when the alert is not in this
+ * organisation, 'dismissed' when it was deleted first.
+ */
+export async function escalateLiveAsProbeFault(orgId: string, theftId: string, userId: string, note: string) {
+  const me = await whoIs(userId)
+  const done = await repo.openAsProbeFault({ orgId, theftId, userId, userName: me.name, reviewer: me.reviewer, note })
+  if (!done || done === 'dismissed') return done
+  const row = await changed(orgId, done.followUpId)
+  announce(orgId, row, 'probe_fault')
+  return { ...done, reviewedBy: me.name }
+}
+
+/** A new probe job for a case whose last one was signed off without a fix. */
+export async function reraiseRepair(orgId: string, id: string, userId: string, note: string) {
+  const row = await load(orgId, id)
+  if (row.status !== 'PROBE_FAULT') throw new ConflictError('Only a case waiting on a probe repair can have one raised')
+  if (row.repairItem && !row.repairItem.resolvedAt) {
+    throw new ConflictError('The probe job for this case is still open in Repairs')
+  }
+  const me = await whoIs(userId)
+  const done = await repo.reraiseProbeJob({
+    id, orgId, vehicleId: row.theft.vehicleId, plate: row.theft.vehicle.registrationPlate,
+    userId, userName: me.name, note,
+  })
+  if (!done) throw new ConflictError('This case changed while you were raising the job. Reload and try again')
+  const fresh = await changed(orgId, id)
+  announce(orgId, fresh, 'repair_raised')
+  return toDto(fresh, userId, await viewerCanAssign(orgId, userId))
+}
+
+/**
+ * Called by Repairs once a job is signed off: fixed closes the cases waiting
+ * on it, failed is logged on them. Never throws; the sign-off is already
+ * stored, and the Audit page catches up on its next read if this fails.
+ */
+export async function repairSignedOff(orgId: string, repairItemId: string) {
+  try {
+    const ids = await repo.applyRepairSignOff(repairItemId)
+    for (const id of ids) {
+      const row = await changed(orgId, id)
+      announce(orgId, row, row.status === 'PROBE_FIXED' ? 'probe_fixed' : 'repair_failed')
+    }
+  } catch (err) {
+    logger.warn({ err, repairItemId }, 'Fuel audit: could not apply a repair sign-off')
+  }
+}
+
+/**
+ * The Fuel Audit page: every case found to be a faulty probe, grouped by
+ * unit, with each unit's probe jobs in Repairs and its dead-probe episodes.
+ */
+export async function listAudit(orgId: string, viewerId: string | null) {
+  // Catch up any sign-off whose hook did not land.
+  for (const itemId of await repo.unsyncedSignOffs(orgId)) await repairSignedOff(orgId, itemId)
+
+  const [rows, canAssign] = await Promise.all([
+    repo.listFollowUps(orgId, repo.STATUS_FILTER.audit, 200),
+    viewerCanAssign(orgId, viewerId),
+  ])
+  const cases = rows.map((r) => toDto(r, viewerId, canAssign))
+  const vehicleIds = [...new Set(cases.map((c) => c.incident.vehicleId))]
+  const { jobs, episodes } = await repo.probeHistory(orgId, vehicleIds)
+
+  const units = vehicleIds.map((vehicleId) => {
+    const mine = cases.filter((c) => c.incident.vehicleId === vehicleId)
+    const lastAlertAt = mine.reduce((m, c) => (c.incident.beganAt > m ? c.incident.beganAt : m), mine[0].incident.beganAt)
+    return {
+      vehicleId,
+      plate: mine[0].incident.plate,
+      openCases: mine.filter((c) => c.status === 'PROBE_FAULT').length,
+      fixedCases: mine.filter((c) => c.status === 'PROBE_FIXED').length,
+      lastAlertAt,
+      cases: mine,
+      repairs: jobs.filter((j) => j.vehicleId === vehicleId),
+      probeFaults: episodes.filter((e) => e.vehicleId === vehicleId),
+    }
+  })
+  // Units still waiting on a repair first, then the most recent alert.
+  units.sort((a, b) => (Number(b.openCases > 0) - Number(a.openCases > 0))
+    || (b.lastAlertAt.getTime() - a.lastAlertAt.getTime()))
+  return units
+}
+
 /**
  * Put a follow-up event on the Live Feed. Never allowed to fail the request
  * that caused it: the follow-up itself is already stored.
  */
 export type Announcement = 'opened' | 'escalated' | 'deescalated' | 'assigned' | 'declined' | 'recalled'
+  | 'probe_fault' | 'repair_raised' | 'repair_failed' | 'probe_fixed'
 
 export function announce(orgId: string, row: FollowUpRow, what: Announcement) {
   const t = row.theft
@@ -300,18 +418,28 @@ export function announce(orgId: string, row: FollowUpRow, what: Announcement) {
     recalled:
       `FOLLOW-UP RECALLED: ${lastOf(row, 'RECALLED')?.actor?.fullName ?? 'An administrator'} took the follow-up on the ` +
       `${incident} back from ${lastOf(row, 'RECALLED')?.subject?.fullName ?? 'its holder'}. It is open again.`,
+    probe_fault:
+      `FAULTY FUEL PROBE: ${row.acceptedBy?.fullName ?? 'The reviewer'} found the ${incident} was a faulty probe, ` +
+      `not a theft. A probe repair for ${plate} is pending in Maintenance > Repairs.`,
+    repair_raised:
+      `FUEL AUDIT: a new probe repair for ${plate} is pending in Maintenance > Repairs.`,
+    repair_failed:
+      `FUEL AUDIT: the probe repair on ${plate} was signed off without a fix. The case stays open in Fuel Audit.`,
+    probe_fixed:
+      `FUEL AUDIT CLOSED: the probe on ${plate} was repaired, closing the case on the ${incident}.`,
   }[what]
   try {
     publishNotification({
       orgId,
       // Opening and the two outcomes happen once per follow-up; assigning and
       // declining can repeat, so those ids carry a time to stay unique.
-      id: what === 'assigned' || what === 'declined' || what === 'recalled'
+      id: what === 'assigned' || what === 'declined' || what === 'recalled' || what === 'repair_raised' || what === 'repair_failed'
         ? `fu-${row.id}-${what}-${Date.now()}`
         : `fu-${row.id}-${what}`,
       source: 'fuel-followup',
       alertType: `FUEL_FOLLOWUP_${what.toUpperCase()}`,
-      severity: what === 'escalated' ? 'critical' : what === 'opened' || what === 'declined' ? 'warning' : 'info',
+      severity: what === 'escalated' ? 'critical'
+        : what === 'opened' || what === 'declined' || what === 'probe_fault' || what === 'repair_failed' ? 'warning' : 'info',
       text,
       at: new Date(),
       plate,
