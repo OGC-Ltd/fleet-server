@@ -52,7 +52,7 @@ export async function theftOutcomes(orgId: string, q: TheftOutcomesQuery) {
       confirmedByVehicle.set(r.vehicleId, v)
     }
     if ((r.reviewStatus === 'CONFIRMED_THEFT' || r.reviewStatus === 'NOT_THEFT' || r.reviewStatus === 'PROBE_FAULT')
-      && r.dismissedAt && r.reviewedAt) {
+      && r.dismissedAt && r.reviewedAt && r.reviewedAt > r.dismissedAt) {
       hoursToDecision.push((r.reviewedAt.getTime() - r.dismissedAt.getTime()) / 3_600_000)
     }
   }
@@ -85,8 +85,9 @@ export async function canReviewTheft(orgId: string, userId: string | null) {
 
 /**
  * Escalate (a confirmed theft) or de-escalate (not a theft) a live alert, from
- * its window, without deleting it. Administrators only. The alert stays on the
- * dashboard either way, now carrying the decision; see repo.reviewTheft.
+ * its window. Administrators only. This is how an alert leaves the dashboard:
+ * there is no Delete (operator, 2026-09-30), so every alert that goes carries
+ * a decision, a note and who made it; see repo.reviewTheft.
  */
 export async function reviewTheft(
   orgId: string, id: string, userId: string,
@@ -105,7 +106,7 @@ export async function reviewTheft(
   const row = await repo.reviewTheft({ orgId, id, userId, reviewer, outcome, note })
   if (!row) throw new NotFoundError('Fuel theft')
   if (row === 'dismissed') {
-    throw new ConflictError('This alert was deleted, so it has a Case: escalate or de-escalate it there')
+    throw new ConflictError('This alert has already been decided and is off the dashboard')
   }
 
   const review = {
@@ -115,6 +116,10 @@ export async function reviewTheft(
     note: row.reviewNote,
   }
   patchSnapshotIncidentReview(orgId, id, review)
+  for (const incidentId of [id, ...row.dismissedIds]) {
+    forgetSnapshotIncident(orgId, incidentId)
+    emitDashboardFuelIncidentDismissed(orgId, { vehicleId: row.vehicleId, incidentId })
+  }
 
   const who = review.by ?? 'An administrator'
   const incident = `${row.vehicle.registrationPlate} fuel incident (${(row.stolenMl / 1000).toFixed(1)} L)`
@@ -148,10 +153,21 @@ async function escalateAsProbeFault(orgId: string, id: string, userId: string, n
   const done = await escalateLiveAsProbeFault(orgId, id, userId, note)
   if (!done) throw new NotFoundError('Fuel theft')
   if (done === 'dismissed') {
-    throw new ConflictError('This alert was deleted, so it has a Case: escalate or de-escalate it there')
+    throw new ConflictError('This alert has already been decided and is off the dashboard')
   }
-  forgetSnapshotIncident(orgId, id)
-  emitDashboardFuelIncidentDismissed(orgId, { vehicleId: done.vehicleId, incidentId: id })
+  // The unit's older live alerts go with it, as with any decision (see
+  // repo.sweepUnitSiblings). After the case is stored: a failure here leaves
+  // an older alert showing, never a decision unrecorded.
+  const swept = await prisma.$transaction((tx) => repo.sweepUnitSiblings(tx, {
+    id, vehicleId: done.vehicleId, userId, now: new Date(),
+  })).catch((err) => {
+    logger.warn({ err, theftId: id }, 'Fuel review: could not clear the unit\'s older alerts')
+    return [] as string[]
+  })
+  for (const incidentId of [id, ...swept]) {
+    forgetSnapshotIncident(orgId, incidentId)
+    emitDashboardFuelIncidentDismissed(orgId, { vehicleId: done.vehicleId, incidentId })
+  }
   const review = { status: 'PROBE_FAULT', at: new Date().toISOString(), by: done.reviewedBy, note }
   return { id, review, followUpId: done.followUpId }
 }
