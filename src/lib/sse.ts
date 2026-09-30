@@ -250,6 +250,15 @@ export function emitDashboardFuelFollowUp(orgId: string, data: { vehicleId: stri
   broadcastDashboard(orgId, 'fuel_followup', data)
 }
 
+/**
+ * A repair job changed: filed, moved, assigned, signed off, or its overhaul
+ * (inspections, spare parts) written. Clients re-read Maintenance > Repairs
+ * and Fuel > Audit, which show the same jobs; the payload carries nothing.
+ */
+export function emitDashboardRepairChanged(orgId: string) {
+  broadcastDashboard(orgId, 'repair_changed', { at: new Date().toISOString() })
+}
+
 /** Alert notification — powers the alert feed and banner toasts. */
 export function emitDashboardAlert(orgId: string, data: unknown) {
   broadcastDashboard(orgId, 'alert', data)

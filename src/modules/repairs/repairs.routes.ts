@@ -28,10 +28,30 @@ import {
   setInspectionSchema, addSparePartSchema, updateSparePartSchema,
 } from './repairs.schema.js'
 import * as ctrl from './repairs.controller.js'
+import { emitDashboardRepairChanged } from '../../lib/sse.js'
 
 const router = Router({ mergeParams: true })
 
 router.use(authenticate, requireOrgAccess)
+
+/*
+ * Every successful write here tells the organisation's open dashboards, so
+ * Maintenance > Repairs and Fuel > Audit (the same jobs, two views) stay in
+ * step for everyone, not only for the person who made the change. Hooked on
+ * the response rather than in each handler, so a write added later cannot
+ * forget it. Never throws into the request.
+ */
+router.use((req, res, next) => {
+  if (req.method !== 'GET') {
+    res.on('finish', () => {
+      if (res.statusCode >= 300) return
+      try {
+        emitDashboardRepairChanged(req.params.orgId as string)
+      } catch { /* a missed broadcast only means a later reload */ }
+    })
+  }
+  next()
+})
 
 router.get('/', requirePermission('repair:read'), validateQuery(listReportsQuerySchema), ctrl.listReports)
 router.get('/items', requirePermission('repair:read'), validateQuery(listItemsQuerySchema), ctrl.listItems)
