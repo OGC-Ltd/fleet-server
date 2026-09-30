@@ -8,6 +8,10 @@
  *   first part ordered, job pending or fixing  ─▶ spare_outsourced
  *   every live part received or fitted         ─▶ fixing
  *
+ * Collecting a part (received) needs the date the fix will happen. The job's
+ * expectedResolutionAt is then the latest of those planned fix dates and the
+ * promised dates of parts still on order: the day the unit can be back.
+ *
  * and a job cannot be signed off FIXED while a part is still ordered, or
  * received and not fitted (assertNoOutstandingParts, called by closeItem).
  * Cancelled parts do not count either way. A FAILED sign-off is never
@@ -69,19 +73,23 @@ async function moveJob(
 
 /**
  * Keep the job's own summary fields in step with its live parts: the part
- * names (what the Repairs tab shows) and the latest promised date (what its
- * overdue sort reads).
+ * names (what the Repairs tab shows) and the day the unit can be back (what
+ * its overdue sort reads): the latest of the planned fix dates of collected
+ * parts and the promised dates of parts still on order.
  */
 async function syncSummary(tx: Prisma.TransactionClient, itemId: string) {
   const live = await tx.repairSparePart.findMany({
     where: { repairItemId: itemId, status: { not: 'cancelled' } },
-    select: { name: true, quantity: true, expectedAt: true, status: true },
+    select: { name: true, quantity: true, expectedAt: true, fixPlannedAt: true, status: true },
     orderBy: { orderedAt: 'asc' },
   })
   if (live.length === 0) return
   const names = live.map((p) => (p.quantity > 1 ? `${p.quantity} × ${p.name}` : p.name)).join(', ').slice(0, 200)
-  const waiting = live.filter((p) => p.status === 'ordered' && p.expectedAt)
-  const latest = waiting.reduce<Date | null>((m, p) => (!m || p.expectedAt! > m ? p.expectedAt! : m), null)
+  const dates = live.flatMap((p) => (
+    p.status === 'ordered' ? (p.expectedAt ? [p.expectedAt] : [])
+      : p.status === 'received' && p.fixPlannedAt ? [p.fixPlannedAt] : []
+  ))
+  const latest = dates.reduce<Date | null>((m, d) => (!m || d > m ? d : m), null)
   await tx.repairReportItem.update({
     where: { id: itemId },
     data: { sparePart: names, ...(latest ? { expectedResolutionAt: latest } : {}) },
@@ -148,7 +156,7 @@ export async function updateSparePart(orgId: string, itemId: string, partId: str
       where: { id: partId, status: part.status },
       data: {
         status: dto.status,
-        ...(dto.status === 'received' ? { receivedAt: now } : {}),
+        ...(dto.status === 'received' ? { receivedAt: now, fixPlannedAt: dto.fixDate } : {}),
         ...(dto.status === 'fitted' ? { fittedAt: now } : {}),
         ...(dto.status === 'cancelled' ? { cancelledAt: now } : {}),
         ...(dto.note ? { note: part.note ? `${part.note}\n${dto.note}` : dto.note } : {}),
@@ -162,7 +170,8 @@ export async function updateSparePart(orgId: string, itemId: string, partId: str
     })
     const allIn = live.length > 0 && live.every((p) => p.status === 'received' || p.status === 'fitted')
     if (allIn && job.stage === 'spare_outsourced') {
-      await moveJob(tx, job, 'fixing', userId, await nameOf(tx, userId), 'All spare parts received')
+      const planned = dto.fixDate ? `; fix planned for ${dto.fixDate.toISOString().slice(0, 10)}` : ''
+      await moveJob(tx, job, 'fixing', userId, await nameOf(tx, userId), `All spare parts received${planned}`)
     }
     await syncSummary(tx, itemId)
     return tx.repairSparePart.findUniqueOrThrow({ where: { id: partId } })
