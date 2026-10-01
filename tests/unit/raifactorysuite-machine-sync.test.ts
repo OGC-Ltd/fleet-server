@@ -12,7 +12,7 @@ import { equipmentTypeOf, ratedConsumptionOf, fleetCodeOf } from '../../src/prov
 
 const machine = (o: Partial<RaiFactorySuiteMachineRow>): RaiFactorySuiteMachineRow => ({
   id: 'm-bh01', factoryCode: 'MUFINDI PAPER MILLS', reference: 'BH-01', registrationNumber: 'T275EAA',
-  category: 'Backhoe', makeModel: 'JCB', fuelType: 'Diesel', contractor: 'KSP',
+  name: 'Backhoe', category: 'Backhoe', makeModel: 'JCB', fuelType: 'Diesel', contractor: 'KSP',
   consumptionBasis: 'HOUR', expectedConsumption: 6, rateUnit: 'Ltrs/Hr',
   fuelSensorFitted: true, gpsUnitId: '30356417', active: true, ...o,
 })
@@ -21,10 +21,11 @@ const blank = {
   machineId: null, equipmentType: null, equipmentCategory: null, equipmentReference: null,
   makeModel: null, contractor: null, fuelType: null, ratedConsumption: null,
   ratedConsumptionBasis: null, fuelSensorFitted: null,
+  machineName: null, machineRegistrationNumber: null, ratedConsumptionUnit: null,
 }
 
 function fakeDb(vehicles: Record<string, unknown>[]) {
-  const update = vi.fn(async () => ({}))
+  const update = vi.fn(async (_args: unknown) => ({}))
   const db = {
     organisation: { findUnique: vi.fn(async () => ({ id: 'org-kasulu' })) },
     vehicle:      { findMany: vi.fn(async () => vehicles), update },
@@ -40,7 +41,10 @@ describe('syncMachineRegister', () => {
     expect(update).toHaveBeenCalledTimes(1)
     expect(update.mock.calls[0]![0]).toMatchObject({
       where: { id: 'v1' },
-      data:  { machineId: 'm-bh01', equipmentType: 'Backhoe', ratedConsumption: 6, ratedConsumptionBasis: 'HOURS' },
+      data:  {
+        machineId: 'm-bh01', equipmentType: 'Backhoe', machineName: 'Backhoe', machineRegistrationNumber: 'T275EAA',
+        makeModel: 'JCB', fuelType: 'Diesel', ratedConsumption: 6, ratedConsumptionBasis: 'HOURS', ratedConsumptionUnit: 'Ltrs/Hr',
+      },
     })
   })
 
@@ -50,6 +54,7 @@ describe('syncMachineRegister', () => {
       machineId: 'm-bh01', equipmentType: 'Backhoe', equipmentCategory: 'Backhoe', equipmentReference: 'BH-01',
       makeModel: 'JCB', contractor: 'KSP', fuelType: 'Diesel', ratedConsumption: 6,
       ratedConsumptionBasis: 'HOURS', fuelSensorFitted: true,
+      machineName: 'Backhoe', machineRegistrationNumber: 'T275EAA', ratedConsumptionUnit: 'Ltrs/Hr',
     }])
     const r = await syncMachineRegister(db, [machine({})], { apply: true })
     expect(r.written).toBe(0)

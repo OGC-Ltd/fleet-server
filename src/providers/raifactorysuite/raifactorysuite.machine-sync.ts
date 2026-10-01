@@ -30,6 +30,7 @@ export const MACHINE_FACTORY_TO_ORG: Record<string, string> = {
 
 const NULL_COLUMNS = {
   machineId: null, equipmentType: null, equipmentCategory: null, equipmentReference: null,
+  machineName: null, machineRegistrationNumber: null, ratedConsumptionUnit: null,
   makeModel: null, contractor: null, fuelType: null, ratedConsumption: null,
   ratedConsumptionBasis: null, fuelSensorFitted: null, machineSyncedAt: null,
 } as const
@@ -38,6 +39,7 @@ const NULL_COLUMNS = {
 const COMPARED = [
   'machineId', 'equipmentType', 'equipmentCategory', 'equipmentReference', 'makeModel',
   'contractor', 'fuelType', 'ratedConsumption', 'ratedConsumptionBasis', 'fuelSensorFitted',
+  'machineName', 'machineRegistrationNumber', 'ratedConsumptionUnit',
 ] as const
 
 const SELECT = {
@@ -45,6 +47,7 @@ const SELECT = {
   machineId: true, equipmentType: true, equipmentCategory: true, equipmentReference: true,
   makeModel: true, contractor: true, fuelType: true, ratedConsumption: true,
   ratedConsumptionBasis: true, fuelSensorFitted: true,
+  machineName: true, machineRegistrationNumber: true, ratedConsumptionUnit: true,
 } as const
 
 type VehicleRow = {
