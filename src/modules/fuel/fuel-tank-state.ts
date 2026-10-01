@@ -39,7 +39,7 @@
  * tank, and the events beside it say why it moved.
  */
 
-import { engineBurnMl, type RateBasis, type ResolvedRate } from './fuel-rate.js'
+import { engineBurnMl, type ExpectedRateBasis, type ExpectedRate } from './fuel-rate.js'
 import { normalisedRate } from './fuel-normalised-rate.js'
 
 /**
@@ -308,10 +308,16 @@ export interface TankState {
   /** The rate `engineBurnMl` was computed at, echoed so the figure is auditable. */
   engineRateLPerHour: number | null
   /**
+   * Set instead of `engineRateLPerHour` for a road vehicle on RaiFactorySuite's
+   * register, which is rated in km per litre: `engineBurnMl` is then the day's
+   * distance at this rate, not engine hours at an hourly one.
+   */
+  engineRateKmPerL: number | null
+  /**
    * Whether that rate is the vehicle's OWN or its org+type median. A borrowed
    * rate is a weaker claim and the column should be able to say so.
    */
-  engineRateBasis: RateBasis | null
+  engineRateBasis: ExpectedRateBasis | null
   /**
    * For a borrowed rate, how far apart the lending group's members are.
    *
@@ -341,7 +347,7 @@ export const UNKNOWN_TANK_STATE: TankState = {
   normalisedLPerHour: null, normalisedMinLPerHour: null, normalisedMaxLPerHour: null,
   normalisedNoiseDominates: false,
   engineHoursMeter: null, engineSeconds: null, engineBurnMl: null,
-  engineRateLPerHour: null, engineRateBasis: null, engineRateSpread: null,
+  engineRateLPerHour: null, engineRateKmPerL: null, engineRateBasis: null, engineRateSpread: null,
   engineRateRuns: null,
 }
 
@@ -476,7 +482,7 @@ export interface TankStateInputs {
    */
   engineSeconds?: number | null
   /** This vehicle's resolved consumption rate, or null if it has none. */
-  rate?: ResolvedRate | null
+  rate?: ExpectedRate | null
   /**
    * Closing reading of the unit's cumulative engine-hour meter. A fact about
    * the machine, not a duration — see TankState.engineHoursMeter.
@@ -523,8 +529,9 @@ export function deriveTankState(
     normalisedMinLPerHour:    norm?.minLPerHour ?? null,
     normalisedMaxLPerHour:    norm?.maxLPerHour ?? null,
     normalisedNoiseDominates: norm?.noiseDominates ?? false,
-    engineBurnMl:       engineBurnMl(engineSeconds, rate),
+    engineBurnMl:       engineBurnMl(engineSeconds, rate, distanceM),
     engineRateLPerHour: rate?.lPerHour ?? null,
+    engineRateKmPerL:   rate?.kmPerL   ?? null,
     engineRateBasis:    rate?.basis    ?? null,
     engineRateSpread:   rate?.spread   ?? null,
     engineRateRuns:     rate?.runs     ?? null,

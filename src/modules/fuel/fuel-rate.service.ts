@@ -51,7 +51,10 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
-import { MIN_RUNS, resolveRates, type RateGroup, type ResolvedRate, type VehicleRate } from './fuel-rate.js'
+import {
+  MIN_RUNS, resolveRates, expectedRate,
+  type RateGroup, type ResolvedRate, type VehicleRate, type ExpectedRate,
+} from './fuel-rate.js'
 import { resolveBasis, derivationCapLph } from './fuel-theft-classifier.js'
 
 /**
@@ -452,6 +455,28 @@ export async function deriveFuelRates(
  * are loaded so a group is never thinned by the org filter. `MUFINDI` tractors
  * fall back to MUFINDI tractors.
  */
+/**
+ * The rates the tank ledger sets each day against: the register's standard
+ * rate where RaiFactorySuite lists the unit (KASULU), the derived one
+ * otherwise. See `expectedRate`. Alerts keep `getOrgFuelRates`' derived rates.
+ */
+export async function getOrgExpectedRates(orgId: string): Promise<Map<string, ExpectedRate>> {
+  const [derived, registered] = await Promise.all([
+    getOrgFuelRates(orgId),
+    prisma.vehicle.findMany({
+      where:  { organisationId: orgId, isActive: true, ratedConsumption: { not: null } },
+      select: { id: true, ratedConsumption: true, ratedConsumptionBasis: true },
+    }),
+  ])
+  const byId = new Map(registered.map(v => [v.id, v]))
+  const out = new Map<string, ExpectedRate>()
+  for (const id of new Set([...derived.keys(), ...byId.keys()])) {
+    const r = expectedRate(byId.get(id) ?? null, derived.get(id) ?? null)
+    if (r) out.set(id, r)
+  }
+  return out
+}
+
 export async function getOrgFuelRates(orgId: string): Promise<Map<string, ResolvedRate>> {
   const [rates, vehicles] = await Promise.all([
     prisma.vehicleFuelRate.findMany({ select: { vehicleId: true, lPerHour: true, lPerKm: true, runs: true } }),

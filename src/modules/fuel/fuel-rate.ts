@@ -127,6 +127,10 @@ export interface RateGroup {
 /** Where a resolved rate came from — reported so a borrowed one is visible. */
 export type RateBasis = 'vehicle' | 'type'
 
+/** `ExpectedRate`'s basis: a derived one, or `register` — the operator's
+ *  standard rate off RaiFactorySuite's machine register. */
+export type ExpectedRateBasis = RateBasis | 'register'
+
 export interface ResolvedRate {
   lPerHour: number
   basis:    RateBasis
@@ -254,9 +258,59 @@ function median(values: readonly number[]): number {
  * hour and stands on a handful of runs, so anything finer would be inventing
  * precision the derivation never had.
  */
-export function engineBurnMl(engineSeconds: number | null, rate: ResolvedRate | null): number | null {
-  if (engineSeconds == null || rate == null) return null
+export function engineBurnMl(
+  engineSeconds: number | null,
+  rate: ExpectedRate | ResolvedRate | null,
+  distanceM: number | null = null,
+): number | null {
+  if (rate == null) return null
+  // A road machine on the register is rated per kilometre, so what it should
+  // have burned is the ground it covered at that rate, not its engine hours.
+  const kmPerL = 'kmPerL' in rate ? rate.kmPerL ?? null : null
+  if (kmPerL != null) {
+    if (distanceM == null) return null
+    return Math.round((distanceM / 1000 / kmPerL) * 1000)
+  }
+  if (engineSeconds == null || rate.lPerHour == null) return null
   return Math.round((engineSeconds / 3600) * rate.lPerHour * 1000)
+}
+
+/**
+ * The rate a unit's day is set against in the tank ledger ("Engine should
+ * use"): the operator's STANDARD rate from RaiFactorySuite's machine register
+ * where the unit has one, else the derived rate (its own, or its type's median).
+ *
+ * The register states plant in litres per engine-hour and road vehicles in
+ * kilometres per litre (operator, 2026-10-01: "the correct burn rate for each
+ * unit"). Exactly one of `lPerHour` / `kmPerL` is set on a register rate.
+ *
+ * Fuel ALERTS do not read this — `resolveBand` still uses the derived rates
+ * and the operator class bands. Moving alerts onto the register is a separate
+ * decision, to be replayed for volume first.
+ */
+export interface ExpectedRate {
+  lPerHour: number | null
+  /** Optional so a derived ResolvedRate is already an ExpectedRate. */
+  kmPerL?:  number | null
+  basis:    ExpectedRateBasis
+  runs:     number | null
+  spread:   number | null
+}
+
+export interface RegisterRate {
+  ratedConsumption:      number | null
+  ratedConsumptionBasis: 'HOURS' | 'DISTANCE' | null
+}
+
+export function expectedRate(register: RegisterRate | null, derived: ResolvedRate | null): ExpectedRate | null {
+  const v = register?.ratedConsumption
+  if (v != null && v > 0 && register!.ratedConsumptionBasis === 'HOURS') {
+    return { lPerHour: v, kmPerL: null, basis: 'register', runs: null, spread: null }
+  }
+  if (v != null && v > 0 && register!.ratedConsumptionBasis === 'DISTANCE') {
+    return { lPerHour: null, kmPerL: v, basis: 'register', runs: null, spread: null }
+  }
+  return derived ? { ...derived, kmPerL: null } : null
 }
 
 /**
