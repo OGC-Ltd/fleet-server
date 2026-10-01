@@ -821,6 +821,8 @@ export async function findFleetSnapshot(orgId: string) {
       registrationPlate: true,
       vehicleType: true,
       tankCapacityLitres: true,
+      // What the machine is, per RaiFactorySuite's register (KASULU only).
+      machineName: true,
       // The provider's own unit id — how lib/connection-state is keyed, so the
       // service layer can attach the provider's connection verdict.
       deviceId: true,
@@ -1050,6 +1052,10 @@ export async function findFleetSnapshot(orgId: string) {
         // Capacity travels with the snapshot so the card can render the fuel
         // gauge as "44 / 95 L", not just a bare percentage.
         tankCapacityLitres: v.tankCapacityLitres ?? null,
+        // "Excavator", "Bull Dozer" — RaiFactorySuite's machine register name,
+        // set on the KASULU units it lists and null everywhere else. The unit
+        // card shows it in place of the label it reads off the unit code.
+        machineName: v.machineName ?? null,
         // Separates "the probe is broken" from "no probe fitted" — both of
         // which leave fuelLevelMl null, and only one of which is a job for
         // the workshop.
