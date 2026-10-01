@@ -3,6 +3,7 @@ import { sendSuccess } from '../../core/response/response.js'
 import { getWeighmentDay } from './weighment.service.js'
 import { getWeighmentAnalytics } from './weighment.analytics.js'
 import { getWeighbridges } from './weighbridge.service.js'
+import { getDispatchedUnits } from './weighment.dispatched.js'
 import type { WeighmentQuery, WeighmentAnalyticsQuery } from './weighment.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -55,5 +56,16 @@ export const listAnalytics: RequestHandler = async (req, res, next) => {
 export const listBridges: RequestHandler = async (req, res, next) => {
   try {
     sendSuccess(res, await getWeighbridges(p(req, 'orgId')))
+  } catch (err) { next(err) }
+}
+
+/**
+ * The trucks and tractors FactorySuite has dispatched for this organisation
+ * and that have not been signed back — the board's "on the road" and "out
+ * longer than a run takes". See weighment.dispatched.
+ */
+export const listDispatched: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await getDispatchedUnits(p(req, 'orgId')))
   } catch (err) { next(err) }
 }

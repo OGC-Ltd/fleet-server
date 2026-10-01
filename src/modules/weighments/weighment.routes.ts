@@ -35,4 +35,9 @@ router.get(
   ctrl.listAnalytics,
 )
 
+// The units dispatched to these bridges and still out, for the board. Same
+// permission: it is the same board, and the runs are the lorries the tickets
+// will weigh.
+router.get('/dispatched', requirePermission('weighbridge:read'), ctrl.listDispatched)
+
 export default router
