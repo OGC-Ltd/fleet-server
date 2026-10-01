@@ -78,6 +78,7 @@ All return a **bare JSON array** — no envelope, no pagination metadata.
 | Endpoint | Rows | Notes |
 |---|---|---|
 | `GET /vehicles?limit=2000` | 598 | `{id, factoryCode, type, numberPlate, make, model, status, active}` |
+| `GET /machines` | 366 (2026-10-01) | **Mufindi Paper Mills' plant register** — the only factory on it. `{id, factoryCode, reference ("BH-01"), registrationNumber, category ("Backhoe", "Concret Mixer", …), makeModel, fuelType, contractor (KSP/FES/Hired), consumptionBasis (HOUR / KM_PER_LITRE), expectedConsumption, rateUnit (Ltrs/Hr / Kms/Ltr), fuelSensorFitted, gpsUnitId, status, …}`. `gpsUnitId` is the **Wialon unit id** (183 rows, unique) — the exact join to KASULU's `wialon:<id>` rows. `limit`/`offset`/`factoryCode` change nothing. Synced by `npm run sync:machines` into the `vehicles` machine columns. (`/vehicles` also lists 133 `MUFINDI PAPER MILLS` rows since ~09-30 — deliberately NOT mapped in sync-vehicles, which would duplicate the Wialon rows.) |
 | `GET /drivers?limit=2000` | 550 | `{id, factoryCode, driverType, name, staffId, licenseNumber, phoneNumber, status, active, …}` |
 | `GET /dispatches?limit=2000` | **capped at 1000** | ignores `offset`/`page`/`skip` — only ~4 days visible. Also returns `driverChangeReason`, `exitChecklist`, `returnChecklist` (2026-09-09), which we do not model — zod strips them. |
 | `GET /alerts?limit=500` | 257 | `{id, factoryCode, type, message, relatedId, acknowledged, createdAt}` |
