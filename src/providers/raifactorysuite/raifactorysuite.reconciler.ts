@@ -39,6 +39,8 @@ import { handleDispatch, handleSale } from '../../modules/webhooks/raifactorysui
 import { handleWeighment } from '../../modules/weighments/weighment.ingest.js'
 import { FACTORIES } from '../../modules/webhooks/factory-map.js'
 import { fleetDayKey } from '../../lib/provider-time.js'
+import { prisma } from '../../lib/prisma.js'
+import { syncMachineRegister } from './raifactorysuite.machine-sync.js'
 
 /**
  * How many alerts to re-read each pass. Only genuinely new ones are written or
@@ -97,6 +99,14 @@ const SALES_WINDOW = 500
  */
 const WEIGHMENT_LOOKBACK_DAYS = 3
 
+/**
+ * How often the machine register (`/machines`) is re-read. It is a roster, not
+ * a feed — what a unit is and what it should burn change when someone edits
+ * the register, not every five minutes — so it rides this loop at most hourly.
+ * A failed pass is retried on the next cycle rather than an hour later.
+ */
+const MACHINE_SYNC_INTERVAL_MS = 60 * 60_000
+
 /** `YYYY-MM-DD` for a day offset from now, in the fleet's own clock — the one
  *  the scale software stamps its tickets with. */
 function weighmentDayKey(offsetDays: number): string {
@@ -125,6 +135,9 @@ class RaiFactorySuiteReconciler {
 
   /** Consecutive failed runs, for backing off the log noise when they're down. */
   private consecutiveFailures = 0
+
+  /** When the machine register last synced successfully; 0 = not this process. */
+  private machinesSyncedAt = 0
 
   get isConfigured(): boolean {
     return this.client.isConfigured
@@ -232,6 +245,28 @@ class RaiFactorySuiteReconciler {
       }
     }
 
+    // Machine register — what each KASULU unit is and its rated consumption.
+    // Hourly, and silent: it changes vehicle attributes, not events. Only rows
+    // the register changed are written, so a quiet hour writes nothing.
+    let machinesWritten: number | undefined
+    if (Date.now() - this.machinesSyncedAt >= MACHINE_SYNC_INTERVAL_MS) {
+      try {
+        const machines = await this.client.listMachines()
+        const r = await syncMachineRegister(prisma, machines, { apply: true })
+        machinesWritten = r.written + r.cleared
+        this.machinesSyncedAt = Date.now()
+        if (machinesWritten > 0) {
+          logger.info(
+            { matched: r.matched.length, written: r.written, cleared: r.cleared, noVehicle: r.noVehicle.map(m => m.reference) },
+            'RaiFactorySuite machine register synced',
+          )
+        }
+      } catch (err) {
+        failed = true
+        this.logFailure('machines', err)
+      }
+    }
+
     if (failed) {
       this.consecutiveFailures++
     } else {
@@ -243,7 +278,7 @@ class RaiFactorySuiteReconciler {
     }
 
     logger.info(
-      { durationMs: Date.now() - t0, alertsCreated, dispatchesSeen, salesSeen, weighmentsSeen, primed: this.primed },
+      { durationMs: Date.now() - t0, alertsCreated, dispatchesSeen, salesSeen, weighmentsSeen, machinesWritten, primed: this.primed },
       'RaiFactorySuite reconcile complete',
     )
   }
