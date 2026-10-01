@@ -19,7 +19,7 @@ import {
   MAX_ENGINE_GAP_SECONDS, MOTION_MIN_KMH, UNKNOWN_TANK_STATE,
   type LevelReading, type TankState,
 } from './fuel-tank-state.js'
-import { getOrgFuelRates } from './fuel-rate.service.js'
+import { getOrgExpectedRates } from './fuel-rate.service.js'
 import { normalisedRate } from './fuel-normalised-rate.js'
 import { engineBurnMl } from './fuel-rate.js'
 
@@ -187,7 +187,7 @@ async function readStoredTankState(orgId: string, asOf: Date): Promise<VehicleTa
   // blanks. See the note above.
   if (!rows.some(r => r.engineHoursMeter != null)) return null
 
-  const rates = await getOrgFuelRates(orgId)
+  const rates = await getOrgExpectedRates(orgId)
 
   return rows.map(r => {
     const rate = rates.get(r.vehicleId) ?? null
@@ -210,12 +210,13 @@ async function readStoredTankState(orgId: string, asOf: Date): Promise<VehicleTa
       expectedBurnMl: r.expectedBurnMl,
       engineHoursMeter: r.engineHoursMeter,
       engineSeconds:  r.engineSeconds,
-      engineBurnMl:   engineBurnMl(r.engineSeconds, rate),
+      engineBurnMl:   engineBurnMl(r.engineSeconds, rate, r.distanceM),
       normalisedLPerHour:       norm?.lPerHour    ?? null,
       normalisedMinLPerHour:    norm?.minLPerHour ?? null,
       normalisedMaxLPerHour:    norm?.maxLPerHour ?? null,
       normalisedNoiseDominates: norm?.noiseDominates ?? false,
       engineRateLPerHour: rate?.lPerHour ?? null,
+      engineRateKmPerL:   rate?.kmPerL   ?? null,
       engineRateBasis:    rate?.basis    ?? null,
       engineRateSpread:   rate?.spread   ?? null,
       engineRateRuns:     rate?.runs     ?? null,
@@ -609,7 +610,7 @@ export async function computeFleetTankState(orgId: string, asOf: Date): Promise<
   // from the table the weekly derivation writes — never computed here, which is
   // the point of §7.1 of docs/fuel-consumption-rates.md: this runs whenever an
   // operator opens a tab.
-  const rates = await getOrgFuelRates(orgId)
+  const rates = await getOrgExpectedRates(orgId)
 
   // Every vehicle that reported on EITHER day gets a row. One that reported
   // yesterday and not today still has an opening balance worth showing, and
