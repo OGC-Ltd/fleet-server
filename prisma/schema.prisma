@@ -742,6 +742,40 @@ model Vehicle {
   isActive           Boolean  @default(true) @map("is_active")
   fuelEfficiencyKmpl Float?   @map("fuel_efficiency_kmpl")
   tankCapacityLitres Float?   @map("tank_capacity_litres")
+
+  // ── RaiFactorySuite machine register (`GET /machines`) ──────────────────
+  // Mufindi Paper Mills' plant register, matched to our Wialon-keyed KASULU
+  // rows on the register's `gpsUnitId` (= the Wialon unit id behind
+  // `externalId = wialon:<id>`). Written only by `prisma/sync-factorysuite-
+  // machines.ts`; `sync-wialon` never touches these columns. All nullable: a
+  // unit the register does not list, or lists without a GPS id, keeps nulls.
+
+  /// The register's machine UUID — distinct from `externalId`, which stays the
+  /// Wialon key for this fleet.
+  machineId             String?           @unique @map("machine_id")
+  /// What the machine IS, as the register names it, cleaned of the contractor
+  /// prefix and spelling drift: "Backhoe", "Concrete Mixer", "Case Puma".
+  /// `vehicleType` is left alone — it is the coarse class the dashboard colours
+  /// and the fuel tables key on.
+  equipmentType         String?           @map("equipment_type")
+  /// The register's category exactly as sent ("Concret Mixer", "FES - LMV").
+  equipmentCategory     String?           @map("equipment_category")
+  /// The operator's fleet number, e.g. "BH-01", "CM-03".
+  equipmentReference    String?           @map("equipment_reference")
+  /// "JCB", "XCMG", "CASE" — a make, not the `model` column's manufacturer model.
+  makeModel             String?           @map("make_model")
+  /// KSP (in-house), FES or Hired.
+  contractor            String?
+  fuelType              String?           @map("fuel_type")
+  /// The operator's stated consumption, in the unit `ratedConsumptionBasis`
+  /// names: HOURS → litres per engine-hour, DISTANCE → kilometres per litre
+  /// (as the register states it; NOT litres per km). Null where the register
+  /// leaves it blank — never inferred.
+  ratedConsumption      Float?            @map("rated_consumption")
+  ratedConsumptionBasis ConsumptionBasis? @map("rated_consumption_basis")
+  fuelSensorFitted      Boolean?          @map("fuel_sensor_fitted")
+  machineSyncedAt       DateTime?         @map("machine_synced_at")
+
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 

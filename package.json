@@ -41,6 +41,7 @@
     "backfill:user-groups": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/backfill-user-groups.ts",
     "repair:home-orgs": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/repair-home-orgs.ts",
     "sync:vehicles": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-vehicles.ts",
+    "sync:machines": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-factorysuite-machines.ts",
     "sync:drivers": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-drivers.ts",
     "seed:org": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/seed-org.ts",
     "sync:wialon": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-wialon.ts --org=KASULU",

@@ -152,6 +152,43 @@ export interface RaiFactorySuiteCaneTransferRow {
   status?:                  string | null
 }
 
+/**
+ * A row of the plant/fleet register — `GET /machines`. Undocumented; shape
+ * read off the live endpoint 2026-10-01, when it held 366 rows, all
+ * `MUFINDI PAPER MILLS` (NDHIWA returns `[]`).
+ *
+ *   • `gpsUnitId` is the WIALON unit id (e.g. "30356417"), set on 183 rows and
+ *     unique where set — the only exact join to our KASULU vehicles.
+ *   • `consumptionBasis` HOUR pairs with `rateUnit` "Ltrs/Hr" (or "Ltr/Hr"),
+ *     KM_PER_LITRE with "Kms/Ltr": `expectedConsumption` is L/h or km/L
+ *     accordingly. Null on 107 rows.
+ *   • `registrationNumber` is null on 86 rows (hand compactors, small
+ *     generators); `reference` ("BH-01") is always set.
+ *   • `limit`, `offset` and `factoryCode` are accepted and change nothing.
+ */
+export interface RaiFactorySuiteMachineRow {
+  id:                  string
+  factoryCode:         string
+  reference:           string
+  registrationNumber?: string | null
+  name?:               string | null
+  category?:           string | null
+  makeModel?:          string | null
+  fuelType?:           string | null
+  contractor?:         string | null
+  consumptionBasis?:   'HOUR' | 'KM_PER_LITRE' | string | null
+  expectedConsumption?: number | null
+  rateUnit?:           string | null
+  fuelSensorFitted?:   boolean | null
+  gpsUnitId?:          string | null
+  status?:             string | null
+  downReason?:         string | null
+  downSince?:          string | null
+  lastServiceMeter?:   number | null
+  lastServiceAt?:      string | null
+  active?:             boolean | null
+}
+
 export class RaiFactorySuiteClient {
   constructor(
     private readonly baseUrl: string = raiFactorySuiteApi.url,
@@ -242,6 +279,11 @@ export class RaiFactorySuiteClient {
     return this.get<RaiFactorySuiteCaneTransferRow>(
       `/weighment/cane-transfer?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
     )
+  }
+
+  /** The machine register — see RaiFactorySuiteMachineRow. Whole set always. */
+  async listMachines(): Promise<RaiFactorySuiteMachineRow[]> {
+    return this.get<RaiFactorySuiteMachineRow>('/machines?limit=5000')
   }
 
   /** Cheap liveness probe used when a reconcile run fails, to tell apart

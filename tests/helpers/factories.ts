@@ -93,6 +93,19 @@ export function makeVehicle(overrides: Partial<Vehicle> = {}): Vehicle {
     // Unknown by default, which is the state of almost the whole fleet — the
     // column exists to be filled in by hand as models are supplied.
     model: null,
+    // Unregistered: only KASULU units on RaiFactorySuite's machine register
+    // carry these.
+    machineId: null,
+    equipmentType: null,
+    equipmentCategory: null,
+    equipmentReference: null,
+    makeModel: null,
+    contractor: null,
+    fuelType: null,
+    ratedConsumption: null,
+    ratedConsumptionBasis: null,
+    fuelSensorFitted: null,
+    machineSyncedAt: null,
     createdAt: now(),
     updatedAt: now(),
     ...overrides,
