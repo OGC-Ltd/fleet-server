@@ -762,6 +762,13 @@ model Vehicle {
   equipmentCategory     String?           @map("equipment_category")
   /// The operator's fleet number, e.g. "BH-01", "CM-03".
   equipmentReference    String?           @map("equipment_reference")
+  /// The register's machine name exactly as sent — "Excavator", "Bull Dozer".
+  /// (Equal to its category on every GPS-linked row, 2026-10-01.)
+  machineName           String?           @map("machine_name")
+  /// The registration number the REGISTER holds ("T876DZB"). Kept apart from
+  /// `registrationPlate`, which is our unique Wialon-derived key and is used
+  /// for matching elsewhere. Null on 21 of the 183 GPS-linked rows.
+  machineRegistrationNumber String?       @map("machine_registration_number")
   /// "JCB", "XCMG", "CASE" — a make, not the `model` column's manufacturer model.
   makeModel             String?           @map("make_model")
   /// KSP (in-house), FES or Hired.
@@ -773,6 +780,10 @@ model Vehicle {
   /// leaves it blank — never inferred.
   ratedConsumption      Float?            @map("rated_consumption")
   ratedConsumptionBasis ConsumptionBasis? @map("rated_consumption_basis")
+  /// The register's unit of measure for the standard rate, as sent: "Ltrs/Hr"
+  /// (also "Ltr/Hr") or "Kms/Ltr". Set only alongside `ratedConsumption`, so a
+  /// unit never stands without its number.
+  ratedConsumptionUnit  String?           @map("rated_consumption_unit")
   fuelSensorFitted      Boolean?          @map("fuel_sensor_fitted")
   machineSyncedAt       DateTime?         @map("machine_synced_at")
 

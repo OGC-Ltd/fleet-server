@@ -102,11 +102,15 @@ export function machineColumns(m: RaiFactorySuiteMachineRow, now: Date) {
     equipmentType:         equipmentTypeOf(m.category),
     equipmentCategory:     clean(m.category),
     equipmentReference:    clean(m.reference),
+    machineName:           clean(m.name),
+    machineRegistrationNumber: clean(m.registrationNumber),
     makeModel:             clean(m.makeModel),
     contractor:            clean(m.contractor),
     fuelType:              clean(m.fuelType),
     ratedConsumption:      rated?.value ?? null,
     ratedConsumptionBasis: rated?.basis ?? null,
+    // Paired with the number: a unit with no rate is not a statement.
+    ratedConsumptionUnit:  rated ? clean(m.rateUnit) : null,
     fuelSensorFitted:      m.fuelSensorFitted ?? null,
     machineSyncedAt:       now,
   }

@@ -96,6 +96,9 @@ export function makeVehicle(overrides: Partial<Vehicle> = {}): Vehicle {
     // Unregistered: only KASULU units on RaiFactorySuite's machine register
     // carry these.
     machineId: null,
+    machineName: null,
+    machineRegistrationNumber: null,
+    ratedConsumptionUnit: null,
     equipmentType: null,
     equipmentCategory: null,
     equipmentReference: null,
