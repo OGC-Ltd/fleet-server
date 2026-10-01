@@ -961,7 +961,9 @@ export async function findFleetSnapshot(orgId: string) {
      ORDER BY t.vehicle_id, t.began_at DESC`
   // Probe hold: a unit flagged for a fuel probe repair shows no fuel theft
   // incident until the repair resolves it (fuel/probe-hold).
-  const onHold = await probeHoldVehicleIds(incidents.map(i => i.vehicle_id))
+  // Asked for every unit, not only the flagged ones: the unit card shows the
+  // hold too (operator, 2026-10-01), so it travels as `probeHold` below.
+  const onHold = await probeHoldVehicleIds(vehicleIds)
   const incidentByVehicle = new Map(incidents.filter(i => !onHold.has(i.vehicle_id)).map(i => [i.vehicle_id, i]))
 
   /**
@@ -1052,6 +1054,9 @@ export async function findFleetSnapshot(orgId: string) {
         // which leave fuelLevelMl null, and only one of which is a job for
         // the workshop.
         fuelProbeFault: ping?.fuel_probe_fault ?? false,
+        // Flagged for a fuel probe repair: fuel theft alerts are held until it
+        // is resolved (fuel/probe-hold). The unit card says so.
+        probeHold: onHold.has(v.id),
 
         // On-board recorder. `hasCamera` defaults FALSE (no recorder is the
         // overwhelming norm — one unit of 1,496), but the rest stay NULL: a
