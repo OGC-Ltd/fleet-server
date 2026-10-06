@@ -217,3 +217,20 @@ describe('bagsFromTonnes', () => {
     expect(bagsFromTonnes(Number.NaN)).toBeNull()
   })
 })
+
+describe('the seal serial (FactorySuite v1.4.32)', () => {
+  it('stores sealSerialNumber as the run serial', async () => {
+    await handleSale(sale({ type: 'SALES', sealSerialNumber: '  SL-004512 ' }))
+
+    const call = (prismaMock.dispatch.upsert as any).mock.calls[0][0]
+    expect(call.create.serialNumber).toBe('SL-004512')
+    // On the update path too, so a serial typed in after sign-out lands.
+    expect(call.update.serialNumber).toBe('SL-004512')
+  })
+
+  it('falls back to null when the seal serial is blank', async () => {
+    await handleSale(sale({ sealSerialNumber: '   ' }))
+
+    expect((prismaMock.dispatch.upsert as any).mock.calls[0][0].create.serialNumber).toBeNull()
+  })
+})

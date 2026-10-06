@@ -14,6 +14,7 @@ import {
   wialonNotificationSchema,
   looksLikeSale,
   looksLikeWeighment,
+  providerDispatchType,
   unwrapEvent,
 } from './webhooks.schema.js'
 
@@ -56,7 +57,26 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
         continue
       }
 
-      // SALES FIRST, and by SHAPE rather than by name.
+      // The provider's own word first, where it gives one (FactorySuite
+      // v1.4.32 stamps every dispatch with `type`). Decisive in a way the
+      // shape never was — and the only thing that keeps a MATERIAL dispatch,
+      // which has a plate and a driver like a cane one, out of the cane table.
+      // Material runs are not modelled yet: logged as unmapped, with their
+      // shape, so they can be wired up from real payloads.
+      const declared = providerDispatchType(item)
+      if (declared === 'SALES') {
+        const sl = raiFactorySuiteSaleSchema.safeParse(item)
+        if (sl.success) { if (await handleSale(sl.data)) sales++; continue }
+      } else if (declared === 'VEHICLE') {
+        const d = raiFactorySuiteDispatchSchema.safeParse(item)
+        if (d.success) { if (await handleDispatch(d.data)) dispatches++; continue }
+      } else if (declared === 'MATERIAL') {
+        unmapped.push(item)
+        continue
+      }
+
+      // No declared type (older deliveries, replays): SALES FIRST, and by
+      // SHAPE rather than by name.
       //
       // The provider reuses `dispatch.created` and `movement.created` for the
       // sales lifecycle — it does not mint an event name of its own — so the
