@@ -47,6 +47,7 @@ import { listQuerySchema } from './modules/roles/role.schema.js'
 import { validateQuery, validateBody } from './middleware/validate.js'
 import * as userCtrl from './modules/users/user.controller.js'
 import { provisionUserSchema } from './modules/users/user.schema.js'
+import { trustProxy, parseProxyList } from './lib/trust-proxy.js'
 
 export function createApp() {
   const app = express()
@@ -62,7 +63,9 @@ export function createApp() {
   }
 
   // BigInt values (VehicleTelemetry.id) are not JSON-serializable by default
-  app.set("trust proxy", 1);
+  // nginx, plus the LiteSpeed proxy in front of it on one of the two domains —
+  // see lib/trust-proxy for why one hop was not enough.
+  app.set("trust proxy", trustProxy(parseProxyList(env.TRUSTED_PROXY_IPS)));
   app.set('json replacer', (_key: string, value: unknown) =>
     typeof value === 'bigint' ? value.toString() : value,
   )

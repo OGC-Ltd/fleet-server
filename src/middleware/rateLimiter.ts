@@ -35,11 +35,13 @@
  *
  * ## Whose IP
  *
- * `app.set('trust proxy', 1)` in app.ts is what makes this per-CLIENT rather
- * than per-nginx: with one proxy hop trusted, `req.ip` resolves through the
- * `X-Forwarded-For` that deploy/nginx/fleet.conf sets. Without it every request
- * would arrive as 127.0.0.1 and the whole platform would share one bucket —
- * the first user through the door would spend everyone's allowance.
+ * `trust proxy` in app.ts is what makes this per-CLIENT rather than per-proxy:
+ * `req.ip` resolves through the `X-Forwarded-For` that deploy/nginx/fleet.conf
+ * sets, and through the LiteSpeed proxy in front of nginx on the
+ * fleettracking.ogc-monitoring.com domain (lib/trust-proxy). Without that,
+ * every request would arrive as one proxy's address and everyone behind it
+ * would share one bucket — which is what happened to that domain's users
+ * until 2026-10-06.
  *
  * ## Fixed windows
  *
