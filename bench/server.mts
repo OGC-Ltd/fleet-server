@@ -92,6 +92,72 @@ const server = app.listen(port, '127.0.0.1', () => {
 server.keepAliveTimeout = 120_000
 server.headersTimeout   = 125_000
 
+// ── Synthetic fleet (--fleet N [--tick S]) ─────────────────────────────────
+// Stands in for the poller: every tick, one position event per vehicle goes
+// through the REAL emitDashboardPosition, so the SSE fan-out, the replay on
+// connect and the heartbeat are the production code paths. The batch is sent
+// in one burst at the top of the tick, as the poller's cycle does. Each payload
+// carries `sentAt` so a client can measure delivery lag. A payload is the shape
+// telemetry.worker emits, ~600 bytes once serialised.
+const argVal = (name: string) => {
+  const i = process.argv.indexOf(name)
+  return i >= 0 ? process.argv[i + 1] : undefined
+}
+const fleet = Number(argVal('--fleet') ?? 0)
+const tickS = Number(argVal('--tick') ?? 30)
+if (fleet > 0) {
+  const { emitDashboardPosition } = await import('../src/lib/sse.js')
+  const orgId = 'bench-org-0000-0000-000000000000'
+  // Two in three vehicles are driving: every tick moves them, turns them a
+  // little, burns fuel and adds distance. The rest are parked and only their
+  // fix time advances. This matters for --delta measurements: a fleet whose
+  // frames never change would flatter the deltas.
+  const bootMs = Date.now()
+  let tick = 0
+  const emitAll = () => {
+    const now = Date.now()
+    tick++
+    for (let v = 0; v < fleet; v++) {
+      const moving = v % 3 !== 0
+      const step = moving ? tick : 0
+      emitDashboardPosition(orgId, {
+        vehicleId: `bench-veh-${v}`, vehicleName: `BENCH - KXX ${String(v).padStart(3, '0')}A`,
+        plate: `KXX ${String(v).padStart(3, '0')}A`, deviceId: `dev-${v}`,
+        capturedAt: new Date(now).toISOString(), sentAt: now,
+        lat: +(-0.8 + (v % 50) * 0.01 + step * 0.0021).toFixed(6),
+        lng: +(34.4 + Math.floor(v / 50) * 0.01 + step * 0.0013).toFixed(6),
+        headingDeg: moving ? (v * 37 + step * 7) % 360 : (v * 37) % 360,
+        speedKmh: moving ? 30 + ((v + step) % 25) : 0, engineOn: moving,
+        fuelLevelMl: 143000 - step * 180, fuelLevelPct: +(71.5 - step * 0.09).toFixed(1),
+        odometerKm: +(120334.2 + step * 0.42).toFixed(1), engineHours: +(5321.4 + step * 0.008).toFixed(3),
+        driverName: 'Bench Driver', vehicleType: 'TRUCK', connectionOnline: true,
+        movement: { state: moving ? 'moving' : 'resting', since: new Date(bootMs - 600_000).toISOString() },
+        zones: { inside: [], violations: [] }, alerts: [], ignition: moving,
+      })
+    }
+  }
+  emitAll()   // seeds lastPositions, so every connect replays a full fleet
+  setInterval(emitAll, tickS * 1000)
+}
+
+// Event-loop delay, CPU and memory every 5 s on stdout: the server's own view
+// of how it is coping, which the client cannot see.
+{
+  const { monitorEventLoopDelay } = await import('node:perf_hooks')
+  const h = monitorEventLoopDelay({ resolution: 10 })
+  h.enable()
+  let cpu = process.cpuUsage(), at = Date.now()
+  setInterval(() => {
+    const d = process.cpuUsage(cpu), ms = Date.now() - at
+    cpu = process.cpuUsage(); at = Date.now()
+    const pctCpu = ((d.user + d.system) / 1000 / ms) * 100
+    process.stdout.write(`[stats] loopDelay p50 ${(h.percentile(50) / 1e6).toFixed(1)}ms `
+      + `p99 ${(h.percentile(99) / 1e6).toFixed(1)}ms max ${(h.max / 1e6).toFixed(0)}ms  `
+      + `cpu ${pctCpu.toFixed(0)}%  rss ${(process.memoryUsage().rss / 1048576).toFixed(0)}MB\n`)
+    h.reset()
+  }, 5000).unref()
+}
+
 const shutdown = () => { server.close(() => process.exit(0)) }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)

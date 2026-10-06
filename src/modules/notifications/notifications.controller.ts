@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express'
 import { pushService }              from './notifications.service.js'
-import { registerDashboardClient, emitDashboardHeartbeat, replayDashboardPositions, replayDashboardFeed } from '../../lib/sse.js'
+import { registerDashboardClient, writeHeartbeat, replayDashboardPositions, replayDashboardFeed } from '../../lib/sse.js'
 import { sendSuccess, sendError }   from '../../core/response/response.js'
 import { logger }                   from '../../lib/logger.js'
 import { getNotifications }         from '../../lib/notifications/notification.reader.js'
@@ -119,22 +119,33 @@ export async function dashboardStream(req: Request, res: Response) {
   // Send an immediate connected confirmation
   res.write(`event: connected\ndata: ${JSON.stringify({ orgId, ts: new Date().toISOString() })}\n\n`)
 
-  // Replay the fleet's last-known positions so this client is in sync with
-  // every other open browser immediately, not after the next poll tick.
-  const replayed = replayDashboardPositions(orgId, res, vehicleIds)
-  // …and this org's recent activity, so the Live Feed panel has history. Async
+  // Changed vehicles and fields only (`position_delta`), for a client that can
+  // rebuild the full frame — see lib/sse positionDelta. Opt-in, so a browser
+  // still running an older build keeps getting full `position` frames.
+  const delta = req.query['delta'] === '1'
+
+  // This org's recent activity, so the Live Feed panel has history. Async
   // because it reads the durable store (Redis, then Postgres) rather than an
   // in-memory buffer — see replayDashboardFeed. Awaited before the client is
   // registered so the replay cannot interleave with a live item arriving
   // mid-read, which would land an older event above a newer one.
   const feedReplayed = await replayDashboardFeed(orgId, res, 40, vehicleIds)
     .catch((err) => { logger.warn({ err, orgId }, 'Feed replay failed — panel starts empty and fills from live events'); return 0 })
-  logger.debug({ orgId, replayed, feedReplayed }, 'Dashboard SSE client connected')
 
-  const cleanup   = registerDashboardClient(orgId, res, { vehicleIds, userId: authz?.userId })
-  const heartbeat = setInterval(() => {
-    try { emitDashboardHeartbeat(orgId) } catch { /* ignore */ }
-  }, HEARTBEAT_MS)
+  // Then the fleet's last-known positions, so this client is in sync with
+  // every other open browser immediately, not after the next poll tick.
+  // AFTER the await and in the same turn as the registration below: deltas
+  // are taken against the positions as they stand, so nothing may be emitted
+  // between the replay that sets this client's base and the moment it starts
+  // receiving deltas. (Replayed before the await, a position arriving during
+  // the feed read was lost to this client, and every later delta for that
+  // vehicle would have applied to a stale base.)
+  const replayed = replayDashboardPositions(orgId, res, vehicleIds)
+  logger.debug({ orgId, replayed, feedReplayed, delta }, 'Dashboard SSE client connected')
+
+  const cleanup   = registerDashboardClient(orgId, res, { vehicleIds, userId: authz?.userId, delta })
+  // Its OWN socket only — see writeHeartbeat for why this is not a broadcast.
+  const heartbeat = setInterval(() => writeHeartbeat(res), HEARTBEAT_MS)
 
   req.on('close', () => {
     cleanup()

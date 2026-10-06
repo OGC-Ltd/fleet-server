@@ -14,6 +14,11 @@ interface SseClient {
   vehicleIds: Set<string> | null
   /** Who opened it, so a revoked account's streams can be closed. */
   userId?: string
+  /** The batched-event number it registered at; it is sent only later ones. */
+  fromSeq?: number
+  /** Asked for `position_delta` (changed vehicles and fields only) instead of
+   *  full `position` frames — see positionDelta. */
+  delta?: boolean
 }
 
 /**
@@ -24,11 +29,15 @@ interface SseClient {
  * concerns a vehicle this person may see. Keep-alives are the exception -
  * withholding those would just kill the connection.
  */
-function visibleTo(client: SseClient, event: string, data: unknown): boolean {
+function visibleTo(client: SseClient, event: string, vehicleId: string | null): boolean {
   if (client.vehicleIds === null) return true
   if (event === 'heartbeat' || event === 'connected') return true
-  const vehicleId = (data as { vehicleId?: unknown } | null)?.vehicleId
-  return typeof vehicleId === 'string' && client.vehicleIds.has(vehicleId)
+  return vehicleId !== null && client.vehicleIds.has(vehicleId)
+}
+
+function vehicleIdOf(data: unknown): string | null {
+  const v = (data as { vehicleId?: unknown } | null)?.vehicleId
+  return typeof v === 'string' ? v : null
 }
 
 // In-process SSE registry.
@@ -98,9 +107,50 @@ function dashboardKey(orgId: string) {
 // dashboard client so its map reflects the fleet as of the LAST poll tick
 // immediately, instead of waiting up to a full tick (30 s) for fresh events.
 // This closes the window where two browsers opened moments apart disagree.
-const lastPositions = new Map<string, Map<string, unknown>>()
+//
+// Kept as the serialised SSE frame rather than the object: the frame is built
+// once when the position arrives and every replay reuses it. The whole-fleet
+// replay is also cached as one Buffer per org (dropped whenever a position
+// changes), so a crowd connecting at once — the morning shift, or every
+// browser reconnecting after a deploy — costs one encode, not one per client.
+// Bench 2026-10-06: the replay is ~320 KB per client at 600 vehicles.
+const lastPositions = new Map<string, Map<string, string>>()
+const replayCache   = new Map<string, Buffer>()
+/** The same positions as plain JSON values — the base each delta is taken
+ *  against. Parsed back from the frame, so Dates and bigints compare exactly
+ *  as the client received them. */
+const lastPositionData = new Map<string, Map<string, Record<string, unknown>>>()
 
-/** Write the org's cached per-vehicle positions straight to one client. */
+const sameValue = (a: unknown, b: unknown): boolean =>
+  a === b || (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null
+    && JSON.stringify(a) === JSON.stringify(b))
+
+/**
+ * What changed in a vehicle's position payload since the last one: the
+ * top-level fields whose value differs (objects such as `movement` and
+ * `zones` go whole when anything inside them changed), plus `$del` naming
+ * fields that disappeared. `vehicleId` is always carried. Null when nothing
+ * changed at all — that vehicle is left out of the delta event.
+ *
+ * Absent and null are different on this wire — a frame with no cargoWeightKg
+ * knows nothing about the load, a null one says there is no measurement —
+ * so a field that vanished is named in `$del`, never sent as null.
+ */
+export function positionDelta(
+  prev: Record<string, unknown> | undefined,
+  next: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (!prev) return { ...next }
+  const out: Record<string, unknown> = {}
+  for (const k of Object.keys(next)) if (!sameValue(prev[k], next[k])) out[k] = next[k]
+  const del = Object.keys(prev).filter((k) => !(k in next))
+  if (!Object.keys(out).length && !del.length) return null
+  if (del.length) out['$del'] = del
+  out['vehicleId'] = next['vehicleId']
+  return out
+}
+
+/** Write the org's cached per-vehicle positions to one client, in one write. */
 export function replayDashboardPositions(
   orgId: string,
   res: Response,
@@ -108,38 +158,176 @@ export function replayDashboardPositions(
 ): number {
   const positions = lastPositions.get(orgId)
   if (!positions?.size) return 0
-  let sent = 0
-  // The replay is the entire fleet as of the last tick, so leaving it unscoped
-  // would hand a restricted client everything the live stream withholds.
-  for (const [vehicleId, data] of positions) {
-    if (vehicleIds && !vehicleIds.has(vehicleId)) continue
-    try {
-      res.write(`event: position\ndata: ${JSON.stringify(data, bigIntReplacer)}\n\n`)
-      sent++
-    } catch { /* client disconnected mid-replay */ }
+  try {
+    if (!vehicleIds) {
+      let buf = replayCache.get(orgId)
+      if (!buf) {
+        buf = Buffer.from([...positions.values()].join(''))
+        replayCache.set(orgId, buf)
+      }
+      res.write(buf)
+      return positions.size
+    }
+    // The replay is the entire fleet as of the last tick, so leaving it
+    // unscoped would hand a restricted client everything the live stream
+    // withholds.
+    const frames: string[] = []
+    for (const [vehicleId, frame] of positions) if (vehicleIds.has(vehicleId)) frames.push(frame)
+    if (frames.length) res.write(frames.join(''))
+    return frames.length
+  } catch {
+    return 0   // client disconnected mid-replay
   }
-  return sent
+}
+
+// ─── batched delivery ──────────────────────────────────────────────────────
+//
+// Dashboard events are queued per org and written every FLUSH_MS as ONE write
+// per client, instead of one write per event per client.
+//
+// Bench 2026-10-06 (bench/realtime.mjs, 600 vehicles, 3000 viewers): a tick was
+// 1.8 M individual writes, each re-encoding the same string, and it froze the
+// event loop for ~7 s every 30 s — new streams were refused, API calls queued
+// behind it, RSS reached ~1 GB. Batched, a tick is one Buffer per org, encoded
+// once and shared by every unscoped client, and one write per client.
+//
+// For a client that did not ask for deltas the wire format is unchanged: a
+// batch is the same `event:`/`data:` frames, concatenated. Order is kept,
+// because every dashboard event goes through the same per-org queue. The price
+// is at most FLUSH_MS of extra delay on an event; positions tick every 30 s.
+//
+// A client that opened /live?delta=1 gets each run of positions in a batch as
+// ONE `position_delta` event: an array of positionDelta()s, vehicles with
+// nothing new left out. Everything else (alerts, feed, dispatch …) is the same
+// frame in the same place. Its replay on connect is still full `position`
+// frames — that is the base its deltas apply to.
+
+const FLUSH_MS = 150
+
+/**
+ * How far a client may fall behind before it is cut loose. A viewer on a dead
+ * link otherwise makes the server hold every tick for it (~330 KB each at 600
+ * vehicles) until TCP gives up, which takes minutes. Closing it lets
+ * EventSource reconnect and take the replay, which is the current fleet anyway.
+ */
+const MAX_BUFFERED_BYTES = 4 * 1024 * 1024
+
+interface Queued {
+  seq: number; event: string; vehicleId: string | null; frame: string
+  /** Position events only: the change since the vehicle's previous position,
+   *  or null when nothing changed. */
+  delta?: Record<string, unknown> | null
+}
+const outbox = new Map<string, Queued[]>()
+let flushTimer: NodeJS.Timeout | null = null
+/** Monotonic event number. A client registered mid-window takes only events
+ *  queued after it — earlier ones are already in its replay. */
+let seq = 0
+
+function frameOf(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data, bigIntReplacer)}\n\n`
+}
+
+function enqueueDashboard(
+  orgId: string, event: string, vehicleId: string | null, frame: string,
+  delta?: Record<string, unknown> | null,
+) {
+  if (!registry.get(dashboardKey(orgId))?.size) return
+  let q = outbox.get(orgId)
+  if (!q) { q = []; outbox.set(orgId, q) }
+  q.push({ seq: ++seq, event, vehicleId, frame, delta })
+  if (!flushTimer) {
+    flushTimer = setTimeout(flushDashboards, FLUSH_MS)
+    flushTimer.unref?.()
+  }
+}
+
+function flushDashboards() {
+  flushTimer = null
+  for (const [orgId, items] of outbox) {
+    outbox.delete(orgId)
+    const clients = registry.get(dashboardKey(orgId))
+    if (!clients?.size) continue
+    const firstSeq = items[0]!.seq
+    // One encode per org per wire format, shared by every unscoped client.
+    let sharedFull: Buffer | null = null
+    let sharedDelta: Buffer | null = null
+    for (const client of [...clients]) {
+      if (client.vehicleIds === null && (client.fromSeq ?? 0) < firstSeq) {
+        const buf = client.delta
+          ? (sharedDelta ??= Buffer.from(encodeBatch(items, true)))
+          : (sharedFull  ??= Buffer.from(encodeBatch(items, false)))
+        if (buf.length) writeOrDrop(client, buf, clients)
+        continue
+      }
+      const mine = items.filter((i) => i.seq > (client.fromSeq ?? 0) && visibleTo(client, i.event, i.vehicleId))
+      const chunk = encodeBatch(mine, client.delta === true)
+      if (chunk) writeOrDrop(client, chunk, clients)
+    }
+  }
+}
+
+/** A batch on the wire: full frames, or with each run of positions folded into
+ *  one `position_delta` event. */
+function encodeBatch(items: Queued[], delta: boolean): string {
+  if (!delta) return items.map((i) => i.frame).join('')
+  let out = ''
+  let run: Record<string, unknown>[] = []
+  const closeRun = () => {
+    if (run.length) out += `event: position_delta\ndata: ${JSON.stringify(run)}\n\n`
+    run = []
+  }
+  for (const i of items) {
+    if (i.event === 'position' && i.delta !== undefined) {
+      if (i.delta) run.push(i.delta)
+      continue
+    }
+    closeRun()
+    out += i.frame
+  }
+  closeRun()
+  return out
+}
+
+function writeOrDrop(client: SseClient, chunk: Buffer | string, clients: Set<SseClient>) {
+  try {
+    if (client.res.writableLength > MAX_BUFFERED_BYTES) {
+      clients.delete(client)
+      client.res.end()
+      return
+    }
+    client.res.write(chunk)
+  } catch { /* client disconnected */ }
 }
 
 function broadcastDashboard(orgId: string, event: string, data: unknown) {
-  const key     = dashboardKey(orgId)
-  const clients = registry.get(key)
-  if (!clients?.size) return
-  const payload = `event: ${event}\ndata: ${JSON.stringify(data, bigIntReplacer)}\n\n`
-  for (const client of clients) {
-    if (!visibleTo(client, event, data)) continue
-    try { client.res.write(payload) } catch { /* client disconnected */ }
-  }
+  if (!registry.get(dashboardKey(orgId))?.size) return
+  enqueueDashboard(orgId, event, vehicleIdOf(data), frameOf(event, data))
+}
+
+/**
+ * A keep-alive for ONE connection, written straight to it.
+ *
+ * This used to be emitDashboardHeartbeat(orgId), called from a timer every
+ * client starts — so each client's timer broadcast to EVERY client in the org:
+ * N clients, N² writes per 25 s. Bench 2026-10-06: 1000 viewers froze the
+ * server for 14 s and 3072 API calls were refused. A keep-alive only has to
+ * keep its own socket warm.
+ */
+export function writeHeartbeat(res: Response): void {
+  try { res.write(frameOf('heartbeat', { ts: new Date().toISOString() })) } catch { /* client gone */ }
 }
 
 export function registerDashboardClient(
   orgId: string,
   res: Response,
-  scope: { vehicleIds?: Set<string> | null; userId?: string } = {},
+  scope: { vehicleIds?: Set<string> | null; userId?: string; delta?: boolean } = {},
 ): () => void {
   const key = dashboardKey(orgId)
   if (!registry.has(key)) registry.set(key, new Set())
-  const client: SseClient = { res, vehicleIds: scope.vehicleIds ?? null, userId: scope.userId }
+  const client: SseClient = {
+    res, vehicleIds: scope.vehicleIds ?? null, userId: scope.userId, fromSeq: seq, delta: scope.delta === true,
+  }
   registry.get(key)!.add(client)
   return () => {
     registry.get(key)?.delete(client)
@@ -208,12 +396,25 @@ export async function replayDashboardFeed(
 
 /** Vehicle position + state snapshot — powers the live map markers. */
 export function emitDashboardPosition(orgId: string, data: unknown) {
-  const vehicleId = (data as { vehicleId?: string } | null)?.vehicleId
+  const vehicleId = vehicleIdOf(data)
+  const json  = JSON.stringify(data, bigIntReplacer)
+  const frame = `event: position\ndata: ${json}\n\n`
+  // No vehicleId, no base to diff against: such a frame goes out whole to
+  // delta clients too (`delta` left undefined).
+  let delta: Record<string, unknown> | null | undefined
   if (vehicleId) {
     if (!lastPositions.has(orgId)) lastPositions.set(orgId, new Map())
-    lastPositions.get(orgId)!.set(vehicleId, data)
+    lastPositions.get(orgId)!.set(vehicleId, frame)
+    replayCache.delete(orgId)
+    // The base is kept current even with nobody watching, so the first delta
+    // after a client connects is taken against exactly what its replay held.
+    if (!lastPositionData.has(orgId)) lastPositionData.set(orgId, new Map())
+    const bases = lastPositionData.get(orgId)!
+    const next = JSON.parse(json) as Record<string, unknown>
+    delta = positionDelta(bases.get(vehicleId), next)
+    bases.set(vehicleId, next)
   }
-  broadcastDashboard(orgId, 'position', data)
+  enqueueDashboard(orgId, 'position', vehicleId, frame, delta)
 }
 
 /**
@@ -262,11 +463,6 @@ export function emitDashboardRepairChanged(orgId: string) {
 /** Alert notification — powers the alert feed and banner toasts. */
 export function emitDashboardAlert(orgId: string, data: unknown) {
   broadcastDashboard(orgId, 'alert', data)
-}
-
-/** Keep long-lived SSE connections alive across proxy timeouts. */
-export function emitDashboardHeartbeat(orgId: string) {
-  broadcastDashboard(orgId, 'heartbeat', { ts: new Date().toISOString() })
 }
 
 /** Lifecycle notice (refuel, vehicle back online, etc.) — powers the notification inbox. */

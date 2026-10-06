@@ -95,6 +95,55 @@ held connection is near zero; the cost is in establishing them.
 This matters because **SSE viewers are invisible in nginx's access log**, so
 this harness is the only way to count them at all.
 
+## Results — 2026-10-06, 3000 concurrent real-time users
+
+The 1000-stream run above held idle streams. Real viewers receive the fleet:
+
+```bash
+npx tsx bench/server.mts --fleet 600 --tick 30     # 600 vehicles report every 30 s
+node bench/realtime.mjs --users 3000 --ramp 100 --hold 65 --rps 250
+```
+
+`--fleet` pushes positions through the real `emitDashboardPosition`, so the
+fan-out, replay-on-connect and heartbeat are the production paths; the server
+prints event-loop delay, CPU and RSS every 5 s. `realtime.mjs` holds N `/live`
+streams, measures how late live positions arrive, and offers API calls at a
+fixed rate (open loop: ~250/s is the web app's polling at 3000 users).
+
+| | streams | API calls | positions arrive | worst stall | RSS |
+|---|---|---|---|---|---|
+| 1000 users, before | 1000 | 3072 refused, 352 timed out | — | **14 s** | 600 MB |
+| 3000 users, heartbeat fixed only | 2694 (306 refused) | 496 refused | 3–7 s late | 6.9 s every tick | ~1 GB |
+| 3000 users, heartbeat fixed + batched | **3000** | **0 errors**, p50 2 ms | 0.7–1.4 s late | 0.67 s | ~410 MB |
+
+The two fixes, both in `src/lib/sse.ts`:
+
+- **Heartbeat was O(N²).** Each client's 25 s timer broadcast to every client
+  in the org. Now each timer writes to its own socket (`writeHeartbeat`).
+- **One write per event per client.** A 600-vehicle tick to 3000 viewers was
+  1.8 M writes. Events are now queued per org and flushed every 150 ms as one
+  shared Buffer per org — one write per client. Same bytes on the wire.
+
+### Deltas — changed vehicles and fields only
+
+`/live?delta=1` (dash and new-ui both open it) gets each batch's positions as
+one `position_delta` event: `[{ vehicleId, ...changed fields, $del? }]`,
+unchanged vehicles left out. Full frames still go to a client that did not ask,
+and as the replay on connect. `realtime.mjs --delta` measures it; the
+synthetic fleet moves two in three vehicles every tick (position, heading,
+speed, fuel, odometer) so the deltas are not flattered.
+
+| 3000 users, 600 vehicles | per tick on the wire | per viewer | worst stall | positions arrive |
+|---|---|---|---|---|
+| full frames (batched) | ~950 MB | ~316 KB | 0.85 s | 0.85–1.7 s late |
+| `?delta=1` | **~325 MB** | **~108 KB** | **0.26 s** | **~0.5 s late** |
+
+0 failed streams, 0 of 15,152 API calls failed. What is left per tick is
+data that genuinely changed. Real payloads carry more static fields than the
+synthetic one, so production should save more, not less — unmeasured. The
+replay on connect is still full (~320 KB each). Next lever: more instances
+(Redis pub/sub).
+
 ## What is NOT measured here, and why
 
 - **Database query cost.** Needs a real Postgres with representative data. The
