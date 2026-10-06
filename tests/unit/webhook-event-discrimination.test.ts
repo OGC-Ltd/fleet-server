@@ -158,3 +158,54 @@ describe('mixed batches', () => {
     expect(body).toMatchObject({ data: expect.objectContaining({ dispatches: 1, sales: 1 }) })
   })
 })
+
+/**
+ * FactorySuite v1.4.32: every dispatch notification declares its kind in
+ * `type` — SALES, MATERIAL or VEHICLE. Where it is present it decides, ahead
+ * of the shape sniffing above; where it is absent nothing changes.
+ */
+describe('the declared dispatch type (FactorySuite v1.4.32)', () => {
+  it('routes type SALES to handleSale and keeps the seal serial', async () => {
+    await post({ event: 'dispatch.created', data: { ...SALE, type: 'SALES', sealSerialNumber: 'SL-004512' } })
+
+    expect(handleSale).toHaveBeenCalledTimes(1)
+    expect(handleDispatch).not.toHaveBeenCalled()
+    // The sale schema strips unknown keys, so this is the test that the field
+    // was actually added to it.
+    expect((handleSale as any).mock.calls[0][0].sealSerialNumber).toBe('SL-004512')
+  })
+
+  it('routes type SALES to handleSale even with none of the sniffed sales fields', async () => {
+    const { tonnage: _t, signOutTime: _s, returnTime: _r, ...bare } = SALE
+    await post({ event: 'dispatch.created', data: { ...bare, type: 'SALES' } })
+
+    expect(handleSale).toHaveBeenCalledTimes(1)
+    expect(handleDispatch).not.toHaveBeenCalled()
+  })
+
+  it('routes type VEHICLE to handleDispatch', async () => {
+    await post({ event: 'dispatch.created', data: { ...DISPATCH, type: 'VEHICLE' } })
+
+    expect(handleDispatch).toHaveBeenCalledTimes(1)
+    expect(handleSale).not.toHaveBeenCalled()
+  })
+
+  it('keeps a MATERIAL dispatch out of the cane table', async () => {
+    // Plate, driver, factory, dispatch time: it parses as a cane dispatch, and
+    // only the declared type says otherwise. Not modelled yet, so ignored and
+    // logged rather than filed.
+    const res = await post({ event: 'dispatch.created', data: { ...DISPATCH, type: 'MATERIAL' } })
+
+    expect(handleDispatch).not.toHaveBeenCalled()
+    expect(handleSale).not.toHaveBeenCalled()
+    expect((res.json as any).mock.calls[0][0]).toMatchObject({ data: expect.objectContaining({ ignored: 1 }) })
+  })
+
+  it('does not read an alert type as a dispatch type', async () => {
+    // Alerts carry `type` as their own category, and no plate.
+    await post({ event: 'alert.created', data: { id: 'a1', factoryCode: 'NDHIWA', type: 'VEHICLE', message: 'x' } })
+
+    expect(handleDispatch).not.toHaveBeenCalled()
+    expect(handleSale).not.toHaveBeenCalled()
+  })
+})

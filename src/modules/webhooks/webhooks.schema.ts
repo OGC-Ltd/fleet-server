@@ -54,6 +54,8 @@ export const raiFactorySuiteDispatchSchema = z.object({
   dispatchTime:         z.string().nullish(),
   expectedReturnTime:   z.string().nullish(),
   actualReturnTime:     z.string().nullish(),
+  /** `VEHICLE` on every /dispatches row since FactorySuite v1.4.32. */
+  type:                 z.string().nullish(),
 })
 
 /**
@@ -89,9 +91,45 @@ export const raiFactorySuiteSaleSchema = z.object({
   signOutPhotoUrl:    z.string().nullish(),
   returnTime:         z.string().nullish(),
   returnPhotoUrl:     z.string().nullish(),
+  /** `SALES` since FactorySuite v1.4.32 — see `providerDispatchType`. */
+  type:               z.string().nullish(),
+  /** The seal the gate puts on the load, typed in by the guard at sign-out
+   *  (v1.4.32). Listed here because this schema STRIPS unknown keys: left out,
+   *  it never reached the handler however often the provider sent it. */
+  sealSerialNumber:   z.string().nullish(),
+  /** Weighbridge legs of the load, kg. Present on the wire, null on every row
+   *  read 2026-10-07; carried so they are not stripped the day they fill in. */
+  loadedWeightKg:     z.coerce.number().nullish(),
+  tareWeightKg:       z.coerce.number().nullish(),
 })
 
 export type RaiFactorySuiteSaleInput = z.infer<typeof raiFactorySuiteSaleSchema>
+
+/**
+ * Which kind of dispatch the provider SAYS this is, or null when it does not.
+ *
+ * FactorySuite v1.4.32 put a `type` on every dispatch notification so partner
+ * integrations stop guessing: `SALES` (finished sugar out of the gate, with
+ * its seal serial), `MATERIAL` (stores and spares leaving the site) and
+ * `VEHICLE` (a unit sent out with a driver — what this codebase calls a cane
+ * dispatch). Read off the live API 2026-10-07: every /dispatches row carries
+ * `VEHICLE`, every /sales row `SALES`; no MATERIAL has been delivered yet.
+ *
+ * Alerts carry a `type` too (the alert's own category), so only these three
+ * values on a payload with a plate count. Anything else returns null and the
+ * shape sniffing below decides, as it did before v1.4.32 — older deliveries
+ * and replays keep routing exactly as they always have.
+ */
+export type ProviderDispatchType = 'SALES' | 'MATERIAL' | 'VEHICLE'
+const DISPATCH_TYPES: ReadonlySet<string> = new Set(['SALES', 'MATERIAL', 'VEHICLE'])
+
+export function providerDispatchType(item: unknown): ProviderDispatchType | null {
+  if (!item || typeof item !== 'object') return null
+  const o = item as Record<string, unknown>
+  if (!('vehicleNumberPlate' in o) || typeof o['type'] !== 'string') return null
+  const t = o['type'].trim().toUpperCase()
+  return DISPATCH_TYPES.has(t) ? (t as ProviderDispatchType) : null
+}
 
 /**
  * Does this payload look like a sale, whatever the sender called the event?

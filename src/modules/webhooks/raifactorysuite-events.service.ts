@@ -110,11 +110,16 @@ export interface DispatchEvent {
  */
 function eventSerial(
   e: {
+    sealSerialNumber?: string | null
     serialNumber?: string | null; serialNo?: string | null
     gatePassNo?: string | null; documentNo?: string | null; referenceNo?: string | null
   },
 ): string | null {
-  const raw = e.serialNumber ?? e.serialNo ?? e.gatePassNo ?? e.documentNo ?? e.referenceNo
+  // `sealSerialNumber` is the name it finally arrived under (FactorySuite
+  // v1.4.32, sales runs): the seal on the load, typed in by the gate guard.
+  // Blank strings fall through to the older guesses, then to null.
+  const seal = typeof e.sealSerialNumber === 'string' && e.sealSerialNumber.trim() ? e.sealSerialNumber : null
+  const raw = seal ?? e.serialNumber ?? e.serialNo ?? e.gatePassNo ?? e.documentNo ?? e.referenceNo
   const trimmed = typeof raw === 'string' ? raw.trim() : ''
   return trimmed.length > 0 ? trimmed : null
 }
@@ -395,8 +400,10 @@ export interface SaleEvent {
   status?: string | null
   signOutTime?: string | null; signOutPhotoUrl?: string | null
   returnTime?:  string | null; returnPhotoUrl?:  string | null
-  /** The gate's document number, under whichever name it turns up in. Every
-   *  one optional, every one absent today — see `eventSerial` above. */
+  /** The seal serial the gate records at sign-out (FactorySuite v1.4.32). */
+  sealSerialNumber?: string | null
+  /** Older guesses at the gate's document number, kept as fallbacks — see
+   *  `eventSerial` above. */
   serialNumber?: string | null; serialNo?: string | null
   gatePassNo?:   string | null; documentNo?: string | null
   referenceNo?:  string | null
@@ -487,10 +494,10 @@ export async function handleSale(
     expectedReturnAt: null,
     actualReturnAt:   returnedAt,
     tonnageT:         s.tonnage ?? null,
-    // The number the gate writes on the pass, where the payload carries one.
-    // Null on every row the provider sends today, which is why this is written
-    // unconditionally rather than guarded: there is nothing to guard, and the
-    // day a serial appears on the wire it lands with no further deploy.
+    // The seal serial the gate guard records at sign-out — `sealSerialNumber`
+    // since FactorySuite v1.4.32 (every Naitiri sales row carried one on
+    // 2026-10-07). Written unconditionally, so a guard who corrects the serial
+    // after sign-out corrects it here on the next delivery or reconcile.
     //
     // The column behind it went in as ONE change with this line and the select
     // in dispatches/dispatch.repository, migration applied to RDS first. The
