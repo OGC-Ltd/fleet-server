@@ -19,3 +19,6 @@ ESTATE*.dwg
 # deploy box meant every `git push` was rejected until someone ran
 # `git checkout -- .`, a command whose other job is discarding real work.
 /.cache/
+
+# load-test sign-in (bench/login.mjs) — never commit
+bench/.bench-token.json
