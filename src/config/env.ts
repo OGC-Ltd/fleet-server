@@ -207,6 +207,14 @@ const schema = z.object({
   PASSWORD_RESET_TTL_S: z.coerce.number().int().positive().optional().default(3_600),   // 1 hour
 
   /**
+   * Reverse proxies IN FRONT of nginx whose X-Forwarded-For is believed, comma
+   * separated. Default: the LiteSpeed host serving fleettracking.ogc-monitoring.com
+   * — without it every user of that domain shares one rate-limit bucket. See
+   * lib/trust-proxy. Set to an empty string to trust nginx alone.
+   */
+  TRUSTED_PROXY_IPS: z.string().optional().default('198.38.90.19'),
+
+  /**
    * Password-reset requests per 15 minutes, per MACHINE — `ip|device`, not the
    * IP alone. A company sits behind one NAT, so the old per-IP reading made
    * this five requests for the whole building.
