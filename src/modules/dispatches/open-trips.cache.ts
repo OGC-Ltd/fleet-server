@@ -95,7 +95,11 @@ export async function patchOpenTrips(orgId: string, vehicleIds: string[]): Promi
       || before.cargoTonnes !== after.cargoTonnes
       || before.destination !== after.destination
       || before.driverName  !== after.driverName
-      || before.status      !== after.status) {
+      || before.status      !== after.status
+      // The gate guard's seal serial can land after the sign-out that opened
+      // the run (FactorySuite v1.4.32), on a unit that is parked and sending
+      // no positions — this push is then the only way it reaches the card.
+      || before.serialNumber !== after.serialNumber) {
       changed.push(vehicleId)
     }
     entry.byVehicle.set(vehicleId, after)

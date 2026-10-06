@@ -123,3 +123,25 @@ describe('dispatch refresh', () => {
     expect(patchOpenTrips).not.toHaveBeenCalled()
   })
 })
+
+describe('the seal serial (FactorySuite v1.4.32)', () => {
+  it('carries the run serial to the card', async () => {
+    patchOpenTrips.mockResolvedValue(['veh-1'])
+    getOpenTripsCached.mockResolvedValue({ byVehicle: new Map([['veh-1', run({ serialNumber: 'C098062' })]]) })
+
+    markDispatchChanged(ORG, 'veh-1')
+    await flushDispatchRefreshNow()
+
+    expect(emitDashboardDispatch.mock.calls[0]![1]).toMatchObject({ serialNumber: 'C098062' })
+  })
+
+  it('sends null when the run has closed', async () => {
+    patchOpenTrips.mockResolvedValue(['veh-1'])
+    getOpenTripsCached.mockResolvedValue({ byVehicle: new Map() })
+
+    markDispatchChanged(ORG, 'veh-1')
+    await flushDispatchRefreshNow()
+
+    expect(emitDashboardDispatch.mock.calls[0]![1]).toMatchObject({ serialNumber: null })
+  })
+})
