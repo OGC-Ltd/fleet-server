@@ -126,6 +126,8 @@ async function flush(orgId: string): Promise<void> {
         cargoWeightKg: run?.cargoTonnes != null ? run.cargoTonnes * 1000 : null,
         cargoBags:     run?.cargoBags ?? null,
         cargoDesc:     run?.cargoName ?? null,
+        // The seal on the load, as the unit card's SEAL SERIAL shows it.
+        serialNumber:  run?.serialNumber ?? null,
       })
     }
 
