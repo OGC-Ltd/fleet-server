@@ -44,39 +44,59 @@ export const WEIGHBRIDGE_FACTORIES: Record<string, {
   /** The organisation a ticket from this feed belongs to — unless its yard is in `yardOrgs`. */
   orgCode:      string
   siteBase:     number
-  /** Stored site code → organisation, for the yards that are not `orgCode`'s. */
-  yardOrgs?:    Readonly<Record<number, string>>
   /** Where a ticket's lorry may be matched, after the ticket's own organisation. */
   vehicleOrgs?: readonly string[]
 }> = {
   NDHIWA: { orgCode: 'SUKARI',    siteBase: 0 },
   // Kabras and Nzoia became organisations of their own on 2026-10-07. Each
-  // mill's FACTORY YARD belongs to that mill; every other yard either feed
-  // names (Magut, Busia, Misikhu, Naitiri, Khalaba, Lake Agro, Selient,
-  // Kitale, Makhese, Weyeta) stays West Kenya's — the operator's split. The
-  // Kabras feed also files 6 tickets at Nzoia Factory Yard (its site 1201);
-  // those are Nzoia's.
+  // mill's FACTORY YARD belongs to that mill (YARD_ORGS); every other yard
+  // either feed names (Magut, Busia, Misikhu, Naitiri, Khalaba, Lake Agro,
+  // Selient, Kitale, Makhese, Weyeta) stays West Kenya's — the operator's split.
   //
   // Lorries cross all three: of the Kabras-feed tickets that matched a unit,
   // 753 were West Kenya lorries, 599 Kabras and 1 Nzoia. So a lorry is looked
   // for in the ticket's own organisation first, then across the group.
   // `siteBase` is unchanged, so every stored site code still reads the same.
-  KABRAS: { orgCode: 'WESTSUGAR', siteBase: 1000, yardOrgs: { 1101: 'KABRAS', 1201: 'NZOIA' }, vehicleOrgs: ['KABRAS', 'NZOIA', 'WESTSUGAR'] },
-  NZOIA:  { orgCode: 'WESTSUGAR', siteBase: 2000, yardOrgs: { 2101: 'NZOIA' },                  vehicleOrgs: ['NZOIA', 'KABRAS', 'WESTSUGAR'] },
+  KABRAS: { orgCode: 'WESTSUGAR', siteBase: 1000, vehicleOrgs: ['KABRAS', 'NZOIA', 'WESTSUGAR'] },
+  NZOIA:  { orgCode: 'WESTSUGAR', siteBase: 2000, vehicleOrgs: ['NZOIA', 'KABRAS', 'WESTSUGAR'] },
+}
+
+/** Yards that are not their feed's default organisation's, by site code
+ *  (after SITE_ALIASES, so a yard is one key whichever feed names it). */
+export const YARD_ORGS: Readonly<Record<number, string>> = {
+  1101: 'KABRAS',  // KABRAS FACTORY YARD
+  2101: 'NZOIA',   // NZOIA FACTORY YARD — both feeds
 }
 
 /** The organisation code a ticket belongs to, from its feed and stored site code. */
 export const weighmentOrgCode = (factoryCode: string, site: number): string | null => {
   const f = WEIGHBRIDGE_FACTORIES[factoryCode]
-  return f ? (f.yardOrgs?.[site] ?? f.orgCode) : null
+  return f ? (YARD_ORGS[site] ?? f.orgCode) : null
 }
 
 /** Rows from before the feed named its factory were all Ndhiwa's. */
 export const LEGACY_FACTORY = 'NDHIWA'
 
 /** The provider's centre code as the site code we store. */
-export const siteCodeOf = (factoryCode: string, centerCode: number): number =>
-  (WEIGHBRIDGE_FACTORIES[factoryCode]?.siteBase ?? 0) + centerCode
+export const siteCodeOf = (factoryCode: string, centerCode: number): number => {
+  const raw = (WEIGHBRIDGE_FACTORIES[factoryCode]?.siteBase ?? 0) + centerCode
+  return SITE_ALIASES[raw] ?? raw
+}
+
+/**
+ * One yard, one site code.
+ *
+ * Each feed numbers yards its own way, so a yard BOTH feeds name came out as
+ * two sites — measured 2026-10-07: Weyeta Yard as 1200 (Kabras feed, 362
+ * tickets) and 2103 (Nzoia feed, 275), Nzoia Factory Yard as 1201 (6) and
+ * 2101 (1,712). The operator saw each twice. The Kabras feed's codes fold
+ * into the Nzoia feed's, which holds the yard's weighbridges and most of its
+ * tickets.
+ */
+export const SITE_ALIASES: Readonly<Record<number, number>> = {
+  1200: 2103,  // WEYETA YARD
+  1201: 2101,  // NZOIA FACTORY YARD
+}
 
 /**
  * Site code -> name.
