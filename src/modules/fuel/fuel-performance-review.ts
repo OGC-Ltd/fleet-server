@@ -112,6 +112,8 @@ export interface PerformanceReview {
   from: string
   to: string
   days: number
+  /** Days from the first refill on record (or `from`) to `to`. */
+  coveredDays: number
   source: 'telemetry'
   totals: {
     litres: number
@@ -335,9 +337,17 @@ export function buildPerformanceReview(input: ReviewInput): PerformanceReview {
     }
   }).sort((a, b) => b.litres - a.litres)
 
-  const perDay = nDays > 0 ? litres / nDays : 0
+  // Litres a day over the days the ledger COVERS: a period that starts before
+  // the first refill on record (Kasulu's ledger opens on 1 July) would
+  // otherwise average empty days in and understate the typical month.
+  let firstFill = Infinity
+  for (const fills of input.fills.values()) for (const f of fills) firstFill = Math.min(firstFill, f.at.getTime())
+  const coveredDays = Number.isFinite(firstFill)
+    ? Math.min(nDays, Math.round((dayStartMs(input.to) - dayStartMs(dayKeyOf(firstFill))) / DAY_MS) + 1)
+    : nDays
+  const perDay = coveredDays > 0 ? litres / coveredDays : 0
   return {
-    from: input.from, to: input.to, days: nDays, source: 'telemetry',
+    from: input.from, to: input.to, days: nDays, coveredDays, source: 'telemetry',
     totals: {
       litres,
       refills: units.reduce((s, u) => s + u.refills, 0),
