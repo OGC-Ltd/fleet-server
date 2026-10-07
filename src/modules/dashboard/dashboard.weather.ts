@@ -56,6 +56,15 @@ const LOCATIONS_BY_ORG: Record<string, Loc[]> = {
     { name: 'Amuka',          lat: 1.0714, lng: 34.9972 },
     { name: 'Kakamega',       lat: 0.2827, lng: 34.7519 },
   ],
+  // The densest 1.1 km cell per fleet, 2026-10-07: Elburgon holds 54 of 114
+  // located Timsales units; Limuru 43 of 77 Aquamist, Mombasa the next 8.
+  TIMSALES: [
+    { name: 'Elburgon', lat: -0.3008, lng: 35.8016 },
+  ],
+  AQUAMIST: [
+    { name: 'Limuru',  lat: -1.2045, lng: 36.6580 },
+    { name: 'Mombasa', lat: -4.0568, lng: 39.6556 },
+  ],
 }
 const DEFAULT_ORG_CODE = 'SUKARI'
 

@@ -84,6 +84,7 @@ import {
   KASULU_WIALON_ACCOUNT_ID,
   MENENGAI_WIALON_ACCOUNT_ID,
   WEST_SUGAR_REPORT_RESOURCE_ID,
+  AQUAMIST_RESOURCE_ID,
 } from '../src/providers/wialon/wialon.account.js'
 
 const pool    = new pg.Pool({ connectionString: process.env.DIRECT_URL })
@@ -116,6 +117,8 @@ const ZONE_SOURCE: Record<string, { accountId: number; label: string }> = {
    */
   SUKARI:    { accountId: MENENGAI_WIALON_ACCOUNT_ID,    label: 'Mene-ngai (holds Sukari\'s zones)' },
   WESTSUGAR: { accountId: WEST_SUGAR_REPORT_RESOURCE_ID, label: 'WEST KENYA SUGAR' },
+  // 4 zones, 2026-10-07. Timsales has no resource on this token, so no entry.
+  AQUAMIST:  { accountId: AQUAMIST_RESOURCE_ID,          label: 'Aquamist' },
 }
 
 const arg = (name: string): string | null => {
