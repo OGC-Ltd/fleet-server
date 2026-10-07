@@ -181,11 +181,12 @@ const PLACEHOLDER_TANK_L = 266
  * Largest tank stated in a unit's fuel sensor names, either spelling — the
  * capacity Wialon holds for it.
  *
- * This is what sync-wialon stores for Timsales and Aquamist (their fleet
- * `tankOf`). The shared `tankCapacityOf` reads only "(450L)", and widening it
- * would also fill 59 Menengai / West Sugar units whose capacity is NULL today
- * — capacity picks their theft-alert band, so that is a change to make on
- * purpose, not as a side effect (measured 2026-10-07).
+ * This is what sync-wialon stores for Timsales, Aquamist, Menengai and West
+ * Sugar (their fleet `tankOf`). The shared `tankCapacityOf` reads only
+ * "(450L)". For Menengai and West Sugar this only FILLS capacities that were
+ * NULL — 36 and 23 units, none altered (measured 2026-10-07) — and since
+ * capacity picks the theft-alert band, those units' alerts are judged on
+ * their stated tank from then on. Kasulu and Sukari are untouched.
  *
  * The 266 L placeholder is kept: it is what Wialon states. Only the TYPE rule
  * ignores it (`statedTankLitres`).
