@@ -28,6 +28,7 @@ const NAMES: Record<string, string> = {
   MENENGAI:  'Menengai Oil Refineries Ltd',
   WESTSUGAR: 'West Kenya Sugar Ltd',
   KABRAS:    'Kabras Sugar',
+  NZOIA:     'Nzoia Sugar',
   TIMSALES:  'Timsales Ltd',
   AQUAMIST:  'Aquamist Ltd',
 }
