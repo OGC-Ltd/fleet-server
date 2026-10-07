@@ -48,6 +48,7 @@
     "sync:menengai": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-wialon.ts --org=MENENGAI",
     "sync:westsugar": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-wialon.ts --org=WESTSUGAR",
     "sync:kabras": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-wialon.ts --org=KABRAS",
+    "sync:nzoia": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-wialon.ts --org=NZOIA",
     "sync:timsales": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-wialon.ts --org=TIMSALES",
     "sync:aquamist": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-wialon.ts --org=AQUAMIST",
     "sync:geofences": "cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/sync-geofences.ts",

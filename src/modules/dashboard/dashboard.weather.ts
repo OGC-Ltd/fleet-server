@@ -62,6 +62,11 @@ const LOCATIONS_BY_ORG: Record<string, Loc[]> = {
     { name: 'Kabras Factory', lat: 0.3781, lng: 34.8333 },
     { name: 'Kakamega',       lat: 0.2827, lng: 34.7519 },
   ],
+  // Densest cell of the Nzoia units, 2026-10-07: 25 of 60, beside the mill's bridges.
+  NZOIA: [
+    { name: 'Nzoia Factory', lat: 0.5719, lng: 34.6544 },
+    { name: 'Bungoma',       lat: 0.5635, lng: 34.5606 },
+  ],
   TIMSALES: [
     { name: 'Elburgon', lat: -0.3008, lng: 35.8016 },
   ],
