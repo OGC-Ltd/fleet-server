@@ -132,8 +132,8 @@ describe("Kabras' and Nzoia's yards", () => {
 describe('the split out of West Kenya (2026-10-07)', () => {
   it("gives each mill its own feed's sites and leaves West Kenya none", () => {
     expect(WEIGHBRIDGES.filter(b => b.orgCode === 'WESTSUGAR')).toHaveLength(0)
-    for (const b of WEIGHBRIDGES.filter(b => b.centerCode >= 1000 && b.centerCode < 2000)) expect(b.orgCode).toBe('KABRAS')
-    for (const b of WEIGHBRIDGES.filter(b => b.centerCode >= 2000 && b.centerCode < 3000)) expect(b.orgCode).toBe('NZOIA')
+    for (const b of WEIGHBRIDGES.filter(b => (b.centerCode ?? 0) >= 1000 && (b.centerCode ?? 0) < 2000)) expect(b.orgCode).toBe('KABRAS')
+    for (const b of WEIGHBRIDGES.filter(b => (b.centerCode ?? 0) >= 2000 && (b.centerCode ?? 0) < 3000)) expect(b.orgCode).toBe('NZOIA')
   })
 })
 
