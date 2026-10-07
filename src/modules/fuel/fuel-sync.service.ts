@@ -81,6 +81,8 @@ export const ORG_RESOURCES: ReadonlyArray<{ code: string; resourceId: number }> 
   { code: 'SUKARI',    resourceId: 28843152 },
   { code: 'MENENGAI',  resourceId: MENENGAI_WIALON_ACCOUNT_ID },
   { code: 'WESTSUGAR', resourceId: WEST_SUGAR_REPORT_RESOURCE_ID },
+  // Kabras units moved out of WESTSUGAR 2026-10-07; same West Kenya resource.
+  { code: 'KABRAS',    resourceId: WEST_SUGAR_REPORT_RESOURCE_ID },
   // 2026-10-07: template 1 "Aquamist Advanced Fuel Analysis Report Per Vehicle".
   // TIMSALES is absent: the token sees no resource for its account.
   { code: 'AQUAMIST',  resourceId: AQUAMIST_RESOURCE_ID },

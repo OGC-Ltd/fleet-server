@@ -217,8 +217,12 @@ async function main() {
     `select v.registration_plate as plate, o.code, v.name
        from vehicles v join organisations o on o.id = v.organisation_id
       where o.id <> $1
-        and upper(regexp_replace(v.registration_plate, '[^A-Za-z0-9]', '', 'g')) = any($2::text[])`,
-    org.id, wantedNorm,
+        and upper(regexp_replace(v.registration_plate, '[^A-Za-z0-9]', '', 'g')) = any($2::text[])
+        -- the same unit's own row, held by another org, is a MOVE, not a
+        -- clash (Kabras out of West Sugar, 2026-10-07): the upsert by
+        -- external id re-homes it.
+        and (v.external_id is null or v.external_id <> all($3::text[]))`,
+    org.id, wantedNorm, units.map(u => `wialon:${u.id}`),
   )
   const exact   = new Set(wanted)
   const blocked = new Set(sameMachine.filter(r => exact.has(r.plate)).map(r => r.plate))
