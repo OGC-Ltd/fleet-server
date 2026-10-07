@@ -112,3 +112,21 @@ describe('statedTankLitres — both spellings', () => {
     })).toBe(361)
   })
 })
+
+import { statedTankCapacity } from '../../src/providers/wialon/wialon.vehicle-type.js'
+
+describe('statedTankCapacity — what the sync stores for Timsales / Aquamist', () => {
+  it('reads the Qty spelling the shared parser misses', () => {
+    expect(statedTankCapacity(fuel('Main Tank Fuel (Qty 97L)'))).toBe(97)
+    expect(statedTankCapacity(fuel('Main Tank (Qty 355L)'))).toBe(355)
+    expect(statedTankCapacity(fuel('Main Tank (QTY 590 L)'))).toBe(590)
+  })
+  it('keeps the 266 L Wialon states, unlike the type rule', () => {
+    expect(statedTankCapacity(fuel('Main Tank Fuel (Qty 266L)'))).toBe(266)
+    expect(statedTankLitres(fuel('Main Tank Fuel (Qty 266L)'))).toBeNull()
+  })
+  it('is null where nothing is stated', () => {
+    expect(statedTankCapacity(fuel('Virtual Tank'))).toBeNull()
+    expect(statedTankCapacity(undefined)).toBeNull()
+  })
+})

@@ -51,7 +51,7 @@
  */
 
 import { menengaiGroup, menengaiPlate, westSugarGroup, parseWestSugarUnit } from './wialon.unit-name.js'
-import { classifyByNameAndTank, type VehicleClass } from './wialon.vehicle-type.js'
+import { classifyByNameAndTank, statedTankCapacity, type VehicleClass } from './wialon.vehicle-type.js'
 import type { WialonSensor } from './wialon.sensors.js'
 
 /** Data flag that returns `bact`. Without it every unit looks unowned. */
@@ -137,6 +137,12 @@ export interface WialonFleet {
    * (classifyUnit) cannot read its names. Absent → classifyUnit.
    */
   typeOf?:  (unitName: string, sensors?: Record<string, WialonSensor>) => VehicleClass
+  /**
+   * The fleet's own tank-capacity reader, where its sensor names state the
+   * tank in a spelling the shared `tankCapacityOf` does not read. Absent →
+   * tankCapacityOf.
+   */
+  tankOf?:  (sensors?: Record<string, WialonSensor>) => number | null
 }
 
 const FLEETS: WialonFleet[] = [
@@ -184,6 +190,8 @@ const FLEETS: WialonFleet[] = [
     // 77 of 115 name a registration; machines keep their unit name.
     plateOf:   (nm) => menengaiPlate(nm) ?? nm.trim(),
     typeOf:    classifyByNameAndTank,
+    // "(Qty 97L)" / "(100L Tank)" — see statedTankCapacity.
+    tankOf:    statedTankCapacity,
   },
   {
     orgCode:   'AQUAMIST',
@@ -195,6 +203,8 @@ const FLEETS: WialonFleet[] = [
     groupOf:   () => ({ code: 'AQUAMIST_TRACKED_UNITS', name: 'TRACKED UNITS' }),
     plateOf:   (nm) => menengaiPlate(nm) ?? nm.trim(),
     typeOf:    classifyByNameAndTank,
+    // "(Qty 97L)" / "(100L Tank)" — see statedTankCapacity.
+    tankOf:    statedTankCapacity,
   },
 ]
 
