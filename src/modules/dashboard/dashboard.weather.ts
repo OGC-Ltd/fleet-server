@@ -58,6 +58,10 @@ const LOCATIONS_BY_ORG: Record<string, Loc[]> = {
   ],
   // The densest 1.1 km cell per fleet, 2026-10-07: Elburgon holds 54 of 114
   // located Timsales units; Limuru 43 of 77 Aquamist, Mombasa the next 8.
+  KABRAS: [
+    { name: 'Kabras Factory', lat: 0.3781, lng: 34.8333 },
+    { name: 'Kakamega',       lat: 0.2827, lng: 34.7519 },
+  ],
   TIMSALES: [
     { name: 'Elburgon', lat: -0.3008, lng: 35.8016 },
   ],

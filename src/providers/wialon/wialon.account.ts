@@ -174,7 +174,9 @@ const FLEETS: WialonFleet[] = [
     accountId: RAI_GROUP_WIALON_ACCOUNT_ID,
     // `\b` after each alternative, so "WKSOMETHING" is not West Sugar. Anchored,
     // so a Sukari unit that merely mentions the words cannot drift in.
-    nameMask:  /^\s*(west\s*sugar|wks)\b/i,
+    // Kabras units ("WKS - Kabras - …") are their own organisation since
+    // 2026-10-07 — excluded here, or this sync would claim them back.
+    nameMask:  /^\s*(west\s*sugar|wks)\b(?!\s*-\s*kabras\b)/i,
     groupOf:   westSugarGroup,
     // 421 of 486 name a plate. The remainder are IMEIs and single letters, and
     // 32 units share just four names between them ("West Sugar - A" fifteen
@@ -182,6 +184,19 @@ const FLEETS: WialonFleet[] = [
     // sync's duplicate resolution is what finally makes the column unique.
     plateOf:   (nm) => parseWestSugarUnit(nm).plate ?? nm.trim(),
     // 23 units state their tank as "(Qty 593L)"; 2026-10-07, on request.
+    tankOf:    statedTankCapacity,
+  },
+  {
+    // Kabras Sugar: the West Kenya units named "WKS - Kabras - …", split into
+    // their own organisation on request (2026-10-07). 154 units in Rai Group's
+    // account; West Kenya keeps the other 309 (Nzoia, Naitiri, …). Reports
+    // and fuel templates are on the West Kenya resource, shared with WESTSUGAR.
+    orgCode:   'KABRAS',
+    orgName:   'Kabras Sugar',
+    accountId: RAI_GROUP_WIALON_ACCOUNT_ID,
+    nameMask:  /^\s*(west\s*sugar|wks)\s*-\s*kabras\b/i,
+    groupOf:   westSugarGroup,
+    plateOf:   (nm) => parseWestSugarUnit(nm).plate ?? nm.trim(),
     tankOf:    statedTankCapacity,
   },
   {
