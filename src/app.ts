@@ -24,6 +24,7 @@ import reportRoutes from './modules/reports/report.routes.js'
 import ingestRoutes from './modules/ingest/ingest.routes.js'
 import webhookRoutes from './modules/webhooks/webhooks.routes.js'
 import telemetryRoutes from './modules/telemetry/telemetry.routes.js'
+import usageReviewRoutes from './modules/usage-review/usage-review.routes.js'
 import routeRoutes from './modules/routes/route.routes.js'
 import geofenceRoutes from './modules/geofences/geofence.routes.js'
 import cargoRoutes from './modules/cargo/cargo.routes.js'
@@ -245,6 +246,7 @@ export function createApp() {
   // vehicleRoutes' `/vehicles/:vehicleId`, 404-ing the fleet snapshot the map
   // depends on. Non-matching paths fall through to vehicleRoutes as before.
   app.use(orgBase, telemetryRoutes)
+  app.use(orgBase, usageReviewRoutes)
   app.use(orgBase, vehicleRoutes)
   app.use(`${orgBase}/trips`, tripRoutes)
   app.use(`${orgBase}/trips`, cargoRoutes)
