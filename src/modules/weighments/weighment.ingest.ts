@@ -40,10 +40,17 @@ import type {
  * A factory not listed is dropped with a warning rather than guessed at: a
  * ticket filed under the wrong company is the bug this table exists to fix.
  */
-export const WEIGHBRIDGE_FACTORIES: Record<string, { orgCode: string; siteBase: number }> = {
+export const WEIGHBRIDGE_FACTORIES: Record<string, { orgCode: string; siteBase: number; vehicleOrgs?: readonly string[] }> = {
   NDHIWA: { orgCode: 'SUKARI',    siteBase: 0 },
-  KABRAS: { orgCode: 'WESTSUGAR', siteBase: 1000 },
-  NZOIA:  { orgCode: 'WESTSUGAR', siteBase: 2000 },
+  // Kabras and Nzoia became organisations of their own on 2026-10-07, and
+  // their mills' tickets moved with them. The lorries did not split so neatly:
+  // of the Kabras tickets that matched a unit, 753 were West Kenya lorries,
+  // 599 Kabras and 1 Nzoia; Nzoia's 146 were 98 / 28 / 20. So a ticket is
+  // matched to a lorry anywhere in the West Kenya group, the factory's own
+  // organisation first. `siteBase` is unchanged so every stored site code,
+  // and every link built on one, still reads the same.
+  KABRAS: { orgCode: 'KABRAS',    siteBase: 1000, vehicleOrgs: ['KABRAS', 'NZOIA', 'WESTSUGAR'] },
+  NZOIA:  { orgCode: 'NZOIA',     siteBase: 2000, vehicleOrgs: ['NZOIA', 'KABRAS', 'WESTSUGAR'] },
 }
 
 /** Rows from before the feed named its factory were all Ndhiwa's. */
@@ -232,23 +239,42 @@ function normaliseTransfer(row: RaiFactorySuiteCaneTransferRow, organisationId: 
  * Most of these lorries are contractors' and match nothing we hold, so a null
  * is the normal case and not a failure.
  */
-async function findVehicleId(organisationId: string, rawPlate: string): Promise<string | null> {
+async function findVehicleId(organisationIds: string[], rawPlate: string): Promise<string | null> {
   const written = rawPlate.trim().toUpperCase().replace(/\s+/g, ' ')
-  const exact = await prisma.vehicle.findFirst({
-    where:  { organisationId, registrationPlate: written },
-    select: { id: true },
-  })
-  if (exact) return exact.id
-
-  // The provider's spacing is not stable ("KCP 134P" and "KCP134P" both
-  // occur), and no index can serve a REPLACE() on the column — so this scan is
-  // the fallback, not the first move.
   const wanted = normalisePlate(rawPlate)
-  const rows = await prisma.vehicle.findMany({
-    where:  { organisationId },
-    select: { id: true, registrationPlate: true },
-  })
-  return rows.find(v => normalisePlate(v.registrationPlate) === wanted)?.id ?? null
+  // In order: the factory's own organisation first, then its group.
+  for (const organisationId of organisationIds) {
+    const exact = await prisma.vehicle.findFirst({
+      where:  { organisationId, registrationPlate: written },
+      select: { id: true },
+    })
+    if (exact) return exact.id
+
+    // The provider's spacing is not stable ("KCP 134P" and "KCP134P" both
+    // occur), and no index can serve a REPLACE() on the column — so this scan
+    // is the fallback, not the first move.
+    const rows = await prisma.vehicle.findMany({
+      where:  { organisationId },
+      select: { id: true, registrationPlate: true },
+    })
+    const hit = rows.find(v => normalisePlate(v.registrationPlate) === wanted)
+    if (hit) return hit.id
+  }
+  return null
+}
+
+/** Organisation ids a factory's tickets may match lorries in, own first. */
+const vehicleOrgIds = new Map<string, string[]>()
+async function vehicleOrgIdsFor(factoryCode: string, ownOrgId: string): Promise<string[]> {
+  const cached = vehicleOrgIds.get(factoryCode)
+  if (cached) return cached
+  const codes = WEIGHBRIDGE_FACTORIES[factoryCode]?.vehicleOrgs
+  if (!codes) return [ownOrgId]
+  const orgs = await prisma.organisation.findMany({ where: { code: { in: [...codes] } }, select: { id: true, code: true } })
+  const ids = codes.map(c => orgs.find(o => o.code === c)?.id).filter((id): id is string => !!id)
+  const ordered = [ownOrgId, ...ids.filter(id => id !== ownOrgId)]
+  vehicleOrgIds.set(factoryCode, ordered)
+  return ordered
 }
 
 /** Organisation id per factory. Cached: it cannot change without a deploy,
@@ -297,7 +323,7 @@ export async function handleWeighment(
     return false
   }
 
-  const vehicleId = await findVehicleId(organisationId, row.vehicleNo)
+  const vehicleId = await findVehicleId(await vehicleOrgIdsFor(factoryCode, organisationId), row.vehicleNo)
   const fields = normaliseWeighment(row, organisationId, vehicleId)
 
   await prisma.weighment.upsert({

@@ -430,9 +430,12 @@ describe('normaliseWeighment: one feed, three factories', () => {
     expect(f.centerCode).toBe(101)
   })
 
-  it('maps Kabras and Nzoia to West Kenya and Ndhiwa to Sukari', () => {
-    expect(WEIGHBRIDGE_FACTORIES.KABRAS.orgCode).toBe('WESTSUGAR')
-    expect(WEIGHBRIDGE_FACTORIES.NZOIA.orgCode).toBe('WESTSUGAR')
+  it('maps Kabras and Nzoia to their own organisations and Ndhiwa to Sukari', () => {
+    expect(WEIGHBRIDGE_FACTORIES.KABRAS.orgCode).toBe('KABRAS')
+    expect(WEIGHBRIDGE_FACTORIES.NZOIA.orgCode).toBe('NZOIA')
+    // Lorries are matched across the West Kenya group, own organisation first.
+    expect(WEIGHBRIDGE_FACTORIES.KABRAS.vehicleOrgs?.[0]).toBe('KABRAS')
+    expect(WEIGHBRIDGE_FACTORIES.NZOIA.vehicleOrgs).toContain('WESTSUGAR')
     expect(WEIGHBRIDGE_FACTORIES.NDHIWA.orgCode).toBe('SUKARI')
     expect(siteCodeOf('NZOIA', 101)).not.toBe(siteCodeOf('KABRAS', 101))
   })
