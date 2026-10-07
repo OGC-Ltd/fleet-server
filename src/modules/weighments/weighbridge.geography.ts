@@ -191,18 +191,17 @@ export const WEIGHBRIDGES: Weighbridge[] = [
   { key: 'kabras-w', orgCode: 'KABRAS',    centerCode: 1101, centerName: 'KABRAS', bridgeNo: null, label: 'West scale', lat: 0.376930, lng: 34.834102, spreadM: 4.7, samples: 391 },
   { key: 'kabras-e', orgCode: 'KABRAS',    centerCode: 1101, centerName: 'KABRAS', bridgeNo: null, label: 'East scale', lat: 0.376854, lng: 34.834258, spreadM: 5.1, samples: 425 },
 
-  // The other sites, from the feed's Kabras and Nzoia tickets. See the note
-  // above for how each was measured and which were left out. Each belongs to
-  // the mill whose feed names it (site code 1xxx Kabras, 2xxx Nzoia) — moved
-  // with the mills out of WESTSUGAR on 2026-10-07.
-  { key: 'naitiri',   orgCode: 'KABRAS',    centerCode: 1107, centerName: 'NAITIRI',        bridgeNo: null, label: 'Weighbridge', lat: 0.7813181, lng: 34.8778280, spreadM: 0, samples: 0 },
-  { key: 'misikhu',   orgCode: 'KABRAS',    centerCode: 1104, centerName: 'MISIKHU',        bridgeNo: null, label: 'Yard', lat: 0.723797, lng: 34.769075, spreadM: 31, samples: 46 },
-  { key: 'selient',   orgCode: 'KABRAS',    centerCode: 1114, centerName: 'SELIENT',        bridgeNo: null, label: 'Yard', lat: 0.510809, lng: 35.025235, spreadM: 19, samples: 34 },
-  { key: 'kitale',    orgCode: 'KABRAS',    centerCode: 1115, centerName: 'KITALE (AMUKA)', bridgeNo: null, label: 'Yard', lat: 1.098563, lng: 35.008331, spreadM: 24, samples: 33 },
+  // The outlying yards, from the feed's Kabras and Nzoia tickets. See the note
+  // above for how each was measured and which were left out. West Kenya's
+  // (operator, 2026-10-07): only each mill's factory yard went to the mill.
+  { key: 'naitiri',   orgCode: 'WESTSUGAR', centerCode: 1107, centerName: 'NAITIRI',        bridgeNo: null, label: 'Weighbridge', lat: 0.7813181, lng: 34.8778280, spreadM: 0, samples: 0 },
+  { key: 'misikhu',   orgCode: 'WESTSUGAR', centerCode: 1104, centerName: 'MISIKHU',        bridgeNo: null, label: 'Yard', lat: 0.723797, lng: 34.769075, spreadM: 31, samples: 46 },
+  { key: 'selient',   orgCode: 'WESTSUGAR', centerCode: 1114, centerName: 'SELIENT',        bridgeNo: null, label: 'Yard', lat: 0.510809, lng: 35.025235, spreadM: 19, samples: 34 },
+  { key: 'kitale',    orgCode: 'WESTSUGAR', centerCode: 1115, centerName: 'KITALE (AMUKA)', bridgeNo: null, label: 'Yard', lat: 1.098563, lng: 35.008331, spreadM: 24, samples: 33 },
   // Operator-given, so no spread or sample count: 0 means "not measured".
   { key: 'nzoia-cw',  orgCode: 'NZOIA',     centerCode: 2101, centerName: 'NZOIA',          bridgeNo: null, label: 'CW bridge', lat: 0.5700258, lng: 34.6544478, spreadM: 0, samples: 0 },
   { key: 'nzoia-hd',  orgCode: 'NZOIA',     centerCode: 2101, centerName: 'NZOIA',          bridgeNo: null, label: 'HD bridge', lat: 0.5671175, lng: 34.6562756, spreadM: 0, samples: 0 },
-  { key: 'weyeta-nz', orgCode: 'NZOIA',     centerCode: 2103, centerName: 'WEYETA',         bridgeNo: null, label: 'Yard', lat: 0.594721, lng: 34.475541, spreadM: 20, samples: 20 },
+  { key: 'weyeta-nz', orgCode: 'WESTSUGAR', centerCode: 2103, centerName: 'WEYETA',         bridgeNo: null, label: 'Yard', lat: 0.594721, lng: 34.475541, spreadM: 20, samples: 20 },
 ]
 
 /* The PROVIDER's numbering only. A scale with no number was never in the

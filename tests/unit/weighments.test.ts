@@ -430,9 +430,10 @@ describe('normaliseWeighment: one feed, three factories', () => {
     expect(f.centerCode).toBe(101)
   })
 
-  it('maps Kabras and Nzoia to their own organisations and Ndhiwa to Sukari', () => {
-    expect(WEIGHBRIDGE_FACTORIES.KABRAS.orgCode).toBe('KABRAS')
-    expect(WEIGHBRIDGE_FACTORIES.NZOIA.orgCode).toBe('NZOIA')
+  it('files Kabras and Nzoia yards under West Kenya unless named, and Ndhiwa under Sukari', () => {
+    expect(WEIGHBRIDGE_FACTORIES.KABRAS.orgCode).toBe('WESTSUGAR')
+    expect(WEIGHBRIDGE_FACTORIES.KABRAS.yardOrgs?.[1101]).toBe('KABRAS')
+    expect(WEIGHBRIDGE_FACTORIES.NZOIA.yardOrgs?.[2101]).toBe('NZOIA')
     // Lorries are matched across the West Kenya group, own organisation first.
     expect(WEIGHBRIDGE_FACTORIES.KABRAS.vehicleOrgs?.[0]).toBe('KABRAS')
     expect(WEIGHBRIDGE_FACTORIES.NZOIA.vehicleOrgs).toContain('WESTSUGAR')
