@@ -177,17 +177,36 @@ const STATED_TANK = /\(\s*(?:qty\s*)?(\d+(?:\.\d+)?)\s*l\b[^)]*\)/i
 /** Placeholder capacity copied onto units with no probe fitted (see above). */
 const PLACEHOLDER_TANK_L = 266
 
-/** Largest stated tank across a unit's fuel sensors, either spelling. */
-export function statedTankLitres(sensors?: Record<string, { n: string; t: string }>): number | null {
+/**
+ * Largest tank stated in a unit's fuel sensor names, either spelling — the
+ * capacity Wialon holds for it.
+ *
+ * This is what sync-wialon stores for Timsales and Aquamist (their fleet
+ * `tankOf`). The shared `tankCapacityOf` reads only "(450L)", and widening it
+ * would also fill 59 Menengai / West Sugar units whose capacity is NULL today
+ * — capacity picks their theft-alert band, so that is a change to make on
+ * purpose, not as a side effect (measured 2026-10-07).
+ *
+ * The 266 L placeholder is kept: it is what Wialon states. Only the TYPE rule
+ * ignores it (`statedTankLitres`).
+ */
+export function statedTankCapacity(sensors?: Record<string, { n: string; t: string }>): number | null {
   let max: number | null = null
   for (const s of Object.values(sensors ?? {})) {
     if (s.t !== 'fuel level') continue
     const m = STATED_TANK.exec(s.n)
     const litres = m ? Number(m[1]) : NaN
-    if (!Number.isFinite(litres) || litres <= 0 || litres === PLACEHOLDER_TANK_L) continue
+    if (!Number.isFinite(litres) || litres <= 0) continue
     if (max == null || litres > max) max = litres
   }
   return max
+}
+
+/** The stated tank as evidence of size: as above, minus the 266 L placeholder. */
+export function statedTankLitres(sensors?: Record<string, { n: string; t: string }>): number | null {
+  const named = Object.fromEntries(Object.entries(sensors ?? {})
+    .filter(([, s]) => Number(STATED_TANK.exec(s.n)?.[1]) !== PLACEHOLDER_TANK_L))
+  return statedTankCapacity(named)
 }
 
 function classByTank(litres: number | null): VehicleClass {

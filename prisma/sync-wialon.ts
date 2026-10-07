@@ -244,7 +244,7 @@ async function main() {
   }
 
   // ── what the sync would change ────────────────────────────────────────────
-  const withTank = units.filter(u => tankCapacityOf(u.sens) != null).length
+  const withTank = units.filter(u => (fleet.tankOf ? fleet.tankOf(u.sens) : tankCapacityOf(u.sens)) != null).length
   const withPos  = units.filter(u => u.pos).length
   const existing = new Set(
     (await prisma.vehicle.findMany({
@@ -310,7 +310,7 @@ async function main() {
       // Tank size is not a Wialon field — the operator writes it into the fuel
       // sensor's NAME, e.g. "Main Tank Fuel Level Qty (450L)". It is the only
       // source available, and without it no fuel PERCENTAGE can be computed.
-      tankCapacityLitres: tankCapacityOf(u.sens),
+      tankCapacityLitres: (fleet.tankOf ? fleet.tankOf(u.sens) : tankCapacityOf(u.sens)),
     }
 
     let vehicleId: string
