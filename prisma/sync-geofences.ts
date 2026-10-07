@@ -101,7 +101,7 @@ const TOKEN   = process.env.WIALON_TOKEN || process.env.access_token || ''
  * split units. SUKARI is absent from it on purpose — its vehicle registry comes
  * from RaiFactorySuite — but its ZONES are in Wialon like everyone else's.
  */
-const ZONE_SOURCE: Record<string, { accountId: number; label: string }> = {
+const ZONE_SOURCE: Record<string, { accountId: number; label: string; include?: RegExp; exclude?: RegExp }> = {
   KASULU:    { accountId: KASULU_WIALON_ACCOUNT_ID,      label: 'Mufindi Paper Mills' },
   MENENGAI:  { accountId: MENENGAI_WIALON_ACCOUNT_ID,    label: 'Mene-ngai' },
   /**
@@ -116,7 +116,14 @@ const ZONE_SOURCE: Record<string, { accountId: number; label: string }> = {
    * When a zone is not where you expect, `--find` locates it.
    */
   SUKARI:    { accountId: MENENGAI_WIALON_ACCOUNT_ID,    label: 'Mene-ngai (holds Sukari\'s zones)' },
-  WESTSUGAR: { accountId: WEST_SUGAR_REPORT_RESOURCE_ID, label: 'WEST KENYA SUGAR' },
+  /**
+   * One resource, two organisations since 2026-10-07: the Kabras factory's
+   * zones ("KABRAS FACTORY -WKS", "Kabras Sugar Factory (West Kenya)") belong
+   * to KABRAS, everything else on it to WESTSUGAR. Without the split a West
+   * Kenya run would re-import the Kabras zones as new West Kenya rows.
+   */
+  WESTSUGAR: { accountId: WEST_SUGAR_REPORT_RESOURCE_ID, label: 'WEST KENYA SUGAR', exclude: /kabras/i },
+  KABRAS:    { accountId: WEST_SUGAR_REPORT_RESOURCE_ID, label: 'WEST KENYA SUGAR (Kabras zones)', include: /kabras/i },
   // 4 zones, 2026-10-07. Timsales has no resource on this token, so no entry.
   AQUAMIST:  { accountId: AQUAMIST_RESOURCE_ID,          label: 'Aquamist' },
 }
@@ -371,6 +378,12 @@ async function main() {
     // The resource may hold other customers' estates — see ZONE_SOURCE.
     const zoneName = (z.n ?? `Zone ${z.id}`).trim()
     if (NAME_MASKS.length && !NAME_MASKS.some(m => zoneName.toLowerCase().includes(m))) {
+      filteredOut++
+      continue
+    }
+    // A resource shared by two organisations (West Kenya / Kabras).
+    if (('include' in source && source.include && !source.include.test(zoneName))
+     || ('exclude' in source && source.exclude && source.exclude.test(zoneName))) {
       filteredOut++
       continue
     }
