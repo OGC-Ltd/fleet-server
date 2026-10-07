@@ -17,7 +17,7 @@ vi.mock('../../src/modules/weighments/weighment.repository.js', () => ({
 
 import { findDay, findCapturedRange, findOrgCentres } from '../../src/modules/weighments/weighment.repository.js'
 import { getWeighmentDay } from '../../src/modules/weighments/weighment.service.js'
-import { weighmentAt, normaliseWeighment, WEIGHBRIDGE_FACTORIES, siteCodeOf } from '../../src/modules/weighments/weighment.ingest.js'
+import { weighmentAt, normaliseWeighment, WEIGHBRIDGE_FACTORIES, YARD_ORGS, siteCodeOf } from '../../src/modules/weighments/weighment.ingest.js'
 import fixtures from '../fixtures/weighment-rows.json' with { type: 'json' }
 
 const ORG = 'org_01'
@@ -432,12 +432,19 @@ describe('normaliseWeighment: one feed, three factories', () => {
 
   it('files Kabras and Nzoia yards under West Kenya unless named, and Ndhiwa under Sukari', () => {
     expect(WEIGHBRIDGE_FACTORIES.KABRAS.orgCode).toBe('WESTSUGAR')
-    expect(WEIGHBRIDGE_FACTORIES.KABRAS.yardOrgs?.[1101]).toBe('KABRAS')
-    expect(WEIGHBRIDGE_FACTORIES.NZOIA.yardOrgs?.[2101]).toBe('NZOIA')
+    expect(YARD_ORGS[1101]).toBe('KABRAS')
+    expect(YARD_ORGS[2101]).toBe('NZOIA')
     // Lorries are matched across the West Kenya group, own organisation first.
     expect(WEIGHBRIDGE_FACTORIES.KABRAS.vehicleOrgs?.[0]).toBe('KABRAS')
     expect(WEIGHBRIDGE_FACTORIES.NZOIA.vehicleOrgs).toContain('WESTSUGAR')
     expect(WEIGHBRIDGE_FACTORIES.NDHIWA.orgCode).toBe('SUKARI')
     expect(siteCodeOf('NZOIA', 101)).not.toBe(siteCodeOf('KABRAS', 101))
+  })
+
+  it('gives a yard both feeds name ONE site code', () => {
+    // Weyeta and Nzoia Factory Yard came out twice each (2026-10-07).
+    expect(siteCodeOf('KABRAS', 200)).toBe(siteCodeOf('NZOIA', 103))   // WEYETA YARD
+    expect(siteCodeOf('KABRAS', 201)).toBe(siteCodeOf('NZOIA', 101))   // NZOIA FACTORY YARD
+    expect(siteCodeOf('KABRAS', 101)).toBe(1101)                       // Kabras' own yard untouched
   })
 })

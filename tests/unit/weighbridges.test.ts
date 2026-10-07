@@ -141,10 +141,10 @@ describe('the split out of West Kenya (2026-10-07)', () => {
 
   it('routes each ticket by its yard', () => {
     expect(weighmentOrgCode('KABRAS', 1101)).toBe('KABRAS')     // Kabras Factory Yard
-    expect(weighmentOrgCode('KABRAS', 1201)).toBe('NZOIA')      // Nzoia Factory Yard, via the Kabras feed
+    expect(weighmentOrgCode('KABRAS', 2101)).toBe('NZOIA')      // Nzoia Factory Yard, via the Kabras feed (aliased)
     expect(weighmentOrgCode('NZOIA',  2101)).toBe('NZOIA')      // Nzoia Factory Yard
     expect(weighmentOrgCode('KABRAS', 1107)).toBe('WESTSUGAR')  // Naitiri
-    expect(weighmentOrgCode('KABRAS', 1200)).toBe('WESTSUGAR')  // Weyeta, via the Kabras feed
+    expect(weighmentOrgCode('KABRAS', 2103)).toBe('WESTSUGAR')  // Weyeta, via the Kabras feed (aliased)
     expect(weighmentOrgCode('NZOIA',  2102)).toBe('WESTSUGAR')  // Makhese
     expect(weighmentOrgCode('NDHIWA', 101)).toBe('SUKARI')
     expect(weighmentOrgCode('ELSEWHERE', 101)).toBeNull()
