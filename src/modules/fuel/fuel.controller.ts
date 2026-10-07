@@ -7,6 +7,8 @@ import { getProbeReport } from './probe-report.service.js'
 import { getFleetTankState } from './fuel-tank-state.service.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import * as signals from './fuel-signal-alerts.service.js'
+import { getPerformanceReview, getUnitPerformance, reviewPeriod } from './fuel-performance-review.service.js'
+import { NotFoundError } from '../../core/errors/errors.js'
 import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, AssignFollowUpDto, RecallFollowUpDto, TheftOutcomesQuery, ReviewTheftDto, SignalAlertQuery, EvaluateSignalsDto, EscalateFollowUpDto } from './fuel.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -288,5 +290,23 @@ export const evaluateSignals: RequestHandler = async (req, res, next) => {
   try {
     const vehicleId = (req.params['vehicleId'] as string | undefined) ?? null
     sendSuccess(res, await signals.evaluateSamples(p(req, 'orgId'), vehicleId, req.body as EvaluateSignalsDto))
+  } catch (err) { next(err) }
+}
+
+/** Every unit's refills against its standard — Fuel › Report's performance review. */
+export const performanceReview: RequestHandler = async (req, res, next) => {
+  try {
+    const { from, to } = reviewPeriod(req.query['from'], req.query['to'])
+    sendSuccess(res, await getPerformanceReview(p(req, 'orgId'), from, to))
+  } catch (err) { next(err) }
+}
+
+/** One unit's refills, row by row, for the review's drill-down. */
+export const unitPerformance: RequestHandler = async (req, res, next) => {
+  try {
+    const { from, to } = reviewPeriod(req.query['from'], req.query['to'])
+    const unit = await getUnitPerformance(p(req, 'orgId'), p(req, 'vehicleId'), from, to)
+    if (!unit) throw new NotFoundError('Vehicle')
+    sendSuccess(res, { from, to, unit })
   } catch (err) { next(err) }
 }
