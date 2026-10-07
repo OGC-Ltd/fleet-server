@@ -109,11 +109,26 @@ describe('the fleet', () => {
       days: new Map([['v1', d], ['v2', d]]),
     })
     expect(r.days).toBe(12)
+    expect(r.coveredDays).toBe(12)
     expect(r.totals.litres).toBe(12 * 220)
     expect(r.totals.assessedUnits).toBe(2)
     expect(r.months).toEqual([{ month: '2026-09', days: 12, litres: 2640, perDay: 220 }])
     expect(r.groups[0]).toMatchObject({ group: 'Excavators', units: 2, worst: 'EX 08', best: 'EX 09', busiest: 'EX 08', overCount: 1 })
     expect(r.records.near + r.records.over).toBe(22)
     expect(r.units[0]!.ref).toBe('EX 08')
+  })
+})
+
+describe('coverage', () => {
+  it('averages litres a day over the days the ledger covers', () => {
+    const k = keys(10)
+    const r = buildPerformanceReview({
+      from: k[0]!, to: k.at(-1)!, vehicles: [EX],
+      fills: new Map([['v1', k.slice(5).map(x => ({ at: at(x), litres: 100 }))]]),
+      days: new Map(),
+    })
+    expect(r.days).toBe(10)
+    expect(r.coveredDays).toBe(5)
+    expect(r.totals.perDay).toBe(100)
   })
 })
