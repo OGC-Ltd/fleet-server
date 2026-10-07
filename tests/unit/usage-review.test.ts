@@ -97,8 +97,9 @@ describe('database coverage', () => {
 describe('place names', () => {
   it('reads Kenyan OSM addresses: ward under city, constituency under county', () => {
     expect(nameFromAddress({ city: 'Bukembe East ward', county: 'Kanduyi', state: 'Bungoma County', country: 'Kenya' }).name).toBe('Bukembe East, Kanduyi')
-    expect(nameFromAddress({ town: 'Webuye', county: 'Webuye East', state: 'Bungoma County' }).name).toBe('Webuye town')
+    expect(nameFromAddress({ town: 'Webuye', county: 'Webuye East', state: 'Bungoma County' }).name).toBe('Webuye Town')
     expect(nameFromAddress({ road: 'C103', village: 'Mtangani', city: 'Malindi Town ward', county: 'Malindi' }).name).toBe('Mtangani, Malindi Town')
+    expect(nameFromAddress({ village: 'riat centre', county: 'Kanyikela' }).name).toBe('Riat Centre, Kanyikela')
   })
 })
 
