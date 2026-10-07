@@ -165,6 +165,8 @@ const FLEETS: WialonFleet[] = [
     // name, so the column stays unique and the screen says what Wialon says
     // rather than a blank or an invented code.
     plateOf:   (nm) => menengaiPlate(nm) ?? nm.trim(),
+    // 36 units state their tank as "(Qty 600L)"; 2026-10-07, on request.
+    tankOf:    statedTankCapacity,
   },
   {
     orgCode:   'WESTSUGAR',
@@ -179,6 +181,8 @@ const FLEETS: WialonFleet[] = [
     // times), so the unit name alone is NOT an identifier for this fleet — the
     // sync's duplicate resolution is what finally makes the column unique.
     plateOf:   (nm) => parseWestSugarUnit(nm).plate ?? nm.trim(),
+    // 23 units state their tank as "(Qty 593L)"; 2026-10-07, on request.
+    tankOf:    statedTankCapacity,
   },
   {
     orgCode:   'TIMSALES',
