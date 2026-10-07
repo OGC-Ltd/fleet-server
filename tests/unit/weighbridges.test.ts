@@ -109,12 +109,13 @@ describe('weighbridge geography', () => {
   })
 })
 
-describe("West Kenya's yards", () => {
+describe("Kabras' and Nzoia's yards", () => {
   it('sit in West Kenya cane country, not on a factory they were confused with', () => {
     // Western Kenya, Bungoma to Kitale: 0.3-1.2 N, 34.4-35.1 E. And no yard on
     // top of another site, which is how the rejected Magut/Khalaba/Makhese
     // derivations failed.
-    const west = WEIGHBRIDGES.filter(b => b.orgCode === 'WESTSUGAR')
+    const west = WEIGHBRIDGES.filter(b => b.orgCode === 'KABRAS' || b.orgCode === 'NZOIA')
+    expect(west.length).toBeGreaterThan(0)
     for (const b of west) {
       expect(b.lat).toBeGreaterThan(0.3); expect(b.lat).toBeLessThan(1.2)
       expect(b.lng).toBeGreaterThan(34.4); expect(b.lng).toBeLessThan(35.1)
@@ -125,6 +126,14 @@ describe("West Kenya's yards", () => {
       const km = Math.hypot(a.lat - b.lat, (a.lng - b.lng) * Math.cos(a.lat * Math.PI / 180)) * 111
       expect(km).toBeGreaterThan(2)
     }
+  })
+})
+
+describe('the split out of West Kenya (2026-10-07)', () => {
+  it("gives each mill its own feed's sites and leaves West Kenya none", () => {
+    expect(WEIGHBRIDGES.filter(b => b.orgCode === 'WESTSUGAR')).toHaveLength(0)
+    for (const b of WEIGHBRIDGES.filter(b => b.centerCode >= 1000 && b.centerCode < 2000)) expect(b.orgCode).toBe('KABRAS')
+    for (const b of WEIGHBRIDGES.filter(b => b.centerCode >= 2000 && b.centerCode < 3000)) expect(b.orgCode).toBe('NZOIA')
   })
 })
 
@@ -156,8 +165,8 @@ describe('getWeighbridges', () => {
     // Kabras' two report to nobody, so no amount of reading the ticket feed
     // finds them. They are claimed by the org named on them and arrive with
     // `last` null permanently — which is the truthful answer, not a gap.
-    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ code: 'WESTSUGAR' })
-    const out = await getWeighbridges('org_west')
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ code: 'KABRAS' })
+    const out = await getWeighbridges('org_kabras')
     expect(out.filter(b => b.centerName === 'KABRAS').map(b => b.label).sort()).toEqual(['East scale', 'West scale'])
     expect(out.every(b => b.last === null)).toBe(true)
     expect(out.every(b => b.bridgeNo === null)).toBe(true)
@@ -165,8 +174,8 @@ describe('getWeighbridges', () => {
     expect(out.every(b => b.lat > 0)).toBe(true)
   })
 
-  it("hangs a West Kenya yard's newest weighing on that yard's pin", async () => {
-    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ code: 'WESTSUGAR' })
+  it("hangs a Kabras yard's newest weighing on that yard's pin", async () => {
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ code: 'KABRAS' })
     ;(prismaMock.weighment.findMany as any).mockResolvedValue([
       ticket({ factoryCode: 'KABRAS', centerCode: 1104, grossBridgeNo: null, tareBridgeNo: null,
                grossAt: new Date('2026-09-25T08:00:00Z'), tareAt: new Date('2026-09-25T09:30:00Z') }),
@@ -174,7 +183,7 @@ describe('getWeighbridges', () => {
       ticket({ factoryCode: 'KABRAS', centerCode: 1101, grossBridgeNo: 1, tareBridgeNo: 1,
                grossAt: new Date('2026-09-25T07:00:00Z'), tareAt: null }),
     ])
-    const out = await getWeighbridges('org_west')
+    const out = await getWeighbridges('org_kabras')
     const misikhu = out.find(b => b.id === 'misikhu')!
     expect(misikhu.last?.at).toBe('2026-09-25T09:30:00.000Z')
     expect(misikhu.last?.stage).toBe('tare')
