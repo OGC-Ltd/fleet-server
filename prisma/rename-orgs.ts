@@ -27,6 +27,8 @@ const NAMES: Record<string, string> = {
   KASULU:    'Mufindi Paper Mills Ltd',
   MENENGAI:  'Menengai Oil Refineries Ltd',
   WESTSUGAR: 'West Kenya Sugar Ltd',
+  TIMSALES:  'Timsales Ltd',
+  AQUAMIST:  'Aquamist Ltd',
 }
 
 async function main(): Promise<void> {

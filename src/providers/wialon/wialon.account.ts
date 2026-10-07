@@ -83,6 +83,27 @@ export const RAI_GROUP_WIALON_ACCOUNT_ID = 27625222
  */
 export const WEST_SUGAR_REPORT_RESOURCE_ID = 28842931
 
+/**
+ * Timsales owns its account outright, like Kasulu and Menengai. Measured
+ * 2026-10-07: 115 units, every one named "Timsales …" (or "EX - Timsales …"
+ * for retired ones), 104 reporting in the last day, all 115 with a fuel sensor.
+ *
+ * The token sees NO resource for this account — no zones and no report
+ * templates — so Timsales has vehicles and live positions but no fuel ledger
+ * (fuel-sync ORG_RESOURCES) and no geofences until the reseller shares one.
+ */
+export const TIMSALES_WIALON_ACCOUNT_ID = 26777960
+
+/**
+ * Aquamist's resource — zones and reports, not units (the West Sugar split).
+ *
+ * Its 77 units bill to RAI GROUP and are named "AQUAMIST - <plate>". This
+ * resource ("Aquamist") holds 4 zones and the per-vehicle Advanced Fuel
+ * Analysis template. "AQAUMIST LTD" (29564956, sic) is a second, empty one —
+ * zero zones, one test template — and is not used.
+ */
+export const AQUAMIST_RESOURCE_ID = 29561763
+
 export interface WialonFleet {
   /** Our `organisations.code`. */
   orgCode:  string
@@ -145,6 +166,26 @@ const FLEETS: WialonFleet[] = [
     // times), so the unit name alone is NOT an identifier for this fleet — the
     // sync's duplicate resolution is what finally makes the column unique.
     plateOf:   (nm) => parseWestSugarUnit(nm).plate ?? nm.trim(),
+  },
+  {
+    orgCode:   'TIMSALES',
+    orgName:   'Timsales Ltd',
+    accountId: TIMSALES_WIALON_ACCOUNT_ID,
+    // Names carry the machine ("LOGGER 16", "CAT 7", "BULLDOZER 05") or a
+    // plate, never a department — one group, as Kasulu.
+    groupOf:   () => ({ code: 'TIMSALES_TRACKED_UNITS', name: 'TRACKED UNITS' }),
+    // 77 of 115 name a registration; machines keep their unit name.
+    plateOf:   (nm) => menengaiPlate(nm) ?? nm.trim(),
+  },
+  {
+    orgCode:   'AQUAMIST',
+    orgName:   'Aquamist Ltd',
+    accountId: RAI_GROUP_WIALON_ACCOUNT_ID,
+    // Anchored, so no Sukari or West Sugar unit can match. All 77 measured
+    // units read "AQUAMIST - <plate>".
+    nameMask:  /^\s*aquamist\b/i,
+    groupOf:   () => ({ code: 'AQUAMIST_TRACKED_UNITS', name: 'TRACKED UNITS' }),
+    plateOf:   (nm) => menengaiPlate(nm) ?? nm.trim(),
   },
 ]
 
