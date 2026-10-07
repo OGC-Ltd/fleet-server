@@ -95,7 +95,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null)
   const s = rv.summary, q = rv.quality, veh = rv.vehicle
   const fuelTot = fuelOf(s.km, kmpl)
 
-  const doc = new PDFDocument({ size: 'A4', margin: M, bufferPages: true, info: { Title: `${veh.plate} motor report`, Author: 'FleetTrack' } })
+  const doc = new PDFDocument({ size: 'A4', margin: M, bufferPages: true, info: { Title: `${veh.plate} highlights`, Author: 'FleetTrack' } })
   const chunks: Buffer[] = []
   doc.on('data', (c: Buffer) => chunks.push(c))
   const done = new Promise<Buffer>(res => doc.on('end', () => res(Buffer.concat(chunks))))
@@ -105,7 +105,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null)
   // ── header ──
   const header = (subtitle: string) => {
     doc.rect(0, 0, 595.28, 6).fill(C.green)
-    doc.font(F.bold).fontSize(8).fillColor(C.green).text('MOTOR REPORT', M, M - 8, { characterSpacing: 2, lineBreak: false })
+    doc.font(F.bold).fontSize(8).fillColor(C.green).text('HIGHLIGHTS', M, M - 8, { characterSpacing: 2, lineBreak: false })
     doc.font(F.bold).fontSize(22).fillColor(C.ink).text(veh.plate, M, M + 4, { lineBreak: false })
     doc.font(F.reg).fontSize(9).fillColor(C.sub)
       .text([veh.organisation, veh.vehicleType?.replace(/_/g, ' ').toLowerCase(), subtitle].filter(Boolean).join('  ·  '), M, M + 31, { lineBreak: false })

@@ -34,6 +34,8 @@ let lastCall = 0
 
 const key = (lat: number, lng: number) => `${lat.toFixed(3)},${lng.toFixed(3)}`
 const unward = (s: string | undefined) => s?.replace(/\s+ward$/i, '').trim() || undefined
+/** Title Case: OpenStreetMap spells many names in lower case ("riat centre"). Only first letters are raised. */
+export const titleCase = (s: string) => s.replace(/(^|[\s,/–-])(\p{Ll})/gu, (_, sep: string, ch: string) => sep + ch.toUpperCase())
 
 /**
  * A short, readable name out of an OSM address — "Bukembe East, Kanduyi",
@@ -52,7 +54,7 @@ export function nameFromAddress(a: Address): Omit<PlaceName, 'address'> {
   else if (ward) name = [ward, constituency].filter(Boolean).join(', ')
   else name = a['road'] ?? constituency ?? a['state'] ?? a['country'] ?? ''
   return {
-    name: name || 'Unnamed place',
+    name: titleCase(name || 'Unnamed place'),
     area: [ward, town, constituency].filter((x, i, xs) => x && xs.indexOf(x) === i).join(', ') || null,
     county: a['state'] ?? null,
     country: a['country'] ?? null,
