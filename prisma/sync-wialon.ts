@@ -266,10 +266,35 @@ async function main() {
   }
   if (toCreate.length > 8) console.log(`      … and ${toCreate.length - 8} more`)
 
+  // ── plate hand-overs ──────────────────────────────────────────────────────
+  // A tracker swap: the old unit leaves Wialon still holding the vehicle's
+  // plate, and the replacement unit is renamed to that same plate. Measured on
+  // West Sugar 2026-10-07 (KCS 644G, KCS 645G). The old row is deactivated
+  // only AFTER the upserts, so the new unit's update hit the unique plate and
+  // failed — name and all. Such rows are released first: deactivated, and
+  // their plate qualified with their own external id, which is unique.
+  const unitIds   = new Set(units.map(u => `wialon:${u.id}`))
+  const holders   = await prisma.vehicle.findMany({
+    where:  { organisationId: org.id, externalId: { startsWith: 'wialon:' }, registrationPlate: { in: [...plateFor.values()] } },
+    select: { id: true, externalId: true, name: true, registrationPlate: true },
+  })
+  const handOvers = holders.filter(h => !unitIds.has(h.externalId!))
+  if (handOvers.length > 0) {
+    console.log(`\n  ↪  ${handOvers.length} plate(s) pass from a unit that left Wialon to its replacement:`)
+    for (const h of handOvers) console.log(`      ${h.registrationPlate}: ${h.externalId} "${h.name}" (gone) → released`)
+  }
+
   if (!APPLY) {
     console.log(`\n  Dry run — nothing written. Re-run with:  npm run sync:wialon -- --org=${fleet.orgCode} --apply\n`)
     await client.logout()
     return
+  }
+
+  for (const h of handOvers) {
+    await prisma.vehicle.update({
+      where: { id: h.id },
+      data:  { isActive: false, registrationPlate: `${h.name} · ${h.externalId}` },
+    })
   }
 
   // ── apply ─────────────────────────────────────────────────────────────────
