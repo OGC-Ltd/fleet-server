@@ -139,3 +139,71 @@ export function classifyUnit(
   const code = codeFromName(name)
   return (code && CODE_TO_CLASS[code]) || 'UNSPECIFIED'
 }
+
+/* ── Timsales and Aquamist (2026-10-07) ─────────────────────────────────────
+ *
+ * Neither fleet carries an equipment code or a TYPE field, and Wialon's own
+ * profile `vehicle_class` is the untouched default ("empty_vehicle") on all
+ * 192 units. The engine-hours counter is no help either: a third of the units
+ * report over 1,000 km per engine hour. Two signals are left, used in order:
+ *
+ *  1. Machine words in the name. Timsales names its plant outright —
+ *     "LOGGER 16", "CAT 7", "BULLDOZER 05", "TIMBER JACK 3",
+ *     "BUCKETLOADER(KBA 499A)" — and those are PLANT whatever else is known.
+ *
+ *  2. The tank size the operator wrote into the fuel sensor's name. Both fleets
+ *     state it, in two spellings: "(450L)" on Timsales, "(Qty 97L)" and
+ *     "(100L Tank)" on Aquamist. Measured spread:
+ *
+ *       Timsales  98–130 L ×17 · 205–300 L ×12 · 370–420 L ×38 · 570–590 L ×12
+ *       Aquamist  55–75 L ×7   · 93–200 L ×42  · 355–366 L ×5
+ *
+ *     INFERRED bands, so a correction is a one-line edit: up to 80 L is a
+ *     light vehicle, up to 300 L a rigid truck, above that a lorry (the
+ *     570–590 L group is prime movers). A ~100 L Timsales unit may be a
+ *     pick-up rather than a light truck; tank size cannot tell those apart.
+ *
+ * A Kenyan "KM…" plate is a motorcycle. There is no motorcycle class, so those
+ * stay UNSPECIFIED rather than being forced into one. So does "Qty 266L": it
+ * is on 18 Aquamist units including all three motorcycles, every one reads
+ * 0 L, so it is a template default, not a tank.
+ */
+
+const PLANT_WORDS = /\b(bulldozer|dozer|logger|timber\s*jack|bucket\s*loader|loader|excavator|grader)|\bcat\s*-?\s*[a-z]?\d/i
+
+/** "(450L)", "(Qty 97L)", "(100L Tank)", "(98L )" → litres. */
+const STATED_TANK = /\(\s*(?:qty\s*)?(\d+(?:\.\d+)?)\s*l\b[^)]*\)/i
+
+/** Placeholder capacity copied onto units with no probe fitted (see above). */
+const PLACEHOLDER_TANK_L = 266
+
+/** Largest stated tank across a unit's fuel sensors, either spelling. */
+export function statedTankLitres(sensors?: Record<string, { n: string; t: string }>): number | null {
+  let max: number | null = null
+  for (const s of Object.values(sensors ?? {})) {
+    if (s.t !== 'fuel level') continue
+    const m = STATED_TANK.exec(s.n)
+    const litres = m ? Number(m[1]) : NaN
+    if (!Number.isFinite(litres) || litres <= 0 || litres === PLACEHOLDER_TANK_L) continue
+    if (max == null || litres > max) max = litres
+  }
+  return max
+}
+
+function classByTank(litres: number | null): VehicleClass {
+  if (litres == null) return 'UNSPECIFIED'
+  if (litres <= 80)   return 'SALOON'
+  if (litres <= 300)  return 'TRUCK'
+  return 'LORRY'
+}
+
+/** Timsales and Aquamist: machine words first, then the stated tank. */
+export function classifyByNameAndTank(
+  name: string,
+  sensors?: Record<string, { n: string; t: string }>,
+): VehicleClass {
+  if (PLANT_WORDS.test(name)) return 'PLANT'
+  // KM-series plates are motorcycles — no class for them.
+  if (/\bKM[A-Z]{2}\s*\d{3}[A-Z]\b/i.test(name)) return 'UNSPECIFIED'
+  return classByTank(statedTankLitres(sensors))
+}

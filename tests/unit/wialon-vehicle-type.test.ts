@@ -59,3 +59,56 @@ describe('classifyUnit — the operator legend', () => {
     expect(classifyUnit('MUFINDI: LMV 06', declared)).toBe('PLANT')
   })
 })
+
+import { classifyByNameAndTank, statedTankLitres } from '../../src/providers/wialon/wialon.vehicle-type.js'
+
+const fuel = (n: string) => ({ a: { n, t: 'fuel level' } })
+
+/** Names and sensor names verbatim from the live Timsales / Aquamist units, 2026-10-07. */
+describe('classifyByNameAndTank — Timsales and Aquamist', () => {
+  it('reads machine words as plant, whatever the tank says', () => {
+    expect(classifyByNameAndTank('TIMSALES - LOGGER 16')).toBe('PLANT')
+    expect(classifyByNameAndTank('Timsales - LOGGER  06')).toBe('PLANT')
+    expect(classifyByNameAndTank('TIMSALES - CAT 7')).toBe('PLANT')
+    expect(classifyByNameAndTank('Timsales - CAT2')).toBe('PLANT')
+    expect(classifyByNameAndTank('Timsales - CAT M325C')).toBe('PLANT')
+    expect(classifyByNameAndTank('Timsales - BULLDOZER 05', fuel('Fuel Level (254L)'))).toBe('PLANT')
+    expect(classifyByNameAndTank('TIMSALES - TIMBER JACK 3')).toBe('PLANT')
+    expect(classifyByNameAndTank('Timsales -BUCKETLOADER(KBA 499A)', fuel('Fuel (258L)'))).toBe('PLANT')
+  })
+
+  it('does not read a plate as a Caterpillar', () => {
+    // "KCAT…" style text must not trip the CAT rule; only "CAT <n>" does.
+    expect(classifyByNameAndTank('AQUAMIST - KCA 259J', fuel('Main Tank Fuel (Qty 100L)'))).toBe('TRUCK')
+  })
+
+  it('sizes plated units by the stated tank', () => {
+    expect(classifyByNameAndTank('AQUAMIST - KCH 773B', fuel('Main Tank Fuel (Qty 55L)'))).toBe('SALOON')
+    expect(classifyByNameAndTank('AQUAMIST - KDE 170P', fuel('Main Tank Fuel (Qty 101L)'))).toBe('TRUCK')
+    expect(classifyByNameAndTank('Timsales - KDJ 079M', fuel('Fuel Level (205L)'))).toBe('TRUCK')
+    expect(classifyByNameAndTank('Timsales - KBT 801R', fuel('Fuel Level (410L)'))).toBe('LORRY')
+    expect(classifyByNameAndTank('Timsales - KCP 272L', fuel('Fuel Level (590L)'))).toBe('LORRY')
+  })
+
+  it('leaves what it cannot know unspecified', () => {
+    expect(classifyByNameAndTank('Timsales - KAW 605R')).toBe('UNSPECIFIED')                                  // no tank stated
+    expect(classifyByNameAndTank('AQUAMIST - KMEC 054B', fuel('Main Tank Fuel (Qty 266L)'))).toBe('UNSPECIFIED') // motorcycle
+    expect(classifyByNameAndTank('AQUAMIST - KBT 313D', fuel('Main Tank Fuel (Qty 266L)'))).toBe('UNSPECIFIED')  // placeholder 266
+  })
+})
+
+describe('statedTankLitres — both spellings', () => {
+  it('reads every measured form', () => {
+    expect(statedTankLitres(fuel('Main Tank Fuel Level Qty (450L)'))).toBe(450)
+    expect(statedTankLitres(fuel('Main Tank Fuel (Qty 97L)'))).toBe(97)
+    expect(statedTankLitres(fuel('Reserve Tank Fuel Level Qty (100L Tank)'))).toBe(100)
+    expect(statedTankLitres(fuel('Reserve Tank Fuel Level Qty (98L )'))).toBe(98)
+  })
+  it('takes the largest tank and ignores non-fuel sensors', () => {
+    expect(statedTankLitres({
+      a: { n: 'Main Tank Fuel (Qty 98L)', t: 'fuel level' },
+      b: { n: 'Reserve Tank (Qty 361L)', t: 'fuel level' },
+      c: { n: 'Battery (500L)', t: 'voltage' },
+    })).toBe(361)
+  })
+})

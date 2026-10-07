@@ -262,7 +262,7 @@ async function main() {
   console.log(`  A vehicle with no stated capacity keeps a NULL one, so litres still land and the`)
   console.log(`  gauge stays blank rather than showing a percentage of an assumed tank.`)
   for (const u of toCreate.slice(0, 8)) {
-    console.log(`      ${String(plateFor.get(u.id)).padEnd(28)} ${String(classifyUnit(u.nm, u.flds)).padEnd(12)} ${u.nm}`)
+    console.log(`      ${String(plateFor.get(u.id)).padEnd(28)} ${String(fleet.typeOf?.(u.nm, u.sens) ?? classifyUnit(u.nm, u.flds)).padEnd(12)} ${u.nm}`)
   }
   if (toCreate.length > 8) console.log(`      … and ${toCreate.length - 8} more`)
 
@@ -302,8 +302,9 @@ async function main() {
       name:              u.nm.trim(),
       registrationPlate: plate,
       // Wialon has no body-type field; classified from the operator's declared
-      // TYPE where present, else the equipment code in the unit name.
-      vehicleType:       classifyUnit(u.nm, u.flds),
+      // TYPE where present, else the equipment code in the unit name — or by
+      // the fleet's own rule where its names carry no code (wialon.account).
+      vehicleType:       fleet.typeOf?.(u.nm, u.sens) ?? classifyUnit(u.nm, u.flds),
       status:            u.pos ? 'TRACKING' : 'NO_SIGNAL',
       isActive:          true,
       // Tank size is not a Wialon field — the operator writes it into the fuel

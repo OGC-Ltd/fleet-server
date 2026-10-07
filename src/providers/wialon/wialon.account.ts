@@ -51,6 +51,8 @@
  */
 
 import { menengaiGroup, menengaiPlate, westSugarGroup, parseWestSugarUnit } from './wialon.unit-name.js'
+import { classifyByNameAndTank, type VehicleClass } from './wialon.vehicle-type.js'
+import type { WialonSensor } from './wialon.sensors.js'
 
 /** Data flag that returns `bact`. Without it every unit looks unowned. */
 export const BILLING_PROPS_FLAG = 0x4
@@ -130,6 +132,11 @@ export interface WialonFleet {
    * ICCID, TIGO), not registrations.
    */
   plateOf:  (unitName: string) => string
+  /**
+   * The fleet's own vehicle-type rule, where the shared code legend
+   * (classifyUnit) cannot read its names. Absent → classifyUnit.
+   */
+  typeOf?:  (unitName: string, sensors?: Record<string, WialonSensor>) => VehicleClass
 }
 
 const FLEETS: WialonFleet[] = [
@@ -176,6 +183,7 @@ const FLEETS: WialonFleet[] = [
     groupOf:   () => ({ code: 'TIMSALES_TRACKED_UNITS', name: 'TRACKED UNITS' }),
     // 77 of 115 name a registration; machines keep their unit name.
     plateOf:   (nm) => menengaiPlate(nm) ?? nm.trim(),
+    typeOf:    classifyByNameAndTank,
   },
   {
     orgCode:   'AQUAMIST',
@@ -186,6 +194,7 @@ const FLEETS: WialonFleet[] = [
     nameMask:  /^\s*aquamist\b/i,
     groupOf:   () => ({ code: 'AQUAMIST_TRACKED_UNITS', name: 'TRACKED UNITS' }),
     plateOf:   (nm) => menengaiPlate(nm) ?? nm.trim(),
+    typeOf:    classifyByNameAndTank,
   },
 ]
 
