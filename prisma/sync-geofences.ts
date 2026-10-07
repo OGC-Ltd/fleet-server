@@ -375,7 +375,19 @@ async function main() {
       continue
     }
 
-    const externalId = `wialon:zone:${z.id}`
+    /*
+     * Wialon numbers zones PER RESOURCE: Aquamist's four are ids 1–4, and so
+     * are zones on West Kenya Sugar's resource. The old key, `wialon:zone:<id>`,
+     * left the resource out, so importing Aquamist would have rewritten
+     * Sukari's "NO GO ZONES" and three West Sugar fences into Aquamist's
+     * (measured on prod 2026-10-07, caught in the dry run).
+     *
+     * New rows key on resource AND zone. Rows imported under the old key are
+     * still found — but only when they already belong to THIS org, so a
+     * same-numbered zone of another customer is never touched.
+     */
+    const externalId = `wialon:zone:${source.accountId}:${z.id}`
+    const legacyId   = `wialon:zone:${z.id}`
     seen.push(externalId)
 
     // Shared shape; geometry columns filled per type below.
@@ -434,14 +446,18 @@ async function main() {
 
     // Without a database there is nothing to compare against, so everything
     // reads as new — which is the honest answer for a preview.
-    const existing = org
-      ? await prisma.geofence.findUnique({ where: { externalId }, select: { id: true, isActive: true, mode: true } })
-      : null
+    const select = { id: true, isActive: true, mode: true, organisationId: true } as const
+    const byKey  = org ? await prisma.geofence.findUnique({ where: { externalId }, select }) : null
+    const legacy = org && !byKey ? await prisma.geofence.findUnique({ where: { externalId: legacyId }, select }) : null
+    const existing = byKey ?? (legacy?.organisationId === org?.id ? legacy : null)
+    if (byKey && byKey.organisationId !== org?.id) {
+      throw new Error(`${externalId} belongs to another organisation — refusing to move it into ${ORG_CODE}`)
+    }
     if (existing) {
       // Never clobber an enforcement decision already made in our system —
       // re-syncing refreshes geometry and name, not policy.
       const { mode: _m, isActive: _a, ...geometry } = data
-      if (APPLY) await prisma.geofence.update({ where: { externalId }, data: geometry })
+      if (APPLY) await prisma.geofence.update({ where: { id: existing.id }, data: geometry })
       updated++
     } else {
       if (APPLY) await prisma.geofence.create({ data: { ...data, externalId } })
