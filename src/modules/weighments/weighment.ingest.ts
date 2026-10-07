@@ -40,17 +40,35 @@ import type {
  * A factory not listed is dropped with a warning rather than guessed at: a
  * ticket filed under the wrong company is the bug this table exists to fix.
  */
-export const WEIGHBRIDGE_FACTORIES: Record<string, { orgCode: string; siteBase: number; vehicleOrgs?: readonly string[] }> = {
+export const WEIGHBRIDGE_FACTORIES: Record<string, {
+  /** The organisation a ticket from this feed belongs to — unless its yard is in `yardOrgs`. */
+  orgCode:      string
+  siteBase:     number
+  /** Stored site code → organisation, for the yards that are not `orgCode`'s. */
+  yardOrgs?:    Readonly<Record<number, string>>
+  /** Where a ticket's lorry may be matched, after the ticket's own organisation. */
+  vehicleOrgs?: readonly string[]
+}> = {
   NDHIWA: { orgCode: 'SUKARI',    siteBase: 0 },
-  // Kabras and Nzoia became organisations of their own on 2026-10-07, and
-  // their mills' tickets moved with them. The lorries did not split so neatly:
-  // of the Kabras tickets that matched a unit, 753 were West Kenya lorries,
-  // 599 Kabras and 1 Nzoia; Nzoia's 146 were 98 / 28 / 20. So a ticket is
-  // matched to a lorry anywhere in the West Kenya group, the factory's own
-  // organisation first. `siteBase` is unchanged so every stored site code,
-  // and every link built on one, still reads the same.
-  KABRAS: { orgCode: 'KABRAS',    siteBase: 1000, vehicleOrgs: ['KABRAS', 'NZOIA', 'WESTSUGAR'] },
-  NZOIA:  { orgCode: 'NZOIA',     siteBase: 2000, vehicleOrgs: ['NZOIA', 'KABRAS', 'WESTSUGAR'] },
+  // Kabras and Nzoia became organisations of their own on 2026-10-07. Each
+  // mill's FACTORY YARD belongs to that mill; every other yard either feed
+  // names (Magut, Busia, Misikhu, Naitiri, Khalaba, Lake Agro, Selient,
+  // Kitale, Makhese, Weyeta) stays West Kenya's — the operator's split. The
+  // Kabras feed also files 6 tickets at Nzoia Factory Yard (its site 1201);
+  // those are Nzoia's.
+  //
+  // Lorries cross all three: of the Kabras-feed tickets that matched a unit,
+  // 753 were West Kenya lorries, 599 Kabras and 1 Nzoia. So a lorry is looked
+  // for in the ticket's own organisation first, then across the group.
+  // `siteBase` is unchanged, so every stored site code still reads the same.
+  KABRAS: { orgCode: 'WESTSUGAR', siteBase: 1000, yardOrgs: { 1101: 'KABRAS', 1201: 'NZOIA' }, vehicleOrgs: ['KABRAS', 'NZOIA', 'WESTSUGAR'] },
+  NZOIA:  { orgCode: 'WESTSUGAR', siteBase: 2000, yardOrgs: { 2101: 'NZOIA' },                  vehicleOrgs: ['NZOIA', 'KABRAS', 'WESTSUGAR'] },
+}
+
+/** The organisation code a ticket belongs to, from its feed and stored site code. */
+export const weighmentOrgCode = (factoryCode: string, site: number): string | null => {
+  const f = WEIGHBRIDGE_FACTORIES[factoryCode]
+  return f ? (f.yardOrgs?.[site] ?? f.orgCode) : null
 }
 
 /** Rows from before the feed named its factory were all Ndhiwa's. */
@@ -263,29 +281,21 @@ async function findVehicleId(organisationIds: string[], rawPlate: string): Promi
   return null
 }
 
-/** Organisation ids a factory's tickets may match lorries in, own first. */
-const vehicleOrgIds = new Map<string, string[]>()
-async function vehicleOrgIdsFor(factoryCode: string, ownOrgId: string): Promise<string[]> {
-  const cached = vehicleOrgIds.get(factoryCode)
-  if (cached) return cached
-  const codes = WEIGHBRIDGE_FACTORIES[factoryCode]?.vehicleOrgs
-  if (!codes) return [ownOrgId]
-  const orgs = await prisma.organisation.findMany({ where: { code: { in: [...codes] } }, select: { id: true, code: true } })
-  const ids = codes.map(c => orgs.find(o => o.code === c)?.id).filter((id): id is string => !!id)
-  const ordered = [ownOrgId, ...ids.filter(id => id !== ownOrgId)]
-  vehicleOrgIds.set(factoryCode, ordered)
-  return ordered
+/** Organisation id per code. Cached: the mapping cannot change without a
+ *  deploy, and a null is cached too so an unknown code does not query per row. */
+const orgIds = new Map<string, string | null>()
+async function orgIdOf(code: string | null): Promise<string | null> {
+  if (!code) return null
+  if (orgIds.has(code)) return orgIds.get(code) ?? null
+  const org = await prisma.organisation.findUnique({ where: { code }, select: { id: true } })
+  orgIds.set(code, org?.id ?? null)
+  return org?.id ?? null
 }
 
-/** Organisation id per factory. Cached: it cannot change without a deploy,
- *  and a null is cached too so an unmapped factory does not query per row. */
-const orgIds = new Map<string, string | null>()
-async function weighbridgeOrgId(factoryCode: string): Promise<string | null> {
-  if (orgIds.has(factoryCode)) return orgIds.get(factoryCode) ?? null
-  const code = WEIGHBRIDGE_FACTORIES[factoryCode]?.orgCode
-  const org = code ? await prisma.organisation.findUnique({ where: { code }, select: { id: true } }) : null
-  orgIds.set(factoryCode, org?.id ?? null)
-  return org?.id ?? null
+/** Organisation ids a ticket's lorry may be matched in: the ticket's own first. */
+async function vehicleOrgIdsFor(factoryCode: string, ownOrgId: string): Promise<string[]> {
+  const ids = await Promise.all((WEIGHBRIDGE_FACTORIES[factoryCode]?.vehicleOrgs ?? []).map(orgIdOf))
+  return [ownOrgId, ...ids.filter((id): id is string => !!id && id !== ownOrgId)]
 }
 
 /** Once per factory per process: the reconciler re-serves every row each pass. */
@@ -317,7 +327,10 @@ export async function handleWeighment(
   if (row?.tokenNumber == null || !row.vehicleNo) return false
 
   const factoryCode = row.factoryCode ?? LEGACY_FACTORY
-  const organisationId = await weighbridgeOrgId(factoryCode)
+  // The yard decides the organisation, so read the site the ticket is stored
+  // under first (a transfer names it as its origin) — see WEIGHBRIDGE_FACTORIES.
+  const site = normaliseWeighment(row, '', null).centerCode
+  const organisationId = await orgIdOf(weighmentOrgCode(factoryCode, site))
   if (!organisationId) {
     warnUnmapped(factoryCode)
     return false
