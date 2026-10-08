@@ -17,6 +17,9 @@ import { renderUsageReviewPdf } from './usage-review.pdf.js'
  *       202 + progress while it builds, 200 + the review when ready.
  *   GET …/vehicles/:vehicleId/usage-review/xlsx?from&to[&kmpl]
  *   GET …/vehicles/:vehicleId/usage-review/pdf?from&to[&kmpl]
+ *   GET …/vehicles/:vehicleId/usage-review/day?from&to&date
+ *       one day's GPS fixes from the built review, for the page's playback:
+ *       { date, points: [t ms, lat, lng, km/h, course|null, ignition 1/0/null][] }
  *
  * `kmpl` overrides the vehicle's rate for the fuel estimate in a download.
  */
@@ -27,6 +30,7 @@ const reviewQuery = z.object({
   kmpl: z.coerce.number().positive().max(100).optional(),
 })
 type ReviewQuery = z.infer<typeof reviewQuery>
+const dayQuery = reviewQuery.extend({ date: day })
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 const q = (req: Parameters<RequestHandler>[0]) => req.query as unknown as ReviewQuery
@@ -79,11 +83,26 @@ const getPdf: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+/** The EAT calendar day of an instant (Kenya keeps no daylight saving). */
+const eatDay = (ms: number) => new Date(ms + 3 * 3_600_000).toISOString().slice(0, 10)
+
+const getDay: RequestHandler = async (req, res, next) => {
+  try {
+    const rv = await held(req)
+    const { date } = req.query as unknown as { date: string }
+    const points = rv.points
+      .filter(pt => eatDay(pt.t) === date)
+      .map(pt => [pt.t, pt.lat, pt.lng, Math.round(pt.speed), pt.course, pt.ign == null ? null : pt.ign ? 1 : 0])
+    sendSuccess(res, { date, points })
+  } catch (err) { next(err) }
+}
+
 const router = Router({ mergeParams: true })
 router.use(authenticate, requireOrgAccess)
 const guard = [requirePermission('telemetry:read'), requireVehicleInScope, validateQuery(reviewQuery)]
 router.get('/vehicles/:vehicleId/usage-review', ...guard, getReview)
 router.get('/vehicles/:vehicleId/usage-review/xlsx', ...guard, getXlsx)
 router.get('/vehicles/:vehicleId/usage-review/pdf', ...guard, getPdf)
+router.get('/vehicles/:vehicleId/usage-review/day', requirePermission('telemetry:read'), requireVehicleInScope, validateQuery(dayQuery), getDay)
 
 export default router
