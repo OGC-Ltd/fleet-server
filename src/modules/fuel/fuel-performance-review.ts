@@ -169,10 +169,15 @@ export function equipmentGroup(category: string | null, name: string): string {
   return 'Other equipment'
 }
 
-/** "MUFINDI: EX 08" / "MUFINDI - DG 12" → "EX 08". */
+/**
+ * The unit's own reference, after every prefix: "MUFINDI: EX 08" → "EX 08",
+ * "CIVIL - Menengai - KBY 679F" → "KBY 679F" (Menengai names carry a
+ * department AND the org). A separator is a colon, or a dash with a space on
+ * at least one side, so a reference like "FT-07" is never split.
+ */
 export function unitRef(name: string): string {
-  const m = /^\s*[A-Z][A-Z .]*?\s*[:\-–]\s*(.+)$/i.exec(name)
-  return (m ? m[1]! : name).trim()
+  const parts = name.split(/\s*:\s*|\s+[-–]\s*|\s*[-–]\s+/).map(p => p.trim()).filter(Boolean)
+  return parts.at(-1) ?? name.trim()
 }
 
 export function median(xs: number[]): number | null {
