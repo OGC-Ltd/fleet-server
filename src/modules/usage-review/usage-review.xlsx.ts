@@ -48,7 +48,8 @@ const longDate = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString('e
 export function buildUsageReviewXlsx(rv: ReadyReview, kmpl: number | null, kmplNote: string): Buffer {
   const s = rv.summary, q = rv.quality, veh = rv.vehicle
   const place = new Map(rv.places.map(p => [p.id, p]))
-  const pname = (id: number) => place.get(id)?.name ?? `Place ${id}`
+  // Google's name where the page found one, the OpenStreetMap area otherwise.
+  const pname = (id: number) => { const pl = place.get(id); return pl?.exactName ?? pl?.name ?? `Place ${id}` }
   const fuelBasis = kmpl ? `Distance ÷ ${kmpl} km/L (${kmplNote})` : 'No km/L rate set, so no fuel estimate'
   const top = rv.places[0]
 
@@ -119,7 +120,7 @@ export function buildUsageReviewXlsx(rv: ReadyReview, kmpl: number | null, kmplN
   ])
 
   const wsPlaces = sheet(rv.places, [
-    { h: 'PlaceID', v: p => p.id }, { h: 'Rank', v: p => p.id }, { h: 'PlaceName', v: p => p.name ?? `Place ${p.id}`, w: 36 }, { h: 'ExactLocation_Google', v: p => p.exactName ?? null, w: 40 }, { h: 'Kind', v: p => (p.kind === 'work' ? (p.site ? `Work site: ${p.site}` : 'Work site') : p.kind === 'home' ? 'Home area' : p.kind ? 'Outside work sites' : null), w: 26 }, { h: 'Nights', v: p => p.nights ?? null },
+    { h: 'PlaceID', v: p => p.id }, { h: 'Rank', v: p => p.id }, { h: 'PlaceName', v: p => p.exactName ?? p.name ?? `Place ${p.id}`, w: 40 }, { h: 'Area_OpenStreetMap', v: p => p.name ?? null, w: 36 }, { h: 'Kind', v: p => (p.kind === 'work' ? (p.site ? `Work site: ${p.site}` : 'Work site') : p.kind === 'home' ? 'Home area' : p.kind ? 'Outside work sites' : null), w: 26 }, { h: 'Nights', v: p => p.nights ?? null },
     { h: 'Area', v: p => p.area, w: 30 }, { h: 'County_or_Region', v: p => p.county, w: 20 }, { h: 'Country', v: p => p.country },
     { h: 'Latitude', v: p => Math.round(p.lat * 1e6) / 1e6 }, { h: 'Longitude', v: p => Math.round(p.lng * 1e6) / 1e6 },
     { h: 'TotalHours', v: p => p.hours }, { h: 'Visits', v: p => p.visits }, { h: 'DaysPresent', v: p => p.days },
