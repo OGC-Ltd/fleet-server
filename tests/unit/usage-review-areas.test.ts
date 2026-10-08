@@ -15,8 +15,8 @@ const stop = (id: number, p: ReviewPlace, d: number): ReviewStop => ({
 })
 
 describe('usage-review areas', () => {
-  const home = place(1, 0.03284, 34.15056, 300)          // Kadenge, Siaya
-  const nearHome = place(2, 0.02331, 34.17165, 200)      // 2.6 km from it
+  const home = place(1, 0.02331, 34.17165, 300)          // a village in Central Alego
+  const nearHome = place(2, 0.03900, 34.18200, 200)      // 2 km from it
   const nzoia = place(3, 0.56972, 34.65396, 12)          // by the Nzoia CW bridge
   const webuye = place(4, 0.61397, 34.77047, 90)         // a town, no site
   const period = { from: '2026-09-01', to: '2026-09-07' }
@@ -37,6 +37,16 @@ describe('usage-review areas', () => {
     expect(summary.hours).toEqual({ home: 500, work: 12, elsewhere: 90 })
     expect(summary.nights).toEqual({ home: 4, work: 1, elsewhere: 1 })
     expect(summary.nightly.map(n => n.kind)).toEqual(['home', 'home', 'home', 'home', 'elsewhere', 'work', null])
+  })
+
+  it('knows the Lake Agro workshop, and a place Google names as a company site, as work', () => {
+    const lakeAgro = place(5, 0.03284, 34.15056, 280)
+    const named = { ...place(6, 0.30000, 34.40000, 20), exactName: 'Nzoia Sugar Company Outgrowers Yard' }
+    const shop = { ...place(7, 0.31000, 34.41000, 5), exactName: 'Mama Pima Shop' }
+    const { byPlace } = classifyPlaces([lakeAgro, named, shop], [], period, STATIC_SITES)
+    expect(byPlace.get(5)).toMatchObject({ kind: 'work', site: 'West Kenya Sugar - Lake Agro workshop' })
+    expect(byPlace.get(6)).toMatchObject({ kind: 'work', site: 'Nzoia Sugar Company Outgrowers Yard' })
+    expect(byPlace.get(7)!.kind).toBe('elsewhere')
   })
 
   it('names no home under three nights away from work', () => {

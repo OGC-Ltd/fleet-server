@@ -350,13 +350,14 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null)
   header('places and nights')
   y = M + 58
 
-  const hasExact = rv.places.some(p => p.exactName)
   const cols = [
     { h: '#', w: 18 },
-    ...(hasExact ? [{ h: 'Place (Google)', w: 104 }] : []),
-    { h: 'Area', w: hasExact ? 96 : 160 },
-    { h: 'Kind', w: hasExact ? 72 : 86 },
-    { h: 'County', w: hasExact ? 48 : 58 },
+    // Google's name for the spot where it has one ("West Kenya Sugar - Lake
+    // Agro workshop"), the OpenStreetMap area only where it has none
+    // (operator, 2026-10-08: not "Kadenge Sublocation" for the workshop).
+    { h: 'Place', w: 170 },
+    { h: 'Kind', w: 86 },
+    { h: 'County', w: 52 },
     { h: 'Hours', w: 34, r: true }, { h: 'Nights', w: 32, r: true }, { h: 'Stops', w: 30, r: true }, { h: 'Days', w: 28, r: true },
   ]
   cols.push({ h: 'Coordinates', w: W - cols.reduce((a, c) => a + c.w, 0) })
@@ -379,8 +380,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null)
     const k = kindOf(p)
     row([
       String(p.id),
-      ...(hasExact ? [p.exactName ?? '-'] : []),
-      p.name ?? `Place ${p.id}`,
+      p.exactName ?? p.name ?? `Place ${p.id}`,
       areas ? (k === 'work' && p.site ? p.site : KIND_SHORT[k]) : '-',
       (p.county ?? '').replace(/ County$/, ''),
       nf(p.hours, 1), String(p.nights ?? 0), String(p.visits), String(p.days),
@@ -509,11 +509,13 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null)
 
   // ── footers ──
   const source = [
-    q.daysFromDb && q.daysFromWialon ? `Data: FleetTrack database (${q.daysFromDb} days) + Wialon (${q.daysFromWialon} days)` : q.daysFromDb ? 'Data: FleetTrack database' : 'Data: Wialon history',
+    // The source is named as the operator's platform (operator, 2026-10-08),
+    // not the tracking provider or our own table behind it.
+    'Rai Operations',
     q.distanceSource === 'odometer' ? 'distance: tracker odometer' : q.distanceSource === 'mixed' ? 'distance: odometer + GPS' : 'distance: GPS track',
     q.gpsVsOdometerPct != null ? `GPS agrees within ${nf(q.gpsVsOdometerPct, 1)}%` : null,
     fuelTot != null ? `fuel estimated at ${kmpl} km/L` : null,
-    rv.incompleteDays.length ? `${rv.incompleteDays.length} day(s) incomplete (Wialon unreachable)` : null,
+    rv.incompleteDays.length ? `${rv.incompleteDays.length} day(s) incomplete (tracker history unreachable)` : null,
   ].filter(Boolean).join('  ·  ')
   const built = new Date(rv.builtAt + TZ_OFFSET_MS).toISOString().slice(0, 16).replace('T', ' ')
   const range = doc.bufferedPageRange()

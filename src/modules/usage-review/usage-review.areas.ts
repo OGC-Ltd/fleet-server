@@ -93,7 +93,7 @@ export function classifyPlaces(
 
   const byPlace = new Map<number, PlaceArea>()
   for (const p of places) {
-    const site = siteAt(p.lat, p.lng, sites)
+    const site = siteAt(p.lat, p.lng, sites) ?? (p.exactName && WORK_NAME.test(p.exactName) ? p.exactName : null)
     byPlace.set(p.id, { kind: site ? 'work' : 'elsewhere', site, nights: nightsAt.get(p.id) ?? 0 })
   }
 
@@ -122,7 +122,17 @@ export function classifyPlaces(
 
 // ── the company's sites ──────────────────────────────────────────────────────
 
+/**
+ * A Google name that says the place is a company site: a sugar company, a
+ * factory, weighbridge, workshop, yard, depot or mill. Operator, 2026-10-08:
+ * 0.03284, 34.15056 is West Kenya Sugar's Lake Agro workshop — a work site
+ * the coordinate tables did not hold, and the classifier had called "home".
+ */
+export const WORK_NAME = /\b(sugar|sukari|kabras|nzoia|factory|weighbridge|workshop|yard|depot|mill)\b/i
+
 export const STATIC_SITES: Site[] = [
+  // Operator-given (2026-10-08): West Kenya Sugar's Lake Agro workshop.
+  { name: 'West Kenya Sugar - Lake Agro workshop', lat: 0.03284, lng: 34.15056 },
   ...Object.values(FACTORIES).map(f => ({ name: `${f.label} factory`, lat: f.lat, lng: f.lng })),
   ...WEIGHBRIDGES.map(b => ({ name: `${b.centerName.charAt(0)}${b.centerName.slice(1).toLowerCase()} ${b.label}`, lat: b.lat, lng: b.lng })),
 ]
