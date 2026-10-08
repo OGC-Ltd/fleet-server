@@ -92,6 +92,10 @@ export interface ReviewPlace {
   firstSeen: number
   lastSeen: number
   name: string | null
+  /** Google's name for the spot, as the page looked it up ("West Kenya Sugar -
+   *  Lake Agro workshop"). The server holds no Google key, so it only arrives
+   *  with a download (`names`), never from the build. */
+  exactName?: string | null
   area: string | null
   county: string | null
   country: string | null

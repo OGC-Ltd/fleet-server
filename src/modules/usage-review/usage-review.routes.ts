@@ -15,19 +15,23 @@ import { renderUsageReviewPdf } from './usage-review.pdf.js'
  *
  *   GET …/vehicles/:vehicleId/usage-review?from&to[&fresh=1]
  *       202 + progress while it builds, 200 + the review when ready.
- *   GET …/vehicles/:vehicleId/usage-review/xlsx?from&to[&kmpl]
- *   GET …/vehicles/:vehicleId/usage-review/pdf?from&to[&kmpl]
+ *   GET …/vehicles/:vehicleId/usage-review/xlsx?from&to[&kmpl][&names]
+ *   GET …/vehicles/:vehicleId/usage-review/pdf?from&to[&kmpl][&names]
  *   GET …/vehicles/:vehicleId/usage-review/day?from&to&date
  *       one day's GPS fixes from the built review, for the page's playback:
  *       { date, points: [t ms, lat, lng, km/h, course|null, ignition 1/0/null][] }
  *
  * `kmpl` overrides the vehicle's rate for the fuel estimate in a download.
+ * `names` is a JSON object of place id → Google's exact name, the ones the
+ * page already looked up (the server has no Google key); the downloads print
+ * them beside the OpenStreetMap area.
  */
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
 const reviewQuery = z.object({
   from: day, to: day,
   fresh: z.enum(['0', '1']).optional(),
   kmpl: z.coerce.number().positive().max(100).optional(),
+  names: z.string().max(8000).optional(),
 })
 type ReviewQuery = z.infer<typeof reviewQuery>
 const dayQuery = reviewQuery.extend({ date: day })
@@ -63,9 +67,21 @@ async function held(req: Parameters<RequestHandler>[0]) {
   return rv
 }
 
+/** Google's names from the page, onto a copy of the held review's places. A
+ *  malformed `names` is ignored: the download falls back to OpenStreetMap. */
+function withNames(rv: ReadyReview, raw: string | undefined): ReadyReview {
+  if (!raw) return rv
+  let parsed: unknown
+  try { parsed = JSON.parse(raw) } catch { return rv }
+  if (!parsed || typeof parsed !== 'object') return rv
+  const names = parsed as Record<string, unknown>
+  const clean = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 120) : null)
+  return { ...rv, places: rv.places.map(pl => ({ ...pl, exactName: clean(names[String(pl.id)]) })) }
+}
+
 const getXlsx: RequestHandler = async (req, res, next) => {
   try {
-    const rv = await held(req)
+    const rv = withNames(await held(req), q(req).names)
     const buf = buildUsageReviewXlsx(rv, rate(rv, q(req).kmpl), rateNote(rv, q(req).kmpl))
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     res.setHeader('Content-Disposition', `attachment; filename="${fileName(rv, 'xlsx')}"`)
@@ -75,7 +91,7 @@ const getXlsx: RequestHandler = async (req, res, next) => {
 
 const getPdf: RequestHandler = async (req, res, next) => {
   try {
-    const rv = await held(req)
+    const rv = withNames(await held(req), q(req).names)
     const buf = await renderUsageReviewPdf(rv, rate(rv, q(req).kmpl))
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `attachment; filename="${fileName(rv, 'pdf')}"`)
