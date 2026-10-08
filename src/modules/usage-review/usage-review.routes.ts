@@ -17,7 +17,7 @@ import { classifyPlaces, loadSites } from './usage-review.areas.js'
  *   GET …/vehicles/:vehicleId/usage-review?from&to[&fresh=1]
  *       202 + progress while it builds, 200 + the review when ready.
  *   GET …/vehicles/:vehicleId/usage-review/xlsx?from&to[&kmpl][&names]
- *   GET …/vehicles/:vehicleId/usage-review/pdf?from&to[&kmpl][&names]
+ *   GET …/vehicles/:vehicleId/usage-review/pdf?from&to[&kmpl][&names][&driver]
  *   GET …/vehicles/:vehicleId/usage-review/day?from&to&date
  *       one day's GPS fixes from the built review, for the page's playback:
  *       { date, points: [t ms, lat, lng, km/h, course|null, ignition 1/0/null][] }
@@ -25,7 +25,8 @@ import { classifyPlaces, loadSites } from './usage-review.areas.js'
  * `kmpl` overrides the vehicle's rate for the fuel estimate in a download.
  * `names` is a JSON object of place id → Google's exact name, the ones the
  * page already looked up (the server has no Google key); the downloads print
- * them beside the OpenStreetMap area.
+ * them beside the OpenStreetMap area. `driver` is the report's subject: the
+ * driver the page shows on the vehicle.
  */
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
 const reviewQuery = z.object({
@@ -33,6 +34,7 @@ const reviewQuery = z.object({
   fresh: z.enum(['0', '1']).optional(),
   kmpl: z.coerce.number().positive().max(100).optional(),
   names: z.string().max(8000).optional(),
+  driver: z.string().max(120).optional(),
 })
 type ReviewQuery = z.infer<typeof reviewQuery>
 const dayQuery = reviewQuery.extend({ date: day })
@@ -56,7 +58,7 @@ const getReview: RequestHandler = async (req, res, next) => {
 }
 
 const safe = (s: string) => s.replace(/[^A-Za-z0-9_-]+/g, '')
-const fileName = (rv: ReadyReview, ext: string) => `${safe(rv.vehicle.plate)}_${rv.period.from}_${rv.period.to}_highlights.${ext}`
+const fileName = (rv: ReadyReview, ext: string) => `${safe(rv.vehicle.plate)}_${rv.period.from}_${rv.period.to}_${ext === 'pdf' ? 'tracking-report' : 'logbook'}.${ext}`
 const rate = (rv: ReadyReview, kmpl: number | undefined) => kmpl ?? rv.vehicle.kmpl
 const rateNote = (rv: ReadyReview, kmpl: number | undefined) =>
   kmpl != null ? 'rate entered for this report' : rv.vehicle.kmplSource === 'vehicle' ? 'rate on the vehicle record' : 'rate in the Wialon unit name'
@@ -107,7 +109,7 @@ const getXlsx: RequestHandler = async (req, res, next) => {
 const getPdf: RequestHandler = async (req, res, next) => {
   try {
     const rv = await withAreas(withNames(await held(req), q(req).names), p(req, 'orgId'))
-    const buf = await renderUsageReviewPdf(rv, rate(rv, q(req).kmpl))
+    const buf = await renderUsageReviewPdf(rv, rate(rv, q(req).kmpl), q(req).driver ?? null)
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `attachment; filename="${fileName(rv, 'pdf')}"`)
     res.send(buf)
