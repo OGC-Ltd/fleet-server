@@ -8,6 +8,7 @@ import { ConflictError } from '../../core/errors/errors.js'
 import { getUsageReview, reviewForDownload, type ReadyReview } from './usage-review.service.js'
 import { buildUsageReviewXlsx } from './usage-review.xlsx.js'
 import { renderUsageReviewPdf } from './usage-review.pdf.js'
+import { classifyPlaces, loadSites } from './usage-review.areas.js'
 
 /**
  * Unit usage review — drive hours, distance, fuel (estimated) and the places a
@@ -79,9 +80,23 @@ function withNames(rv: ReadyReview, raw: string | undefined): ReadyReview {
   return { ...rv, places: rv.places.map(pl => ({ ...pl, exactName: clean(names[String(pl.id)]) })) }
 }
 
+/** Each place's kind (work site, home area, elsewhere) and the period's
+ *  split by kind, onto a copy of the review — see usage-review.areas. */
+async function withAreas(rv: ReadyReview, orgId: string): Promise<ReadyReview> {
+  const { byPlace, summary } = classifyPlaces(rv.places, rv.stops, rv.period, await loadSites(orgId))
+  return {
+    ...rv,
+    areas: summary,
+    places: rv.places.map(pl => {
+      const a = byPlace.get(pl.id)
+      return a ? { ...pl, kind: a.kind, site: a.site, nights: a.nights } : pl
+    }),
+  }
+}
+
 const getXlsx: RequestHandler = async (req, res, next) => {
   try {
-    const rv = withNames(await held(req), q(req).names)
+    const rv = await withAreas(withNames(await held(req), q(req).names), p(req, 'orgId'))
     const buf = buildUsageReviewXlsx(rv, rate(rv, q(req).kmpl), rateNote(rv, q(req).kmpl))
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     res.setHeader('Content-Disposition', `attachment; filename="${fileName(rv, 'xlsx')}"`)
@@ -91,7 +106,7 @@ const getXlsx: RequestHandler = async (req, res, next) => {
 
 const getPdf: RequestHandler = async (req, res, next) => {
   try {
-    const rv = withNames(await held(req), q(req).names)
+    const rv = await withAreas(withNames(await held(req), q(req).names), p(req, 'orgId'))
     const buf = await renderUsageReviewPdf(rv, rate(rv, q(req).kmpl))
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `attachment; filename="${fileName(rv, 'pdf')}"`)

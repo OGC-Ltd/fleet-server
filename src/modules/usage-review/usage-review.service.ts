@@ -19,6 +19,7 @@ import { buildUsageReview, dayStartMs, daysBetween, eatDay, type UsageReview } f
 import { loadUnitHistory, type UnitHistory } from './usage-review.wialon.js'
 import { heldDays, loadDbHistory } from './usage-review.db.js'
 import { namePlaces } from './usage-review.geocode.js'
+import type { AreaSummary } from './usage-review.areas.js'
 
 export const MAX_DAYS = 92
 /** Places named per review; the rest keep their coordinates. */
@@ -51,6 +52,8 @@ export interface ReadyReview extends UsageReview {
   /** Wialon unreachable: the review was read from our table, and these days of it have holes. */
   incompleteDays: string[]
   wialonError: string | null
+  /** The period split by kind of place; set on a download (usage-review.areas). */
+  areas?: AreaSummary
 }
 
 type Stage = 'queued' | 'loading' | 'computing' | 'naming' | 'ready' | 'failed'

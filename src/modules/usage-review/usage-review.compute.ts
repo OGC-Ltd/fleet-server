@@ -96,6 +96,13 @@ export interface ReviewPlace {
    *  Lake Agro workshop"). The server holds no Google key, so it only arrives
    *  with a download (`names`), never from the build. */
   exactName?: string | null
+  /** Work site, the home area, or elsewhere — see usage-review.areas. Set on
+   *  a download only, where the organisation's sites are read. */
+  kind?: 'work' | 'home' | 'elsewhere'
+  /** The site a work place stands at ("Nzoia cw bridge", a geofence name). */
+  site?: string | null
+  /** Nights (02:00 EAT) the unit stood here. */
+  nights?: number
   area: string | null
   county: string | null
   country: string | null
