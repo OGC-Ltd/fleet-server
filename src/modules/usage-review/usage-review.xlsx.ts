@@ -119,7 +119,7 @@ export function buildUsageReviewXlsx(rv: ReadyReview, kmpl: number | null, kmplN
   ])
 
   const wsPlaces = sheet(rv.places, [
-    { h: 'PlaceID', v: p => p.id }, { h: 'Rank', v: p => p.id }, { h: 'PlaceName', v: p => p.name ?? `Place ${p.id}`, w: 36 }, { h: 'ExactLocation_Google', v: p => p.exactName ?? null, w: 40 },
+    { h: 'PlaceID', v: p => p.id }, { h: 'Rank', v: p => p.id }, { h: 'PlaceName', v: p => p.name ?? `Place ${p.id}`, w: 36 }, { h: 'ExactLocation_Google', v: p => p.exactName ?? null, w: 40 }, { h: 'Kind', v: p => (p.kind === 'work' ? (p.site ? `Work site: ${p.site}` : 'Work site') : p.kind === 'home' ? 'Home area' : p.kind ? 'Outside work sites' : null), w: 26 }, { h: 'Nights', v: p => p.nights ?? null },
     { h: 'Area', v: p => p.area, w: 30 }, { h: 'County_or_Region', v: p => p.county, w: 20 }, { h: 'Country', v: p => p.country },
     { h: 'Latitude', v: p => Math.round(p.lat * 1e6) / 1e6 }, { h: 'Longitude', v: p => Math.round(p.lng * 1e6) / 1e6 },
     { h: 'TotalHours', v: p => p.hours }, { h: 'Visits', v: p => p.visits }, { h: 'DaysPresent', v: p => p.days },
