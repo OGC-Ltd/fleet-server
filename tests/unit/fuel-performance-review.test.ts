@@ -16,6 +16,9 @@ describe('names and groups', () => {
   it('reads the reference off either separator', () => {
     expect(unitRef('MUFINDI: EX 08')).toBe('EX 08')
     expect(unitRef('MUFINDI - DG 12')).toBe('DG 12')
+    expect(unitRef('CIVIL - Menengai - KBY 679F')).toBe('KBY 679F')
+    expect(unitRef('Menengai -KDE 121E')).toBe('KDE 121E')
+    expect(unitRef('MUFINDI - FT-07')).toBe('FT-07')
   })
   it('groups by register category, then by plate family', () => {
     expect(equipmentGroup('Bull Dozer', 'MUFINDI: DZ 02')).toBe('Bulldozers')
