@@ -53,7 +53,7 @@ describe('POST /geofences', () => {
 
     const res = await request(app).post(BASE).send({
       type: 'POLYGON', name: 'Custom Zone',
-      polygonCoords: [[-1.3, 36.8], [-1.3, 36.9], [-1.2, 36.9]],
+      polygonCoords: [[36.8, -1.3], [36.9, -1.3], [36.9, -1.2]],
     })
     expect(res.status).toBe(201)
   })

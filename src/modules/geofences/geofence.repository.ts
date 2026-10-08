@@ -72,6 +72,10 @@ export async function findAllAsGeoJSON(orgId: string) {
       widthM:   g.widthM,
       radiusM:  g.radiusM,
       areaHa:   g.type === 'POLYGON' && coords ? Math.round(ringAreaHa(coords)) : null,
+      // Where the fence is kept. A provider's (Wialon) zone is rewritten by the
+      // next sync, so the Logbook's fence tool shows it but edits only 'app'
+      // fences — the ones drawn here, which no sync touches.
+      source:   g.externalId ? 'provider' as const : 'app' as const,
     }
 
     if (g.type === 'CIRCLE') {
