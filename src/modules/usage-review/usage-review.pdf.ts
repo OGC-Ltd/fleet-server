@@ -196,12 +196,12 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null)
   y = my + mapH + 14
 
   // ── top places ──
-  doc.font(F.bold).fontSize(10).fillColor(C.ink).text('Where it spent its time', M, y, { lineBreak: false })
+  doc.font(F.bold).fontSize(10).fillColor(C.ink).text('Where It Spent Its Time', M, y, { lineBreak: false })
   doc.font(F.reg).fontSize(8).fillColor(C.sub).text(`${s.places} places · ${nf(s.stoppedH, 0)} h stopped (stops of 10 min or more)`, M, y + 1, { width: W, align: 'right', lineBreak: false })
   y += 16
   const cols = [
-    { h: '#', w: 18 }, { h: 'Place', w: 190 }, { h: 'County', w: 95 }, { h: 'Hours', w: 45, r: true },
-    { h: 'Stops', w: 38, r: true }, { h: 'Days', w: 34, r: true }, { h: 'Coordinates', w: W - 420 },
+    { h: '#', w: 16 }, { h: 'Exact location', w: 140 }, { h: 'Area', w: 105 }, { h: 'County', w: 62 },
+    { h: 'Hours', w: 38, r: true }, { h: 'Stops', w: 32, r: true }, { h: 'Days', w: 28, r: true }, { h: 'Coordinates', w: W - 421 },
   ]
   const row = (vals: string[], yy: number, bold = false, color = C.ink) => {
     let x = M
@@ -216,7 +216,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null)
   const rowsLeft = Math.max(0, Math.floor((842 - M - 24 - y) / 13.5))
   rv.places.slice(0, Math.min(12, rowsLeft)).forEach((p, i) => {
     if (i % 2 === 0) doc.rect(M, y - 3, W, 13.5).fill(C.panel)
-    row([String(p.id), p.name ?? `Place ${p.id}`, p.county ?? '', nf(p.hours, 1), String(p.visits), String(p.days), `${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`], y)
+    row([String(p.id), p.exactName ?? '-', p.name ?? `Place ${p.id}`, p.county ?? '', nf(p.hours, 1), String(p.visits), String(p.days), `${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`], y)
     y += 13.5
   })
 
@@ -236,7 +236,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null)
   }
   const days = rv.days
   {
-    const b = chart('Distance and driving per day', 'bars: km  ·  dots: drive hours', 170)
+    const b = chart('Distance and Driving per Day', 'bars: km  ·  dots: drive hours', 170)
     const maxKm = Math.max(10, ...days.map(d => d.km))
     const maxH = Math.max(1, ...days.map(d => d.driveH))
     const kmTop = Math.ceil(maxKm / 100) * 100, hTop = Math.ceil(maxH / 4) * 4
@@ -265,7 +265,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null)
 
   // Hour-of-day profile: average driving minutes in each hour.
   {
-    const b = chart('When it drives', 'average minutes of driving in each hour of the day (EAT)', 110)
+    const b = chart('Driving by Hour', 'average minutes of driving in each hour of the day (EAT)', 110)
     const per = Array.from({ length: 24 }, (_, hr) => rv.hours.filter(h => h.hour === hr).reduce((a, h) => a + h.driveMin, 0) / Math.max(1, rv.period.days))
     const top = Math.max(1, ...per)
     const bw = b.w / 24
@@ -280,7 +280,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null)
 
   // How the period's hours divided.
   {
-    doc.font(F.bold).fontSize(10).fillColor(C.ink).text('How the time divided', M, y, { lineBreak: false })
+    doc.font(F.bold).fontSize(10).fillColor(C.ink).text('How the Time Divided', M, y, { lineBreak: false })
     y += 18
     const total = rv.period.days * 24
     const drive = s.driveH, idle = s.idleH ?? 0
@@ -309,13 +309,13 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null)
 
   // Places by hours, top 10.
   {
-    doc.font(F.bold).fontSize(10).fillColor(C.ink).text('Hours at each place', M, y, { lineBreak: false })
+    doc.font(F.bold).fontSize(10).fillColor(C.ink).text('Hours at Each Place', M, y, { lineBreak: false })
     y += 18
     const top = rv.places.slice(0, 10)
     const maxH = top[0]?.hours || 1
     for (const p of top) {
       if (y > 842 - M - 40) break
-      doc.font(F.reg).fontSize(8).fillColor(C.ink).text(`${p.id}. ${p.name ?? `Place ${p.id}`}`, M, y, { width: 200, lineBreak: false, ellipsis: true })
+      doc.font(F.reg).fontSize(8).fillColor(C.ink).text(`${p.id}. ${p.exactName ?? p.name ?? `Place ${p.id}`}`, M, y, { width: 200, lineBreak: false, ellipsis: true })
       const w = (W - 270) * (p.hours / maxH)
       doc.rect(M + 205, y + 1, Math.max(1, w), 7).fill(p.id === 1 ? C.green : C.amber)
       doc.font(F.bold).fontSize(8).fillColor(C.ink).text(`${nf(p.hours, 1)} h`, M + 210 + w, y, { lineBreak: false })

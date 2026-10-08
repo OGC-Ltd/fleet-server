@@ -92,7 +92,7 @@ export function buildUsageReviewXlsx(rv: ReadyReview, kmpl: number | null, kmplN
     ['4. Average fuel per day (estimate)', totFuel != null ? Math.round((totFuel / s.calendarDays) * 10) / 10 : null, 'L/day', fuelBasis],
     ['4b. Average fuel per active day (estimate)', totFuel != null && s.activeDays ? Math.round((totFuel / s.activeDays) * 10) / 10 : null, 'L/day', fuelBasis],
     ['Total fuel (estimate)', totFuel, 'L', fuelBasis],
-    ['5. Place with most time', top?.name ?? '', '', top ? `${top.lat.toFixed(6)}, ${top.lng.toFixed(6)}${top.address ? ` · ${top.address}` : ''}` : ''],
+    ['5. Place with most time', top?.exactName ?? top?.name ?? '', '', top ? `${top.lat.toFixed(6)}, ${top.lng.toFixed(6)}${top.address ? ` · ${top.address}` : ''}` : ''],
     ['5. Hours at that place', top?.hours ?? null, 'h', top ? `${top.visits} stops on ${top.days} days` : ''],
     ['Total stopped time (stops ≥10 min)', s.stoppedH, 'h', `${s.stops} stops at ${s.places} places`],
     ['Trips', s.trips, '', ''],
@@ -119,7 +119,7 @@ export function buildUsageReviewXlsx(rv: ReadyReview, kmpl: number | null, kmplN
   ])
 
   const wsPlaces = sheet(rv.places, [
-    { h: 'PlaceID', v: p => p.id }, { h: 'Rank', v: p => p.id }, { h: 'PlaceName', v: p => p.name ?? `Place ${p.id}`, w: 36 },
+    { h: 'PlaceID', v: p => p.id }, { h: 'Rank', v: p => p.id }, { h: 'PlaceName', v: p => p.name ?? `Place ${p.id}`, w: 36 }, { h: 'ExactLocation_Google', v: p => p.exactName ?? null, w: 40 },
     { h: 'Area', v: p => p.area, w: 30 }, { h: 'County_or_Region', v: p => p.county, w: 20 }, { h: 'Country', v: p => p.country },
     { h: 'Latitude', v: p => Math.round(p.lat * 1e6) / 1e6 }, { h: 'Longitude', v: p => Math.round(p.lng * 1e6) / 1e6 },
     { h: 'TotalHours', v: p => p.hours }, { h: 'Visits', v: p => p.visits }, { h: 'DaysPresent', v: p => p.days },
