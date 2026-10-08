@@ -1,6 +1,9 @@
 import { z } from 'zod'
 
-const coordinatePair = z.tuple([z.number().min(-90).max(90), z.number().min(-180).max(180)])
+// [lng, lat] — the order polygonCoords is stored and read in (lib/geofence,
+// the GeoJSON projection, the Wialon sync). This used to validate [lat, lng],
+// which only passed because Kenya's longitudes are under 90.
+const coordinatePair = z.tuple([z.number().min(-180).max(180), z.number().min(-90).max(90)])
 
 export const createGeofenceSchema = z.discriminatedUnion('type', [
   z.object({

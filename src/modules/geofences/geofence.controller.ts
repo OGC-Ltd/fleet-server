@@ -2,6 +2,7 @@ import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import { NotFoundError } from '../../core/errors/errors.js'
 import * as repo from './geofence.repository.js'
+import { invalidateZoneCache } from '../../lib/zone-presence.js'
 import type { CreateGeofence, UpdateGeofence, GeofenceListQuery } from './geofence.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -23,6 +24,9 @@ export const geojson: RequestHandler = async (req, res, next) => {
 export const create: RequestHandler = async (req, res, next) => {
   try {
     const fence = await repo.create(p(req, 'orgId'), req.user!.id, req.body as CreateGeofence)
+    // A fence drawn on the Logbook map should name arrivals on the live feed
+    // now, not when the five-minute zone cache next expires.
+    invalidateZoneCache(p(req, 'orgId'))
     sendSuccess(res, fence, 201)
   } catch (err) { next(err) }
 }
@@ -39,6 +43,7 @@ export const update: RequestHandler = async (req, res, next) => {
   try {
     const fence = await repo.update(p(req, 'geofenceId'), p(req, 'orgId'), req.body as UpdateGeofence)
     if (!fence) throw new NotFoundError('Geofence not found')
+    invalidateZoneCache(p(req, 'orgId'))
     sendSuccess(res, fence)
   } catch (err) { next(err) }
 }
@@ -47,6 +52,7 @@ export const remove: RequestHandler = async (req, res, next) => {
   try {
     const deleted = await repo.remove(p(req, 'geofenceId'), p(req, 'orgId'))
     if (!deleted) throw new NotFoundError('Geofence not found')
+    invalidateZoneCache(p(req, 'orgId'))
     sendSuccess(res, null, 204)
   } catch (err) { next(err) }
 }
