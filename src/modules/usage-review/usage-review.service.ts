@@ -19,7 +19,8 @@ import { buildUsageReview, dayStartMs, daysBetween, eatDay, type UsageReview } f
 import { loadUnitHistory, type UnitHistory } from './usage-review.wialon.js'
 import { heldDays, loadDbHistory } from './usage-review.db.js'
 import { namePlaces } from './usage-review.geocode.js'
-import type { AreaSummary } from './usage-review.areas.js'
+import { classifyPlaces, loadSites, type AreaSummary } from './usage-review.areas.js'
+import { computeVisits, loadVisitFences, type VisitsResult } from './usage-review.visits.js'
 
 export const MAX_DAYS = 92
 /** Places named per review; the rest keep their coordinates. */
@@ -52,8 +53,12 @@ export interface ReadyReview extends UsageReview {
   /** Wialon unreachable: the review was read from our table, and these days of it have holes. */
   incompleteDays: string[]
   wialonError: string | null
-  /** The period split by kind of place; set on a download (usage-review.areas). */
+  /** The period split by kind of place (usage-review.areas). Set on the build,
+   *  and again on a download, where Google's names can make a place a site. */
   areas?: AreaSummary
+  /** Entries into and exits from the organisation's fences (usage-review.visits).
+   *  Null when the fences could not be read — the rest of the review stands. */
+  visits: VisitsResult | null
 }
 
 type Stage = 'queued' | 'loading' | 'computing' | 'naming' | 'ready' | 'failed'
@@ -168,9 +173,26 @@ async function run(job: Job, orgId: string, vehicleId: string, from: string, to:
     job.stage = 'naming'
     await namePlaces(review.places, NAMED_PLACES, (done, total) => { job.progress = { done, total } })
 
+    // Where it went: fence by fence, and each place's kind. Neither is worth
+    // failing a review over — without them it is the review it always was.
+    let visits: VisitsResult | null = null
+    let areas: AreaSummary | undefined
+    try {
+      visits = computeVisits(messages, review.period, await loadVisitFences(orgId), review.stops)
+      const { byPlace, summary } = classifyPlaces(review.places, review.stops, review.period, await loadSites(orgId))
+      areas = summary
+      for (const p of review.places) {
+        const a = byPlace.get(p.id)
+        if (a) { p.kind = a.kind; p.site = a.site; p.nights = a.nights }
+      }
+    } catch (err) {
+      logger.warn({ vehicleId, err: (err as Error).message }, 'Usage review: visits not worked out')
+    }
+
     const nameRate = kmplFromName(hist.unitName)
     job.result = {
       ...review,
+      visits, areas,
       builtAt: Date.now(),
       incompleteDays, wialonError,
       vehicle: {
