@@ -8,8 +8,9 @@
  *   Page 2 — where the vehicle spent its time, place by place with home
  *            first; how the period's hours divided; distance day by day
  *            against the active-day mean and median.
- *   Page 3 — when it drives (trips by weekday and by start hour) and the
- *            most frequent routes.
+ *   Page 3 — when it drives (trips by weekday and by start hour), the most
+ *            frequent routes, and the movement web: the same drives on the
+ *            map, place to place, an arrow per direction, width by trips.
  *   Page 4 — the top sites with median arrival and departure, entries into
  *            and exits from the organisation's fences, and where it stood
  *            each night.
@@ -78,10 +79,12 @@ const lat2y = (lat: number, z: number) => {
 
 interface MapFrame { z: number; x0: number; y0: number; scale: number }
 
-/** Fetch what the map needs before drawing (pdfkit draws synchronously). */
-async function prepareMap(rv: ReadyReview, boxW: number, boxH: number) {
-  const pts: [number, number][] = rv.tracks.flatMap(t => t.path)
-  for (const p of rv.places.slice(0, 10)) pts.push([p.lat, p.lng])
+/** Fetch what the map needs before drawing (pdfkit draws synchronously).
+ *  Framed on `frameOn` ([lat, lng] points) when given, else on the route and
+ *  the top places. */
+async function prepareMap(rv: ReadyReview, boxW: number, boxH: number, frameOn?: [number, number][]) {
+  const pts: [number, number][] = frameOn ? [...frameOn] : rv.tracks.flatMap(t => t.path)
+  if (!frameOn) for (const p of rv.places.slice(0, 10)) pts.push([p.lat, p.lng])
   if (!pts.length) return null
   let s = Infinity, n = -Infinity, w = Infinity, e = -Infinity
   for (const [la, lo] of pts) { s = Math.min(s, la); n = Math.max(n, la); w = Math.min(w, lo); e = Math.max(e, lo) }
@@ -241,6 +244,31 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     return y + 4
   }
 
+  type Prepared = NonNullable<Awaited<ReturnType<typeof prepareMap>>>
+  /** The tiles, softened, in the box; returns the projection. Call inside
+   *  doc.save()/restore() with the box clipped. */
+  const mapGround = (map: Prepared | null, mx: number, my: number, w: number, h: number, soften: number) => {
+    doc.rect(mx, my, w, h).fill('#eef2f0')
+    if (!map) return null
+    const { frame, tiles: tl } = map
+    const size = 256 * frame.scale
+    for (const t of tl) {
+      if (!t.buf) continue
+      try { doc.image(t.buf, mx + (t.x * 256 - frame.x0) * frame.scale, my + (t.y * 256 - frame.y0) * frame.scale, { width: size, height: size }) } catch { /* a bad tile is skipped */ }
+    }
+    doc.rect(mx, my, w, h).fillOpacity(soften).fill('#ffffff').fillOpacity(1)
+    return {
+      px: (lng: number) => mx + (lon2x(lng, frame.z) - frame.x0) * frame.scale,
+      py: (lat: number) => my + (lat2y(lat, frame.z) - frame.y0) * frame.scale,
+    }
+  }
+  /** A place as a numbered circle, in its kind's colour. */
+  const placeDot = (p: ReviewPlace, x: number, yy: number, r: number) => {
+    doc.circle(x, yy, r).fill(KIND_COLOR[kindOf(p)])
+    doc.circle(x, yy, r).lineWidth(1.2).stroke('#ffffff')
+    doc.font(F.bold).fontSize(r > 9 ? 8 : 7).fillColor('#ffffff').text(String(p.id), x - 10, yy - (r > 9 ? 4 : 3.5), { width: 20, align: 'center', lineBreak: false })
+  }
+
   const period = `${dayLabel(rv.period.from, true)} – ${dayLabel(rv.period.to, true)}`
   const prepared = (() => { const d = new Date(rv.builtAt + TZ_OFFSET_MS); return `${String(d.getUTCDate()).padStart(2, '0')} ${['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][d.getUTCMonth()]} ${d.getUTCFullYear()}` })()
 
@@ -382,7 +410,8 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   y = title('Daily distance', 'km per day · lines over the days it moved', y)
   {
     const days = rv.days
-    const box = { x: M + 30, y, w: W - 40, h: Math.min(180, BOTTOM - y - 30) }
+    // The key sits on its own line above the bars, never over them.
+    const box = { x: M + 30, y: y + 14, w: W - 40, h: Math.min(180, BOTTOM - y - 44) }
     const top = Math.max(50, ...days.map(d => d.km))
     const step = top > 300 ? 100 : top > 120 ? 50 : 20
     const ceil = Math.ceil(top / step) * step
@@ -396,15 +425,15 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
       const h = (d.km / ceil) * box.h
       if (h > 0) doc.rect(box.x + i * bw + bw * 0.15, box.y + box.h - h, Math.max(0.8, bw * 0.7), h).fill(C.green)
     })
-    const ref = (v: number | null, c: string, dash: [number, number], label: string, ly: number) => {
+    const ref = (v: number | null, c: string, dash: [number, number], label: string, ly: number, lx: number) => {
       if (v == null) return
       const yy = box.y + box.h - (v / ceil) * box.h
       doc.moveTo(box.x, yy).lineTo(box.x + box.w, yy).lineWidth(1.2).dash(dash[0], { space: dash[1] }).stroke(c).undash()
-      doc.moveTo(box.x + box.w - 150, ly + 4).lineTo(box.x + box.w - 132, ly + 4).lineWidth(1.2).dash(dash[0], { space: dash[1] }).stroke(c).undash()
-      line(label, box.x + box.w - 128, ly, 128, { size: 7.5 })
+      doc.moveTo(lx, ly + 4).lineTo(lx + 18, ly + 4).lineWidth(1.2).dash(dash[0], { space: dash[1] }).stroke(c).undash()
+      line(label, lx + 22, ly, 128, { size: 7.5 })
     }
-    ref(fig.activeKm.mean, C.orange, [5, 3], `Mean active: ${nf(fig.activeKm.mean, 0)} km`, box.y)
-    ref(fig.activeKm.median, C.red, [1.5, 2], `Median active: ${nf(fig.activeKm.median, 0)} km`, box.y + 12)
+    ref(fig.activeKm.mean, C.orange, [5, 3], `Mean active: ${nf(fig.activeKm.mean, 0)} km`, box.y - 16, box.x + box.w - 150)
+    ref(fig.activeKm.median, C.red, [1.5, 2], `Median active: ${nf(fig.activeKm.median, 0)} km`, box.y - 16, box.x + box.w - 300)
     const every = Math.max(1, Math.ceil(days.length / 10))
     days.forEach((d, i) => { if (i % every === 0) line(dayLabel(d.date), box.x + i * bw - 12, box.y + box.h + 4, 34, { size: 6.5, color: C.sub, align: 'center' }) })
     y = box.y + box.h + 20
@@ -449,6 +478,95 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   } else {
     line('No trips between stops in the period.', M, y, W, { size: 8.5, color: C.sub })
     y += 16
+  }
+
+  // ── the movement web: the drives on the map, place to place ──
+  {
+    const byId = new Map(rv.places.map(p => [p.id, p]))
+    const edgeMap = new Map<string, { from: number; to: number; trips: number; min: number; km: number }>()
+    for (const t of rv.trips) {
+      if (t.fromPlace === t.toPlace || !byId.has(t.fromPlace) || !byId.has(t.toPlace)) continue
+      const k = `${t.fromPlace}>${t.toPlace}`
+      const e = edgeMap.get(k) ?? { from: t.fromPlace, to: t.toPlace, trips: 0, min: 0, km: 0 }
+      e.trips++; e.min += t.min; e.km += t.km
+      edgeMap.set(k, e)
+    }
+    const edges = [...edgeMap.values()].sort((a, b) => b.trips - a.trips).slice(0, 30)
+    if (edges.length) {
+      const ids = [...new Set(edges.flatMap(e => [e.from, e.to]))].sort((a, b) => a - b)
+      const keyRows = Math.ceil(Math.min(ids.length, 16) / 2)
+      let webH = BOTTOM - y - 28 - keyRows * 11 - 12
+      if (webH < 230) { doc.addPage(); y = head('movement web'); webH = Math.min(500, BOTTOM - y - 28 - keyRows * 11 - 12) }
+      y = title('Movement web', 'each drive between two places · width = trips · the arrow shows the way', y)
+      const nodes = ids.map(id => byId.get(id)!)
+      const map = await prepareMap(rv, W, webH, nodes.map(p => [p.lat, p.lng]))
+      const mx = M, my = y
+      doc.save()
+      doc.rect(mx, my, W, webH).clip()
+      const proj = mapGround(map, mx, my, W, webH, 0.45)
+      if (proj) {
+        const max = Math.max(1, ...edges.map(e => e.trips))
+        const at = (p: ReviewPlace) => ({ x: proj.px(p.lng), y: proj.py(p.lat) })
+        const labels: { pt: (t: number) => { x: number; y: number }; text: string }[] = []
+        // Quietest first, so the busy connections lie on top.
+        const quietFirst = [...edges].reverse()
+        quietFirst.forEach((e, k) => {
+          const a = at(byId.get(e.from)!), b = at(byId.get(e.to)!)
+          const w = 1.2 + 5 * Math.sqrt(e.trips / max)
+          // Bowed to one side of the way it goes, so the drive back, going
+          // the other way, bows to the other.
+          const dx = b.x - a.x, dy = b.y - a.y
+          const c = { x: (a.x + b.x) / 2 + dy * 0.16, y: (a.y + b.y) / 2 - dx * 0.16 }
+          const pt = (t: number) => ({ x: (1 - t) ** 2 * a.x + 2 * (1 - t) * t * c.x + t * t * b.x, y: (1 - t) ** 2 * a.y + 2 * (1 - t) * t * c.y + t * t * b.y })
+          doc.moveTo(a.x, a.y).quadraticCurveTo(c.x, c.y, b.x, b.y).lineWidth(w).strokeOpacity(0.75).lineCap('round').stroke(C.route)
+          doc.strokeOpacity(1)
+          // The arrowhead at 62%, turned along the curve.
+          const p0 = pt(0.6), p1 = pt(0.64)
+          const ang = Math.atan2(p1.y - p0.y, p1.x - p0.x)
+          const L = 5 + w, Wd = 3 + w * 0.7
+          const tip = { x: p1.x + Math.cos(ang) * L * 0.5, y: p1.y + Math.sin(ang) * L * 0.5 }
+          const back = { x: tip.x - Math.cos(ang) * L, y: tip.y - Math.sin(ang) * L }
+          doc.polygon([tip.x, tip.y], [back.x + Math.sin(ang) * Wd, back.y - Math.cos(ang) * Wd], [back.x - Math.sin(ang) * Wd, back.y + Math.cos(ang) * Wd])
+            .lineWidth(0.8).fillAndStroke(C.route, '#ffffff')
+          // The six busiest connections carry their count and drive time.
+          if (quietFirst.length - 1 - k < 6) labels.push({ pt, text: `${e.trips}× · ${dur(e.min / e.trips)}` })
+        })
+        const maxH = Math.max(1, ...nodes.map(p => p.hours))
+        for (const p of [...nodes].sort((a, b) => b.id - a.id)) {
+          const q = at(p)
+          placeDot(p, q.x, q.y, 6 + 6 * Math.sqrt(Math.min(1, p.hours / maxH)))
+        }
+        // Labels, busiest first, each at the first point along its curve
+        // where it covers neither another label nor a place; else left off.
+        const taken: { x: number; y: number; w: number; h: number }[] = nodes.map(p => { const q = at(p); return { x: q.x - 12, y: q.y - 12, w: 24, h: 24 } })
+        const meets = (b: { x: number; y: number; w: number; h: number }) => taken.some(o => b.x < o.x + o.w && o.x < b.x + b.w && b.y < o.y + o.h && o.y < b.y + b.h)
+        for (const l of labels.reverse()) {
+          doc.font(F.bold).fontSize(6.8)
+          const tw = doc.widthOfString(l.text) + 8
+          for (const t of [0.5, 0.4, 0.6, 0.32, 0.68, 0.25, 0.75]) {
+            const m = l.pt(t)
+            const box = { x: m.x - tw / 2, y: m.y - 6, w: tw, h: 12 }
+            if (meets(box)) continue
+            taken.push(box)
+            doc.roundedRect(box.x, box.y, tw, 12, 3).fillOpacity(0.92).fill('#ffffff').fillOpacity(1)
+            line(l.text, box.x, m.y - 3.5, tw, { font: F.bold, size: 6.8, color: C.route, align: 'center' })
+            break
+          }
+        }
+      }
+      doc.restore()
+      doc.rect(mx, my, W, webH).lineWidth(0.6).stroke(C.line)
+      line('© OpenStreetMap contributors', mx, my + webH - 10, W - 6, { size: 6, color: C.sub, align: 'right' })
+      y = my + webH + 8
+      const shown = nodes.slice(0, 16), cw = W / 2
+      shown.forEach((p, i) => {
+        const x = M + Math.floor(i / keyRows) * cw, yy = y + (i % keyRows) * 11
+        doc.circle(x + 5, yy + 3.5, 3.5).fill(KIND_COLOR[kindOf(p)])
+        line(`${p.id}. ${shortPlaceName(p)}`, x + 12, yy, cw - 60, { size: 7.2 })
+        line(`${nf(p.hours, 1)} h`, x + cw - 56, yy, 44, { size: 7.2, color: C.sub, align: 'right' })
+      })
+      y += keyRows * 11 + 8
+    }
   }
 
   // ════ page 4: sites, entries and exits, nights ════
@@ -540,17 +658,9 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     const mx = M, my = y
     doc.save()
     doc.rect(mx, my, W, mapH).clip()
-    doc.rect(mx, my, W, mapH).fill('#eef2f0')
-    if (map) {
-      const { frame, tiles: tl } = map
-      const px = (lng: number) => mx + (lon2x(lng, frame.z) - frame.x0) * frame.scale
-      const py = (lat: number) => my + (lat2y(lat, frame.z) - frame.y0) * frame.scale
-      const size = 256 * frame.scale
-      for (const t of tl) {
-        if (!t.buf) continue
-        try { doc.image(t.buf, mx + (t.x * 256 - frame.x0) * frame.scale, my + (t.y * 256 - frame.y0) * frame.scale, { width: size, height: size }) } catch { /* a bad tile is skipped */ }
-      }
-      doc.rect(mx, my, W, mapH).fillOpacity(0.3).fill('#ffffff').fillOpacity(1)
+    const proj = mapGround(map, mx, my, W, mapH, 0.3)
+    if (proj) {
+      const { px, py } = proj
       for (const t of rv.tracks) {
         if (t.path.length < 2) continue
         doc.moveTo(px(t.path[0]![1]), py(t.path[0]![0]))
@@ -560,13 +670,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
       doc.strokeOpacity(1)
       const top = rv.places.slice(0, 14)
       const maxH = Math.max(1, ...top.slice(0, 2).map(p => p.hours))
-      for (const p of [...top].reverse()) {
-        const r = 6 + 6 * Math.sqrt(Math.min(1, p.hours / maxH))
-        const x = px(p.lng), yy = py(p.lat)
-        doc.circle(x, yy, r).fill(KIND_COLOR[kindOf(p)])
-        doc.circle(x, yy, r).lineWidth(1.2).stroke('#ffffff')
-        doc.font(F.bold).fontSize(r > 9 ? 8 : 7).fillColor('#ffffff').text(String(p.id), x - 10, yy - (r > 9 ? 4 : 3.5), { width: 20, align: 'center', lineBreak: false })
-      }
+      for (const p of [...top].reverse()) placeDot(p, px(p.lng), py(p.lat), 6 + 6 * Math.sqrt(Math.min(1, p.hours / maxH)))
     }
     doc.restore()
     doc.rect(mx, my, W, mapH).lineWidth(0.6).stroke(C.line)
