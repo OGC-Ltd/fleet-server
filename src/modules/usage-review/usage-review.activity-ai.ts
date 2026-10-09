@@ -25,9 +25,10 @@
 import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
 
+// The operator's words (2026-10-09): mechanical, entertainment, haircut, work.
 export const ACTIVITIES = [
-  'Fuel', 'Vehicle service', 'Banking', 'Medical', 'Lodging', 'Food and drink', 'Worship', 'Education',
-  'Government', 'Shopping', 'Transport', 'Industrial / works', 'Farm', 'Offices', 'Leisure',
+  'Fuel', 'Mechanical', 'Banking', 'Medical', 'Barber / salon', 'Entertainment', 'Lodging', 'Food and drink',
+  'Worship', 'Education', 'Government', 'Shopping', 'Transport', 'Work', 'Farm', 'Offices',
 ] as const
 export type Activity = (typeof ACTIVITIES)[number]
 
@@ -38,16 +39,26 @@ const BATCH = 40
 const SYSTEM_PROMPT = `You say what kind of place a business or building is, from its name, for a fleet report in Kenya and East Africa.
 Answer with exactly one of these groups for each place, or null when the name does not say:
 ${ACTIVITIES.join(' | ')}.
-Read local words: "hotel" on a small Kenyan business usually means an eatery (Food and drink) unless the hint says lodging; "sacco" and "M-Pesa" are Banking; "chemist" and "dispensary" are Medical; "agrovet" and "supplies" are Shopping; "jim" is a gym (Leisure); a weighbridge, "waybridge", cane buying centre, factory, depot or workshop is Industrial / works.
-A hint, when given, is Google's own type for the place; trust it unless it is only "point of interest" or "establishment".
+Read every word of the name and decide what a driver most likely went there to do. Local words matter:
+- Mechanical: garages, motor or motorcycle spares, tyres, auto parts, welding, panel beaters, car wash ("Diamond Motorcycle Spares").
+- Entertainment: resorts, clubs, lounges, parks, stadiums, gyms ("jim"), casinos ("Rhumba Resort").
+- Barber / salon: "kinyozi" (Swahili for barber), barbers, salons and "saloons", beauty parlours, hair, nails, spa.
+- Work: sugar companies and their factories, workshops, weighbridges ("waybridge"), cane buying centres, depots, mills, yards ("West Kenya Sugar - Lake Agro workshop").
+- Food and drink: restaurants, cafes, butcheries, "nyama choma", and a small Kenyan "hotel", which is usually an eatery unless the hint says lodging.
+- Banking: banks, saccos, M-Pesa agents, microfinance. Medical: hospitals, clinics, chemists, dispensaries. Shopping: shops, stores, supermarkets, agrovets, "supplies", phones.
+A hint, when given, is Google's own type for the place; use it when the name says nothing, but the words of the name come first.
 Do not guess from a person's name alone. Reply with JSON only: {"items":[{"i":<index>,"activity":<group or null>}]}.`
 
 type Entry = { a: Activity | null; at: number }
 const cache = new Map<string, Entry>()
 const inFlight = new Map<string, Promise<Activity | null>>()
 
-/** The cache key: case and spacing do not make a different business. */
-export const nameKey = (name: string) => name.trim().toLowerCase().replace(/\s+/g, ' ')
+/** "Diamond Motorcycle Spares, 0.5 km away" → "Diamond Motorcycle Spares": the
+ *  page labels the nearest place some way off with its distance. */
+export const bareName = (name: string) => name.replace(/,\s*[\d.]+\s*km away$/i, '').trim()
+
+/** The cache key: case, spacing and a distance do not make a different business. */
+export const nameKey = (name: string) => bareName(name).toLowerCase().replace(/\s+/g, ' ')
 
 const isActivity = (v: unknown): v is Activity => typeof v === 'string' && (ACTIVITIES as readonly string[]).includes(v)
 
@@ -178,7 +189,7 @@ export async function aiActivities(places: { name: string; hint?: string | null 
     if (hit !== undefined) { out.set(k, hit); continue }
     const pending = inFlight.get(k)
     if (pending) { waits.push(pending.then(a => { out.set(k, a) }, () => {})); continue }
-    ask.push({ k, name: name.slice(0, 120), hint: p.hint?.trim().slice(0, 60) || null })
+    ask.push({ k, name: bareName(name).slice(0, 120), hint: p.hint?.trim().slice(0, 60) || null })
   }
   if (ask.length && aiConfigured()) {
     for (let i = 0; i < ask.length; i += BATCH) {

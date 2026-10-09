@@ -54,20 +54,21 @@ const has = (t: Record<string, string>, k: string, re: RegExp) => t[k] != null &
 /** What an OSM feature is, in the page's groups. Null when its tags do not say. */
 export function osmActivity(t: Record<string, string>): string | null {
   if (has(t, 'amenity', /^(fuel|charging_station)$/)) return 'Fuel'
-  if (has(t, 'shop', /^(car_repair|car|car_parts|tyres|motorcycle)$/) || has(t, 'amenity', /^(car_wash|vehicle_inspection)$/) || has(t, 'craft', /^(car_repair|mechanic)$/)) return 'Vehicle service'
+  if (has(t, 'shop', /^(car_repair|car|car_parts|tyres|motorcycle)$/) || has(t, 'amenity', /^(car_wash|vehicle_inspection)$/) || has(t, 'craft', /^(car_repair|mechanic)$/)) return 'Mechanical'
   if (has(t, 'amenity', /^(bank|atm|bureau_de_change|money_transfer|microfinance)$/) || has(t, 'office', /^(financial|insurance|accountant)$/)) return 'Banking'
   if (has(t, 'amenity', /^(hospital|clinic|doctors|dentist|pharmacy|health_post|veterinary)$/) || t['healthcare'] || has(t, 'shop', /^(chemist|medical_supply)$/)) return 'Medical'
+  if (has(t, 'shop', /^(hairdresser|beauty|barber|massage)$/) || has(t, 'amenity', /^spa$/)) return 'Barber / salon'
+  if (has(t, 'amenity', /^(nightclub|casino|cinema|theatre)$/) || has(t, 'tourism', /^resort$/) || has(t, 'leisure', /^(resort|stadium|park|sports_centre|pitch|fitness_centre|water_park)$/)) return 'Entertainment'
   if (has(t, 'tourism', /^(hotel|motel|guest_house|hostel|camp_site|apartment)$/)) return 'Lodging'
-  if (has(t, 'amenity', /^(restaurant|cafe|fast_food|bar|pub|food_court|biergarten|nightclub)$/) || has(t, 'shop', /^(bakery|butcher)$/)) return 'Food and drink'
+  if (has(t, 'amenity', /^(restaurant|cafe|fast_food|bar|pub|food_court|biergarten)$/) || has(t, 'shop', /^(bakery|butcher)$/)) return 'Food and drink'
   if (has(t, 'amenity', /^place_of_worship$/)) return 'Worship'
   if (has(t, 'amenity', /^(school|college|university|kindergarten|library|training)$/)) return 'Education'
   if (has(t, 'amenity', /^(police|townhall|courthouse|post_office|fire_station|prison)$/) || has(t, 'office', /^government$/)) return 'Government'
   if (t['shop'] || has(t, 'amenity', /^marketplace$/) || has(t, 'landuse', /^(retail|commercial)$/)) return 'Shopping'
   if (has(t, 'amenity', /^(bus_station|parking|taxi|ferry_terminal)$/) || has(t, 'landuse', /^railway$/)) return 'Transport'
-  if (t['industrial'] || t['craft'] || has(t, 'landuse', /^industrial$/) || has(t, 'man_made', /^(works|silo|storage_tank|water_works|wastewater_plant)$/)) return 'Industrial / works'
+  if (t['industrial'] || t['craft'] || has(t, 'landuse', /^industrial$/) || has(t, 'man_made', /^(works|silo|storage_tank|water_works|wastewater_plant)$/)) return 'Work'
   if (has(t, 'landuse', /^farmyard$/) || has(t, 'place', /^farm$/)) return 'Farm'
   if (t['office']) return 'Offices'
-  if (has(t, 'leisure', /^(stadium|park|sports_centre|pitch)$/)) return 'Leisure'
   return null
 }
 

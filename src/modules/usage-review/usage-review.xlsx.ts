@@ -71,7 +71,7 @@ export function buildUsageReviewXlsx(rv: ReadyReview, kmpl: number | null, kmplN
     ['Stops', 'Stationary (< 3 km/h) for 10 minutes or more. Position = median of the stop\'s fixes.'],
     ['Places', 'Stops grouped within 400 m. Names from OpenStreetMap. Place 1 is where it spent the most time.'],
     ['Trips', 'Driving between two consecutive stops, kept when ≥ 0.5 km.'],
-    ['Activity', 'What the place is, from the kind Google Maps gives the named place there (a bank, a restaurant, a clinic) — what the unit most likely went there for. Blank where Google has no named place.'],
+    ['Activity', 'What the place is — Mechanical, Banking, Barber / salon, Entertainment, Work and so on — read from its name first, then from the kind Google Maps or OpenStreetMap gives it; what the unit most likely went there for. Blank where nothing says.'],
     ['Relationships (Power BI)', 'Calendar[Date] 1→* Daily[Date], Stops[Date], Trips[Date], Hourly[Date], GPS_Points[Date]; Places[PlaceID] 1→* Stops[PlaceID], Trips[FromPlaceID] (active), Trips[ToPlaceID] (inactive); Stops[StopID] 1→* Trips[FromStopID].'],
     ['Map visuals', 'Use the Latitude/Longitude columns in Places, Stops or GPS_Points. Size place bubbles by TotalHours.'],
   ]

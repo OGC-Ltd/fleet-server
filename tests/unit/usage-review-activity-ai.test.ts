@@ -16,15 +16,16 @@ describe('readReply', () => {
 describe('aiActivities', () => {
   beforeEach(() => { vi.restoreAllMocks() })
   it('asks once for a batch, then answers from memory', async () => {
-    const f = vi.spyOn(globalThis, 'fetch').mockResolvedValue(reply([{ i: 0, activity: 'Leisure' }, { i: 1, activity: 'Fuel' }, { i: 2, activity: null }]))
+    const f = vi.spyOn(globalThis, 'fetch').mockResolvedValue(reply([{ i: 0, activity: 'Entertainment' }, { i: 1, activity: 'Fuel' }, { i: 2, activity: null }]))
     const got = await aiActivities([{ name: 'Ka mwalimu jim', hint: 'Point of interest' }, { name: 'Rodesa Filling Station' }, { name: 'John Otieno' }, { name: 'KA MWALIMU  JIM' }])
     expect(f).toHaveBeenCalledTimes(1)
     const sent = JSON.parse(JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string).messages[1].content)
     expect(sent).toEqual([{ i: 0, name: 'Ka mwalimu jim', hint: 'Point of interest' }, { i: 1, name: 'Rodesa Filling Station' }, { i: 2, name: 'John Otieno' }])
-    expect(got.get('ka mwalimu jim')).toBe('Leisure')
+    expect(got.get('ka mwalimu jim')).toBe('Entertainment')
     expect(got.get('rodesa filling station')).toBe('Fuel')
     expect(got.get('john otieno')).toBeNull()
     expect(cachedActivity('Rodesa  filling STATION')).toBe('Fuel')
+    expect(cachedActivity('Rodesa Filling Station, 0.4 km away')).toBe('Fuel')
     const again = await aiActivities([{ name: 'Rodesa Filling Station' }])
     expect(f).toHaveBeenCalledTimes(1)
     expect(again.get('rodesa filling station')).toBe('Fuel')

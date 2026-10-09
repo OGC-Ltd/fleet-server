@@ -9,7 +9,7 @@ describe('osmActivity', () => {
     expect(osmActivity({ amenity: 'clinic' })).toBe('Medical')
     expect(osmActivity({ healthcare: 'hospital' })).toBe('Medical')
     expect(osmActivity({ amenity: 'fuel', shop: 'convenience' })).toBe('Fuel')
-    expect(osmActivity({ landuse: 'industrial' })).toBe('Industrial / works')
+    expect(osmActivity({ landuse: 'industrial' })).toBe('Work')
     expect(osmActivity({ shop: 'hardware' })).toBe('Shopping')
     expect(osmActivity({ office: 'company' })).toBe('Offices')
     expect(osmActivity({ name: 'x' })).toBeNull()
@@ -26,7 +26,7 @@ describe('pickPoi', () => {
     expect(pickPoi(lat, lng, [far, works, bank, road])).toEqual({ name: 'Equity Bank', activity: 'Banking' })
   })
   it('else the premises it stands inside, in Title Case', () => {
-    expect(pickPoi(lat, lng, [far, works, road])).toEqual({ name: 'West Kenya Sugar Company', activity: 'Industrial / works' })
+    expect(pickPoi(lat, lng, [far, works, road])).toEqual({ name: 'West Kenya Sugar Company', activity: 'Work' })
   })
   it('names nothing from roads or far places', () => {
     expect(pickPoi(lat, lng, [far, road])).toBeNull()
