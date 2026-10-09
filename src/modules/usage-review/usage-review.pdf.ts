@@ -4,18 +4,19 @@
  * type of information in the PowerPoint, organised in our PDF"):
  *
  *   Page 1 — the cover (vehicle, subject, period, prepared) and the executive
- *            summary: six headline figures and four key findings.
+ *            summary: six headline figures, four key findings and Time
+ *            Utilisation (the period's hours as a donut).
  *   Then, flowing on from page 2 — a section starts a new page only when it
  *   does not fit below the last (operator, 2026-10-09: no extra white space):
- *     where the vehicle spent its time, place by place with home first; how
- *     the period's hours divided; distance day by day against the active-day
- *     mean and median;
- *     when it drives (trips by weekday and by start hour), the most frequent
- *     routes;
- *     the top sites with what each is (a bank, a restaurant, a clinic) and
- *     median arrival and departure, and where it stood each night;
- *     fleet tracking evidence: the route on the map with its places
- *     numbered and named.
+ *     Where the Vehicle Spent Its Time, place by place with home first; Daily
+ *     Distance against the active-day mean and median;
+ *     Driving Patterns (trips by weekday and by start hour), Most Frequent
+ *     Routes;
+ *     Top Sites at a Glance, with what each is (a bank, a restaurant, a
+ *     clinic) and median arrival and departure; Overnight Locations;
+ *     Route Map and Key Locations: the route with its places numbered and
+ *     named.
+ *   Titles in Title Case (operator, 2026-10-09).
  *
  * In black and white, with green and amber in the charts only (see C); the
  * map in grey under a black route (operator, 2026-10-09).
@@ -372,7 +373,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     y += 58
   }
 
-  y = title('Executive summary', `${veh.plate} over ${rv.period.days} days`, y)
+  y = title('Executive Summary', `${veh.plate} over ${rv.period.days} days`, y)
   {
     const quiet = s.calendarDays - s.activeDays
     const tiles: { l: string; v: string; sub: string }[] = [
@@ -426,12 +427,48 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
       line(l, M + i * mw + 8, y + 6, mw - 12, { size: 6.8, color: C.sub })
       line(v, M + i * mw + 8, y + 17, mw - 12, { font: F.bold, size: 8.8 })
     })
+    y += 32 + 16
   }
+
+  /** Time Utilisation: the period's hours as a donut with its key. `R` is
+   *  the donut's outer radius; returns the y under it. */
+  const timeUse = (y0: number, R: number) => {
+    const sp = fig.split
+    const all = sp.driving + (sp.idling ?? 0) + sp.home + sp.away
+    let yy = title('Time Utilisation', `Driving ${pct(sp.driving, all)}  ·  Idling ${sp.idling != null ? pct(sp.idling, all) : '-'}  ·  Stopped ${pct(sp.home + sp.away, all)}  ·  ${s.activeDays}/${s.calendarDays} active days`, y0)
+    const parts = [
+      { l: 'Driving', v: sp.driving, c: C.green },
+      { l: 'Idling', v: sp.idling ?? 0, c: C.amber },
+      { l: 'Stopped at home', v: sp.home, c: C.dark },
+      { l: 'Stopped away', v: sp.away, c: C.light },
+    ]
+    const total = parts.reduce((a, p) => a + p.v, 0)
+    const ri = R * 0.62, cx = M + R + 10, cy = yy + R
+    donut(cx, cy, R, ri, parts.map(p => ({ v: p.v, c: p.c })))
+    line(`${nf(total, 0)} h`, cx - ri, cy - 9, 2 * ri, { font: F.bold, size: 13, align: 'center' })
+    line('accounted for', cx - ri, cy + 6, 2 * ri, { size: 6.8, color: C.sub, align: 'center' })
+    let ly = cy - 2 * 18 + 1
+    const lx = M + 2 * R + 34
+    for (const p of parts) {
+      doc.rect(lx, ly + 1, 9, 9).fill(p.c)
+      line(`${p.l} – ${nf(p.v, 0)} h (${pct(p.v, total)})`, lx + 15, ly, 220, { size: 9 })
+      ly += 18
+    }
+    if (sp.idling == null) line('No ignition on this tracker, so idling cannot be told from stopped.', lx, ly + 2, 240, { size: 7, color: C.sub })
+    yy += 2 * R + 18
+    return yy
+  }
+  // On the first page, in the room under the summary (operator, 2026-10-09:
+  // "the pie chart can cover the space on the first page"), as large as that
+  // room allows; on page 2 only if the first page has too little left.
+  const roomR = Math.min(70, (BOTTOM - y - 28 - 18) / 2)
+  const timeOnCover = roomR >= 46
+  if (timeOnCover) y = timeUse(y, roomR)
 
   // ════ page 2: where the time went, how it divided, day by day ════
   doc.addPage()
-  y = head('where the time went')
-  y = title('Where the vehicle spent its time', `${nf(fig.stoppedH, 0)} h stopped at ${s.places} places · stops of 10 min or more`, y)
+  y = head('Time and Distance')
+  y = title('Where the Vehicle Spent Its Time', `${nf(fig.stoppedH, 0)} h stopped at ${s.places} places · stops of 10 min or more`, y)
   {
     const rows = fig.sites.slice(0, 15).map(x => ({
       label: x.name, v: x.hours, c: KIND_COLOR[x.home ? 'home' : x.kind],
@@ -447,33 +484,9 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     y += 26
   }
 
-  {
-    const sp = fig.split
-    const all = sp.driving + (sp.idling ?? 0) + sp.home + sp.away
-    y = title('How time was divided', `Driving ${pct(sp.driving, all)}  ·  Idling ${sp.idling != null ? pct(sp.idling, all) : '-'}  ·  Stopped ${pct(sp.home + sp.away, all)}  ·  ${s.activeDays}/${s.calendarDays} active days`, y)
-    const parts = [
-      { l: 'Driving', v: sp.driving, c: C.green },
-      { l: 'Idling', v: sp.idling ?? 0, c: C.amber },
-      { l: 'Stopped at home', v: sp.home, c: C.dark },
-      { l: 'Stopped away', v: sp.away, c: C.light },
-    ]
-    const total = parts.reduce((a, p) => a + p.v, 0)
-    const R = 58, cx = M + R + 10, cy = y + R
-    donut(cx, cy, R, 36, parts.map(p => ({ v: p.v, c: p.c })))
-    line(`${nf(total, 0)} h`, cx - 36, cy - 9, 72, { font: F.bold, size: 13, align: 'center' })
-    line('accounted for', cx - 36, cy + 6, 72, { size: 6.8, color: C.sub, align: 'center' })
-    let ly = y + 10
-    const lx = M + 2 * R + 34
-    for (const p of parts) {
-      doc.rect(lx, ly + 1, 9, 9).fill(p.c)
-      line(`${p.l} – ${nf(p.v, 0)} h (${pct(p.v, total)})`, lx + 15, ly, 220, { size: 9 })
-      ly += 18
-    }
-    if (sp.idling == null) line('No ignition on this tracker, so idling cannot be told from stopped.', lx, ly + 2, 240, { size: 7, color: C.sub })
-    y += 2 * R + 18
-  }
+  if (!timeOnCover) y = timeUse(y, 58)
 
-  y = title('Daily distance', 'km per day · lines over the days it moved', y)
+  y = title('Daily Distance', 'km per day · lines over the days it moved', y)
   {
     const days = rv.days
     // The key sits on its own line above the bars, never over them.
@@ -506,14 +519,14 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   }
 
   // ════ when it drives, and the routes ════
-  y = section(y, 230, 'when it drives')
-  y = title('When it drives', fig.busiestDay != null && fig.peakHour != null
+  y = section(y, 230, 'Driving Patterns')
+  y = title('Driving Patterns', fig.busiestDay != null && fig.peakHour != null
     ? `Busiest day ${WEEKDAYS[fig.busiestDay]} · Peak start hour ${String(fig.peakHour).padStart(2, '0')}:00 · ${pct0(fig.beforeNoonShare)} of trips start before noon`
     : 'no trips in the period', y)
   {
     const half = (W - 20) / 2
-    line('Trips by day of week', M, y, half, { font: F.bold, size: 9, align: 'center' })
-    line('Trips by hour of day (trip start)', M + half + 20, y, half, { font: F.bold, size: 9, align: 'center' })
+    line('Trips by Day of Week', M, y, half, { font: F.bold, size: 9, align: 'center' })
+    line('Trips by Hour of Day (Trip Start)', M + half + 20, y, half, { font: F.bold, size: 9, align: 'center' })
     const h = 150
     const wcol = fig.byWeekday.map((_, i) => (i === fig.busiestDay ? C.green : i === fig.quietestDay ? C.amber : C.greenSoft))
     vbars({ x: M + 6, y: y + 22, w: half - 12, h }, fig.byWeekday, wcol, WEEKDAYS.map(d => d.slice(0, 3)))
@@ -527,7 +540,9 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     y += 22 + h + 30
   }
 
-  y = title('Most frequent routes', 'between places where it stopped 10 min or more', y)
+  // Its own page when its rows would not fit under Driving Patterns.
+  y = section(y - 8, 40 + 16 * Math.max(1, Math.min(12, fig.routes.length)) + 26, 'Most Frequent Routes')
+  y = title('Most Frequent Routes', 'between places where it stopped 10 min or more', y)
   if (fig.routes.length) {
     const rows = fig.routes.slice(0, 12).map(r => ({
       // Helvetica's WinAnsi has no →; › is in it.
@@ -546,8 +561,8 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   }
 
   // ════ sites, nights ════
-  y = section(y, 40 + 15 * (1 + Math.min(11, fig.sites.length)), 'sites')
-  y = title('Top sites at a glance', 'home and the top 10 other places · activity read from each name and Google Maps · times are median arrival / departure', y)
+  y = section(y, 40 + 15 * (1 + Math.min(11, fig.sites.length)), 'Top Sites')
+  y = title('Top Sites at a Glance', 'home and the top 10 other places · activity read from each name and Google Maps · times are median arrival / departure', y)
   {
     const homeRow = fig.sites.find(x => x.home)
     const rows = [...(homeRow ? [homeRow] : []), ...fig.sites.filter(x => !x.home).slice(0, 10)]
@@ -562,8 +577,8 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   }
 
   if (areas) {
-    y = section(y - 8, 120, 'nights')
-    y = title('Where it spent each night', 'where the unit stood at 02:00, each night of the period', y)
+    y = section(y - 8, 120, 'Overnight Locations')
+    y = title('Overnight Locations', 'where the unit stood at 02:00, each night of the period', y)
     const n = areas.nightly.length
     const cw = W / n
     areas.nightly.forEach((d, i) => {
@@ -591,8 +606,8 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
 
   // ════ evidence ════
   const mapH = 400
-  y = section(y, 40 + mapH + 8 + 7 * 11 + 14, 'evidence')
-  y = title('Fleet tracking evidence', 'the route over the period, places numbered by time spent', y)
+  y = section(y, 40 + mapH + 8 + 7 * 11 + 14, 'Route Map')
+  y = title('Route Map and Key Locations', 'the route over the period, places numbered by time spent', y)
   const map = await prepareMap(rv, W, mapH)
   {
     const mx = M, my = y
