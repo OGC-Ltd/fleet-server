@@ -129,7 +129,9 @@ function sweep() {
 }
 
 async function run(job: Job, orgId: string, vehicleId: string, from: string, to: string) {
-  const release = await slot()
+  const held = await slot()
+  let freed = false
+  const release = () => { if (!freed) { freed = true; held() } }
   try {
     const { v, wialonUnitId } = await findVehicle(orgId, vehicleId)
     job.stage = 'loading'
@@ -168,6 +170,12 @@ async function run(job: Job, orgId: string, vehicleId: string, from: string, to:
     job.stage = 'computing'
     job.progress = { done: 0, total: 1 }
     const review = buildUsageReview(messages, from, to)
+    // The slot guards the heavy part — Wialon and the arithmetic. Naming waits
+    // on outside services that pace themselves (Nominatim one a second, shared
+    // by every review), so it no longer holds a slot: measured 2026-10-09, a
+    // review whose places were all known waited 34 s queued behind two that
+    // were naming.
+    release()
 
     job.stage = 'naming'
     // The area (Nominatim) and the business there (Overpass): two services,
