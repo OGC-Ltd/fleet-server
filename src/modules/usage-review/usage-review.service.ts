@@ -194,6 +194,8 @@ async function run(job: Job, orgId: string, vehicleId: string, from: string, to:
       for (const p of review.places) {
         const a = byPlace.get(p.id)
         if (a) { p.kind = a.kind; p.site = a.site; p.nights = a.nights }
+        // A work site with no business named there is still work.
+        if (a?.kind === 'work' && !p.activity) p.activity = 'Work'
       }
     } catch (err) {
       logger.warn({ vehicleId, err: (err as Error).message }, 'Usage review: place kinds not worked out')

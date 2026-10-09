@@ -93,7 +93,9 @@ export function classifyPlaces(
 
   const byPlace = new Map<number, PlaceArea>()
   for (const p of places) {
-    const site = siteAt(p.lat, p.lng, sites) ?? (p.exactName && WORK_NAME.test(p.exactName) ? p.exactName : null)
+    const site = siteAt(p.lat, p.lng, sites)
+      ?? (p.exactName && WORK_NAME.test(p.exactName) ? p.exactName : null)
+      ?? (p.name && WORK_AREA.test(p.name) ? p.name : null)
     byPlace.set(p.id, { kind: site ? 'work' : 'elsewhere', site, nights: nightsAt.get(p.id) ?? 0 })
   }
 
@@ -130,9 +132,20 @@ export function classifyPlaces(
  */
 export const WORK_NAME = /\b(sugar|sukari|kabras|nzoia|factory|weighbridge|workshop|yard|depot|mill)\b/i
 
+/**
+ * Areas the operator has named as work areas, matched on the place's
+ * OpenStreetMap area name ("Hirimani, Bura"): a unit stopped anywhere OSM
+ * calls by that name is at work. Operator, 2026-10-09: "Hirimani Bura, that
+ * is work area".
+ */
+export const WORK_AREA = /\bhirimani\b/i
+
 export const STATIC_SITES: Site[] = [
   // Operator-given (2026-10-08): West Kenya Sugar's Lake Agro workshop.
   { name: 'West Kenya Sugar - Lake Agro workshop', lat: 0.03284, lng: 34.15056 },
+  // Operator-named (2026-10-09): the Hirimani work area, Bura, Tana River —
+  // OpenStreetMap's village point and 3 km round it: an area, not a yard.
+  { name: 'Hirimani work area, Bura', fence: { type: 'CIRCLE', centerLat: -1.11953, centerLng: 39.82372, radiusM: 3_000 } },
   ...Object.values(FACTORIES).map(f => ({ name: `${f.label} factory`, lat: f.lat, lng: f.lng })),
   ...WEIGHBRIDGES.map(b => ({ name: `${b.centerName.charAt(0)}${b.centerName.slice(1).toLowerCase()} ${b.label}`, lat: b.lat, lng: b.lng })),
 ]

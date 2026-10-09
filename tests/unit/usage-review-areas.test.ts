@@ -49,6 +49,16 @@ describe('usage-review areas', () => {
     expect(byPlace.get(7)!.kind).toBe('elsewhere')
   })
 
+  it('knows the Hirimani area in Bura as work, by place and by name', () => {
+    const inside = place(8, -1.13000, 39.83000, 40)                                  // ~1.4 km from the village point
+    const named = { ...place(9, -1.16000, 39.86000, 10), name: 'Hirimani, Bura' }    // past the circle, named by OSM
+    const bura = { ...place(10, -1.10000, 39.95000, 10), name: 'Bura town' }
+    const { byPlace } = classifyPlaces([inside, named, bura], [], period, STATIC_SITES)
+    expect(byPlace.get(8)).toMatchObject({ kind: 'work', site: 'Hirimani work area, Bura' })
+    expect(byPlace.get(9)).toMatchObject({ kind: 'work', site: 'Hirimani, Bura' })
+    expect(byPlace.get(10)!.kind).toBe('elsewhere')
+  })
+
   it('names no home under three nights away from work', () => {
     const stops = [stop(1, home, 1), stop(2, home, 2), stop(3, nzoia, 3)]
     const { byPlace, summary } = classifyPlaces([home, nzoia], stops, period, STATIC_SITES)
