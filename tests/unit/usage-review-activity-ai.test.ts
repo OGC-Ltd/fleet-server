@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 vi.mock('../../src/config/env.js', () => ({ env: { OPENAI_API_KEY: 'test', OPENAI_MODEL: 'gpt-5-nano', DEEPSEEK_API_KEY: 'test-ds', DEEPSEEK_MODEL: 'deepseek-chat' } }))
 vi.mock('../../src/lib/logger.js', () => ({ logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn() } }))
-import { aiActivities, cachedActivity, readReply } from '../../src/modules/usage-review/usage-review.activity-ai.js'
+import { aiActivities, aiStatus, cachedActivity, readReply } from '../../src/modules/usage-review/usage-review.activity-ai.js'
 
 const reply = (items: unknown) => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ items }) } }] }), { status: 200 })
 
@@ -40,6 +40,10 @@ describe('aiActivities', () => {
     expect(body.reasoning_effort).toBeUndefined()
     await aiActivities([{ name: 'Kenya Women Finance Trust' }])
     expect(f.mock.calls.slice(2).map(c => String(c[0]))).toEqual(['https://api.deepseek.com/chat/completions'])
+    expect(aiStatus()).toEqual([
+      { name: 'OpenAI', configured: true, resting: true, lastProblem: 'HTTP 429 credit_balance_exhausted' },
+      { name: 'DeepSeek', configured: true, resting: false, lastProblem: null },
+    ])
   })
   it('leaves names out when no model can answer, and asks again next time', async () => {
     const f = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('busy', { status: 503 }))

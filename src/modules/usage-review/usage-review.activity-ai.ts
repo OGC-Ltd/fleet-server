@@ -90,6 +90,8 @@ function providers(): Provider[] {
 }
 /** Provider name → when it may be asked again, after refusing its key or credit. */
 const restingUntil = new Map<string, number>()
+/** Provider name → its last failure, as HTTP status and error code only. */
+const lastProblem = new Map<string, string>()
 
 async function askOne(p: Provider, batch: { name: string; hint: string | null }[]): Promise<(Activity | null)[] | null> {
   try {
@@ -112,13 +114,19 @@ async function askOne(p: Provider, batch: { name: string; hint: string | null }[
     if (!res.ok) {
       // A bad key or no credit will not mend in the next minute.
       if ([401, 402, 403, 429].includes(res.status)) restingUntil.set(p.name, Date.now() + 10 * 60_000)
-      throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
+      const text = await res.text()
+      let code = ''
+      try { const e = (JSON.parse(text) as { error?: { code?: unknown; type?: unknown } }).error; code = String(e?.code ?? e?.type ?? '') } catch { /* not JSON */ }
+      lastProblem.set(p.name, `HTTP ${res.status}${code ? ` ${code.slice(0, 40)}` : ''}`)
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`)
     }
     const body = await res.json() as { choices?: { message?: { content?: string } }[] }
     const got = readReply(body.choices?.[0]?.message?.content ?? '', batch.length)
-    if (!got) throw new Error('unreadable reply')
+    if (!got) { lastProblem.set(p.name, 'unreadable reply'); throw new Error('unreadable reply') }
+    lastProblem.delete(p.name)
     return got
   } catch (err) {
+    if (!lastProblem.has(p.name)) lastProblem.set(p.name, err instanceof Error && err.name === 'TimeoutError' ? 'timed out' : 'no answer')
     logger.warn({ provider: p.name, err: String(err), names: batch.length }, 'Usage review: place activities not read by the model')
     return null
   }
@@ -134,8 +142,23 @@ async function askModel(batch: { name: string; hint: string | null }[]): Promise
   return null
 }
 
-/** Whether any provider is configured — for the tests and the page's note. */
+/** Whether any provider is configured. */
 export const aiConfigured = () => providers().length > 0
+
+/**
+ * Each provider as the server sees it — configured or not, resting, its last
+ * failure — never the key. Answered beside the activities so a blank Activity
+ * column can be explained without reading the server's logs.
+ */
+export function aiStatus() {
+  const on = new Set(providers().map(p => p.name))
+  return ['OpenAI', 'DeepSeek'].map(name => ({
+    name,
+    configured: on.has(name),
+    resting: (restingUntil.get(name) ?? 0) > Date.now(),
+    lastProblem: lastProblem.get(name) ?? null,
+  }))
+}
 
 /**
  * The model's group for each place name, keyed by nameKey. `hint` is Google's
