@@ -19,6 +19,7 @@ import { buildUsageReview, dayStartMs, daysBetween, eatDay, type UsageReview } f
 import { loadUnitHistory, type UnitHistory } from './usage-review.wialon.js'
 import { heldDays, loadDbHistory } from './usage-review.db.js'
 import { namePlaces } from './usage-review.geocode.js'
+import { namePois } from './usage-review.poi.js'
 import { classifyPlaces, loadSites, type AreaSummary } from './usage-review.areas.js'
 
 export const MAX_DAYS = 92
@@ -167,7 +168,12 @@ async function run(job: Job, orgId: string, vehicleId: string, from: string, to:
     const review = buildUsageReview(messages, from, to)
 
     job.stage = 'naming'
-    await namePlaces(review.places, NAMED_PLACES, (done, total) => { job.progress = { done, total } })
+    // The area (Nominatim) and the business there (Overpass): two services,
+    // asked side by side.
+    await Promise.all([
+      namePlaces(review.places, NAMED_PLACES, (done, total) => { job.progress = { done, total } }),
+      namePois(review.places, NAMED_PLACES),
+    ])
 
     // Each place's kind. Not worth failing a review over — without it it is
     // the review it always was.

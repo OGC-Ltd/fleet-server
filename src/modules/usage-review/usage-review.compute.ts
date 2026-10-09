@@ -92,9 +92,9 @@ export interface ReviewPlace {
   firstSeen: number
   lastSeen: number
   name: string | null
-  /** Google's name for the spot, as the page looked it up ("West Kenya Sugar -
-   *  Lake Agro workshop"). The server holds no Google key, so it only arrives
-   *  with a download (`names`), never from the build. */
+  /** The business or premises at the spot: OpenStreetMap's on the build
+   *  (usage-review.poi), replaced on a download by Google's when the page
+   *  looked one up ("West Kenya Sugar - Lake Agro workshop"). */
   exactName?: string | null
   /** What the named place is, from Google's type for it ("Banking", "Food
    *  and drink", "Medical") — what the unit most likely stopped there for.
