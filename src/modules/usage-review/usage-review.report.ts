@@ -7,7 +7,8 @@
  *     the top-3 places' share of stopped time, and four key findings;
  *   · where the stopped time went, place by place, home first;
  *   · how the period's hours divided — driving, idling, stopped at home,
- *     stopped away;
+ *     stopped away, each hour counted once (a stop's engine-on minutes are
+ *     idling, so stopped is engine off);
  *   · when it drives — trips by weekday and by start hour;
  *   · the most frequent routes, place to place, and round trips;
  *   · the top sites with their median arrival and departure times.
@@ -70,6 +71,8 @@ export interface ReportFigures {
   homeShare: number | null
   top3Share: number | null
   homeName: string | null
+  /** A home area was found: without one, nothing shows a home row. */
+  hasHome: boolean
   activeKm: { mean: number | null; median: number | null; peak: { date: string; km: number } | null }
   tripKm: { mean: number | null; median: number | null }
   tripMin: number | null
@@ -79,7 +82,8 @@ export interface ReportFigures {
   quietestDay: number | null
   peakHour: number | null
   beforeNoonShare: number | null
-  /** Driving, idling, stopped at home, stopped away — hours. */
+  /** Driving, idling, stopped at home, stopped away — hours, each counted
+   *  once: stopped is engine off, its engine-on minutes being idling. */
   split: { driving: number; idling: number | null; home: number; away: number }
   /** Every place, home merged into one row, most hours first. */
   sites: SiteRow[]
@@ -161,6 +165,12 @@ export function reportFigures(rv: Pick<UsageReview, 'places' | 'stops' | 'trips'
   }
   const tripMin = rv.trips.length ? Math.round(sum(rv.trips.map(t => t.min)) / rv.trips.length) : null
 
+  // Stopped with the engine off. A stop's engine-on minutes are idling, and
+  // counted there: added again here, the parts ran past the period's hours
+  // (KCP 136P, Aug–Sep 2026: 1,484 h of a 1,464 h period).
+  const parkedH = (home: boolean) => sum(rv.stops.filter(st => isHome(st.place) === home)
+    .map(st => Math.max(0, (st.end - st.start) / 3_600_000 - (st.idleMin ?? 0) / 60)))
+
   const top3 = sites.slice(0, 3)
   const top3Share = stoppedH > 0 ? sum(top3.map(x => x.hours)) / stoppedH : null
   const homeShare = stoppedH > 0 && homeH > 0 ? homeH / stoppedH : null
@@ -170,43 +180,48 @@ export function reportFigures(rv: Pick<UsageReview, 'places' | 'stops' | 'trips'
   const nf0 = (v: number | null | undefined) => (v == null ? '-' : Math.round(v).toLocaleString('en-GB'))
   const nf1 = (v: number | null | undefined) => (v == null ? '-' : (Math.round(v * 10) / 10).toLocaleString('en-GB', { minimumFractionDigits: 1, maximumFractionDigits: 1 }))
   const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  const dlabel = (d: string) => `${d.slice(8, 10)} ${MON[Number(d.slice(5, 7)) - 1]}`
+  const dlabel = (d: string) => `${Number(d.slice(8, 10))} ${MON[Number(d.slice(5, 7)) - 1]}`
+  const hh = (h: number) => `${String(h % 24).padStart(2, '0')}:00`
   const firstAway = sites.find(x => !x.home)
+  // Each finding's figure says something its text and the tiles above do not
+  // (2026-10-10: the top-3 share stood both in a tile and here).
+  const lead = homeShare != null ? firstAway : sites[0]
   const findings: Finding[] = [
     {
       title: 'Activity Concentration',
       text: homeShare != null
-        ? `Home holds ${pctS(homeShare)} of all stopped time.${firstAway ? ` Largest non-home site: ${firstAway.name} (${nf0(firstAway.hours)} h).` : ''}`
-        : sites[0] ? `No home area stands out. Most stopped time was at ${sites[0].name} (${nf0(sites[0].hours)} h).` : 'No stops of 10 minutes or more in the period.',
-      stat: pctS(top3Share), statLabel: 'top-3 share of stopped time',
+        ? firstAway ? `Away from home, the most stopped time was at ${firstAway.name} (${nf1(firstAway.hours)} h).` : 'All of the stopped time was in the home area.'
+        : sites[0] ? `No home area stands out; the most stopped time was at ${sites[0].name} (${nf1(sites[0].hours)} h).` : 'No stops of 10 minutes or more in the period.',
+      stat: lead && stoppedH > 0 ? pctS(lead.hours / stoppedH) : pctS(homeShare),
+      statLabel: lead ? `of stopped time at ${lead.name}` : homeShare != null ? 'of stopped time at home' : 'of stopped time',
     },
     {
       title: 'Distance Profile',
       text: activeKm.median != null && activeKm.peak
-        ? `Median active day ${nf0(activeKm.median)} km; peak of ${nf0(activeKm.peak.km)} km on ${dlabel(activeKm.peak.date)}.`
+        ? `The median active day covered ${nf0(activeKm.median)} km; the longest, ${dlabel(activeKm.peak.date)}, covered ${nf0(activeKm.peak.km)} km.`
         : 'It did not move in the period.',
-      stat: activeKm.median && activeKm.peak ? `${nf1(activeKm.peak.km / activeKm.median)}×` : '-', statLabel: 'peak vs median day',
+      stat: activeKm.median && activeKm.peak ? `${nf1(activeKm.peak.km / activeKm.median)}×` : '-', statLabel: 'longest day against the median',
     },
     {
       title: 'Trip Length',
       text: rv.trips.length
-        ? `Mean ${nf1(tripKm.mean)} km, median ${nf1(tripKm.median)} km; average trip lasts ${nf0(tripMin)} minutes.`
+        ? `The average trip covered ${nf1(tripKm.mean)} km and lasted ${nf0(tripMin)} min.`
         : 'No trips between stops in the period.',
       stat: tripKm.median != null ? `${nf1(tripKm.median)} km` : '-', statLabel: 'median trip',
     },
     {
       title: 'Time-of-Day Pattern',
       text: peakHour != null && busiestDay != null
-        ? `Peak start hour is ${String(peakHour).padStart(2, '0')}:00 and the busiest day is ${WEEKDAYS[busiestDay]}.`
+        ? `More trips started between ${hh(peakHour)} and ${hh(peakHour + 1)} than in any other hour; ${WEEKDAYS[busiestDay]} was the busiest day.`
         : 'No trips to read a pattern from.',
-      stat: pctS(beforeNoonShare), statLabel: 'of trips start before noon',
+      stat: pctS(beforeNoonShare), statLabel: 'of trips started before noon',
     },
   ]
 
   return {
-    stoppedH: r1(stoppedH), homeH: r1(homeH), homeShare, top3Share, homeName,
+    stoppedH: r1(stoppedH), homeH: r1(homeH), homeShare, top3Share, homeName, hasHome: homeH > 0,
     activeKm, tripKm, tripMin, byWeekday, byHour, busiestDay, quietestDay, peakHour, beforeNoonShare,
-    split: { driving: s.driveH, idling: s.idleH, home: r1(homeH), away: r1(Math.max(0, stoppedH - homeH)) },
+    split: { driving: s.driveH, idling: s.idleH, home: r1(parkedH(true)), away: r1(parkedH(false)) },
     sites, routes, findings,
   }
 }

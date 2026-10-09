@@ -24,7 +24,7 @@ const stops = [
   stop(2, 2, at(1, 9), at(1, 12)),
   stop(3, 1, at(1, 14), at(2, 7)),
   stop(4, 2, at(2, 9, 30), at(2, 11)),
-  stop(5, 4, at(2, 15), at(2, 20)),
+  { ...stop(5, 4, at(2, 15), at(2, 20)), idleMin: 30 },   // half an hour of it idling
 ]
 // Tue 1 Sep and Wed 2 Sep 2026.
 const trips = [
@@ -52,7 +52,12 @@ describe('usage-review report figures', () => {
     expect(f.sites[0]!.name).toBe('Home (Webuye Town, Bungoma)')
     expect(f.sites[0]!.hours).toBe(105)
     expect(f.homeShare).toBeCloseTo(105 / 135, 6)
-    expect(f.split).toEqual({ driving: 4.2, idling: 0.5, home: 105, away: 30 })
+  })
+
+  it("splits the hours once each: a stop's engine-on minutes are idling, not stopped", () => {
+    // Home: 7 h + 17 h of stops. Away: 3 h + 1.5 h + 5 h, less the half hour idling.
+    expect(f.split).toEqual({ driving: 4.2, idling: 0.5, home: 24, away: 9 })
+    expect(f.hasHome).toBe(true)
   })
 
   it('gives median arrival and departure, skipping a stop that began before the period', () => {
@@ -79,11 +84,15 @@ describe('usage-review report figures', () => {
   })
 
   it('writes the four findings from the figures', () => {
-    expect(f.findings[0]!.text).toContain('Home holds 78%')
-    expect(f.findings[0]!.text).toContain('Kabras Sugar (20 h)')
+    // The home share is the TIME AT HOME tile's, and the top-3 share its own
+    // tile's: the first finding's figure is the leading site's instead.
+    expect(f.findings[0]!.text).toBe('Away from home, the most stopped time was at Kabras Sugar (20.0 h).')
+    expect(f.findings[0]!.stat).toBe('15%')
+    expect(f.findings[0]!.statLabel).toBe('of stopped time at Kabras Sugar')
     expect(f.activeKm.median).toBe(90)
-    expect(f.findings[1]!.text).toBe('Median active day 90 km; peak of 120 km on 02 Sep.')
-    expect(f.findings[3]!.text).toContain('busiest day is Wednesday')
+    expect(f.findings[1]!.text).toBe('The median active day covered 90 km; the longest, 2 Sep, covered 120 km.')
+    expect(f.findings[2]!.text).toBe('The average trip covered 36.0 km and lasted 50 min.')
+    expect(f.findings[3]!.text).toBe('More trips started between 07:00 and 08:00 than in any other hour; Wednesday was the busiest day.')
     expect(median([3, 1, 2])).toBe(2)
   })
 })

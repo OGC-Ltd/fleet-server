@@ -84,6 +84,10 @@ export interface ReviewStop {
    *  (usage-review.siteplans nameStops): a place gathers every stop within
    *  400 m under one name, so the stop's own spot is the more exact answer. */
   spot?: string | null
+  /** Minutes of it with the engine running: idling while stopped, which the
+   *  review's idle time already counts. Null when the tracker sends no
+   *  ignition. */
+  idleMin?: number | null
 }
 
 export interface ReviewPlace {
@@ -370,7 +374,7 @@ export function buildUsageReview(messages: ReviewMessage[], from: string, to: st
   }
 
   // ── stops (inside the period) ──
-  const stopRuns: { t0: number; t1: number; lat: number; lng: number }[] = []
+  const stopRuns: { t0: number; t1: number; lat: number; lng: number; idle: number }[] = []
   for (let i = i0; i < i1;) {
     if (all[i]!.speed >= STOP_KMH) { i++; continue }
     let j = i
@@ -378,7 +382,10 @@ export function buildUsageReview(messages: ReviewMessage[], from: string, to: st
     const t0 = all[i]!.t, t1 = all[j - 1]!.t
     if (t1 - t0 >= STOP_MIN_S) {
       const fixes = all.slice(i, j).filter(valid).slice(0, 400)
-      if (fixes.length) stopRuns.push({ t0, t1, lat: median(fixes.map(f => f.lat!)), lng: median(fixes.map(f => f.lng!)) })
+      // The steps inside the stop with the engine on, measured as idle is.
+      let idle = 0
+      for (let k = i; k < j - 1; k++) if (all[k]!.ign) idle += dtc[k]!
+      if (fixes.length) stopRuns.push({ t0, t1, lat: median(fixes.map(f => f.lat!)), lng: median(fixes.map(f => f.lng!)), idle })
     }
     i = j
   }
@@ -408,6 +415,7 @@ export function buildUsageReview(messages: ReviewMessage[], from: string, to: st
     id: k + 1, start: s.t0 * 1000, end: s.t1 * 1000, min: r1((s.t1 - s.t0) / 60),
     lat: s.lat, lng: s.lng, place: rank.get(member[k]!)!,
     overnight: eatDay(s.t1 * 1000) !== eatDay(s.t0 * 1000),
+    idleMin: hasIgn ? r1(s.idle / 60) : null,
   }))
   const stoppedSec = stopRuns.reduce((a, s) => a + s.t1 - s.t0, 0)
   const places: ReviewPlace[] = order.map((c, k) => {

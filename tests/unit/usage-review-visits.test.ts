@@ -8,10 +8,10 @@ import { describe, it, expect, vi } from 'vitest'
 
 vi.mock('../../src/lib/prisma.js', () => ({ prisma: { geofence: { findMany: vi.fn(async () => []) } } }))
 import {
-  loadSitePlans, nameStops, siteVisits, MIN_AREA_MS, MIN_GROUND_MS, MIN_VISIT_MS, VISIT_GAP_MS,
+  loadSitePlans, mergeSiteNamedPlaces, nameStops, siteVisits, MIN_AREA_MS, MIN_GROUND_MS, MIN_VISIT_MS, VISIT_GAP_MS,
 } from '../../src/modules/usage-review/usage-review.siteplans.js'
 import type { Site } from '../../src/modules/usage-review/usage-review.areas.js'
-import type { ReviewPoint, ReviewStop } from '../../src/modules/usage-review/usage-review.compute.js'
+import type { ReviewPlace, ReviewPoint, ReviewStop, ReviewTrip, UsageReview } from '../../src/modules/usage-review/usage-review.compute.js'
 
 const plans = loadSitePlans()
 
@@ -106,6 +106,51 @@ describe('siteVisits', () => {
     expect(min(v!.end - v!.start)).toBe(30)
   })
 
+  // KCP 136P, 4 Aug 2026: "Menengai Yard" 20:18-20:27, then "Menengai Yard"
+  // again from 20:28, with "Menengai Yard NEW" drawn over the same ground.
+  describe('company geofences drawn over one another', () => {
+    const fences: Site[] = [
+      { name: 'Yard', fence: { type: 'CIRCLE', centerLat: WEBUYE.lat, centerLng: WEBUYE.lng, radiusM: 300 } },
+      { name: 'Yard NEW', fence: { type: 'CIRCLE', centerLat: WEBUYE.lat, centerLng: WEBUYE.lng, radiusM: 80 } },
+    ]
+    const RING = { lat: WEBUYE.lat + 200 / 111_000, lng: WEBUYE.lng }   // in Yard only
+
+    it('keeps one visit through the smaller fence, as one of its areas', () => {
+      const pts = [...stay(0, 5, KABRAS_ROAD), ...stay(10, 30, RING), ...stay(31, 50, WEBUYE), ...stay(51, 70, RING), ...stay(90, 95, KABRAS_ROAD)]
+      const visits = siteVisits(pts, plans, fences)
+      expect(visits).toHaveLength(1)
+      expect(visits[0]).toMatchObject({ site: 'Yard', from: 'geofence' })
+      expect(visits[0]!.areas.map(a => [a.name, min(a.start - T0), min(a.end - T0)])).toEqual([
+        [null, 10, 30], ['Yard NEW', 31, 50], [null, 51, 70],
+      ])
+    })
+
+    it('keeps one visit across fences that only partly overlap, under the larger', () => {
+      // A and B overlap between their centres; neither holds the other.
+      const A = { lat: WEBUYE.lat - 100 / 111_000, lng: WEBUYE.lng }
+      const both = { lat: WEBUYE.lat + 50 / 111_000, lng: WEBUYE.lng }
+      const B = { lat: WEBUYE.lat + 200 / 111_000, lng: WEBUYE.lng }
+      const parts: Site[] = [
+        { name: 'Yard A', fence: { type: 'CIRCLE', centerLat: WEBUYE.lat, centerLng: WEBUYE.lng, radiusM: 150 } },
+        { name: 'Yard B', fence: { type: 'CIRCLE', centerLat: B.lat, centerLng: B.lng, radiusM: 160 } },
+      ]
+      const pts = [...stay(0, 5, KABRAS_ROAD), ...stay(10, 30, A), ...stay(31, 40, both), ...stay(41, 70, B), ...stay(90, 95, KABRAS_ROAD)]
+      const visits = siteVisits(pts, plans, parts)
+      expect(visits).toHaveLength(1)
+      expect(visits[0]!.site).toBe('Yard B')
+      expect(visits[0]!.areas.map(a => [a.name, min(a.start - T0), min(a.end - T0)])).toEqual([['Yard A', 10, 40], [null, 41, 70]])
+    })
+
+    it('makes a visit that began in the smaller fence a visit to the larger', () => {
+      const pts = [...stay(0, 5, KABRAS_ROAD), ...stay(10, 20, WEBUYE), ...stay(21, 50, RING), ...stay(70, 75, KABRAS_ROAD)]
+      const visits = siteVisits(pts, plans, fences)
+      expect(visits).toHaveLength(1)
+      expect(visits[0]!.site).toBe('Yard')
+      expect(min(visits[0]!.start - T0)).toBe(10)
+      expect(visits[0]!.areas.map(a => a.name)).toEqual(['Yard NEW', null])
+    })
+  })
+
   it('reads a month of fixes quickly', () => {
     // 43,200 fixes, a minute apart, wandering round western Kenya.
     const pts = Array.from({ length: 43_200 }, (_, i) => at(i, {
@@ -126,6 +171,45 @@ describe('nameStops', () => {
     const stops = [stop(1, GARAGE), stop(2, WEIGHBRIDGE), stop(3, RAIPLY), stop(4, WEBUYE)]
     nameStops(stops, plans)
     expect(stops.map(s => s.spot)).toEqual(['Garage, Kabras', 'Weighbridge, Kabras', 'Raiply', null])
+  })
+})
+
+// KCP 136P, Aug-Sep 2026: Raiply is bigger than a 400 m place, so two places
+// both named "Raiply" stood in the bars, Top Sites and the routes.
+describe('mergeSiteNamedPlaces', () => {
+  const H = 3_600_000
+  const place = (id: number, name: string, hours: number, nameFrom: ReviewPlace['nameFrom']): ReviewPlace => ({
+    id, lat: id, lng: id, hours, visits: 1, days: 1, share: 0, firstSeen: 0, lastSeen: 0,
+    name: null, exactName: name, nameFrom, area: null, county: null, country: null, address: null,
+  })
+  const stop = (id: number, p: number, from: number, h: number): ReviewStop =>
+    ({ id, start: T0 + from * H, end: T0 + (from + h) * H, min: h * 60, lat: 0, lng: 0, place: p, overnight: false })
+  const trip = (id: number, a: number, b: number): ReviewTrip => ({
+    id, start: 0, end: 0, min: 10, driveMin: 10, km: 5, maxKmh: 40, avgKmh: 30, fromStop: 0, toStop: 0, fromPlace: a, toPlace: b, from: [0, 0], to: [0, 0],
+  })
+
+  it('makes one place of the places a site named alike, numbered again by time', () => {
+    const rv = {
+      places: [place(1, 'Naitiri Factory', 10, 'site-plan'), place(2, 'Raiply', 6, 'site-plan'), place(3, 'Raiply', 5, 'site-plan'), place(4, 'Raiply', 1, null)],
+      stops: [stop(1, 1, 0, 10), stop(2, 2, 12, 6), stop(3, 3, 30, 5), stop(4, 4, 40, 1)],
+      trips: [trip(1, 1, 2), trip(2, 2, 3), trip(3, 3, 1)],
+      summary: { places: 4 } as UsageReview['summary'],
+    }
+    expect(mergeSiteNamedPlaces(rv)).toBe(1)
+    // The shop that Google calls "Raiply" is not on the company's ground.
+    expect(rv.places.map(p => [p.id, p.exactName, p.hours, p.visits, p.days])).toEqual([
+      [1, 'Raiply', 11, 2, 2], [2, 'Naitiri Factory', 10, 1, 1], [3, 'Raiply', 1, 1, 1],
+    ])
+    expect(rv.places[0]!.lat).toBeCloseTo((2 * 6 + 3 * 5) / 11, 6)
+    expect(rv.stops.map(s => s.place)).toEqual([2, 1, 1, 3])
+    expect(rv.trips.map(t => [t.fromPlace, t.toPlace])).toEqual([[2, 1], [1, 1], [1, 2]])
+    expect(rv.summary.places).toBe(3)
+  })
+
+  it('leaves the places alone when no two share a site name', () => {
+    const rv = { places: [place(1, 'Raiply', 3, 'site-plan')], stops: [stop(1, 1, 0, 3)], trips: [], summary: { places: 1 } as UsageReview['summary'] }
+    expect(mergeSiteNamedPlaces(rv)).toBe(0)
+    expect(rv.places[0]!.id).toBe(1)
   })
 })
 
