@@ -21,7 +21,7 @@ import { heldDays, loadDbHistory } from './usage-review.db.js'
 import { namePlaces } from './usage-review.geocode.js'
 import { namePois } from './usage-review.poi.js'
 import { classifyPlaces, loadFences, STATIC_SITES, type AreaSummary, type Site } from './usage-review.areas.js'
-import { loadSitePlans, nameBySite, siteVisits, type SiteVisit } from './usage-review.siteplans.js'
+import { loadSitePlans, nameBySite, nameStops, siteVisits, type SiteVisit } from './usage-review.siteplans.js'
 
 export const MAX_DAYS = 92
 /** Places named per review; the rest keep their coordinates. */
@@ -190,6 +190,7 @@ async function run(job: Job, orgId: string, vehicleId: string, from: string, to:
     try {
       fences = await loadFences(orgId)
       nameBySite(review.places, review.stops, loadSitePlans(), fences)
+      nameStops(review.stops, loadSitePlans(), fences)
       visits = siteVisits(review.points, loadSitePlans(), fences)
     } catch (err) {
       logger.warn({ vehicleId, err: (err as Error).message }, 'Usage review: places not named by site')

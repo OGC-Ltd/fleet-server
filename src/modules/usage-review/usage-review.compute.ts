@@ -79,6 +79,11 @@ export interface ReviewStop {
   lng: number
   place: number
   overnight: boolean
+  /** Where on the company's ground it stood ("Garage, Kabras"), when it stood
+   *  on a site plan or a geofence; null when it did not. Set on the build
+   *  (usage-review.siteplans nameStops): a place gathers every stop within
+   *  400 m under one name, so the stop's own spot is the more exact answer. */
+  spot?: string | null
 }
 
 export interface ReviewPlace {
