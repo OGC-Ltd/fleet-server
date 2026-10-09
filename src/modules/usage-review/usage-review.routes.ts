@@ -87,7 +87,9 @@ function withNames(rv: ReadyReview, raw: string | undefined): ReadyReview {
     places: rv.places.map(pl => {
       const v = names[String(pl.id)]
       const o = v && typeof v === 'object' ? v as Record<string, unknown> : { name: v }
-      return { ...pl, exactName: clean(o['name'], 120), activity: clean(o['activity'], 40) }
+      const name = clean(o['name'], 120)
+      // No Google name: the OpenStreetMap business from the build stands.
+      return name ? { ...pl, exactName: name, activity: clean(o['activity'], 40) } : pl
     }),
   }
 }
