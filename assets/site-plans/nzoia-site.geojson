@@ -1,0 +1,638 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Nzoia Sugar",
+    "category": "perimeter",
+    "kind": "boundary"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       34.6528077,
+       0.5658139
+      ],
+      [
+       34.6528871,
+       0.5657696
+      ],
+      [
+       34.652969,
+       0.5657748
+      ],
+      [
+       34.6530638,
+       0.5657974
+      ],
+      [
+       34.653411,
+       0.5658269
+      ],
+      [
+       34.6537389,
+       0.5658638
+      ],
+      [
+       34.6539695,
+       0.5658942
+      ],
+      [
+       34.6544858,
+       0.565973
+      ],
+      [
+       34.6546035,
+       0.5659873
+      ],
+      [
+       34.6552956,
+       0.565947
+      ],
+      [
+       34.6557438,
+       0.5659283
+      ],
+      [
+       34.6557953,
+       0.5658635
+      ],
+      [
+       34.6558687,
+       0.5658206
+      ],
+      [
+       34.6559775,
+       0.5658181
+      ],
+      [
+       34.6560437,
+       0.5658413
+      ],
+      [
+       34.6561019,
+       0.5658896
+      ],
+      [
+       34.656177,
+       0.5659226
+      ],
+      [
+       34.6566329,
+       0.5660286
+      ],
+      [
+       34.6568184,
+       0.5660919
+      ],
+      [
+       34.656868,
+       0.5661625
+      ],
+      [
+       34.6570042,
+       0.5661708
+      ],
+      [
+       34.6571158,
+       0.5661157
+      ],
+      [
+       34.6573154,
+       0.5660406
+      ],
+      [
+       34.6575344,
+       0.5659938
+      ],
+      [
+       34.6580809,
+       0.5658477
+      ],
+      [
+       34.6588019,
+       0.5656635
+      ],
+      [
+       34.6590205,
+       0.5656178
+      ],
+      [
+       34.6590845,
+       0.5656562
+      ],
+      [
+       34.6590896,
+       0.5657416
+      ],
+      [
+       34.6590902,
+       0.5658786
+      ],
+      [
+       34.6591275,
+       0.5660241
+      ],
+      [
+       34.6591161,
+       0.566061
+      ],
+      [
+       34.6591274,
+       0.5662609
+      ],
+      [
+       34.6590177,
+       0.5674604
+      ],
+      [
+       34.6589505,
+       0.5683372
+      ],
+      [
+       34.6588598,
+       0.5689131
+      ],
+      [
+       34.6587935,
+       0.5696372
+      ],
+      [
+       34.6587581,
+       0.5699348
+      ],
+      [
+       34.6587063,
+       0.570369
+      ],
+      [
+       34.6586477,
+       0.5709838
+      ],
+      [
+       34.6586049,
+       0.571061
+      ],
+      [
+       34.6584317,
+       0.5710554
+      ],
+      [
+       34.6576854,
+       0.571018
+      ],
+      [
+       34.6572814,
+       0.5709834
+      ],
+      [
+       34.6559331,
+       0.5707712
+      ],
+      [
+       34.6557738,
+       0.5707901
+      ],
+      [
+       34.6557835,
+       0.5710445
+      ],
+      [
+       34.6557757,
+       0.5716883
+      ],
+      [
+       34.6557756,
+       0.5720103
+      ],
+      [
+       34.6557792,
+       0.5722065
+      ],
+      [
+       34.6557838,
+       0.5725407
+      ],
+      [
+       34.6557739,
+       0.5726724
+      ],
+      [
+       34.6557658,
+       0.5728832
+      ],
+      [
+       34.6557724,
+       0.5730218
+      ],
+      [
+       34.6557825,
+       0.5734231
+      ],
+      [
+       34.6557812,
+       0.5740098
+      ],
+      [
+       34.6557622,
+       0.5741046
+      ],
+      [
+       34.6557724,
+       0.5742345
+      ],
+      [
+       34.6557567,
+       0.5749162
+      ],
+      [
+       34.6557626,
+       0.5753999
+      ],
+      [
+       34.6557672,
+       0.5757458
+      ],
+      [
+       34.6557442,
+       0.5760793
+      ],
+      [
+       34.6556657,
+       0.5761653
+      ],
+      [
+       34.6555161,
+       0.5761733
+      ],
+      [
+       34.6549297,
+       0.5761255
+      ],
+      [
+       34.6542903,
+       0.5761132
+      ],
+      [
+       34.6542258,
+       0.5760585
+      ],
+      [
+       34.6542301,
+       0.5758648
+      ],
+      [
+       34.6542405,
+       0.5751589
+      ],
+      [
+       34.6542412,
+       0.5746443
+      ],
+      [
+       34.6541946,
+       0.5737866
+      ],
+      [
+       34.654207,
+       0.5735699
+      ],
+      [
+       34.6542016,
+       0.5733339
+      ],
+      [
+       34.6541898,
+       0.573136
+      ],
+      [
+       34.6541507,
+       0.5728683
+      ],
+      [
+       34.6541296,
+       0.5725998
+      ],
+      [
+       34.6541055,
+       0.5724377
+      ],
+      [
+       34.6540761,
+       0.5721727
+      ],
+      [
+       34.6540664,
+       0.572064
+      ],
+      [
+       34.6539158,
+       0.5717412
+      ],
+      [
+       34.6536199,
+       0.570781
+      ],
+      [
+       34.6533341,
+       0.5700708
+      ],
+      [
+       34.6528797,
+       0.5688724
+      ],
+      [
+       34.6525981,
+       0.5677062
+      ],
+      [
+       34.6525412,
+       0.5669287
+      ],
+      [
+       34.6525933,
+       0.5664677
+      ],
+      [
+       34.6528077,
+       0.5658139
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Commerical WB",
+    "category": "weighing",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.656333,
+     0.566944
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Main Entrance WH",
+    "category": "gate",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.655917,
+     0.567583
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Bagasee HSE LS",
+    "category": "storage",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.6563676,
+     0.5691832
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Scrap CNTR",
+    "category": "yard",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.6557162,
+     0.5692858
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "FCN RW Gate",
+    "category": "gate",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.6556589,
+     0.5699608
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Scrap yard",
+    "category": "yard",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.655917,
+     0.569167
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Fuel Station",
+    "category": "fuel",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.654605,
+     0.5730926
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Tractor Cell",
+    "category": "facility",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.6546037,
+     0.5727237
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Auto Workshop Gate",
+    "category": "gate",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.654917,
+     0.573306
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Auto Workshop",
+    "category": "workshop",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.6551344,
+     0.5726933
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Cane WB",
+    "category": "weighing",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.6544449,
+     0.5700442
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Nzoia Main Gate",
+    "category": "gate",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.652944,
+     0.566611
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Transport &amp; PWH",
+    "category": "facility",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.655278,
+     0.568528
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Factory Entrance",
+    "category": "gate",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.6546295,
+     0.5682962
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Scrap LS",
+    "category": "yard",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.6560185,
+     0.568749
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Bagasee HSE RS",
+    "category": "storage",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.6559679,
+     0.5700537
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Factory Gate",
+    "category": "gate",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.6543315,
+     0.5682488
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Field Workshop",
+    "category": "workshop",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     34.6542769,
+     0.5733808
+    ]
+   }
+  }
+ ]
+}

@@ -20,7 +20,8 @@ import { loadUnitHistory, type UnitHistory } from './usage-review.wialon.js'
 import { heldDays, loadDbHistory } from './usage-review.db.js'
 import { namePlaces } from './usage-review.geocode.js'
 import { namePois } from './usage-review.poi.js'
-import { classifyPlaces, loadSites, type AreaSummary } from './usage-review.areas.js'
+import { classifyPlaces, loadFences, STATIC_SITES, type AreaSummary, type Site } from './usage-review.areas.js'
+import { loadSitePlans, nameBySite } from './usage-review.siteplans.js'
 
 export const MAX_DAYS = 92
 /** Places named per review; the rest keep their coordinates. */
@@ -178,6 +179,16 @@ async function run(job: Job, orgId: string, vehicleId: string, from: string, to:
     release()
 
     job.stage = 'naming'
+    // The company's own ground first: a place inside a site plan or one of the
+    // organisation's geofences takes that name, and the lookups below leave it
+    // alone (usage-review.siteplans). Costs no outside call.
+    let fences: Site[] = []
+    try {
+      fences = await loadFences(orgId)
+      nameBySite(review.places, review.stops, loadSitePlans(), fences)
+    } catch (err) {
+      logger.warn({ vehicleId, err: (err as Error).message }, 'Usage review: places not named by site')
+    }
     // The area (Nominatim) and the business there (Overpass): two services,
     // asked side by side.
     await Promise.all([
@@ -189,7 +200,7 @@ async function run(job: Job, orgId: string, vehicleId: string, from: string, to:
     // the review it always was.
     let areas: AreaSummary | undefined
     try {
-      const { byPlace, summary } = classifyPlaces(review.places, review.stops, review.period, await loadSites(orgId))
+      const { byPlace, summary } = classifyPlaces(review.places, review.stops, review.period, [...fences, ...STATIC_SITES])
       areas = summary
       for (const p of review.places) {
         const a = byPlace.get(p.id)

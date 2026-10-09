@@ -147,7 +147,8 @@ async function overpass(data: string, deadline: number): Promise<OsmElement[]> {
  */
 export async function namePois(places: ReviewPlace[], limit: number, budgetMs = BUDGET_MS): Promise<void> {
   const deadline = Date.now() + budgetMs
-  const todo = places.slice(0, limit)
+  // A place a site plan or geofence has named already has its name.
+  const todo = places.slice(0, limit).filter(p => !p.nameFrom)
   const all = todo.filter(p => !cache.has(key(p.lat, p.lng)))
   const batches: ReviewPlace[][] = []
   for (let i = 0; i < all.length; i += BATCH) batches.push(all.slice(i, i + BATCH))

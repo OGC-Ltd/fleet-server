@@ -94,6 +94,9 @@ function withNames(rv: ReadyReview, raw: string | undefined): ReadyReview {
   return {
     ...rv,
     places: rv.places.map(pl => {
+      // Named by a site plan or geofence on the build: the company's own name
+      // for its ground beats the nearest business Google found (siteplans).
+      if (pl.nameFrom) return pl
       const v = names[String(pl.id)]
       const o = v && typeof v === 'object' ? v as Record<string, unknown> : { name: v }
       const name = clean(o['name'], 120)

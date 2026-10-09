@@ -93,7 +93,10 @@ export function classifyPlaces(
 
   const byPlace = new Map<number, PlaceArea>()
   for (const p of places) {
-    const site = siteAt(p.lat, p.lng, sites)
+    // Named by a site plan or a geofence: on the company's own ground, so at
+    // work (usage-review.siteplans), whatever the coordinate tables say.
+    const site = (p.nameFrom && p.site ? p.site : null)
+      ?? siteAt(p.lat, p.lng, sites)
       ?? (p.exactName && WORK_NAME.test(p.exactName) ? p.exactName : null)
       ?? (p.name && WORK_AREA.test(p.name) ? p.name : null)
     byPlace.set(p.id, { kind: site ? 'work' : 'elsewhere', site, nights: nightsAt.get(p.id) ?? 0 })
@@ -157,6 +160,13 @@ export const STATIC_SITES: Site[] = [
  * a road is not a stop at work; regions over MAX_FENCE_HA would swallow towns.
  */
 export async function loadSites(orgId: string): Promise<Site[]> {
+  return [...await loadFences(orgId), ...STATIC_SITES]
+}
+
+/** The organisation's own area fences — loadSites without the sites placed in
+ *  code. These are names the company gave its ground, so they can name a place
+ *  (usage-review.siteplans); a factory matched within 1.5 km cannot. */
+export async function loadFences(orgId: string): Promise<Site[]> {
   const rows = await prisma.geofence.findMany({
     where: { organisationId: orgId, type: { in: ['CIRCLE', 'POLYGON'] } },
     select: { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true },
@@ -170,5 +180,5 @@ export async function loadSites(orgId: string): Promise<Site[]> {
       if (ring.length >= 3 && ringAreaHa(ring) <= MAX_FENCE_HA) fences.push({ name: r.name, fence: { type: 'POLYGON', polygonCoords: ring } })
     }
   }
-  return [...fences, ...STATIC_SITES]
+  return fences
 }
