@@ -174,28 +174,28 @@ export function reportFigures(rv: Pick<UsageReview, 'places' | 'stops' | 'trips'
   const firstAway = sites.find(x => !x.home)
   const findings: Finding[] = [
     {
-      title: 'Activity concentration',
+      title: 'Activity Concentration',
       text: homeShare != null
         ? `Home holds ${pctS(homeShare)} of all stopped time.${firstAway ? ` Largest non-home site: ${firstAway.name} (${nf0(firstAway.hours)} h).` : ''}`
         : sites[0] ? `No home area stands out. Most stopped time was at ${sites[0].name} (${nf0(sites[0].hours)} h).` : 'No stops of 10 minutes or more in the period.',
       stat: pctS(top3Share), statLabel: 'top-3 share of stopped time',
     },
     {
-      title: 'Distance profile',
+      title: 'Distance Profile',
       text: activeKm.median != null && activeKm.peak
         ? `Median active day ${nf0(activeKm.median)} km; peak of ${nf0(activeKm.peak.km)} km on ${dlabel(activeKm.peak.date)}.`
         : 'It did not move in the period.',
       stat: activeKm.median && activeKm.peak ? `${nf1(activeKm.peak.km / activeKm.median)}×` : '-', statLabel: 'peak vs median day',
     },
     {
-      title: 'Trip length',
+      title: 'Trip Length',
       text: rv.trips.length
         ? `Mean ${nf1(tripKm.mean)} km, median ${nf1(tripKm.median)} km; average trip lasts ${nf0(tripMin)} minutes.`
         : 'No trips between stops in the period.',
       stat: tripKm.median != null ? `${nf1(tripKm.median)} km` : '-', statLabel: 'median trip',
     },
     {
-      title: 'Time-of-day pattern',
+      title: 'Time-of-Day Pattern',
       text: peakHour != null && busiestDay != null
         ? `Peak start hour is ${String(peakHour).padStart(2, '0')}:00 and the busiest day is ${WEEKDAYS[busiestDay]}.`
         : 'No trips to read a pattern from.',
