@@ -431,6 +431,13 @@ model User {
   /// question asked was when and how many, not from which IP.
   passwordChangedAt   DateTime?  @map("password_changed_at")
   passwordChangeCount Int        @default(0) @map("password_change_count")
+  /// The version of the dashboard's first-time tour this person has been shown
+  /// (new-ui lib/productTour TOUR_VERSION), NULL for never. On the account and
+  /// not in the browser so a person who signs in on another machine is not
+  /// walked through it again (operator, 2026-10-09: "what if we have over 10
+  /// machines"). A version rather than a flag, so a new tour can be shown to
+  /// everybody by bumping TOUR_VERSION.
+  tourSeenVersion     Int?       @map("tour_seen_version")
   createdAt           DateTime   @default(now()) @map("created_at")
   updatedAt           DateTime   @updatedAt @map("updated_at")
   deletedAt           DateTime?  @map("deleted_at") // soft delete — preserves FK integrity on trips

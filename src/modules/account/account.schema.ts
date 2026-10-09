@@ -51,3 +51,12 @@ export type UpdateProfileDto = z.infer<typeof updateProfileSchema>
 export type ChangePasswordDto = z.infer<typeof changePasswordSchema>
 export type ForgotPasswordDto = z.infer<typeof forgotPasswordSchema>
 export type SetupDto = z.infer<typeof setupSchema>
+
+/** The first-time tour, seen: the version new-ui showed (lib/productTour). */
+export const tourSeenSchema = z
+  .object({
+    version: z.number().int().min(1).max(1000),
+  })
+  .strict()
+
+export type TourSeenDto = z.infer<typeof tourSeenSchema>

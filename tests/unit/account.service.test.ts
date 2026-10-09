@@ -253,3 +253,32 @@ describe('completeSetup', () => {
     expect(out.accessToken).toBe('new-access')
   })
 })
+
+// Operator, 2026-10-09: kept in the browser, the first-time tour came back on
+// every other machine a person signed in on.
+describe('recordTourSeen', () => {
+  it('records the version on the account, and only raises it', async () => {
+    prismaMock.user.updateMany.mockResolvedValue({ count: 1 } as never)
+    prismaMock.user.findUnique.mockResolvedValue({ tourSeenVersion: 2 } as never)
+
+    const out = await account.recordTourSeen('u1', 2)
+
+    expect(prismaMock.user.updateMany).toHaveBeenCalledWith({
+      where: { id: 'u1', OR: [{ tourSeenVersion: null }, { tourSeenVersion: { lt: 2 } }] },
+      data:  { tourSeenVersion: 2 },
+    })
+    expect(out).toEqual({ tourSeenVersion: 2 })
+  })
+
+  it('answers with what the account holds when a newer tour was already seen', async () => {
+    prismaMock.user.updateMany.mockResolvedValue({ count: 0 } as never)
+    prismaMock.user.findUnique.mockResolvedValue({ tourSeenVersion: 3 } as never)
+
+    expect(await account.recordTourSeen('u1', 1)).toEqual({ tourSeenVersion: 3 })
+  })
+
+  it('reads never-shown as null', async () => {
+    prismaMock.user.findUnique.mockResolvedValue({ tourSeenVersion: null } as never)
+    expect(await account.tourSeenVersion('u1')).toBeNull()
+  })
+})
