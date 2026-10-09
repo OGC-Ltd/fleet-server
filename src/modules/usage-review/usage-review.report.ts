@@ -49,6 +49,8 @@ export interface SiteRow {
   name: string
   home: boolean
   kind: 'work' | 'home' | 'elsewhere'
+  /** What the place is (Banking, Food and drink…); null for home or unknown. */
+  activity: string | null
   hours: number
   visits: number
   days: number
@@ -112,6 +114,7 @@ export function reportFigures(rv: Pick<UsageReview, 'places' | 'stops' | 'trips'
     const first = placeById.get(g.ids[0]!)!
     return {
       key, name: siteName(g.ids[0]!), home: key === 'home', kind: first.kind ?? 'elsewhere',
+      activity: key === 'home' ? null : first.activity ?? null,
       hours: r1(hours), visits: st.length, days: new Set(st.map(x => eat(x.start).toISOString().slice(0, 10))).size,
       avgH: st.length ? Math.round((hours / st.length) * 100) / 100 : 0,
       // A stop that began before the period has no arrival in it; one that

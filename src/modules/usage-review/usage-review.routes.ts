@@ -23,7 +23,8 @@ import { classifyPlaces, loadSites } from './usage-review.areas.js'
  *       { date, points: [t ms, lat, lng, km/h, course|null, ignition 1/0/null][] }
  *
  * `kmpl` overrides the vehicle's rate for the fuel estimate in a download.
- * `names` is a JSON object of place id → Google's exact name, the ones the
+ * `names` is a JSON object of place id → Google's exact name (or { name,
+ * activity }: what Google says the place is — Banking, Food and drink), the ones the
  * page already looked up (the server has no Google key); the downloads print
  * them beside the OpenStreetMap area. `driver` is the report's subject: the
  * driver the page shows on the vehicle.
@@ -70,16 +71,25 @@ async function held(req: Parameters<RequestHandler>[0]) {
   return rv
 }
 
-/** Google's names from the page, onto a copy of the held review's places. A
- *  malformed `names` is ignored: the download falls back to OpenStreetMap. */
+/** Google's names from the page, onto a copy of the held review's places:
+ *  each a name, or `{ name, activity }` where Google's type says what the
+ *  place is. A malformed `names` is ignored: the download falls back to
+ *  OpenStreetMap. */
 function withNames(rv: ReadyReview, raw: string | undefined): ReadyReview {
   if (!raw) return rv
   let parsed: unknown
   try { parsed = JSON.parse(raw) } catch { return rv }
   if (!parsed || typeof parsed !== 'object') return rv
   const names = parsed as Record<string, unknown>
-  const clean = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 120) : null)
-  return { ...rv, places: rv.places.map(pl => ({ ...pl, exactName: clean(names[String(pl.id)]) })) }
+  const clean = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null)
+  return {
+    ...rv,
+    places: rv.places.map(pl => {
+      const v = names[String(pl.id)]
+      const o = v && typeof v === 'object' ? v as Record<string, unknown> : { name: v }
+      return { ...pl, exactName: clean(o['name'], 120), activity: clean(o['activity'], 40) }
+    }),
+  }
 }
 
 /** Each place's kind (work site, home area, elsewhere) and the period's
