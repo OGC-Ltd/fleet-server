@@ -15,7 +15,10 @@
  *     the top sites with what each is (a bank, a restaurant, a clinic) and
  *     median arrival and departure, and where it stood each night;
  *     fleet tracking evidence: the route on the map with its places
- *     numbered, and the gate times to check against CCTV.
+ *     numbered and named.
+ *
+ * In black and white: shades of grey for the charts, the map in grey under a
+ * black route (operator, 2026-10-09).
  *
  * The figures are usage-review.report's; the map is OpenStreetMap tiles
  * stitched under the route. Tiles are fetched with an identifying User-Agent
@@ -31,12 +34,12 @@ import type { PlaceKind } from './usage-review.areas.js'
 import type { ReadyReview } from './usage-review.service.js'
 import { reportFigures, shortPlaceName, WEEKDAYS } from './usage-review.report.js'
 
+// Black and white (operator, 2026-10-09): no colour anywhere but the logos,
+// so no green beside blue, red or purple and no purple bars. Things are told
+// apart by shade, and the reference lines by their dashes.
 const C = {
-  ink: '#111827', sub: '#6b7280', faint: '#9ca3af', line: '#e5e7eb', panel: '#f8fafc',
-  // The report's palette (the KDP 365T deck): home a deep green, driving a
-  // brighter one, other places orange, work sites blue, the low day red.
-  green: '#2e7d32', deep: '#1b5e20', orange: '#f57c00', blue: '#1565c0', red: '#c62828', violet: '#6a1b9a',
-  route: '#3b6fd4',
+  ink: '#111111', sub: '#5f5f5f', faint: '#9a9a9a', line: '#dddddd', panel: '#f4f4f4',
+  black: '#111111', dark: '#4d4d4d', mid: '#999999', light: '#c8c8c8', pale: '#e8e8e8',
 }
 const F = { reg: 'Helvetica', bold: 'Helvetica-Bold' }
 const M = 36
@@ -58,13 +61,50 @@ function logo(file: string): Buffer | null {
 // ── tiles ────────────────────────────────────────────────────────────────────
 
 const TILE_UA = 'fleettrack-usage-review/1.0 (logistics.raioperations.com)'
+
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+  return c >>> 0
+})
+const crc32 = (b: Buffer) => {
+  let c = 0xffffffff
+  for (const x of b) c = CRC_TABLE[(c ^ x) & 0xff]! ^ (c >>> 8)
+  return (c ^ 0xffffffff) >>> 0
+}
+
+/**
+ * A tile in grey, for the black-and-white report. OpenStreetMap's tiles are
+ * paletted PNGs, so only the palette is rewritten — each colour to its
+ * luminance — and the pixels are not touched. Any other PNG comes back as it
+ * was. Exported for the tests.
+ */
+export function greyPng(buf: Buffer): Buffer {
+  if (buf.length < 33 || buf.toString('latin1', 1, 4) !== 'PNG' || buf[25] !== 3) return buf
+  const out = Buffer.from(buf)
+  for (let o = 8; o + 12 <= out.length;) {
+    const len = out.readUInt32BE(o), type = out.toString('latin1', o + 4, o + 8)
+    if (type === 'PLTE') {
+      for (let i = o + 8; i + 3 <= o + 8 + len; i += 3) {
+        const g = Math.round(0.299 * out[i]! + 0.587 * out[i + 1]! + 0.114 * out[i + 2]!)
+        out[i] = out[i + 1] = out[i + 2] = g
+      }
+      out.writeUInt32BE(crc32(out.subarray(o + 4, o + 8 + len)), o + 8 + len)
+      return out
+    }
+    if (type === 'IDAT' || type === 'IEND') break
+    o += 12 + len
+  }
+  return buf
+}
+
 const tileCache = new Map<string, Buffer | null>()
 async function tile(z: number, x: number, y: number): Promise<Buffer | null> {
   const k = `${z}/${x}/${y}`
   if (tileCache.has(k)) return tileCache.get(k) ?? null
   try {
     const res = await fetch(`https://tile.openstreetmap.org/${k}.png`, { headers: { 'User-Agent': TILE_UA }, signal: AbortSignal.timeout(8_000) })
-    const buf = res.ok ? Buffer.from(await res.arrayBuffer()) : null
+    const buf = res.ok ? greyPng(Buffer.from(await res.arrayBuffer())) : null
     if (tileCache.size > 2_000) tileCache.delete(tileCache.keys().next().value!)
     tileCache.set(k, buf)
     return buf
@@ -121,13 +161,12 @@ const dayLabel = (d: string, year = false) => `${Number(d.slice(8, 10))} ${MONTH
 const pct = (v: number, of: number) => (of > 0 ? `${nf((v / of) * 100, 1)}%` : '-')
 const pct0 = (v: number | null) => (v == null ? '-' : `${Math.round(v * 100)}%`)
 const hhmm = (m: number | null) => (m == null ? '-' : `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`)
-const eatClock = (ms: number) => new Date(ms + TZ_OFFSET_MS).toISOString().slice(11, 16)
-const eatDate = (ms: number) => new Date(ms + TZ_OFFSET_MS).toISOString().slice(0, 10)
-const dur = (min: number) => { const m = Math.round(min); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')}` }
 
 // ── drawing ──────────────────────────────────────────────────────────────────
 
-const KIND_COLOR: Record<PlaceKind, string> = { work: C.blue, home: C.deep, elsewhere: C.orange }
+const KIND_COLOR: Record<PlaceKind, string> = { home: C.black, work: C.dark, elsewhere: C.light }
+/** The number on a place's circle: white on the dark shades, black on the light. */
+const KIND_TEXT: Record<PlaceKind, string> = { home: '#ffffff', work: '#ffffff', elsewhere: C.ink }
 const KIND_SHORT: Record<PlaceKind, string> = { work: 'Work site', home: 'Home area', elsewhere: 'Other places' }
 const kindOf = (p: ReviewPlace): PlaceKind => p.kind ?? 'elsewhere'
 
@@ -246,7 +285,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   /** The tiles, softened, in the box; returns the projection. Call inside
    *  doc.save()/restore() with the box clipped. */
   const mapGround = (map: Prepared | null, mx: number, my: number, w: number, h: number, soften: number) => {
-    doc.rect(mx, my, w, h).fill('#eef2f0')
+    doc.rect(mx, my, w, h).fill(C.panel)
     if (!map) return null
     const { frame, tiles: tl } = map
     const size = 256 * frame.scale
@@ -260,11 +299,11 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
       py: (lat: number) => my + (lat2y(lat, frame.z) - frame.y0) * frame.scale,
     }
   }
-  /** A place as a numbered circle, in its kind's colour. */
+  /** A place as a numbered circle, in its kind's shade. */
   const placeDot = (p: ReviewPlace, x: number, yy: number, r: number) => {
     doc.circle(x, yy, r).fill(KIND_COLOR[kindOf(p)])
-    doc.circle(x, yy, r).lineWidth(1.2).stroke('#ffffff')
-    doc.font(F.bold).fontSize(r > 9 ? 8 : 7).fillColor('#ffffff').text(String(p.id), x - 10, yy - (r > 9 ? 4 : 3.5), { width: 20, align: 'center', lineBreak: false })
+    doc.circle(x, yy, r).lineWidth(1.2).stroke(kindOf(p) === 'elsewhere' ? C.ink : '#ffffff')
+    doc.font(F.bold).fontSize(r > 9 ? 8 : 7).fillColor(KIND_TEXT[kindOf(p)]).text(String(p.id), x - 10, yy - (r > 9 ? 4 : 3.5), { width: 20, align: 'center', lineBreak: false })
   }
 
   const period = `${dayLabel(rv.period.from, true)} – ${dayLabel(rv.period.to, true)}`
@@ -280,7 +319,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
 
   /** The running head on pages 2 on: logos, the plate and the period. */
   const head = (section: string) => {
-    doc.rect(0, 0, 595.28, 4).fill(C.green)
+    doc.rect(0, 0, 595.28, 4).fill(C.ink)
     const rai = logo('rai-group-logo.jpeg'), ogc = logo('ogc-logo.png')
     if (rai) try { doc.image(rai, M, M - 14, { fit: [26, 26] }) } catch { /* no logo */ }
     if (ogc) try { doc.image(ogc, M + W - 25, M - 10, { fit: [25, 18], align: 'right', valign: 'center' }) } catch { /* no logo */ }
@@ -292,11 +331,11 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
 
   // ════ page 1: cover and executive summary ════
   {
-    doc.rect(0, 0, 595.28, 6).fill(C.green)
+    doc.rect(0, 0, 595.28, 6).fill(C.ink)
     const rai = logo('rai-group-logo.jpeg'), ogc = logo('ogc-logo.png')
     if (rai) try { doc.image(rai, M, M - 6, { fit: [64, 64] }) } catch { /* no logo */ }
     if (ogc) try { doc.image(ogc, M + W - 50, M + 10, { fit: [50, 36], align: 'right', valign: 'center' }) } catch { /* no logo */ }
-    line('VEHICLE TRACKING REPORT', M + 76, M + 4, W - 170, { font: F.bold, size: 9, color: C.green })
+    line('VEHICLE TRACKING REPORT', M + 76, M + 4, W - 170, { font: F.bold, size: 9, color: C.sub })
     line(veh.plate, M + 76, M + 16, W - 170, { font: F.bold, size: 30 })
     line([veh.organisation, veh.wialonName && veh.wialonName !== veh.plate ? veh.wialonName : null].filter(Boolean).join('  ·  '), M + 76, M + 48, W - 170, { size: 8.5, color: C.sub })
   }
@@ -327,7 +366,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     tiles.forEach((t, i) => {
       const x = M + (i % 3) * (cw + 10), yy = y + Math.floor(i / 3) * (ch + 10)
       doc.rect(x, yy, cw, ch).lineWidth(0.6).stroke(C.line)
-      doc.rect(x, yy, 3, ch).fill(C.green)
+      doc.rect(x, yy, 3, ch).fill(C.ink)
       line(t.l, x + 12, yy + 9, cw - 20, { font: F.bold, size: 7, color: C.sub })
       line(t.v, x + 12, yy + 21, cw - 20, { font: F.bold, size: 20 })
       line(t.sub, x + 12, yy + 46, cw - 20, { size: 7.8, color: C.sub })
@@ -341,11 +380,11 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     fig.findings.forEach((f, i) => {
       const yy = y + i * rh
       if (i) doc.moveTo(M, yy - 4).lineTo(M + W, yy - 4).lineWidth(0.5).stroke(C.line)
-      doc.circle(M + 11, yy + 12, 11).fill(C.green)
+      doc.circle(M + 11, yy + 12, 11).fill(C.ink)
       line(String(i + 1), M, yy + 7.5, 22, { font: F.bold, size: 10, color: '#ffffff', align: 'center' })
       line(f.title, M + 32, yy + 2, W - 190, { font: F.bold, size: 10 })
       doc.font(F.reg).fontSize(8.5).fillColor(C.sub).text(f.text, M + 32, yy + 16, { width: W - 200, height: 24, ellipsis: true })
-      line(f.stat, M + W - 150, yy + 2, 150, { font: F.bold, size: 18, color: C.green, align: 'right' })
+      line(f.stat, M + W - 150, yy + 2, 150, { font: F.bold, size: 18, align: 'right' })
       line(f.statLabel, M + W - 150, yy + 24, 150, { size: 7.5, color: C.sub, align: 'right' })
     })
     y += 4 * rh + 6
@@ -392,10 +431,10 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     const all = sp.driving + (sp.idling ?? 0) + sp.home + sp.away
     y = title('How time was divided', `Driving ${pct(sp.driving, all)}  ·  Idling ${sp.idling != null ? pct(sp.idling, all) : '-'}  ·  Stopped ${pct(sp.home + sp.away, all)}  ·  ${s.activeDays}/${s.calendarDays} active days`, y)
     const parts = [
-      { l: 'Driving', v: sp.driving, c: C.green },
-      { l: 'Idling', v: sp.idling ?? 0, c: C.orange },
-      { l: 'Stopped at home', v: sp.home, c: C.deep },
-      { l: 'Stopped away', v: sp.away, c: C.blue },
+      { l: 'Driving', v: sp.driving, c: C.black },
+      { l: 'Idling', v: sp.idling ?? 0, c: C.mid },
+      { l: 'Stopped at home', v: sp.home, c: C.dark },
+      { l: 'Stopped away', v: sp.away, c: C.light },
     ]
     const total = parts.reduce((a, p) => a + p.v, 0)
     const R = 58, cx = M + R + 10, cy = y + R
@@ -429,7 +468,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     const bw = box.w / days.length
     days.forEach((d, i) => {
       const h = (d.km / ceil) * box.h
-      if (h > 0) doc.rect(box.x + i * bw + bw * 0.15, box.y + box.h - h, Math.max(0.8, bw * 0.7), h).fill(C.green)
+      if (h > 0) doc.rect(box.x + i * bw + bw * 0.15, box.y + box.h - h, Math.max(0.8, bw * 0.7), h).fill(C.mid)
     })
     const ref = (v: number | null, c: string, dash: [number, number], label: string, ly: number, lx: number) => {
       if (v == null) return
@@ -438,8 +477,8 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
       doc.moveTo(lx, ly + 4).lineTo(lx + 18, ly + 4).lineWidth(1.2).dash(dash[0], { space: dash[1] }).stroke(c).undash()
       line(label, lx + 22, ly, 128, { size: 7.5 })
     }
-    ref(fig.activeKm.mean, C.orange, [5, 3], `Mean active: ${nf(fig.activeKm.mean, 0)} km`, box.y - 16, box.x + box.w - 150)
-    ref(fig.activeKm.median, C.red, [1.5, 2], `Median active: ${nf(fig.activeKm.median, 0)} km`, box.y - 16, box.x + box.w - 300)
+    ref(fig.activeKm.mean, C.ink, [5, 3], `Mean active: ${nf(fig.activeKm.mean, 0)} km`, box.y - 16, box.x + box.w - 150)
+    ref(fig.activeKm.median, C.ink, [1.5, 2], `Median active: ${nf(fig.activeKm.median, 0)} km`, box.y - 16, box.x + box.w - 300)
     const every = Math.max(1, Math.ceil(days.length / 10))
     days.forEach((d, i) => { if (i % every === 0) line(dayLabel(d.date), box.x + i * bw - 12, box.y + box.h + 4, 34, { size: 6.5, color: C.sub, align: 'center' }) })
     y = box.y + box.h + 20
@@ -455,9 +494,9 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     line('Trips by day of week', M, y, half, { font: F.bold, size: 9, align: 'center' })
     line('Trips by hour of day (trip start)', M + half + 20, y, half, { font: F.bold, size: 9, align: 'center' })
     const h = 150
-    const wcol = fig.byWeekday.map((_, i) => (i === fig.busiestDay ? C.deep : i === fig.quietestDay ? C.red : C.blue))
+    const wcol = fig.byWeekday.map((_, i) => (i === fig.busiestDay ? C.black : i === fig.quietestDay ? C.light : C.mid))
     vbars({ x: M + 6, y: y + 22, w: half - 12, h }, fig.byWeekday, wcol, WEEKDAYS.map(d => d.slice(0, 3)))
-    const hcol = fig.byHour.map((_, i) => (i === fig.peakHour ? C.deep : C.violet))
+    const hcol = fig.byHour.map((_, i) => (i === fig.peakHour ? C.black : C.mid))
     vbars({ x: M + half + 26, y: y + 22, w: half - 12, h }, fig.byHour, hcol, fig.byHour.map((_, i) => String(i).padStart(2, '0')), { every: 3, values: false })
     if (fig.peakHour != null) {
       const bw = (half - 12) / 24
@@ -471,13 +510,13 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   if (fig.routes.length) {
     const rows = fig.routes.slice(0, 12).map(r => ({
       // Helvetica's WinAnsi has no →; › is in it.
-      label: r.round ? `Round trip · ${r.from}` : `${r.from}  ›  ${r.to}`, v: r.trips, c: r.round ? C.orange : C.green,
+      label: r.round ? `Round trip · ${r.from}` : `${r.from}  ›  ${r.to}`, v: r.trips, c: r.round ? C.light : C.dark,
       note: `${r.trips} trip${r.trips === 1 ? '' : 's'} · ${nf(r.km, 0)} km · ${nf(r.hours, 1)} h`,
     }))
     y = hbars(rows, y, 230, 16)
-    doc.rect(M + 236, y + 7, 8, 8).fill(C.green)
+    doc.rect(M + 236, y + 7, 8, 8).fill(C.dark)
     line('Point-to-point route', M + 248, y + 7, 110, { size: 7.5, color: C.sub })
-    doc.rect(M + 360, y + 7, 8, 8).fill(C.orange)
+    doc.rect(M + 360, y + 7, 8, 8).fill(C.light)
     line('Round trip (returned to the same place)', M + 372, y + 7, 160, { size: 7.5, color: C.sub })
     y += 26
   } else {
@@ -508,7 +547,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     const cw = W / n
     areas.nightly.forEach((d, i) => {
       const x = M + i * cw
-      doc.rect(x + 0.6, y, Math.max(1, cw - 1.2), 18).fill(d.kind ? KIND_COLOR[d.kind] : C.line)
+      doc.rect(x + 0.6, y, Math.max(1, cw - 1.2), 18).fill(d.kind ? KIND_COLOR[d.kind] : C.pale)
     })
     const every = Math.max(1, Math.ceil(n / 15))
     areas.nightly.forEach((d, i) => { if (i % every === 0) line(dayLabel(d.date), M + i * cw - 8, y + 22, cw + 16, { size: 6.3, color: C.sub, align: 'center' }) })
@@ -517,7 +556,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     for (const k of ['home', 'work', 'elsewhere', null] as (PlaceKind | null)[]) {
       const count = k ? areas.nights[k] : areas.nightly.filter(d => !d.kind).length
       const label = `${k ? (k === 'home' ? 'Home area' : KIND_SHORT[k]) : 'Moving or no stop'}  ${count}`
-      doc.rect(kx, y + 1, 7, 7).fill(k ? KIND_COLOR[k] : C.line)
+      doc.rect(kx, y + 1, 7, 7).fill(k ? KIND_COLOR[k] : C.pale)
       line(label, kx + 11, y, 140, { size: 7.5 })
       doc.font(F.reg).fontSize(7.5)
       kx += doc.widthOfString(label) + 28
@@ -545,12 +584,32 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
         if (t.path.length < 2) continue
         doc.moveTo(px(t.path[0]![1]), py(t.path[0]![0]))
         for (const [la, lo] of t.path.slice(1)) doc.lineTo(px(lo), py(la))
-        doc.lineWidth(1.6).strokeOpacity(0.75).lineJoin('round').stroke(C.route)
+        doc.lineWidth(1.6).strokeOpacity(0.8).lineJoin('round').stroke(C.ink)
       }
       doc.strokeOpacity(1)
       const top = rv.places.slice(0, 14)
       const maxH = Math.max(1, ...top.slice(0, 2).map(p => p.hours))
-      for (const p of [...top].reverse()) placeDot(p, px(p.lng), py(p.lat), 6 + 6 * Math.sqrt(Math.min(1, p.hours / maxH)))
+      const dots = top.map(p => ({ p, x: px(p.lng), y: py(p.lat), r: 6 + 6 * Math.sqrt(Math.min(1, p.hours / maxH)) }))
+      for (const d of [...dots].reverse()) placeDot(d.p, d.x, d.y, d.r)
+      // Each place's name beside its circle (operator, 2026-10-09: the exact
+      // names on the map itself), the most hours first. A name that would
+      // cover another name or a circle, or run off the map, is left to the key.
+      type Box = { x: number; y: number; w: number; h: number }
+      const taken: Box[] = dots.map(d => ({ x: d.x - d.r, y: d.y - d.r, w: 2 * d.r, h: 2 * d.r }))
+      const hit = (a: Box, b: Box) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+      for (const d of dots) {
+        const text = fit(shortPlaceName(d.p), 130, F.bold, 6.8)
+        const w = doc.widthOfString(text) + 6, h = 10
+        const box = [
+          { x: d.x + d.r + 2, y: d.y - h / 2 }, { x: d.x - d.r - 2 - w, y: d.y - h / 2 },
+          { x: d.x - w / 2, y: d.y - d.r - h - 1 }, { x: d.x - w / 2, y: d.y + d.r + 1 },
+        ].map(b => ({ ...b, w, h }))
+          .find(b => b.x >= mx + 2 && b.x + w <= mx + W - 2 && b.y >= my + 2 && b.y + h <= my + mapH - 12 && !taken.some(o => hit(b, o)))
+        if (!box) continue
+        taken.push(box)
+        doc.rect(box.x, box.y, w, h).fillOpacity(0.85).fill('#ffffff').fillOpacity(1)
+        line(text, box.x + 3, box.y + 2, w - 4, { font: F.bold, size: 6.8 })
+      }
     }
     doc.restore()
     doc.rect(mx, my, W, mapH).lineWidth(0.6).stroke(C.line)
@@ -566,23 +625,6 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
       line(`${nf(p.hours, 1)} h`, x + cw - 56, yy, 44, { size: 7.2, color: C.sub, align: 'right' })
     })
     y += half * 11 + 14
-  }
-
-  // Gate times: when it came and went at work sites — the times to pull CCTV for.
-  {
-    type Gate = { site: string; start: number; end: number; min: number }
-    const gates: Gate[] = rv.stops.filter(st => rv.places.find(p => p.id === st.place)?.kind === 'work')
-      .map(st => ({ site: shortPlaceName(rv.places.find(p => p.id === st.place)!), start: st.start, end: st.end, min: st.min }))
-    gates.sort((a, b) => b.start - a.start)
-    // Under five rows' room left: the list on a page of its own.
-    if (gates.length && BOTTOM - y - 50 < 15 * Math.min(5, gates.length)) { doc.addPage(); y = head('gate times') }
-    const rows = gates.slice(0, Math.max(0, Math.floor((BOTTOM - y - 50) / 15)))
-    if (rows.length) {
-      y = title('Gate times to check against CCTV', 'the latest arrivals at and departures from work sites', y)
-      table([
-        { h: 'Site', w: 210 }, { h: 'Date', w: 90 }, { h: 'Arrived', w: 70, r: true }, { h: 'Left', w: 70, r: true }, { h: 'Inside', w: W - 440, r: true },
-      ], rows.map(g => ({ cells: [g.site, dayLabel(eatDate(g.start), true), eatClock(g.start), eatClock(g.end), dur(g.min)] })), y)
-    }
   }
 
   // ── footers ──
