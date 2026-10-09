@@ -679,84 +679,184 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   }
 
   // ════ site visits ════
+  /* Hallmark · component: site-visits ledger (PDF) · genre: editorial · theme: custom (the report's C tokens)
+   * vibe: "an austere ledger, a day at a time" · redesign of the row-per-area table
+   * structure: day band › visit block (time gutter · site, stay bar, stays in order · time on site)
+   * pre-emit critique: P5 H5 E4 S5 R5 V4
+   */
   // Each time it went onto a site plan or one of the organisation's geofences
   // (operator, 2026-10-09: "at what time did it arrive, which area within the
   // organisation was it seen, for how long, when it departed"), read from the
-  // track itself (usage-review.siteplans siteVisits). A visit's rows share a
-  // shade, and the table runs on over as many pages as it needs.
+  // track itself (usage-review.siteplans siteVisits).
+  //
+  // A ledger, a day at a time. Each visit is one block: arrival over departure
+  // in the gutter; the site, a bar of where on it the time went and the stays
+  // in order beneath; the time on site on the right. The bar is the one chart
+  // here, so it alone carries the green: the longest stay full, the other
+  // named areas soft, the site's own ground grey, the moves between them pale.
+  // The row-per-area table it replaced read a month as one long even list. A
+  // block never splits over a page, and a day carried over says so.
   {
     const visits = rv.siteVisits ?? []
-    const MAX_VISITS = 150, MAX_STAYS = 8, VR = 15
+    const MAX_VISITS = 150
     const shown = visits.slice(0, MAX_VISITS)
-    const nSites = new Set(visits.map(v => v.site)).size
-    y = section(y, 40 + 4 * VR, 'Site Visits')
+    const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
+    const bySite = new Map<string, { n: number; ms: number }>()
+    for (const v of visits) {
+      const t = bySite.get(v.site) ?? { n: 0, ms: 0 }
+      t.n++; t.ms += v.end - v.start
+      bySite.set(v.site, t)
+    }
+
+    // Geometry: the time gutter, the site column, the time on site.
+    const GUT = 64, RIGHT = 84, SX = M + GUT, SW = W - GUT - RIGHT - 10
+    const BAR_H = 6, LINE_H = 10, ITEM = 7.4
+    const clock = (ms: number) => when(ms, ms)
+    const departed = (v: SiteVisit) => {
+      if (v.endsAfter) return 'still in'
+      if (eatDate(v.end) === eatDate(v.start)) return clock(v.end)
+      const d = new Date(v.end + TZ_OFFSET_MS)
+      return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${clock(v.end)}`
+    }
+    /** The stays in order as lines of items, at most two; what does not fit
+     *  is counted at the end. */
+    const stayLines = (v: SiteVisit) => {
+      const named = v.areas.filter(a => a.name != null)
+      const longest = named.length ? named.reduce((x, a) => (a.end - a.start > x.end - x.start ? a : x)) : null
+      const items = v.areas.map(a => ({ name: a.name ?? 'Site grounds', dur: span(a.end - a.start), strong: a === longest }))
+      const width = (it: { name: string; dur: string; strong: boolean }) =>
+        doc.font(it.strong ? F.bold : F.reg).fontSize(ITEM).widthOfString(it.name) + doc.font(F.reg).fontSize(ITEM).widthOfString(` ${it.dur}`)
+      const SEP = doc.font(F.reg).fontSize(ITEM).widthOfString('  ›  ')
+      const MORE = doc.font(F.reg).fontSize(ITEM).widthOfString('  +99 more')
+      const lines: (typeof items)[] = [[]]
+      let used = 0, more = 0
+      items.forEach((it, i) => {
+        if (more) { more++; return }
+        if (!lines[0]!.length) { lines[0]!.push(it); used = width(it); return }
+        const w = width(it) + (lines[lines.length - 1]!.length ? SEP : 0)
+        const roomFor = SW - (lines.length === 2 && i < items.length - 1 ? MORE : 0)
+        if (used + w <= roomFor) { lines[lines.length - 1]!.push(it); used += w; return }
+        if (lines.length < 2 && lines[0]!.length) { lines.push([it]); used = width(it); return }
+        more = 1
+      })
+      return { lines: lines.filter(l => l.length), more, longest }
+    }
+    const blockH = (v: SiteVisit) => (v.areas.length ? 15 + BAR_H + 6 + stayLines(v).lines.length * LINE_H : 26) + 8
+
+    let day = ''
+    const dayBand = (v: SiteVisit, carried: boolean) => {
+      const d = eatDate(v.start)
+      const same = shown.filter(x => eatDate(x.start) === d)
+      doc.rect(M, y, W, 16).fill(C.panel)
+      const dt = new Date(v.start + TZ_OFFSET_MS)
+      line(`${WD[dt.getUTCDay()]} ${dt.getUTCDate()} ${MONTHS[dt.getUTCMonth()]}${carried ? ' (continued)' : ''}`, M + 8, y + 4.5, 200, { font: F.bold, size: 8 })
+      line(`${plural(same.length, 'visit')} · ${span(same.reduce((t, x) => t + x.end - x.start, 0))} on site`, M + W - 260, y + 5, 252, { size: 7, color: C.sub, align: 'right' })
+      y += 16 + 9
+    }
+    const fresh = () => { doc.addPage(); y = head('Site Visits') }
+
+    y = section(y, 40 + 34 + 26 + 25 + 2 * 44, 'Site Visits')
     y = title('Site Visits', visits.length
-      ? `${visits.length} visit${visits.length === 1 ? '' : 's'} to ${nSites} site${nSites === 1 ? '' : 's'} · site plans and company geofences · 5 min or longer · times in EAT`
+      ? `${plural(visits.length, 'visit')} to ${plural(bySite.size, 'site')} · site plans and company geofences · 5 min or longer · times in EAT`
       : 'site plans and company geofences', y)
     if (!visits.length) {
       // Not worked out (the build logs why) is not the same as none.
       line(rv.siteVisits ? 'It did not go onto any site plan or company geofence in the period.' : 'The site visits could not be worked out for this review.', M, y, W, { size: 8.5, color: C.sub })
       y += 20
     } else {
-      const cols = [{ w: 215, h: 'Site and area' }, { w: 100, h: 'Arrived' }, { w: 100, h: 'Departed' }, { w: W - 415, h: 'Time there', r: true }]
-      const header = (yy: number) => {
-        let x = M
-        for (const c of cols) { line(c.h, x + 4, yy, c.w - 8, { font: F.bold, size: 7, color: C.sub, align: c.r ? 'right' : 'left' }); x += c.w }
-        doc.moveTo(M, yy + 11).lineTo(M + W, yy + 11).lineWidth(0.6).stroke(C.line)
-        return yy + 16
-      }
-      /** One row; on a fresh page under the header when this one has no room,
-       *  and a stay carried over is told which visit it belongs to. */
-      const put = (v: SiteVisit, shade: boolean, cells: string[], kind: 'visit' | 'stay', nameColor = C.ink) => {
-        if (y + VR > BOTTOM) {
-          doc.addPage()
-          y = header(head('Site Visits'))
-          if (kind === 'stay') put(v, shade, [`${v.site} (continued)`, '', '', ''], 'visit')
+      // The sites, most time first: the period's answer before its detail, in
+      // the cover's label-over-value band.
+      const sites = [...bySite.entries()].sort((p1, p2) => p2[1].ms - p1[1].ms)
+      const cells: [string, { n: number; ms: number }][] = sites.length > 4
+        ? [...sites.slice(0, 3), [`${sites.length - 3} more sites`, sites.slice(3).reduce((t, [, x]) => ({ n: t.n + x.n, ms: t.ms + x.ms }), { n: 0, ms: 0 })]]
+        : sites
+      const cw = W / 4
+      doc.rect(M, y, W, 34).fill(C.panel)
+      cells.forEach(([name, t], i) => {
+        const x = M + i * cw
+        if (i) doc.moveTo(x, y + 7).lineTo(x, y + 27).lineWidth(0.5).stroke(C.line)
+        line(name.toUpperCase(), x + 10, y + 7, cw - 16, { font: F.bold, size: 6.8, color: C.sub })
+        line(`${plural(t.n, 'visit')} · ${span(t.ms)}`, x + 10, y + 18, cw - 16, { font: F.bold, size: 9 })
+      })
+      y += 34 + 10
+
+      // The bar's key, and how to read the gutter.
+      {
+        let kx = M
+        for (const [c, label] of [[C.green, 'Longest stay'], [C.greenSoft, 'Other areas'], [C.light, 'Site grounds (no named area)'], [C.pale, 'Moving between areas']] as const) {
+          doc.rect(kx, y + 1.5, 12, 5).fill(c)
+          line(label, kx + 16, y, 140, { size: 7, color: C.sub })
+          kx += 16 + doc.font(F.reg).fontSize(7).widthOfString(label) + 14
         }
-        if (shade) doc.rect(M, y - 4, W, VR).fill(C.panel)
-        let x = M
-        cells.forEach((val, i) => {
-          const c = cols[i]!
-          const pad = i ? 4 : kind === 'visit' ? 12 : 22
-          line(val, x + pad, y, c.w - pad - 4, { font: kind === 'visit' && !i ? F.bold : F.reg, size: 7.8, color: i ? C.ink : nameColor, align: c.r ? 'right' : 'left' })
-          x += c.w
-        })
-        if (kind === 'visit') doc.circle(M + 6, y + 3.6, 2.8).fill(v.from === 'site-plan' ? C.green : C.greenSoft)
-        else doc.moveTo(M + 13, y + 4).lineTo(M + 18, y + 4).lineWidth(0.6).stroke(C.faint)
-        y += VR
+        const note = 'times on the left: arrival over departure'
+        if (kx + doc.font(F.reg).fontSize(7).widthOfString(note) + 8 <= M + W) line(note, M + W - 150, y, 150, { size: 7, color: C.sub, align: 'right' })
+        y += 16
       }
-      y = header(y)
+
       shown.forEach((v, i) => {
-        const stays = v.areas.length > MAX_STAYS + 1 ? v.areas.slice(0, MAX_STAYS) : v.areas
-        const rest = v.areas.slice(stays.length)
-        // A visit starts on the next page rather than leave its name alone at
-        // the foot of this one.
-        if (y + VR * Math.min(3, 1 + v.areas.length) > BOTTOM) { doc.addPage(); y = header(head('Site Visits')) }
-        const shade = i % 2 === 0
-        put(v, shade, [
-          v.site,
-          v.startsBefore ? 'On site at start' : when(v.start),
-          v.endsAfter ? 'Still on site' : when(v.end),
-          span(v.end - v.start),
-        ], 'visit')
-        for (const a of stays) {
-          put(v, shade, [a.name ?? 'Elsewhere on the site', when(a.start, v.start), when(a.end, v.start), span(a.end - a.start)], 'stay', a.name ? C.ink : C.sub)
+        const h = blockH(v)
+        const d = eatDate(v.start)
+        if (d !== day) {
+          // A day band is not left alone at the foot of a page.
+          if (y + 25 + h > BOTTOM) fresh()
+          day = d
+          dayBand(v, false)
+        } else if (y + h > BOTTOM) {
+          fresh()
+          dayBand(v, true)
+        } else if (i) {
+          doc.moveTo(SX, y - 6).lineTo(M + W, y - 6).lineWidth(0.4).stroke(C.line)
         }
-        if (rest.length) {
-          const areasLeft = new Set(rest.map(a => a.name)).size
-          put(v, shade, [
-            `${rest.length} more stays in ${areasLeft} area${areasLeft === 1 ? '' : 's'}`,
-            when(rest[0]!.start, v.start), when(rest[rest.length - 1]!.end, v.start),
-            span(rest.reduce((t, a) => t + a.end - a.start, 0)),
-          ], 'stay', C.sub)
+        const y0 = y
+        // The gutter: arrival over departure, joined by a hairline.
+        line(v.startsBefore ? 'at start' : clock(v.start), M, y0, GUT - 6, { font: v.startsBefore ? F.reg : F.bold, size: 9, color: v.startsBefore ? C.sub : C.ink })
+        const dy = v.areas.length ? 15 + BAR_H + 6 : 12
+        doc.moveTo(M + 2.5, y0 + 12).lineTo(M + 2.5, y0 + dy - 1.5).lineWidth(0.6).stroke(C.light)
+        line(departed(v), M, y0 + dy, GUT - 6, { size: 9, color: C.sub })
+        // The site, and the time on site.
+        line(v.site, SX, y0 - 0.5, SW, { font: F.bold, size: 9.5 })
+        if (v.from === 'geofence') {
+          const nw = doc.font(F.bold).fontSize(9.5).widthOfString(v.site)
+          line('company geofence', SX + nw + 8, y0 + 1.5, SW - nw - 8, { size: 7, color: C.sub })
         }
+        line(span(v.end - v.start), M + W - RIGHT, y0 - 0.5, RIGHT, { font: F.bold, size: 10, align: 'right' })
+        if (v.startsBefore || v.endsAfter) line('at least', M + W - RIGHT, y0 + 12, RIGHT, { size: 6.8, color: C.sub, align: 'right' })
+
+        if (v.areas.length) {
+          const { lines, more, longest } = stayLines(v)
+          // The bar: the visit end to end, each stay where it fell.
+          const by = y0 + 15, dur = Math.max(1, v.end - v.start)
+          doc.rect(SX, by, SW, BAR_H).fill(C.pale)
+          for (const a of v.areas) {
+            const x0 = SX + ((a.start - v.start) / dur) * SW
+            const w = Math.max(1.5, ((a.end - a.start) / dur) * SW)
+            doc.rect(x0, by, Math.min(w, SX + SW - x0), BAR_H).fill(a === longest ? C.green : a.name ? C.greenSoft : C.light)
+            if (x0 > SX + 0.5) doc.moveTo(x0, by).lineTo(x0, by + BAR_H).lineWidth(0.8).stroke(C.paper)
+          }
+          // The stays in order, the longest named one in bold.
+          lines.forEach((items, li) => {
+            let x = SX
+            const ly = by + BAR_H + 5 + li * LINE_H
+            items.forEach((it, k) => {
+              if (k) {
+                doc.font(F.reg).fontSize(ITEM).fillColor(C.faint).text('  ›  ', x, ly, { lineBreak: false })
+                x += doc.widthOfString('  ›  ')
+              }
+              doc.font(it.strong ? F.bold : F.reg).fontSize(ITEM).fillColor(it.name === 'Site grounds' ? C.sub : C.ink).text(it.name, x, ly, { lineBreak: false })
+              x += doc.widthOfString(it.name)
+              doc.font(F.reg).fontSize(ITEM).fillColor(C.sub).text(` ${it.dur}`, x, ly, { lineBreak: false })
+              x += doc.widthOfString(` ${it.dur}`)
+            })
+            if (more && li === lines.length - 1) doc.font(F.reg).fontSize(ITEM).fillColor(C.sub).text(`  +${more} more`, x, ly, { lineBreak: false })
+          })
+        }
+        y = y0 + h
       })
       if (visits.length > shown.length) {
-        y += 4
         line(`${visits.length - shown.length} later visits are not shown.`, M, y, W, { size: 7.5, color: C.sub })
         y += 12
       }
-      y += 10
+      y += 6
     }
   }
 
