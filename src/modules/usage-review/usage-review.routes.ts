@@ -9,7 +9,7 @@ import { getUsageReview, reviewForDownload, type ReadyReview } from './usage-rev
 import { buildUsageReviewXlsx } from './usage-review.xlsx.js'
 import { renderUsageReviewPdf } from './usage-review.pdf.js'
 import { classifyPlaces, loadSites } from './usage-review.areas.js'
-import { aiActivities, cachedActivity, nameKey } from './usage-review.activity-ai.js'
+import { aiActivities, aiStatus, cachedActivity, nameKey } from './usage-review.activity-ai.js'
 
 /**
  * Unit usage review — drive hours, distance, fuel (estimated) and the places a
@@ -21,8 +21,9 @@ import { aiActivities, cachedActivity, nameKey } from './usage-review.activity-a
  *   GET …/vehicles/:vehicleId/usage-review/pdf?from&to[&kmpl][&names][&driver]
  *   POST …/vehicles/:vehicleId/usage-review/activities  { places: [{ name, hint? }] }
  *       what each named place is, read by OpenAI from its exact name (and
- *       Google's type as a hint): { activities: { [name]: group | null } } —
- *       see usage-review.activity-ai. Names it could not read are absent.
+ *       Google's type as a hint): { activities: { [name]: group | null },
+ *       models: [{ name, configured, resting, lastProblem }] } — see
+ *       usage-review.activity-ai. Names it could not read are absent.
  *   GET …/vehicles/:vehicleId/usage-review/day?from&to&date
  *       one day's GPS fixes from the built review, for the page's playback:
  *       { date, points: [t ms, lat, lng, km/h, course|null, ignition 1/0/null][] }
@@ -145,7 +146,7 @@ const postActivities: RequestHandler = async (req, res, next) => {
     const got = await aiActivities(places)
     const activities: Record<string, string | null> = {}
     for (const pl of places) { const k = nameKey(pl.name); if (got.has(k)) activities[pl.name] = got.get(k) ?? null }
-    sendSuccess(res, { activities })
+    sendSuccess(res, { activities, models: aiStatus() })
   } catch (err) { next(err) }
 }
 
