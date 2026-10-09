@@ -9,11 +9,11 @@
  *   Then, flowing on from page 2 — a section starts a new page only when it
  *   does not fit below the last (operator, 2026-10-09: no extra white space):
  *     Where the Vehicle Spent Its Time, place by place with home first; Daily
- *     Distance against the active-day mean and median;
+ *     Distance against the active-day mean and median; Overnight Locations;
  *     Driving Patterns (trips by weekday and by start hour), Most Frequent
  *     Routes;
  *     Top Sites at a Glance, with what each is (a bank, a restaurant, a
- *     clinic) and median arrival and departure; Overnight Locations;
+ *     clinic) and median arrival and departure;
  *     Route Map and Key Locations: the route with its places numbered and
  *     named.
  *   Titles in Title Case (operator, 2026-10-09).
@@ -45,8 +45,8 @@ import { reportFigures, shortPlaceName, WEEKDAYS } from './usage-review.report.j
 // a black-and-white report, colour in the bar and pie charts, green never
 // beside blue, red or purple, no purple bars). Green is work — driving and
 // the work sites; amber is what to look at — other places, idling, round
-// trips, the quiet day. Neither ever sits beside blue, red or purple: those
-// are not in the report. Greys lean to the green (hue 150), never flat; the
+// trips, the quiet day. No red or purple anywhere; the one blue is the mean
+// line on Daily Distance, asked for by name. Greys lean to the green (hue 150), never flat; the
 // paper is a tinted white, not #fff. Values are OKLCH, written as hex because
 // pdfkit takes no OKLCH.
 const C = {
@@ -62,6 +62,10 @@ const C = {
   green: '#21763c',     // oklch(50% 0.12 150): work, driving, the peak
   greenSoft: '#63a471', // oklch(66% 0.10 150): the ordinary bars
   amber: '#f2b036',     // oklch(80% 0.15 78): elsewhere, idling, the low point
+  // Daily Distance's reference lines only (operator, 2026-10-09: "the median
+  // a yellow line, the mean a sky blue line").
+  yellow: '#debb19',    // oklch(80% 0.16 95): the median
+  sky: '#37aae3',       // oklch(70% 0.13 235): the mean
 }
 const F = { reg: 'Helvetica', bold: 'Helvetica-Bold' }
 const M = 36
@@ -268,16 +272,31 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   }
 
   /** Vertical bars in a box, a value over each, a label under. */
-  const vbars = (box: { x: number; y: number; w: number; h: number }, vals: number[], colors: string[], labels: string[], o: { every?: number; values?: boolean } = {}) => {
-    const top = Math.max(1, ...vals)
+  /** Vertical bars in a box, a value over each, a label under. With `axis`,
+   *  a scale up the left side (counts, light gridlines) instead of a value
+   *  over each bar, captioned `axis`. Returns the value the box's top stands for. */
+  const vbars = (box: { x: number; y: number; w: number; h: number }, vals: number[], colors: string[], labels: string[], o: { every?: number; values?: boolean; axis?: string; labelSize?: number } = {}) => {
+    let top = Math.max(1, ...vals)
+    if (o.axis) {
+      const raw = top / 4, mag = 10 ** Math.floor(Math.log10(raw))
+      const step = Math.max(1, [1, 2, 5, 10].map(k => k * mag).find(k => k >= raw) ?? 10 * mag)
+      top = Math.ceil(top / step) * step
+      for (let v = 0; v <= top; v += step) {
+        const yy = box.y + box.h - (v / top) * box.h
+        if (v > 0) doc.moveTo(box.x, yy).lineTo(box.x + box.w, yy).lineWidth(0.3).stroke(C.line)
+        line(String(v), box.x - 22, yy - 3, 18, { size: 6.3, color: C.sub, align: 'right' })
+      }
+      line(o.axis, box.x - 22, box.y - 12, 40, { size: 6.3, color: C.sub })
+    }
     const bw = box.w / vals.length
     doc.moveTo(box.x, box.y + box.h).lineTo(box.x + box.w, box.y + box.h).lineWidth(0.6).stroke(C.faint)
     vals.forEach((v, i) => {
       const h = (v / top) * box.h
       if (h > 0) doc.rect(box.x + i * bw + bw * 0.14, box.y + box.h - h, bw * 0.72, h).fill(colors[i]!)
-      if (o.values !== false && v > 0) line(String(v), box.x + i * bw, box.y + box.h - h - 9, bw, { size: 6.5, color: C.sub, align: 'center' })
-      if (i % (o.every ?? 1) === 0) line(labels[i]!, box.x + i * bw - 4, box.y + box.h + 4, bw + 8, { size: 6.5, color: C.sub, align: 'center' })
+      if (!o.axis && o.values !== false && v > 0) line(String(v), box.x + i * bw, box.y + box.h - h - 9, bw, { size: 6.5, color: C.sub, align: 'center' })
+      if (i % (o.every ?? 1) === 0) line(labels[i]!, box.x + i * bw - 4, box.y + box.h + 4, bw + 8, { size: o.labelSize ?? 6.5, color: C.sub, align: 'center' })
     })
+    return top
   }
 
   /** A table: header row, zebra rows, one line per cell. */
@@ -331,6 +350,8 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   const period = `${dayLabel(rv.period.from, true)} – ${dayLabel(rv.period.to, true)}`
   const prepared = (() => { const d = new Date(rv.builtAt + TZ_OFFSET_MS); return `${String(d.getUTCDate()).padStart(2, '0')} ${['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][d.getUTCMonth()]} ${d.getUTCFullYear()}` })()
 
+  /** Overnight Locations' height: title, strip, dates, key and the note. */
+  const NIGHTS_H = 128
   /** A new section: on the same page when `need` points fit below what is
    *  there, else on a fresh page under the running head. */
   const section = (y: number, need: number, name: string) => {
@@ -490,7 +511,9 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   {
     const days = rv.days
     // The key sits on its own line above the bars, never over them.
-    const box = { x: M + 30, y: y + 14, w: W - 40, h: Math.min(180, BOTTOM - y - 44) }
+    // Room kept below for Overnight Locations, when the chart can spare it.
+    const room = BOTTOM - y - 44
+    const box = { x: M + 30, y: y + 14, w: W - 40, h: Math.min(180, areas && room - NIGHTS_H >= 110 ? room - NIGHTS_H : room) }
     const top = Math.max(50, ...days.map(d => d.km))
     const step = top > 300 ? 100 : top > 120 ? 50 : 20
     const ceil = Math.ceil(top / step) * step
@@ -507,16 +530,46 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     const ref = (v: number | null, c: string, dash: [number, number], label: string, ly: number, lx: number) => {
       if (v == null) return
       const yy = box.y + box.h - (v / ceil) * box.h
-      doc.moveTo(box.x, yy).lineTo(box.x + box.w, yy).lineWidth(1.2).dash(dash[0], { space: dash[1] }).stroke(c).undash()
-      doc.moveTo(lx, ly + 4).lineTo(lx + 18, ly + 4).lineWidth(1.2).dash(dash[0], { space: dash[1] }).stroke(c).undash()
+      doc.moveTo(box.x, yy).lineTo(box.x + box.w, yy).lineWidth(1.6).dash(dash[0], { space: dash[1] }).stroke(c).undash()
+      doc.moveTo(lx, ly + 4).lineTo(lx + 18, ly + 4).lineWidth(1.6).dash(dash[0], { space: dash[1] }).stroke(c).undash()
       line(label, lx + 22, ly, 128, { size: 7.5 })
     }
-    ref(fig.activeKm.mean, C.ink, [5, 3], `Mean active: ${nf(fig.activeKm.mean, 0)} km`, box.y - 16, box.x + box.w - 150)
-    ref(fig.activeKm.median, C.ink, [1.5, 2], `Median active: ${nf(fig.activeKm.median, 0)} km`, box.y - 16, box.x + box.w - 300)
+    ref(fig.activeKm.mean, C.sky, [5, 3], `Mean active: ${nf(fig.activeKm.mean, 0)} km`, box.y - 16, box.x + box.w - 150)
+    ref(fig.activeKm.median, C.yellow, [3, 2], `Median active: ${nf(fig.activeKm.median, 0)} km`, box.y - 16, box.x + box.w - 300)
     const every = Math.max(1, Math.ceil(days.length / 10))
     days.forEach((d, i) => { if (i % every === 0) line(dayLabel(d.date), box.x + i * bw - 12, box.y + box.h + 4, 34, { size: 6.5, color: C.sub, align: 'center' }) })
     y = box.y + box.h + 20
   }
+
+  // Overnight Locations, below Daily Distance (operator, 2026-10-09).
+  if (areas) {
+    y = section(y - 8, NIGHTS_H - 8, 'Overnight Locations')
+    y = title('Overnight Locations', 'where the unit stood at 02:00, each night of the period', y)
+    const n = areas.nightly.length
+    const cw = W / n
+    areas.nightly.forEach((d, i) => {
+      const x = M + i * cw
+      doc.rect(x + 0.6, y, Math.max(1, cw - 1.2), 18).fill(d.kind ? KIND_COLOR[d.kind] : C.pale)
+    })
+    const every = Math.max(1, Math.ceil(n / 15))
+    areas.nightly.forEach((d, i) => { if (i % every === 0) line(dayLabel(d.date), M + i * cw - 8, y + 22, cw + 16, { size: 6.3, color: C.sub, align: 'center' }) })
+    y += 36
+    let kx = M
+    for (const k of ['home', 'work', 'elsewhere', null] as (PlaceKind | null)[]) {
+      const count = k ? areas.nights[k] : areas.nightly.filter(d => !d.kind).length
+      const label = `${k ? (k === 'home' ? 'Home area' : KIND_SHORT[k]) : 'Moving or no stop'}  ${count}`
+      doc.rect(kx, y + 1, 7, 7).fill(k ? KIND_COLOR[k] : C.pale)
+      line(label, kx + 11, y, 140, { size: 7.5 })
+      doc.font(F.reg).fontSize(7.5)
+      kx += doc.widthOfString(label) + 28
+    }
+    y += 16
+    doc.font(F.reg).fontSize(6.8).fillColor(C.sub).text(
+      'Work sites are the company\'s factories and weighbridge yards and its own site fences. The home area is the place away from work where the unit spends the most nights, and anywhere within 3 km of it; nothing on record names a driver\'s house, so read it as where the unit sleeps.',
+      M, y, { width: W, lineGap: 1 })
+    y = doc.y + 10
+  }
+
 
   // ════ when it drives, and the routes ════
   y = section(y, 230, 'Driving Patterns')
@@ -531,10 +584,12 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     const wcol = fig.byWeekday.map((_, i) => (i === fig.busiestDay ? C.green : i === fig.quietestDay ? C.amber : C.greenSoft))
     vbars({ x: M + 6, y: y + 22, w: half - 12, h }, fig.byWeekday, wcol, WEEKDAYS.map(d => d.slice(0, 3)))
     const hcol = fig.byHour.map((_, i) => (i === fig.peakHour ? C.green : C.greenSoft))
-    vbars({ x: M + half + 26, y: y + 22, w: half - 12, h }, fig.byHour, hcol, fig.byHour.map((_, i) => String(i).padStart(2, '0')), { every: 3, values: false })
+    // Every hour named under its bar, and a scale of trips up the side
+    // (operator, 2026-10-09: "add the hours on the axis").
+    const top = vbars({ x: M + half + 26, y: y + 22, w: half - 12, h }, fig.byHour, hcol, fig.byHour.map((_, i) => String(i).padStart(2, '0')), { axis: 'trips', labelSize: 5.8 })
+    line('hour of day', M + half + 26, y + 22 + h + 13, half - 12, { size: 6.3, color: C.sub, align: 'center' })
     if (fig.peakHour != null) {
       const bw = (half - 12) / 24
-      const top = Math.max(1, ...fig.byHour)
       line(`Peak ${String(fig.peakHour).padStart(2, '0')}:00`, M + half + 26 + fig.peakHour * bw - 25, y + 22 + h - (fig.byHour[fig.peakHour]! / top) * h - 10, 50 + bw, { size: 6.8, align: 'center' })
     }
     y += 22 + h + 30
@@ -560,7 +615,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     y += 16
   }
 
-  // ════ sites, nights ════
+  // ════ sites ════
   y = section(y, 40 + 15 * (1 + Math.min(11, fig.sites.length)), 'Top Sites')
   y = title('Top Sites at a Glance', 'home and the top 10 other places · activity read from each name and Google Maps · times are median arrival / departure', y)
   {
@@ -574,34 +629,6 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
       cells: [x.name, x.home ? 'Home' : x.activity ?? '-', nf(x.hours, 1), String(x.visits), String(x.days), `${nf(x.avgH, 2)} h`, hhmm(x.arrive), hhmm(x.depart)],
     })), y)
     y += 10
-  }
-
-  if (areas) {
-    y = section(y - 8, 120, 'Overnight Locations')
-    y = title('Overnight Locations', 'where the unit stood at 02:00, each night of the period', y)
-    const n = areas.nightly.length
-    const cw = W / n
-    areas.nightly.forEach((d, i) => {
-      const x = M + i * cw
-      doc.rect(x + 0.6, y, Math.max(1, cw - 1.2), 18).fill(d.kind ? KIND_COLOR[d.kind] : C.pale)
-    })
-    const every = Math.max(1, Math.ceil(n / 15))
-    areas.nightly.forEach((d, i) => { if (i % every === 0) line(dayLabel(d.date), M + i * cw - 8, y + 22, cw + 16, { size: 6.3, color: C.sub, align: 'center' }) })
-    y += 36
-    let kx = M
-    for (const k of ['home', 'work', 'elsewhere', null] as (PlaceKind | null)[]) {
-      const count = k ? areas.nights[k] : areas.nightly.filter(d => !d.kind).length
-      const label = `${k ? (k === 'home' ? 'Home area' : KIND_SHORT[k]) : 'Moving or no stop'}  ${count}`
-      doc.rect(kx, y + 1, 7, 7).fill(k ? KIND_COLOR[k] : C.pale)
-      line(label, kx + 11, y, 140, { size: 7.5 })
-      doc.font(F.reg).fontSize(7.5)
-      kx += doc.widthOfString(label) + 28
-    }
-    y += 16
-    doc.font(F.reg).fontSize(6.8).fillColor(C.sub).text(
-      'Work sites are the company\'s factories and weighbridge yards and its own site fences. The home area is the place away from work where the unit spends the most nights, and anywhere within 3 km of it; nothing on record names a driver\'s house, so read it as where the unit sleeps.',
-      M, y, { width: W, lineGap: 1 })
-    y = doc.y + 10
   }
 
   // ════ evidence ════
