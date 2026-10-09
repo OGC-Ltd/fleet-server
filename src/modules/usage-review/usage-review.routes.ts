@@ -115,7 +115,8 @@ async function withAreas(rv: ReadyReview, orgId: string): Promise<ReadyReview> {
     areas: summary,
     places: rv.places.map(pl => {
       const a = byPlace.get(pl.id)
-      return a ? { ...pl, kind: a.kind, site: a.site, nights: a.nights } : pl
+      // A work site with no business named there is still work.
+      return a ? { ...pl, kind: a.kind, site: a.site, nights: a.nights, activity: pl.activity || (a.kind === 'work' ? 'Work' : null) } : pl
     }),
   }
 }
