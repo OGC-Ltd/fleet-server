@@ -19,6 +19,10 @@
  *
  * Every one of those is work (usage-review.areas reads `nameFrom`).
  *
+ * The same test, run over every fix of the track, gives the Logbook's Site
+ * Visits (siteVisits): when the unit went onto each site, the named areas it
+ * stood in and for how long, and when it left.
+ *
  * The surveys are COPIES of new-ui's public/*-site.geojson, which is where they
  * are drawn on the map (new-ui lib/sitePlans.js). A new survey goes in both
  * places. Read once, on first use.
@@ -29,7 +33,7 @@ import path from 'node:path'
 import { haversineM, isInsideFence, pointInPolygon } from '../../lib/geofence.js'
 import { ringAreaHa } from '../../lib/zone-taxonomy.js'
 import { logger } from '../../lib/logger.js'
-import type { ReviewPlace, ReviewStop } from './usage-review.compute.js'
+import type { ReviewPlace, ReviewPoint, ReviewStop } from './usage-review.compute.js'
 import type { Site } from './usage-review.areas.js'
 
 /** A stop this close to a surveyed pin stood at it. Kabras' pins are 4–60 m
@@ -120,33 +124,56 @@ export function loadSitePlans(dir = path.resolve(process.cwd(), 'assets', 'site-
   return out
 }
 
+const haCache = new WeakMap<object, number>()
 const fenceHa = (s: Site): number => {
   const f = s.fence
   if (!f) return Infinity
-  if (f.type === 'CIRCLE') return (Math.PI * f.radiusM * f.radiusM) / 10_000
-  if (f.type === 'POLYGON') return ringAreaHa(f.polygonCoords)
-  return Infinity
+  let ha = haCache.get(f)
+  if (ha === undefined) {
+    ha = f.type === 'CIRCLE' ? (Math.PI * f.radiusM * f.radiusM) / 10_000 : f.type === 'POLYGON' ? ringAreaHa(f.polygonCoords) : Infinity
+    haCache.set(f, ha)
+  }
+  return ha
 }
+
+/** A ring's bounding box, worked out once: a whole track is tested against
+ *  every survey (siteVisits), and nearly every fix is nowhere near most. */
+const boxCache = new WeakMap<Ring, [number, number, number, number]>()
+function inRing(lat: number, lng: number, ring: Ring): boolean {
+  let b = boxCache.get(ring)
+  if (!b) {
+    b = [Infinity, Infinity, -Infinity, -Infinity]
+    for (const [x, y] of ring) { b[0] = Math.min(b[0], x); b[1] = Math.min(b[1], y); b[2] = Math.max(b[2], x); b[3] = Math.max(b[3], y) }
+    boxCache.set(ring, b)
+  }
+  return lng >= b[0] && lng <= b[2] && lat >= b[1] && lat <= b[3] && pointInPolygon(lat, lng, ring)
+}
+const inFence = (lat: number, lng: number, f: NonNullable<Site['fence']>) =>
+  f.type === 'POLYGON' ? inRing(lat, lng, f.polygonCoords) : isInsideFence(lat, lng, f)
+/** About PIN_RADIUS_M in degrees of latitude, with room: a pin further than
+ *  this north or south is not measured. */
+const PIN_DEG = (PIN_RADIUS_M * 1.2) / 111_000
 
 /** Where a point stands, by the company's own ground — see the module note. */
 export function spotAt(lat: number, lng: number, plans: SitePlan[], fences: Site[] = []): Spot | null {
   // 1. A surveyed site: inside its fence, or at one of its pins.
   let best: { plan: SitePlan; ha: number } | null = null
   for (const plan of plans) {
-    if (!plan.perimeter || !plan.name || !pointInPolygon(lat, lng, plan.perimeter)) continue
+    if (!plan.perimeter || !plan.name || !inRing(lat, lng, plan.perimeter)) continue
     if (!best || plan.ha < best.ha) best = { plan, ha: plan.ha }
   }
   let pinHit: { plan: SitePlan; name: string; d: number } | null = null
   for (const plan of best ? [best.plan] : plans) {
     if (!plan.name) continue
     for (const pin of plan.pins) {
+      if (Math.abs(pin.lat - lat) > PIN_DEG) continue
       const d = haversineM(lat, lng, pin.lat, pin.lng)
       if (d <= PIN_RADIUS_M && (!pinHit || d < pinHit.d)) pinHit = { plan, name: pin.name, d }
     }
   }
   if (best) {
     const area = best.plan.areas
-      .filter(a => pointInPolygon(lat, lng, a.ring))
+      .filter(a => inRing(lat, lng, a.ring))
       .sort((a, b) => a.ha - b.ha)[0]?.name ?? pinHit?.name ?? null
     return { site: best.plan.name!, area, from: 'site-plan' }
   }
@@ -154,12 +181,12 @@ export function spotAt(lat: number, lng: number, plans: SitePlan[], fences: Site
 
   // 2. A surveyed area with no fence round it.
   const open = plans.filter(p => !p.perimeter).flatMap(p => p.areas)
-    .filter(a => pointInPolygon(lat, lng, a.ring)).sort((a, b) => a.ha - b.ha)[0]
+    .filter(a => inRing(lat, lng, a.ring)).sort((a, b) => a.ha - b.ha)[0]
   if (open) return { site: open.name, area: null, from: 'site-plan' }
 
   // 3. The organisation's own geofences, smallest first.
   const fence = fences
-    .filter(s => s.fence && fenceHa(s) <= MAX_NAMING_FENCE_HA && isInsideFence(lat, lng, s.fence))
+    .filter(s => s.fence && fenceHa(s) <= MAX_NAMING_FENCE_HA && inFence(lat, lng, s.fence))
     .sort((a, b) => fenceHa(a) - fenceHa(b))[0]
   return fence ? { site: fence.name, area: null, from: 'geofence' } : null
 }
@@ -222,4 +249,108 @@ export function nameBySite(places: ReviewPlace[], stops: ReviewStop[], plans: Si
     named++
   }
   return named
+}
+
+// ── visits ──────────────────────────────────────────────────────────────────
+
+/** Out of a site for less than this and back in is the same visit: a fix that
+ *  landed over the fence line, or a lorry out of the gate and straight back. */
+export const VISIT_GAP_MS = 10 * 60_000
+/** Shorter than this, a visit was a drive past (a road along the fence, a pin
+ *  by the roadside) and not a visit. */
+export const MIN_VISIT_MS = 5 * 60_000
+/** Shorter than this, an area was driven through on the way to another. */
+export const MIN_AREA_MS = 2 * 60_000
+/** The site's own ground, outside every named area, takes longer to cross
+ *  (out of Kabras' garage to the gate is three minutes), so a stay there
+ *  counts from this. */
+export const MIN_GROUND_MS = 5 * 60_000
+
+export interface SiteVisitArea {
+  /** The named area or pin; null for the site's own ground, outside every
+   *  named area. */
+  name: string | null
+  /** First and last fix in it, ms. */
+  start: number
+  end: number
+}
+
+export interface SiteVisit {
+  site: string
+  from: Spot['from']
+  /** The first fix inside the site, and the last. */
+  start: number
+  end: number
+  /** On the site already at the period's first fix, so it arrived earlier. */
+  startsBefore: boolean
+  /** Still on the site at the period's last fix, so it left later, if at all. */
+  endsAfter: boolean
+  /** Where on the site it stood, in order, each a stay in one area. Empty for
+   *  a visit that never stood in a named area. */
+  areas: SiteVisitArea[]
+}
+
+/**
+ * Every visit to a site in the track (operator, 2026-10-09: "when the unit was
+ * able to access for instance Raiply, at what time did it arrive, which area
+ * within the organisation was it seen, for how long, when it departed").
+ *
+ * Read from the fixes rather than the stops: a stop is a place it stood ten
+ * minutes or more, but it arrives when it crosses the fence, and the areas it
+ * stood in for less still count. A visit runs from the first fix inside the
+ * site to the last; out of it for under VISIT_GAP_MS and back is the same
+ * visit, and a silence (a tracker that sleeps while parked) does not end one.
+ */
+export function siteVisits(points: ReviewPoint[], plans: SitePlan[], fences: Site[] = []): SiteVisit[] {
+  if (!points.length) return []
+  // A parked unit sends the same fix over and over.
+  const memo = new Map<string, Spot | null>()
+  const spot = (lat: number, lng: number) => {
+    const k = `${lat.toFixed(5)},${lng.toFixed(5)}`
+    let v = memo.get(k)
+    if (v === undefined) { v = spotAt(lat, lng, plans, fences); memo.set(k, v) }
+    return v
+  }
+  const firstT = points[0]!.t, lastT = points[points.length - 1]!.t
+  const out: SiteVisit[] = []
+  let cur: (SiteVisit & { key: string }) | null = null
+
+  const close = () => {
+    if (!cur) return
+    const { key: _key, ...v } = cur
+    cur = null
+    if (v.end - v.start < MIN_VISIT_MS) return
+    // Areas driven through drop out, and the stays either side of one become
+    // one stay; the longest is kept if every one was short.
+    let kept = v.areas.filter(a => a.end - a.start >= (a.name == null ? MIN_GROUND_MS : MIN_AREA_MS))
+    if (!kept.length) kept = [...v.areas].sort((a, b) => (b.end - b.start) - (a.end - a.start)).slice(0, 1)
+    const merged: SiteVisitArea[] = []
+    for (const a of kept) {
+      const last = merged[merged.length - 1]
+      if (last && last.name === a.name) last.end = a.end
+      else merged.push({ ...a })
+    }
+    v.areas = merged.length === 1 && merged[0]!.name == null ? [] : merged
+    out.push(v)
+  }
+
+  for (const p of points) {
+    const s = spot(p.lat, p.lng)
+    if (!s) {
+      if (cur && p.t - cur.end > VISIT_GAP_MS) close()
+      continue
+    }
+    const key = `${s.from}|${s.site}`
+    if (cur && cur.key !== key) close()
+    if (!cur) {
+      cur = { key, site: s.site, from: s.from, start: p.t, end: p.t, startsBefore: p.t === firstT, endsAfter: false, areas: [] }
+    }
+    cur.end = p.t
+    cur.endsAfter = p.t === lastT
+    const last = cur.areas[cur.areas.length - 1]
+    if (last && last.name === s.area) last.end = p.t
+    else cur.areas.push({ name: s.area, start: p.t, end: p.t })
+  }
+  close()
+  return out
 }

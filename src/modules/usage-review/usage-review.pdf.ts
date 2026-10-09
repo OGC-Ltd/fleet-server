@@ -14,6 +14,9 @@
  *     Routes;
  *     Top Sites at a Glance, with what each is (a bank, a restaurant, a
  *     clinic) and median arrival and departure;
+ *     Site Visits: each time it went onto a site plan or a company geofence,
+ *     when it arrived, the areas inside it stood in and for how long, and
+ *     when it left;
  *     Route Map and Key Locations: the route with its places numbered and
  *     named.
  *   Titles in Title Case (operator, 2026-10-09).
@@ -33,6 +36,7 @@ import PDFDocument from 'pdfkit'
 import { fuelOf, TZ_OFFSET_MS, type ReviewPlace } from './usage-review.compute.js'
 import type { PlaceKind } from './usage-review.areas.js'
 import type { ReadyReview } from './usage-review.service.js'
+import type { SiteVisit } from './usage-review.siteplans.js'
 import { reportFigures, shortPlaceName, WEEKDAYS } from './usage-review.report.js'
 
 /* Hallmark · component: report charts (PDF) · genre: editorial · theme: custom
@@ -187,6 +191,23 @@ const dayLabel = (d: string, year = false) => `${Number(d.slice(8, 10))} ${MONTH
 const pct = (v: number, of: number) => (of > 0 ? `${nf((v / of) * 100, 1)}%` : '-')
 const pct0 = (v: number | null) => (v == null ? '-' : `${Math.round(v * 100)}%`)
 const hhmm = (m: number | null) => (m == null ? '-' : `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`)
+const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const eatDate = (ms: number) => new Date(ms + TZ_OFFSET_MS).toISOString().slice(0, 10)
+/** "Mon 5 Oct 07:12" in EAT; only "07:12" on the same day as `sameDayAs`. */
+const when = (ms: number, sameDayAs?: number) => {
+  const d = new Date(ms + TZ_OFFSET_MS)
+  const t = `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
+  if (sameDayAs != null && eatDate(sameDayAs) === eatDate(ms)) return t
+  return `${WD[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${t}`
+}
+/** "45 min", "9 h 26 min", "3 d 4 h". */
+const span = (ms: number) => {
+  const m = Math.round(ms / 60_000)
+  if (m < 60) return `${m} min`
+  const h = Math.floor(m / 60), r = m % 60
+  if (h < 48) return r ? `${h} h ${r} min` : `${h} h`
+  return `${Math.floor(h / 24)} d ${h % 24} h`
+}
 
 // ── drawing ──────────────────────────────────────────────────────────────────
 
@@ -655,6 +676,88 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
       cells: [x.name, x.home ? 'Home' : x.activity ?? '-', nf(x.hours, 1), String(x.visits), String(x.days), `${nf(x.avgH, 2)} h`, hhmm(x.arrive), hhmm(x.depart)],
     })), y)
     y += 10
+  }
+
+  // ════ site visits ════
+  // Each time it went onto a site plan or one of the organisation's geofences
+  // (operator, 2026-10-09: "at what time did it arrive, which area within the
+  // organisation was it seen, for how long, when it departed"), read from the
+  // track itself (usage-review.siteplans siteVisits). A visit's rows share a
+  // shade, and the table runs on over as many pages as it needs.
+  {
+    const visits = rv.siteVisits ?? []
+    const MAX_VISITS = 150, MAX_STAYS = 8, VR = 15
+    const shown = visits.slice(0, MAX_VISITS)
+    const nSites = new Set(visits.map(v => v.site)).size
+    y = section(y, 40 + 4 * VR, 'Site Visits')
+    y = title('Site Visits', visits.length
+      ? `${visits.length} visit${visits.length === 1 ? '' : 's'} to ${nSites} site${nSites === 1 ? '' : 's'} · site plans and company geofences · 5 min or longer · times in EAT`
+      : 'site plans and company geofences', y)
+    if (!visits.length) {
+      // Not worked out (the build logs why) is not the same as none.
+      line(rv.siteVisits ? 'It did not go onto any site plan or company geofence in the period.' : 'The site visits could not be worked out for this review.', M, y, W, { size: 8.5, color: C.sub })
+      y += 20
+    } else {
+      const cols = [{ w: 215, h: 'Site and area' }, { w: 100, h: 'Arrived' }, { w: 100, h: 'Departed' }, { w: W - 415, h: 'Time there', r: true }]
+      const header = (yy: number) => {
+        let x = M
+        for (const c of cols) { line(c.h, x + 4, yy, c.w - 8, { font: F.bold, size: 7, color: C.sub, align: c.r ? 'right' : 'left' }); x += c.w }
+        doc.moveTo(M, yy + 11).lineTo(M + W, yy + 11).lineWidth(0.6).stroke(C.line)
+        return yy + 16
+      }
+      /** One row; on a fresh page under the header when this one has no room,
+       *  and a stay carried over is told which visit it belongs to. */
+      const put = (v: SiteVisit, shade: boolean, cells: string[], kind: 'visit' | 'stay', nameColor = C.ink) => {
+        if (y + VR > BOTTOM) {
+          doc.addPage()
+          y = header(head('Site Visits'))
+          if (kind === 'stay') put(v, shade, [`${v.site} (continued)`, '', '', ''], 'visit')
+        }
+        if (shade) doc.rect(M, y - 4, W, VR).fill(C.panel)
+        let x = M
+        cells.forEach((val, i) => {
+          const c = cols[i]!
+          const pad = i ? 4 : kind === 'visit' ? 12 : 22
+          line(val, x + pad, y, c.w - pad - 4, { font: kind === 'visit' && !i ? F.bold : F.reg, size: 7.8, color: i ? C.ink : nameColor, align: c.r ? 'right' : 'left' })
+          x += c.w
+        })
+        if (kind === 'visit') doc.circle(M + 6, y + 3.6, 2.8).fill(v.from === 'site-plan' ? C.green : C.greenSoft)
+        else doc.moveTo(M + 13, y + 4).lineTo(M + 18, y + 4).lineWidth(0.6).stroke(C.faint)
+        y += VR
+      }
+      y = header(y)
+      shown.forEach((v, i) => {
+        const stays = v.areas.length > MAX_STAYS + 1 ? v.areas.slice(0, MAX_STAYS) : v.areas
+        const rest = v.areas.slice(stays.length)
+        // A visit starts on the next page rather than leave its name alone at
+        // the foot of this one.
+        if (y + VR * Math.min(3, 1 + v.areas.length) > BOTTOM) { doc.addPage(); y = header(head('Site Visits')) }
+        const shade = i % 2 === 0
+        put(v, shade, [
+          v.site,
+          v.startsBefore ? 'On site at start' : when(v.start),
+          v.endsAfter ? 'Still on site' : when(v.end),
+          span(v.end - v.start),
+        ], 'visit')
+        for (const a of stays) {
+          put(v, shade, [a.name ?? 'Elsewhere on the site', when(a.start, v.start), when(a.end, v.start), span(a.end - a.start)], 'stay', a.name ? C.ink : C.sub)
+        }
+        if (rest.length) {
+          const areasLeft = new Set(rest.map(a => a.name)).size
+          put(v, shade, [
+            `${rest.length} more stays in ${areasLeft} area${areasLeft === 1 ? '' : 's'}`,
+            when(rest[0]!.start, v.start), when(rest[rest.length - 1]!.end, v.start),
+            span(rest.reduce((t, a) => t + a.end - a.start, 0)),
+          ], 'stay', C.sub)
+        }
+      })
+      if (visits.length > shown.length) {
+        y += 4
+        line(`${visits.length - shown.length} later visits are not shown.`, M, y, W, { size: 7.5, color: C.sub })
+        y += 12
+      }
+      y += 10
+    }
   }
 
   // ════ evidence ════
