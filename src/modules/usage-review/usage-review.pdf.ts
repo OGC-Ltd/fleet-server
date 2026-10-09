@@ -17,6 +17,8 @@
  *     Site Visits: each time it went onto a site plan or a company geofence,
  *     when it arrived, the areas inside it stood in and for how long, and
  *     when it left;
+ *     Movements: every trip and every stop, day by day, on and off the work
+ *     sites;
  *     Route Map and Key Locations: the route with its places numbered and
  *     named.
  *   Titles in Title Case (operator, 2026-10-09).
@@ -33,7 +35,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import PDFDocument from 'pdfkit'
-import { fuelOf, TZ_OFFSET_MS, type ReviewPlace } from './usage-review.compute.js'
+import { fuelOf, TZ_OFFSET_MS, type ReviewPlace, type ReviewTrip } from './usage-review.compute.js'
 import type { PlaceKind } from './usage-review.areas.js'
 import type { ReadyReview } from './usage-review.service.js'
 import type { SiteVisit } from './usage-review.siteplans.js'
@@ -200,6 +202,9 @@ const when = (ms: number, sameDayAs?: number) => {
   if (sameDayAs != null && eatDate(sameDayAs) === eatDate(ms)) return t
   return `${WD[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${t}`
 }
+/** "07:12" in EAT. */
+const clock = (ms: number) => when(ms, ms)
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
 /** "45 min", "9 h 26 min", "3 d 4 h". */
 const span = (ms: number) => {
   const m = Math.round(ms / 60_000)
@@ -700,7 +705,6 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     const visits = rv.siteVisits ?? []
     const MAX_VISITS = 150
     const shown = visits.slice(0, MAX_VISITS)
-    const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
     const bySite = new Map<string, { n: number; ms: number }>()
     for (const v of visits) {
       const t = bySite.get(v.site) ?? { n: 0, ms: 0 }
@@ -711,7 +715,6 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     // Geometry: the time gutter, the site column, the time on site.
     const GUT = 64, RIGHT = 84, SX = M + GUT, SW = W - GUT - RIGHT - 10
     const BAR_H = 6, LINE_H = 10, ITEM = 7.4
-    const clock = (ms: number) => when(ms, ms)
     const departed = (v: SiteVisit) => {
       if (v.endsAfter) return 'still in'
       if (eatDate(v.end) === eatDate(v.start)) return clock(v.end)
@@ -854,6 +857,132 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
       })
       if (visits.length > shown.length) {
         line(`${visits.length - shown.length} later visits are not shown.`, M, y, W, { size: 7.5, color: C.sub })
+        y += 12
+      }
+      y += 6
+    }
+  }
+
+  // ════ movements ════
+  /* Hallmark · component: movements log (PDF) · genre: editorial · theme: custom (the report's C tokens)
+   * vibe: the Site Visits ledger's companion, the same day bands and summary band, one line an entry on a spine
+   * pre-emit critique: P5 H4 E4 S5 R5 V4
+   */
+  // The rest of the period (operator, 2026-10-09: "another section that will
+  // cover the rest of the movements made on and off work areas"): every trip,
+  // and every stop of 10 min or more, day by day on one spine. A stop's dot is
+  // the kind of place it was: green a work site, dark the home area, amber
+  // anywhere else, the report's colour for what to look at. Site Visits says
+  // what happened inside each site; this says how the unit got between them
+  // and where else it stood, so the two account for the whole period.
+  {
+    const placeById = new Map(rv.places.map(pl => [pl.id, pl]))
+    type Entry =
+      | { kind: 'stop'; start: number; end: number; place: ReviewPlace | undefined; spot: string | null }
+      | { kind: 'trip'; start: number; end: number; trip: ReviewTrip }
+    const entries: Entry[] = [
+      ...rv.stops.map(st => ({ kind: 'stop' as const, start: st.start, end: st.end, place: placeById.get(st.place), spot: st.spot ?? null })),
+      ...rv.trips.map(t => ({ kind: 'trip' as const, start: t.start, end: t.end, trip: t })),
+    ].sort((a, b) => a.start - b.start || (a.kind === 'stop' ? -1 : 1))
+    const MAX_ROWS = 400
+    const shown = entries.slice(0, MAX_ROWS)
+    // A stop on the company's ground is at work, under the name of the spot
+    // it stood at, whatever the place it belongs to is called.
+    const kindAt = (e: Entry & { kind: 'stop' }): PlaceKind => (e.spot ? 'work' : e.place ? kindOf(e.place) : 'elsewhere')
+    const stoppedMs = (k: PlaceKind, list: Entry[]) =>
+      list.reduce((t, e) => t + (e.kind === 'stop' && kindAt(e) === k ? e.end - e.start : 0), 0)
+    const km = (list: Entry[]) => list.reduce((t, e) => t + (e.kind === 'trip' ? e.trip.km : 0), 0)
+    const trips = (list: Entry[]) => list.filter(e => e.kind === 'trip').length
+
+    // Geometry: the times, the spine, what happened, how long.
+    const GUT = 84, RIGHT = 70, RH = 13
+    const SPX = M + GUT + 4, DX = M + GUT + 14, DW = W - GUT - 14 - RIGHT - 6
+    const range = (a: number, b: number) => {
+      const days = Math.round((Date.parse(eatDate(b)) - Date.parse(eatDate(a))) / 86_400_000)
+      return { text: `${clock(a)}–${clock(b)}`, more: days > 0 ? `+${days}d` : '' }
+    }
+
+    let day = ''
+    const dayBand = (e: Entry, carried: boolean) => {
+      const d = eatDate(e.start)
+      const same = shown.filter(x => eatDate(x.start) === d)
+      doc.rect(M, y, W, 16).fill(C.panel)
+      const dt = new Date(e.start + TZ_OFFSET_MS)
+      line(`${WD[dt.getUTCDay()]} ${dt.getUTCDate()} ${MONTHS[dt.getUTCMonth()]}${carried ? ' (continued)' : ''}`, M + 8, y + 4.5, 200, { font: F.bold, size: 8 })
+      const off = stoppedMs('elsewhere', same)
+      line([trips(same) ? `${plural(trips(same), 'trip')} · ${nf(km(same), 0)} km` : 'no trips', off ? `${span(off)} off work sites` : null].filter(Boolean).join(' · '),
+        M + W - 260, y + 5, 252, { size: 7, color: C.sub, align: 'right' })
+      y += 16 + 8
+    }
+    const fresh = () => { doc.addPage(); y = head('Movements') }
+
+    y = section(y, 40 + 34 + 12 + 24 + 3 * RH, 'Movements')
+    y = title('Movements', 'every trip, and every stop of 10 min or more · off work sites in amber · times in EAT', y)
+    if (!entries.length) {
+      line('No trips, and no stops of 10 min or more, in the period.', M, y, W, { size: 8.5, color: C.sub })
+      y += 20
+    } else {
+      // The period in four figures, in the band Site Visits opens with; each
+      // label's swatch is the key to the dots below.
+      const cells: [string, string, string | null][] = [
+        ['DRIVING', `${plural(trips(entries), 'trip')} · ${nf(km(entries), 0)} km`, null],
+        ['ON WORK SITES', span(stoppedMs('work', entries)), C.green],
+        ['OFF WORK SITES', span(stoppedMs('elsewhere', entries)), C.amber],
+        ['HOME AREA', span(stoppedMs('home', entries)), C.dark],
+      ]
+      const cw = W / 4
+      doc.rect(M, y, W, 34).fill(C.panel)
+      cells.forEach(([label, value, sw], i) => {
+        const x = M + i * cw
+        if (i) doc.moveTo(x, y + 7).lineTo(x, y + 27).lineWidth(0.5).stroke(C.line)
+        if (sw) doc.circle(x + 13, y + 9.6, 2.8).fill(sw)
+        line(label, x + (sw ? 20 : 10), y + 7, cw - 26, { font: F.bold, size: 6.8, color: C.sub })
+        line(value, x + 10, y + 18, cw - 16, { font: F.bold, size: 9 })
+      })
+      y += 34 + 12
+
+      shown.forEach((e, i) => {
+        const d = eatDate(e.start)
+        if (d !== day) {
+          // A day band is not left alone at the foot of a page.
+          if (y + 24 + 2 * RH > BOTTOM) fresh()
+          day = d
+          dayBand(e, false)
+        } else if (y + RH > BOTTOM) {
+          fresh()
+          dayBand(e, true)
+        }
+        // The spine through every row; a stop is a dot on it.
+        doc.moveTo(SPX, y - 3).lineTo(SPX, y + RH - 3).lineWidth(0.8).stroke(C.line)
+        const r = range(e.start, e.end)
+        const sub = e.kind === 'trip'
+        line(r.text, M, y, GUT - 6, { size: 8, color: sub ? C.sub : C.ink })
+        if (r.more) {
+          const tw = doc.font(F.reg).fontSize(8).widthOfString(r.text)
+          line(r.more, M + tw + 3, y + 0.8, 24, { size: 6.5, color: C.sub })
+        }
+        line(span(e.end - e.start), M + W - RIGHT, y, RIGHT, { size: 8, color: sub ? C.sub : C.ink, align: 'right' })
+        if (e.kind === 'trip') {
+          const t = e.trip
+          line(`Drove ${nf(t.km, t.km < 10 ? 1 : 0)} km · top ${t.maxKmh} km/h`, DX, y, DW, { size: 7.6, color: C.sub })
+        } else {
+          const k = kindAt(e)
+          doc.circle(SPX, y + 3.6, 2.8).fill(KIND_COLOR[k])
+          doc.circle(SPX, y + 3.6, 2.8).lineWidth(0.8).stroke(C.paper)
+          const name = e.spot ?? (e.place ? shortPlaceName(e.place) : 'Unnamed place')
+          const font = k === 'elsewhere' ? F.bold : F.reg
+          line(name, DX, y, DW, { font, size: 8 })
+          const note = k === 'home' ? 'home area' : k === 'elsewhere' ? e.place?.activity ?? null : null
+          if (note) {
+            const nw = doc.font(font).fontSize(8).widthOfString(name)
+            if (nw + 12 < DW) line(note, DX + nw + 8, y + 0.5, DW - nw - 8, { size: 7, color: C.sub })
+          }
+        }
+        y += RH
+        if (i === shown.length - 1) y += 4
+      })
+      if (entries.length > shown.length) {
+        line(`${entries.length - shown.length} later entries are not shown.`, M, y, W, { size: 7.5, color: C.sub })
         y += 12
       }
       y += 6

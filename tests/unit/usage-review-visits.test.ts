@@ -8,10 +8,10 @@ import { describe, it, expect, vi } from 'vitest'
 
 vi.mock('../../src/lib/prisma.js', () => ({ prisma: { geofence: { findMany: vi.fn(async () => []) } } }))
 import {
-  loadSitePlans, siteVisits, MIN_AREA_MS, MIN_GROUND_MS, MIN_VISIT_MS, VISIT_GAP_MS,
+  loadSitePlans, nameStops, siteVisits, MIN_AREA_MS, MIN_GROUND_MS, MIN_VISIT_MS, VISIT_GAP_MS,
 } from '../../src/modules/usage-review/usage-review.siteplans.js'
 import type { Site } from '../../src/modules/usage-review/usage-review.areas.js'
-import type { ReviewPoint } from '../../src/modules/usage-review/usage-review.compute.js'
+import type { ReviewPoint, ReviewStop } from '../../src/modules/usage-review/usage-review.compute.js'
 
 const plans = loadSitePlans()
 
@@ -114,6 +114,18 @@ describe('siteVisits', () => {
     const t = performance.now()
     siteVisits(pts, plans)
     expect(performance.now() - t).toBeLessThan(3_000)
+  })
+})
+
+// Movements names each stop by the spot it stood at: a place gathers every stop
+// within 400 m, so "Vehicle Parking, Kabras" also held the garage next door.
+describe('nameStops', () => {
+  it('names a stop on the company ground by its own spot, and leaves the rest', () => {
+    const stop = (id: number, p: { lat: number; lng: number }): ReviewStop =>
+      ({ id, start: 0, end: 600_000, min: 10, lat: p.lat, lng: p.lng, place: 1, overnight: false })
+    const stops = [stop(1, GARAGE), stop(2, WEIGHBRIDGE), stop(3, RAIPLY), stop(4, WEBUYE)]
+    nameStops(stops, plans)
+    expect(stops.map(s => s.spot)).toEqual(['Garage, Kabras', 'Weighbridge, Kabras', 'Raiply', null])
   })
 })
 

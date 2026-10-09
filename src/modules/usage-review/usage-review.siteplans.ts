@@ -251,6 +251,15 @@ export function nameBySite(places: ReviewPlace[], stops: ReviewStop[], plans: Si
   return named
 }
 
+/** Name each stop by the spot it stood at on the company's ground, in place;
+ *  the Logbook's Movements reads it (ReviewStop.spot). */
+export function nameStops(stops: ReviewStop[], plans: SitePlan[], fences: Site[] = []): void {
+  for (const s of stops) {
+    const sp = spotAt(s.lat, s.lng, plans, fences)
+    s.spot = sp ? spotName(sp) : null
+  }
+}
+
 // ── visits ──────────────────────────────────────────────────────────────────
 
 /** Out of a site for less than this and back in is the same visit: a fix that
