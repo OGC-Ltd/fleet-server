@@ -24,7 +24,9 @@ import { classifyPlaces, loadSites, type AreaSummary } from './usage-review.area
 
 export const MAX_DAYS = 92
 /** Places named per review; the rest keep their coordinates. */
-export const NAMED_PLACES = 40
+// The places anything shows: the page's map holds 30, the PDF 15. Each one
+// costs Nominatim's 1.1 s on a cold cache (2026-10-09: was 40).
+export const NAMED_PLACES = 30
 /** Read this far either side of the period, so the odometer carries in and the last step has an end. */
 const MARGIN_S = 6 * 3600
 const KEEP_DONE_MS = 6 * 3_600_000

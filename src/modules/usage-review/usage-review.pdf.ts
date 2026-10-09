@@ -197,8 +197,9 @@ const KIND_SHORT: Record<PlaceKind, string> = { work: 'Work site', home: 'Home a
 const kindOf = (p: ReviewPlace): PlaceKind => p.kind ?? 'elsewhere'
 
 /**
- * @param subject who the report is about — the driver on the vehicle, as the
- *   page knows it; "-" when none is assigned.
+ * @param subject the driver on the vehicle, as the page knows it; null when
+ *   none is assigned. The cover's subject is always "Highlights", the page
+ *   the report comes from.
  */
 export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null, subject: string | null = null): Promise<Buffer> {
   const s = rv.summary, q = rv.quality, veh = rv.vehicle
@@ -384,12 +385,32 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   }
   let y = M + 78
   {
-    const meta: [string, string][] = [['SUBJECT', subject?.trim() || '-'], ['REVIEW PERIOD', period], ['PREPARED', prepared], ['PREPARED BY', PREPARED_BY]]
-    const cw = W / meta.length
+    // The subject is the Highlights page the report comes from (operator,
+    // 2026-10-09); the driver, when the page knows one, beside it. Each
+    // column as wide as its value needs — the period was cut short at a
+    // quarter of the width.
+    const driver = subject?.trim()
+    const meta: [string, string][] = [
+      ['SUBJECT', 'Highlights'], ...(driver ? [['DRIVER', driver] as [string, string]] : []),
+      ['REVIEW PERIOD', period], ['PREPARED', prepared], ['PREPARED BY', PREPARED_BY],
+    ]
+    // The values' own widths, the room left shared out evenly; the type a
+    // little smaller only when even that does not fit.
+    let size = 9.5
+    const need = () => meta.map(([l, v]) => {
+      const lw = doc.font(F.bold).fontSize(6.8).widthOfString(l)
+      return Math.max(lw, doc.font(F.bold).fontSize(size).widthOfString(v)) + 20
+    })
+    let widths = need()
+    while (widths.reduce((a, w) => a + w, 0) > W && size > 7.5) { size -= 0.5; widths = need() }
+    const spare = Math.max(0, W - widths.reduce((a, w) => a + w, 0)) / meta.length
     doc.rect(M, y, W, 40).fill(C.panel)
+    let mx = M
     meta.forEach(([l, v], i) => {
-      line(l, M + i * cw + 10, y + 8, cw - 16, { font: F.bold, size: 6.8, color: C.sub })
-      line(v, M + i * cw + 10, y + 20, cw - 16, { font: F.bold, size: 9.5 })
+      const cw = widths[i]! + spare
+      line(l, mx + 10, y + 8, cw - 14, { font: F.bold, size: 6.8, color: C.sub })
+      line(v, mx + 10, y + 20, cw - 14, { font: F.bold, size })
+      mx += cw
     })
     y += 58
   }

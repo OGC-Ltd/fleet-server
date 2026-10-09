@@ -6,11 +6,14 @@
  * the process goes through ONE queue spaced 1.1 s apart, whichever review asked,
  * and an answer is kept for the life of the process at ~100 m (3 decimals), so a
  * second review of the same unit, or of another unit at the same depot, names
- * its places without asking again.
+ * its places without asking again. The answers are kept on disk too
+ * (usage-review.store), so a deploy does not send every place back through the
+ * one-a-second queue.
  */
 
 import { logger } from '../../lib/logger.js'
 import { haversineM, type ReviewPlace } from './usage-review.compute.js'
+import { persistentStore } from './usage-review.store.js'
 
 const URL_BASE = 'https://nominatim.openstreetmap.org/reverse'
 const USER_AGENT = 'fleettrack-usage-review/1.0 (logistics.raioperations.com)'
@@ -28,7 +31,8 @@ export interface PlaceName {
 
 type Address = Record<string, string | undefined>
 
-const cache = new Map<string, PlaceName | null>()
+// A town keeps its name: answers for half a year, "nothing here" for a fortnight.
+const cache = persistentStore<PlaceName | null>('geocode', { hitTtlMs: 180 * 86_400_000, missTtlMs: 14 * 86_400_000, max: CACHE_MAX })
 let queue: Promise<unknown> = Promise.resolve()
 let lastCall = 0
 
@@ -81,7 +85,6 @@ export function reverseGeocode(lat: number, lng: number): Promise<PlaceName | nu
     if (cache.has(k)) return cache.get(k) ?? null
     try {
       const got = await lookupNow(lat, lng)
-      if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value!)
       cache.set(k, got)
       return got
     } catch (err) {
