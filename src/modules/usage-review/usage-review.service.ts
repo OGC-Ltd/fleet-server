@@ -21,7 +21,7 @@ import { heldDays, loadDbHistory } from './usage-review.db.js'
 import { namePlaces } from './usage-review.geocode.js'
 import { namePois } from './usage-review.poi.js'
 import { classifyPlaces, loadFences, STATIC_SITES, type AreaSummary, type Site } from './usage-review.areas.js'
-import { loadSitePlans, nameBySite } from './usage-review.siteplans.js'
+import { loadSitePlans, nameBySite, siteVisits, type SiteVisit } from './usage-review.siteplans.js'
 
 export const MAX_DAYS = 92
 /** Places named per review; the rest keep their coordinates. */
@@ -59,6 +59,9 @@ export interface ReadyReview extends UsageReview {
   /** The period split by kind of place (usage-review.areas). Set on the build,
    *  and again on a download, where Google's names can make a place a site. */
   areas?: AreaSummary
+  /** Each time it went onto a site plan or one of the organisation's
+   *  geofences: arrival, the areas it stood in, departure (siteVisits). */
+  siteVisits?: SiteVisit[]
 }
 
 type Stage = 'queued' | 'loading' | 'computing' | 'naming' | 'ready' | 'failed'
@@ -183,9 +186,11 @@ async function run(job: Job, orgId: string, vehicleId: string, from: string, to:
     // organisation's geofences takes that name, and the lookups below leave it
     // alone (usage-review.siteplans). Costs no outside call.
     let fences: Site[] = []
+    let visits: SiteVisit[] | undefined
     try {
       fences = await loadFences(orgId)
       nameBySite(review.places, review.stops, loadSitePlans(), fences)
+      visits = siteVisits(review.points, loadSitePlans(), fences)
     } catch (err) {
       logger.warn({ vehicleId, err: (err as Error).message }, 'Usage review: places not named by site')
     }
@@ -216,6 +221,7 @@ async function run(job: Job, orgId: string, vehicleId: string, from: string, to:
     job.result = {
       ...review,
       areas,
+      siteVisits: visits,
       builtAt: Date.now(),
       incompleteDays, wialonError,
       vehicle: {
