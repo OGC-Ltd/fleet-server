@@ -80,14 +80,23 @@ export const meHandler: RequestHandler = async (req, res, next) => {
     // list has to come from the organisations table rather than from the
     // subject's own memberships.
     const orgIds = subject.isPlatform ? undefined : [...subject.orgs.keys()]
-    const orgs = await prisma.organisation.findMany({
-      where:   orgIds ? { id: { in: orgIds } } : undefined,
-      select:  { id: true, name: true, code: true },
-      orderBy: { createdAt: 'asc' },
-    })
+    const [orgs, seen] = await Promise.all([
+      prisma.organisation.findMany({
+        where:   orgIds ? { id: { in: orgIds } } : undefined,
+        select:  { id: true, name: true, code: true },
+        orderBy: { createdAt: 'asc' },
+      }),
+      // The first-time tour version shown to this person (account.routes
+      // /tour). Read here and not cached with the identity, so a tour seen on
+      // one machine is known to the next sign-in on any other. Never worth a
+      // failed sign-in: unreadable, the field is left out and the dashboard
+      // falls back to its own per-browser record.
+      prisma.user.findUnique({ where: { id: userId }, select: { tourSeenVersion: true } })
+        .catch(() => undefined),
+    ])
 
     sendSuccess(res, {
-      user: req.user,
+      user: seen === undefined ? req.user : { ...req.user, tourSeenVersion: seen?.tourSeenVersion ?? null },
       isPlatform: subject.isPlatform,
       platformPermissions: [...subject.platformPermissions],
       organisations: orgs.map((o) => {

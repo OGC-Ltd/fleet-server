@@ -364,3 +364,22 @@ export async function getOwnProfile(userId: string) {
 export async function revokeEverySession(userId: string): Promise<number> {
   return authService.revokeAllSessions(userId, 'signed out of all devices by user')
 }
+
+/**
+ * Record that this person has been shown the dashboard's first-time tour, so
+ * no other machine they sign in on shows it again. Never lowers the version: a
+ * tab still running an older build must not undo a newer tour.
+ */
+export async function recordTourSeen(userId: string, version: number) {
+  await prisma.user.updateMany({
+    where: { id: userId, OR: [{ tourSeenVersion: null }, { tourSeenVersion: { lt: version } }] },
+    data:  { tourSeenVersion: version },
+  })
+  return { tourSeenVersion: await tourSeenVersion(userId) }
+}
+
+/** The tour version this person has been shown, or null for never; for /auth/me. */
+export async function tourSeenVersion(userId: string): Promise<number | null> {
+  const row = await prisma.user.findUnique({ where: { id: userId }, select: { tourSeenVersion: true } })
+  return row?.tourSeenVersion ?? null
+}

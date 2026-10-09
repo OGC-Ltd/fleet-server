@@ -35,7 +35,7 @@ import {
   sensitiveLimiter,
 } from '../../middleware/rateLimiter.js'
 import {
-  updateProfileSchema, changePasswordSchema, forgotPasswordSchema, setupSchema,
+  updateProfileSchema, changePasswordSchema, forgotPasswordSchema, setupSchema, tourSeenSchema,
 } from './account.schema.js'
 import * as ctrl from './account.controller.js'
 
@@ -86,6 +86,10 @@ router.use(authenticate)
 router.get('/profile', ctrl.getProfile)
 router.patch('/profile', validateBody(updateProfileSchema), ctrl.updateProfile)
 router.patch('/password', sensitiveLimiter, validateBody(changePasswordSchema), ctrl.changePassword)
+
+// The dashboard's first-time tour, shown: kept on the account so another
+// machine does not show it again.
+router.post('/tour', validateBody(tourSeenSchema), ctrl.recordTour)
 
 // Devices. `revoke-all` is declared BEFORE `/:sessionId` — a literal has to
 // beat the parameter that would otherwise swallow it.

@@ -4,7 +4,7 @@ import { UnauthorizedError } from '../../core/errors/errors.js'
 import { setAuthCookies, clearAuthCookies } from '../auth/auth.cookies.js'
 import * as service from './account.service.js'
 import type {
-  UpdateProfileDto, ChangePasswordDto, ForgotPasswordDto, SetupDto,
+  UpdateProfileDto, ChangePasswordDto, ForgotPasswordDto, SetupDto, TourSeenDto,
 } from './account.schema.js'
 
 /** The device a request came from, for the session row and the security mail. */
@@ -137,6 +137,16 @@ export const revokeAllSessions: RequestHandler = async (req, res, next) => {
     const count = await service.revokeEverySession(selfId(req))
     clearAuthCookies(res)
     sendSuccess(res, { revoked: count }, 200)
+  } catch (err) {
+    next(err)
+  }
+}
+
+/** The first-time tour has been shown to this person (new-ui lib/productTour). */
+export const recordTour: RequestHandler = async (req, res, next) => {
+  try {
+    const dto = req.body as TourSeenDto
+    sendSuccess(res, await service.recordTourSeen(selfId(req), dto.version), 200)
   } catch (err) {
     next(err)
   }
