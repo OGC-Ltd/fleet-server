@@ -17,8 +17,8 @@
  *     fleet tracking evidence: the route on the map with its places
  *     numbered and named.
  *
- * In black and white: shades of grey for the charts, the map in grey under a
- * black route (operator, 2026-10-09).
+ * In black and white, with green and amber in the charts only (see C); the
+ * map in grey under a black route (operator, 2026-10-09).
  *
  * The figures are usage-review.report's; the map is OpenStreetMap tiles
  * stitched under the route. Tiles are fetched with an identifying User-Agent
@@ -34,12 +34,33 @@ import type { PlaceKind } from './usage-review.areas.js'
 import type { ReadyReview } from './usage-review.service.js'
 import { reportFigures, shortPlaceName, WEEKDAYS } from './usage-review.report.js'
 
-// Black and white (operator, 2026-10-09): no colour anywhere but the logos,
-// so no green beside blue, red or purple and no purple bars. Things are told
-// apart by shade, and the reference lines by their dashes.
+/* Hallmark · component: report charts (PDF) · genre: editorial · theme: custom
+ * vibe: "black-and-white report, green for work, amber to look at"
+ * anchor hue: 150 (green) · accent: oklch(50% 0.12 150) · second: oklch(80% 0.15 78) amber
+ * axes: light / sans (Helvetica) / chromatic-other (green)
+ * pre-emit critique: P4 H5 E4 S5 R5 V4
+ */
+// Black and white with two colours in the charts only (operator, 2026-10-09:
+// a black-and-white report, colour in the bar and pie charts, green never
+// beside blue, red or purple, no purple bars). Green is work — driving and
+// the work sites; amber is what to look at — other places, idling, round
+// trips, the quiet day. Neither ever sits beside blue, red or purple: those
+// are not in the report. Greys lean to the green (hue 150), never flat; the
+// paper is a tinted white, not #fff. Values are OKLCH, written as hex because
+// pdfkit takes no OKLCH.
 const C = {
-  ink: '#111111', sub: '#5f5f5f', faint: '#9a9a9a', line: '#dddddd', panel: '#f4f4f4',
-  black: '#111111', dark: '#4d4d4d', mid: '#999999', light: '#c8c8c8', pale: '#e8e8e8',
+  ink: '#121813',       // oklch(20% 0.012 150)
+  sub: '#545a55',       // oklch(46% 0.010 150)
+  faint: '#959a96',     // oklch(68% 0.008 150)
+  line: '#d8dcd9',      // oklch(89% 0.006 150)
+  panel: '#f1f5f1',     // oklch(96.5% 0.006 150)
+  paper: '#fafdfa',     // oklch(99% 0.004 150)
+  dark: '#343a35',      // oklch(34% 0.012 150): home
+  light: '#cdd2ce',     // oklch(86% 0.008 150)
+  pale: '#e5e9e6',      // oklch(93% 0.006 150): nothing to show
+  green: '#21763c',     // oklch(50% 0.12 150): work, driving, the peak
+  greenSoft: '#63a471', // oklch(66% 0.10 150): the ordinary bars
+  amber: '#f2b036',     // oklch(80% 0.15 78): elsewhere, idling, the low point
 }
 const F = { reg: 'Helvetica', bold: 'Helvetica-Bold' }
 const M = 36
@@ -164,9 +185,9 @@ const hhmm = (m: number | null) => (m == null ? '-' : `${String(Math.floor(m / 6
 
 // ── drawing ──────────────────────────────────────────────────────────────────
 
-const KIND_COLOR: Record<PlaceKind, string> = { home: C.black, work: C.dark, elsewhere: C.light }
-/** The number on a place's circle: white on the dark shades, black on the light. */
-const KIND_TEXT: Record<PlaceKind, string> = { home: '#ffffff', work: '#ffffff', elsewhere: C.ink }
+const KIND_COLOR: Record<PlaceKind, string> = { home: C.dark, work: C.green, elsewhere: C.amber }
+/** The number on a place's circle: paper on the dark fills, ink on amber. */
+const KIND_TEXT: Record<PlaceKind, string> = { home: C.paper, work: C.paper, elsewhere: C.ink }
 const KIND_SHORT: Record<PlaceKind, string> = { work: 'Work site', home: 'Home area', elsewhere: 'Other places' }
 const kindOf = (p: ReviewPlace): PlaceKind => p.kind ?? 'elsewhere'
 
@@ -225,7 +246,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     }
     a0 = -Math.PI / 2
     for (const p of shown) {
-      doc.moveTo(cx + ri * Math.cos(a0), cy + ri * Math.sin(a0)).lineTo(cx + r * Math.cos(a0), cy + r * Math.sin(a0)).lineWidth(1.2).stroke('#ffffff')
+      doc.moveTo(cx + ri * Math.cos(a0), cy + ri * Math.sin(a0)).lineTo(cx + r * Math.cos(a0), cy + r * Math.sin(a0)).lineWidth(1.2).stroke(C.paper)
       a0 += (p.v / total) * Math.PI * 2
     }
   }
@@ -293,7 +314,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
       if (!t.buf) continue
       try { doc.image(t.buf, mx + (t.x * 256 - frame.x0) * frame.scale, my + (t.y * 256 - frame.y0) * frame.scale, { width: size, height: size }) } catch { /* a bad tile is skipped */ }
     }
-    doc.rect(mx, my, w, h).fillOpacity(soften).fill('#ffffff').fillOpacity(1)
+    doc.rect(mx, my, w, h).fillOpacity(soften).fill(C.paper).fillOpacity(1)
     return {
       px: (lng: number) => mx + (lon2x(lng, frame.z) - frame.x0) * frame.scale,
       py: (lat: number) => my + (lat2y(lat, frame.z) - frame.y0) * frame.scale,
@@ -302,7 +323,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   /** A place as a numbered circle, in its kind's shade. */
   const placeDot = (p: ReviewPlace, x: number, yy: number, r: number) => {
     doc.circle(x, yy, r).fill(KIND_COLOR[kindOf(p)])
-    doc.circle(x, yy, r).lineWidth(1.2).stroke(kindOf(p) === 'elsewhere' ? C.ink : '#ffffff')
+    doc.circle(x, yy, r).lineWidth(1.2).stroke(C.paper)
     doc.font(F.bold).fontSize(r > 9 ? 8 : 7).fillColor(KIND_TEXT[kindOf(p)]).text(String(p.id), x - 10, yy - (r > 9 ? 4 : 3.5), { width: 20, align: 'center', lineBreak: false })
   }
 
@@ -381,7 +402,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
       const yy = y + i * rh
       if (i) doc.moveTo(M, yy - 4).lineTo(M + W, yy - 4).lineWidth(0.5).stroke(C.line)
       doc.circle(M + 11, yy + 12, 11).fill(C.ink)
-      line(String(i + 1), M, yy + 7.5, 22, { font: F.bold, size: 10, color: '#ffffff', align: 'center' })
+      line(String(i + 1), M, yy + 7.5, 22, { font: F.bold, size: 10, color: C.paper, align: 'center' })
       line(f.title, M + 32, yy + 2, W - 190, { font: F.bold, size: 10 })
       doc.font(F.reg).fontSize(8.5).fillColor(C.sub).text(f.text, M + 32, yy + 16, { width: W - 200, height: 24, ellipsis: true })
       line(f.stat, M + W - 150, yy + 2, 150, { font: F.bold, size: 18, align: 'right' })
@@ -431,8 +452,8 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     const all = sp.driving + (sp.idling ?? 0) + sp.home + sp.away
     y = title('How time was divided', `Driving ${pct(sp.driving, all)}  ·  Idling ${sp.idling != null ? pct(sp.idling, all) : '-'}  ·  Stopped ${pct(sp.home + sp.away, all)}  ·  ${s.activeDays}/${s.calendarDays} active days`, y)
     const parts = [
-      { l: 'Driving', v: sp.driving, c: C.black },
-      { l: 'Idling', v: sp.idling ?? 0, c: C.mid },
+      { l: 'Driving', v: sp.driving, c: C.green },
+      { l: 'Idling', v: sp.idling ?? 0, c: C.amber },
       { l: 'Stopped at home', v: sp.home, c: C.dark },
       { l: 'Stopped away', v: sp.away, c: C.light },
     ]
@@ -468,7 +489,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     const bw = box.w / days.length
     days.forEach((d, i) => {
       const h = (d.km / ceil) * box.h
-      if (h > 0) doc.rect(box.x + i * bw + bw * 0.15, box.y + box.h - h, Math.max(0.8, bw * 0.7), h).fill(C.mid)
+      if (h > 0) doc.rect(box.x + i * bw + bw * 0.15, box.y + box.h - h, Math.max(0.8, bw * 0.7), h).fill(C.greenSoft)
     })
     const ref = (v: number | null, c: string, dash: [number, number], label: string, ly: number, lx: number) => {
       if (v == null) return
@@ -494,9 +515,9 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     line('Trips by day of week', M, y, half, { font: F.bold, size: 9, align: 'center' })
     line('Trips by hour of day (trip start)', M + half + 20, y, half, { font: F.bold, size: 9, align: 'center' })
     const h = 150
-    const wcol = fig.byWeekday.map((_, i) => (i === fig.busiestDay ? C.black : i === fig.quietestDay ? C.light : C.mid))
+    const wcol = fig.byWeekday.map((_, i) => (i === fig.busiestDay ? C.green : i === fig.quietestDay ? C.amber : C.greenSoft))
     vbars({ x: M + 6, y: y + 22, w: half - 12, h }, fig.byWeekday, wcol, WEEKDAYS.map(d => d.slice(0, 3)))
-    const hcol = fig.byHour.map((_, i) => (i === fig.peakHour ? C.black : C.mid))
+    const hcol = fig.byHour.map((_, i) => (i === fig.peakHour ? C.green : C.greenSoft))
     vbars({ x: M + half + 26, y: y + 22, w: half - 12, h }, fig.byHour, hcol, fig.byHour.map((_, i) => String(i).padStart(2, '0')), { every: 3, values: false })
     if (fig.peakHour != null) {
       const bw = (half - 12) / 24
@@ -510,13 +531,13 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   if (fig.routes.length) {
     const rows = fig.routes.slice(0, 12).map(r => ({
       // Helvetica's WinAnsi has no →; › is in it.
-      label: r.round ? `Round trip · ${r.from}` : `${r.from}  ›  ${r.to}`, v: r.trips, c: r.round ? C.light : C.dark,
+      label: r.round ? `Round trip · ${r.from}` : `${r.from}  ›  ${r.to}`, v: r.trips, c: r.round ? C.amber : C.greenSoft,
       note: `${r.trips} trip${r.trips === 1 ? '' : 's'} · ${nf(r.km, 0)} km · ${nf(r.hours, 1)} h`,
     }))
     y = hbars(rows, y, 230, 16)
-    doc.rect(M + 236, y + 7, 8, 8).fill(C.dark)
+    doc.rect(M + 236, y + 7, 8, 8).fill(C.greenSoft)
     line('Point-to-point route', M + 248, y + 7, 110, { size: 7.5, color: C.sub })
-    doc.rect(M + 360, y + 7, 8, 8).fill(C.light)
+    doc.rect(M + 360, y + 7, 8, 8).fill(C.amber)
     line('Round trip (returned to the same place)', M + 372, y + 7, 160, { size: 7.5, color: C.sub })
     y += 26
   } else {
@@ -526,7 +547,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
 
   // ════ sites, nights ════
   y = section(y, 40 + 15 * (1 + Math.min(11, fig.sites.length)), 'sites')
-  y = title('Top sites at a glance', 'home and the top 10 other places · activity from Google Maps · times are median arrival / departure', y)
+  y = title('Top sites at a glance', 'home and the top 10 other places · activity read from each name and Google Maps · times are median arrival / departure', y)
   {
     const homeRow = fig.sites.find(x => x.home)
     const rows = [...(homeRow ? [homeRow] : []), ...fig.sites.filter(x => !x.home).slice(0, 10)]
@@ -607,7 +628,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
           .find(b => b.x >= mx + 2 && b.x + w <= mx + W - 2 && b.y >= my + 2 && b.y + h <= my + mapH - 12 && !taken.some(o => hit(b, o)))
         if (!box) continue
         taken.push(box)
-        doc.rect(box.x, box.y, w, h).fillOpacity(0.85).fill('#ffffff').fillOpacity(1)
+        doc.rect(box.x, box.y, w, h).fillOpacity(0.85).fill(C.paper).fillOpacity(1)
         line(text, box.x + 3, box.y + 2, w - 4, { font: F.bold, size: 6.8 })
       }
     }
