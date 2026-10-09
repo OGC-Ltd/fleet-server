@@ -3,9 +3,7 @@
  * analyst: one sheet per table, a header row, typed cells, keys between sheets.
  *
  * Same nine sheets as the hand-built August–September reviews: README, Summary,
- * Daily, Places, Stops, Trips, Hourly, Calendar, GPS_Points — and two more
- * since 2026-10-09: Visits (each entry into and exit from a fence) and
- * Visit_Register (per fence: how often, how long, when, and where next).
+ * Daily, Places, Stops, Trips, Hourly, Calendar, GPS_Points.
  *
  * Times are written as Excel serial numbers in Kenyan time (EAT) directly,
  * rather than as JS Dates, which SheetJS would convert through the SERVER's own
@@ -16,7 +14,6 @@ import * as XLSX from 'xlsx'
 import { rezip } from './rezip.js'
 import { daysBetween, fuelOf, TZ_OFFSET_MS } from './usage-review.compute.js'
 import type { ReadyReview } from './usage-review.service.js'
-import { fenceLabel, refLabel, type FenceRegister } from './usage-review.visits.js'
 
 type V = string | number | boolean | null | undefined
 interface Col<T> { h: string; v: (row: T) => V; fmt?: 'date' | 'time'; w?: number }
@@ -74,9 +71,7 @@ export function buildUsageReviewXlsx(rv: ReadyReview, kmpl: number | null, kmplN
     ['Stops', 'Stationary (< 3 km/h) for 10 minutes or more. Position = median of the stop\'s fixes.'],
     ['Places', 'Stops grouped within 400 m. Names from OpenStreetMap. Place 1 is where it spent the most time.'],
     ['Trips', 'Driving between two consecutive stops, kept when ≥ 0.5 km.'],
-    ['Visits', rv.visits
-      ? 'Each time the unit went into one of the organisation’s site fences, and when it came out — worked out fix by fix, so a short pass over a weighbridge counts. An area fence inside another (a yard inside the premises) is listed with ParentVisitID pointing at the premises visit. Under 2 minutes inside is a drive-through and not listed; under 3 minutes outside is jitter at the edge and joined over. Entry and exit are put midway between the fixes either side when they are under 5 minutes apart.'
-      : 'Not available for this review: the fences could not be read.'],
+    ['Activity', 'What the place is, from the kind Google Maps gives the named place there (a bank, a restaurant, a clinic) — what the unit most likely went there for. Blank where Google has no named place.'],
     ['Relationships (Power BI)', 'Calendar[Date] 1→* Daily[Date], Stops[Date], Trips[Date], Hourly[Date], GPS_Points[Date]; Places[PlaceID] 1→* Stops[PlaceID], Trips[FromPlaceID] (active), Trips[ToPlaceID] (inactive); Stops[StopID] 1→* Trips[FromStopID].'],
     ['Map visuals', 'Use the Latitude/Longitude columns in Places, Stops or GPS_Points. Size place bubbles by TotalHours.'],
   ]
@@ -126,7 +121,7 @@ export function buildUsageReviewXlsx(rv: ReadyReview, kmpl: number | null, kmplN
   ])
 
   const wsPlaces = sheet(rv.places, [
-    { h: 'PlaceID', v: p => p.id }, { h: 'Rank', v: p => p.id }, { h: 'PlaceName', v: p => p.exactName ?? p.name ?? `Place ${p.id}`, w: 40 }, { h: 'Area_OpenStreetMap', v: p => p.name ?? null, w: 36 }, { h: 'Kind', v: p => (p.kind === 'work' ? (p.site ? `Work site: ${p.site}` : 'Work site') : p.kind === 'home' ? 'Home area' : p.kind ? 'Outside work sites' : null), w: 26 }, { h: 'Nights', v: p => p.nights ?? null },
+    { h: 'PlaceID', v: p => p.id }, { h: 'Rank', v: p => p.id }, { h: 'PlaceName', v: p => p.exactName ?? p.name ?? `Place ${p.id}`, w: 40 }, { h: 'Activity', v: p => p.activity ?? null, w: 18 }, { h: 'Area_OpenStreetMap', v: p => p.name ?? null, w: 36 }, { h: 'Kind', v: p => (p.kind === 'work' ? (p.site ? `Work site: ${p.site}` : 'Work site') : p.kind === 'home' ? 'Home area' : p.kind ? 'Outside work sites' : null), w: 26 }, { h: 'Nights', v: p => p.nights ?? null },
     { h: 'Area', v: p => p.area, w: 30 }, { h: 'County_or_Region', v: p => p.county, w: 20 }, { h: 'Country', v: p => p.country },
     { h: 'Latitude', v: p => Math.round(p.lat * 1e6) / 1e6 }, { h: 'Longitude', v: p => Math.round(p.lng * 1e6) / 1e6 },
     { h: 'TotalHours', v: p => p.hours }, { h: 'Visits', v: p => p.visits }, { h: 'DaysPresent', v: p => p.days },
@@ -140,6 +135,7 @@ export function buildUsageReviewXlsx(rv: ReadyReview, kmpl: number | null, kmplN
     { h: 'StartTime', v: x => t(x.start), fmt: 'time', w: 17 }, { h: 'EndTime', v: x => t(x.end), fmt: 'time', w: 17 },
     { h: 'DurationMin', v: x => x.min }, { h: 'Latitude', v: x => Math.round(x.lat * 1e6) / 1e6 }, { h: 'Longitude', v: x => Math.round(x.lng * 1e6) / 1e6 },
     { h: 'PlaceID', v: x => x.place }, { h: 'Overnight', v: x => yn(x.overnight) }, { h: 'PlaceName', v: x => pname(x.place), w: 36 },
+    { h: 'Activity', v: x => place.get(x.place)?.activity ?? null, w: 18 },
   ])
 
   const wsTrips = sheet(rv.trips, [
@@ -184,38 +180,10 @@ export function buildUsageReviewXlsx(rv: ReadyReview, kmpl: number | null, kmplN
     { h: 'Moving', v: p => yn(p.moving) },
   ])
 
-  const vz = rv.visits
-  const fenceById = new Map((vz?.fences ?? []).map(f => [f.id, f]))
-  const visitPlace = (id: number) => { const pl = place.get(id); return `${pname(id)}${pl?.kind === 'home' ? ' (home area)' : pl?.kind === 'work' ? ' (work area)' : ' (outside work area)'}` }
-  const wsVisits = sheet(vz?.visits ?? [], [
-    { h: 'VisitID', v: x => x.id }, { h: 'Date', v: x => Math.floor(serial(x.start)), fmt: 'date', w: 12 },
-    { h: 'Place', v: x => fenceLabel(fenceById.get(x.fenceId), x.fenceId), w: 44 },
-    { h: 'Premises', v: x => { const pid = fenceById.get(x.fenceId)?.parentId; return pid ? fenceById.get(pid)?.name ?? null : null }, w: 30 },
-    { h: 'ParentVisitID', v: x => x.parent },
-    { h: 'Entered', v: x => t(x.start), fmt: 'time', w: 17 }, { h: 'Left', v: x => t(x.end), fmt: 'time', w: 17 },
-    { h: 'DurationMin', v: x => x.min },
-    { h: 'InsideAtPeriodStart', v: x => yn(x.openStart) }, { h: 'InsideAtPeriodEnd', v: x => yn(x.openEnd) },
-    { h: 'TrackerQuietMin', v: x => x.quietMin },
-    { h: 'WentNext', v: x => refLabel(x.next, fenceById, visitPlace), w: 44 }, { h: 'MinToNext', v: x => x.toNextMin },
-  ])
-  const clock = (m: number | null) => (m == null ? null : `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`)
-  const wsRegister = sheet(vz?.register ?? [], [
-    { h: 'Place', v: x => fenceLabel(fenceById.get(x.fenceId), x.fenceId), w: 44 },
-    { h: 'Premises', v: x => { const pid = fenceById.get(x.fenceId)?.parentId; return pid ? fenceById.get(pid)?.name ?? null : null }, w: 30 },
-    { h: 'Visits', v: x => x.visits }, { h: 'DaysPresent', v: x => x.days }, { h: 'TotalHours', v: x => x.hours }, { h: 'AvgStayMin', v: x => x.avgMin },
-    { h: 'FirstEntered', v: x => t(x.firstIn), fmt: 'time', w: 17 }, { h: 'LastLeft', v: x => t(x.lastOut), fmt: 'time', w: 17 },
-    { h: 'UsualArrival', v: x => clock(x.usualIn) }, { h: 'UsualDeparture', v: x => clock(x.usualOut) },
-    ...[0, 1, 2].flatMap(k => [
-      { h: `Next${k + 1}`, v: (x: FenceRegister) => (x.next[k] ? refLabel(x.next[k]!.ref, fenceById, visitPlace) : null), w: 40 },
-      { h: `Next${k + 1}Times`, v: (x: FenceRegister) => x.next[k]?.times ?? null },
-      { h: `Next${k + 1}AvgMin`, v: (x: FenceRegister) => x.next[k]?.avgMin ?? null },
-    ]),
-  ])
-
   const wb = XLSX.utils.book_new()
   const add = (name: string, ws: XLSX.WorkSheet) => XLSX.utils.book_append_sheet(wb, ws, name)
   add('README', wsReadme); add('Summary', wsSummary); add('Daily', wsDaily); add('Places', wsPlaces); add('Stops', wsStops)
-  add('Trips', wsTrips); add('Visits', wsVisits); add('Visit_Register', wsRegister); add('Hourly', wsHourly); add('Calendar', wsCal); add('GPS_Points', wsGps)
+  add('Trips', wsTrips); add('Hourly', wsHourly); add('Calendar', wsCal); add('GPS_Points', wsGps)
   for (const name of wb.SheetNames.slice(1)) wb.Sheets[name]!['!freeze'] = { xSplit: 0, ySplit: 1 }
   // Written stored, deflated by zlib: see rezip.
   return rezip(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx', compression: false, bookSST: true }) as Buffer)

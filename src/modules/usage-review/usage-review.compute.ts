@@ -96,6 +96,11 @@ export interface ReviewPlace {
    *  Lake Agro workshop"). The server holds no Google key, so it only arrives
    *  with a download (`names`), never from the build. */
   exactName?: string | null
+  /** What the named place is, from Google's type for it ("Banking", "Food
+   *  and drink", "Medical") — what the unit most likely stopped there for.
+   *  Arrives with `exactName`, and only when the place is the spot itself,
+   *  not a neighbour some way off. */
+  activity?: string | null
   /** Work site, the home area, or elsewhere — see usage-review.areas. Set on
    *  a download only, where the organisation's sites are read. */
   kind?: 'work' | 'home' | 'elsewhere'

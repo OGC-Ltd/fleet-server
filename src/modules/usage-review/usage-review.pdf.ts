@@ -11,9 +11,9 @@
  *   Page 3 — when it drives (trips by weekday and by start hour), the most
  *            frequent routes, and the movement web: the same drives on the
  *            map, place to place, an arrow per direction, width by trips.
- *   Page 4 — the top sites with median arrival and departure, entries into
- *            and exits from the organisation's fences, and where it stood
- *            each night.
+ *   Page 4 — the top sites with what each is (a bank, a restaurant, a
+ *            clinic — Google's type for it) and median arrival and departure,
+ *            and where it stood each night.
  *   Page 5 — fleet tracking evidence: the route on the map with its places
  *            numbered, and the gate times to check against CCTV.
  *
@@ -569,57 +569,21 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     }
   }
 
-  // ════ page 4: sites, entries and exits, nights ════
+  // ════ page 4: sites, nights ════
   doc.addPage()
   y = head('sites')
-  y = title('Top sites at a glance', 'home and the top 10 other places · times are median arrival / departure', y)
+  y = title('Top sites at a glance', 'home and the top 10 other places · activity from Google Maps · times are median arrival / departure', y)
   {
     const homeRow = fig.sites.find(x => x.home)
     const rows = [...(homeRow ? [homeRow] : []), ...fig.sites.filter(x => !x.home).slice(0, 10)]
     y = table([
-      { h: 'Site', w: 205 }, { h: 'Hours', w: 52, r: true }, { h: 'Visits', w: 44, r: true }, { h: 'Days', w: 40, r: true },
-      { h: 'Avg / visit', w: 62, r: true }, { h: 'Arrive', w: 60, r: true }, { h: 'Depart', w: W - 463, r: true },
+      { h: 'Site', w: 168 }, { h: 'Activity', w: 76 }, { h: 'Hours', w: 40, r: true }, { h: 'Visits', w: 38, r: true }, { h: 'Days', w: 34, r: true },
+      { h: 'Avg / visit', w: 54, r: true }, { h: 'Arrive', w: 44, r: true }, { h: 'Depart', w: W - 454, r: true },
     ], rows.map(x => ({
       dot: KIND_COLOR[x.home ? 'home' : x.kind], bold: x.home,
-      cells: [x.name, nf(x.hours, 1), String(x.visits), String(x.days), `${nf(x.avgH, 2)} h`, hhmm(x.arrive), hhmm(x.depart)],
+      cells: [x.name, x.home ? 'Home' : x.activity ?? '-', nf(x.hours, 1), String(x.visits), String(x.days), `${nf(x.avgH, 2)} h`, hhmm(x.arrive), hhmm(x.depart)],
     })), y)
     y += 10
-  }
-
-  const vz = rv.visits
-  if (vz && vz.visits.length) {
-    const fenceById = new Map(vz.fences.map(f => [f.id, f]))
-    const placeName = (id: number) => { const p = rv.places.find(x => x.id === id); return p ? `${shortPlaceName(p)} (${p.kind === 'home' ? 'home area' : p.kind === 'work' ? 'work area' : 'outside work area'})` : `Place ${id}` }
-    const nextName = (r: (typeof vz.register)[number]['next'][number]['ref'] | undefined) => {
-      if (!r) return '-'
-      if (r.kind === 'end') return 'still there at the end'
-      if (r.kind === 'exit') return `left ${fenceById.get(r.id)?.name ?? 'the site'}`
-      if (r.kind === 'fence') return `${fenceById.get(r.id)?.name ?? 'fence'} (work area)`
-      return placeName(r.id)
-    }
-    // Each premises, then its areas.
-    const reg = vz.register
-    const parentOf = (id: string) => fenceById.get(id)?.parentId ?? null
-    const ordered = reg.filter(r => !parentOf(r.fenceId) || !reg.some(x => x.fenceId === parentOf(r.fenceId)))
-      .flatMap(t => [t, ...reg.filter(r => parentOf(r.fenceId) === t.fenceId)])
-    const max = Math.min(ordered.length, Math.floor((BOTTOM - y - 160) / 15))
-    if (max > 0) {
-      y = title('Entries and exits', 'each time it went into a site fence and came out · areas inside a site indented', y)
-      y = table([
-        { h: 'Site / area', w: 150 }, { h: 'Visits', w: 38, r: true }, { h: 'Hours', w: 42, r: true }, { h: 'Avg stay', w: 50, r: true },
-        { h: 'Usually', w: 70, r: true }, { h: 'Most often next', w: W - 350 },
-      ], ordered.slice(0, max).map(r => {
-        const f = fenceById.get(r.fenceId)
-        const parent = f?.parentId ? fenceById.get(f.parentId) : null
-        const nm = parent && f!.name.startsWith(parent.name) ? `   ${f!.name.slice(parent.name.length).replace(/^[\s·:,–-]+/, '')}` : `${f?.name ?? 'Fence'} (work area)`
-        return {
-          bold: !f?.parentId,
-          cells: [nm, String(r.visits), nf(r.hours, 1), dur(r.avgMin), `${hhmm(r.usualIn)}–${hhmm(r.usualOut)}`,
-            r.next[0] ? `${nextName(r.next[0].ref)}  ×${r.next[0].times}` : '-'],
-        }
-      }), y)
-      y += 10
-    }
   }
 
   if (areas && y + 110 < BOTTOM) {
@@ -691,11 +655,8 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   // Gate times: when it came and went at work sites — the times to pull CCTV for.
   {
     type Gate = { site: string; start: number; end: number; min: number }
-    const fenceName = (id: string) => vz?.fences.find(f => f.id === id)?.name ?? 'Site'
-    const gates: Gate[] = vz && vz.visits.some(v => v.parent == null)
-      ? vz.visits.filter(v => v.parent == null && !v.openStart).map(v => ({ site: fenceName(v.fenceId), start: v.start, end: v.end, min: v.min }))
-      : rv.stops.filter(st => rv.places.find(p => p.id === st.place)?.kind === 'work')
-        .map(st => ({ site: shortPlaceName(rv.places.find(p => p.id === st.place)!), start: st.start, end: st.end, min: st.min }))
+    const gates: Gate[] = rv.stops.filter(st => rv.places.find(p => p.id === st.place)?.kind === 'work')
+      .map(st => ({ site: shortPlaceName(rv.places.find(p => p.id === st.place)!), start: st.start, end: st.end, min: st.min }))
     const rows = gates.sort((a, b) => b.start - a.start).slice(0, Math.max(0, Math.floor((BOTTOM - y - 50) / 15)))
     if (rows.length) {
       y = title('Gate times to check against CCTV', 'the latest arrivals at and departures from work sites', y)
