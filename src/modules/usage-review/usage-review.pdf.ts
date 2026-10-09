@@ -8,7 +8,7 @@
  *            Utilisation (the period's hours as a donut).
  *   Then, flowing on from page 2 — a section starts a new page only when it
  *   does not fit below the last (operator, 2026-10-09: no extra white space):
- *     Where the Vehicle Spent Its Time, place by place with home first; Daily
+ *     Where the Vehicle Spent its Time, place by place with home first; Daily
  *     Distance against the active-day mean and median; Overnight Locations;
  *     Driving Patterns (trips by weekday and by start hour), Most Frequent
  *     Routes;
@@ -221,11 +221,16 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     while (t.length > 1 && doc.widthOfString(`${t}…`) > width) t = t.slice(0, -1)
     return `${t.trimEnd()}…`
   }
-  /** One line of text, never wrapped: the guard against rows running together. */
+  /** One line of text, never wrapped: the guard against rows running together.
+   *  pdfkit wraps any text given a width, `lineBreak: false` or not, and its
+   *  word-by-word measure runs a hair wider than widthOfString — a label cut to
+   *  fit exactly still dropped "Services…" onto the row below (2026-10-09). So
+   *  the text is cut with a margin, and the box is one line high: a second
+   *  line is never drawn. */
   const line = (text: string, x: number, yy: number, width: number, o: { font?: string; size?: number; color?: string; align?: 'left' | 'right' | 'center' } = {}) => {
     const font = o.font ?? F.reg, size = o.size ?? 8
     doc.font(font).fontSize(size).fillColor(o.color ?? C.ink)
-      .text(fit(text, width, font, size), x, yy, { width, align: o.align ?? 'left', lineBreak: false })
+      .text(fit(text, width - 2, font, size), x, yy, { width, height: size * 1.4, align: o.align ?? 'left', lineBreak: false })
   }
   /** A section title with a note on the right, over a hairline. */
   const title = (t: string, note: string | null, yy: number) => {
@@ -510,7 +515,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   // ════ page 2: where the time went, how it divided, day by day ════
   doc.addPage()
   y = head('Time and Distance')
-  y = title('Where the Vehicle Spent Its Time', `${nf(fig.stoppedH, 0)} h stopped at ${s.places} places · stops of 10 min or more`, y)
+  y = title('Where the Vehicle Spent its Time', `${nf(fig.stoppedH, 0)} h stopped at ${s.places} places · stops of 10 min or more`, y)
   {
     const rows = fig.sites.slice(0, 15).map(x => ({
       label: x.name, v: x.hours, c: KIND_COLOR[x.home ? 'home' : x.kind],
@@ -600,7 +605,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   {
     const half = (W - 20) / 2
     line('Trips by Day of Week', M, y, half, { font: F.bold, size: 9, align: 'center' })
-    line('Trips by Hour of Day (Trip Start)', M + half + 20, y, half, { font: F.bold, size: 9, align: 'center' })
+    line('Trips by Hour of Day', M + half + 20, y, half, { font: F.bold, size: 9, align: 'center' })
     const h = 150
     const wcol = fig.byWeekday.map((_, i) => (i === fig.busiestDay ? C.green : i === fig.quietestDay ? C.amber : C.greenSoft))
     vbars({ x: M + 6, y: y + 22, w: half - 12, h }, fig.byWeekday, wcol, WEEKDAYS.map(d => d.slice(0, 3)))
