@@ -118,6 +118,11 @@ const schema = z.object({
   // reports { configured: false } and clients fall back to the local summary.
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL:   z.string().default('gpt-5-nano'),
+  // DeepSeek, asked when OpenAI cannot answer (no key, no credit, a timeout):
+  // the Logbook's place activities (usage-review.activity-ai). Its API speaks
+  // OpenAI's chat-completions. Unset = no fallback.
+  DEEPSEEK_API_KEY: z.string().optional(),
+  DEEPSEEK_MODEL:   z.string().default('deepseek-chat'),
 
   // ── Transactional mail (Mailtrap) ────────────────────────────────────────
   // Every one of these is optional with a default, so an unconfigured

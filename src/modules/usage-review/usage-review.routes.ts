@@ -2,13 +2,14 @@ import { Router, type RequestHandler } from 'express'
 import { z } from 'zod'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission, requireVehicleInScope } from '../../middleware/authorize.js'
-import { validateQuery } from '../../middleware/validate.js'
+import { validateBody, validateQuery } from '../../middleware/validate.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { ConflictError } from '../../core/errors/errors.js'
 import { getUsageReview, reviewForDownload, type ReadyReview } from './usage-review.service.js'
 import { buildUsageReviewXlsx } from './usage-review.xlsx.js'
 import { renderUsageReviewPdf } from './usage-review.pdf.js'
 import { classifyPlaces, loadSites } from './usage-review.areas.js'
+import { aiActivities, cachedActivity, nameKey } from './usage-review.activity-ai.js'
 
 /**
  * Unit usage review — drive hours, distance, fuel (estimated) and the places a
@@ -18,6 +19,10 @@ import { classifyPlaces, loadSites } from './usage-review.areas.js'
  *       202 + progress while it builds, 200 + the review when ready.
  *   GET …/vehicles/:vehicleId/usage-review/xlsx?from&to[&kmpl][&names]
  *   GET …/vehicles/:vehicleId/usage-review/pdf?from&to[&kmpl][&names][&driver]
+ *   POST …/vehicles/:vehicleId/usage-review/activities  { places: [{ name, hint? }] }
+ *       what each named place is, read by OpenAI from its exact name (and
+ *       Google's type as a hint): { activities: { [name]: group | null } } —
+ *       see usage-review.activity-ai. Names it could not read are absent.
  *   GET …/vehicles/:vehicleId/usage-review/day?from&to&date
  *       one day's GPS fixes from the built review, for the page's playback:
  *       { date, points: [t ms, lat, lng, km/h, course|null, ignition 1/0/null][] }
@@ -39,6 +44,9 @@ const reviewQuery = z.object({
 })
 type ReviewQuery = z.infer<typeof reviewQuery>
 const dayQuery = reviewQuery.extend({ date: day })
+const activitiesBody = z.object({
+  places: z.array(z.object({ name: z.string().min(1).max(120), hint: z.string().max(60).nullish() })).max(60),
+})
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 const q = (req: Parameters<RequestHandler>[0]) => req.query as unknown as ReviewQuery
@@ -88,8 +96,11 @@ function withNames(rv: ReadyReview, raw: string | undefined): ReadyReview {
       const v = names[String(pl.id)]
       const o = v && typeof v === 'object' ? v as Record<string, unknown> : { name: v }
       const name = clean(o['name'], 120)
+      // What OpenAI read from the name, when it has been asked (the page asks
+      // as the names arrive), over the page's own reading of Google's type.
+      if (name) return { ...pl, exactName: name, activity: cachedActivity(name) ?? clean(o['activity'], 40) }
       // No Google name: the OpenStreetMap business from the build stands.
-      return name ? { ...pl, exactName: name, activity: clean(o['activity'], 40) } : pl
+      return pl.exactName ? { ...pl, activity: cachedActivity(pl.exactName) ?? pl.activity ?? null } : pl
     }),
   }
 }
@@ -128,6 +139,16 @@ const getPdf: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+const postActivities: RequestHandler = async (req, res, next) => {
+  try {
+    const { places } = req.body as z.infer<typeof activitiesBody>
+    const got = await aiActivities(places)
+    const activities: Record<string, string | null> = {}
+    for (const pl of places) { const k = nameKey(pl.name); if (got.has(k)) activities[pl.name] = got.get(k) ?? null }
+    sendSuccess(res, { activities })
+  } catch (err) { next(err) }
+}
+
 /** The EAT calendar day of an instant (Kenya keeps no daylight saving). */
 const eatDay = (ms: number) => new Date(ms + 3 * 3_600_000).toISOString().slice(0, 10)
 
@@ -148,6 +169,7 @@ const guard = [requirePermission('telemetry:read'), requireVehicleInScope, valid
 router.get('/vehicles/:vehicleId/usage-review', ...guard, getReview)
 router.get('/vehicles/:vehicleId/usage-review/xlsx', ...guard, getXlsx)
 router.get('/vehicles/:vehicleId/usage-review/pdf', ...guard, getPdf)
+router.post('/vehicles/:vehicleId/usage-review/activities', requirePermission('telemetry:read'), requireVehicleInScope, validateBody(activitiesBody), postActivities)
 router.get('/vehicles/:vehicleId/usage-review/day', requirePermission('telemetry:read'), requireVehicleInScope, validateQuery(dayQuery), getDay)
 
 export default router
