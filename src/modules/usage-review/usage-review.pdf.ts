@@ -5,17 +5,17 @@
  *
  *   Page 1 — the cover (vehicle, subject, period, prepared) and the executive
  *            summary: six headline figures and four key findings.
- *   Page 2 — where the vehicle spent its time, place by place with home
- *            first; how the period's hours divided; distance day by day
- *            against the active-day mean and median.
- *   Page 3 — when it drives (trips by weekday and by start hour), the most
- *            frequent routes, and the movement web: the same drives on the
- *            map, place to place, an arrow per direction, width by trips.
- *   Page 4 — the top sites with what each is (a bank, a restaurant, a
- *            clinic — Google's type for it) and median arrival and departure,
- *            and where it stood each night.
- *   Page 5 — fleet tracking evidence: the route on the map with its places
- *            numbered, and the gate times to check against CCTV.
+ *   Then, flowing on from page 2 — a section starts a new page only when it
+ *   does not fit below the last (operator, 2026-10-09: no extra white space):
+ *     where the vehicle spent its time, place by place with home first; how
+ *     the period's hours divided; distance day by day against the active-day
+ *     mean and median;
+ *     when it drives (trips by weekday and by start hour), the most frequent
+ *     routes;
+ *     the top sites with what each is (a bank, a restaurant, a clinic) and
+ *     median arrival and departure, and where it stood each night;
+ *     fleet tracking evidence: the route on the map with its places
+ *     numbered, and the gate times to check against CCTV.
  *
  * The figures are usage-review.report's; the map is OpenStreetMap tiles
  * stitched under the route. Tiles are fetched with an identifying User-Agent
@@ -79,12 +79,10 @@ const lat2y = (lat: number, z: number) => {
 
 interface MapFrame { z: number; x0: number; y0: number; scale: number }
 
-/** Fetch what the map needs before drawing (pdfkit draws synchronously).
- *  Framed on `frameOn` ([lat, lng] points) when given, else on the route and
- *  the top places. */
-async function prepareMap(rv: ReadyReview, boxW: number, boxH: number, frameOn?: [number, number][]) {
-  const pts: [number, number][] = frameOn ? [...frameOn] : rv.tracks.flatMap(t => t.path)
-  if (!frameOn) for (const p of rv.places.slice(0, 10)) pts.push([p.lat, p.lng])
+/** Fetch what the map needs before drawing (pdfkit draws synchronously). */
+async function prepareMap(rv: ReadyReview, boxW: number, boxH: number) {
+  const pts: [number, number][] = rv.tracks.flatMap(t => t.path)
+  for (const p of rv.places.slice(0, 10)) pts.push([p.lat, p.lng])
   if (!pts.length) return null
   let s = Infinity, n = -Infinity, w = Infinity, e = -Infinity
   for (const [la, lo] of pts) { s = Math.min(s, la); n = Math.max(n, la); w = Math.min(w, lo); e = Math.max(e, lo) }
@@ -272,12 +270,20 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   const period = `${dayLabel(rv.period.from, true)} – ${dayLabel(rv.period.to, true)}`
   const prepared = (() => { const d = new Date(rv.builtAt + TZ_OFFSET_MS); return `${String(d.getUTCDate()).padStart(2, '0')} ${['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][d.getUTCMonth()]} ${d.getUTCFullYear()}` })()
 
+  /** A new section: on the same page when `need` points fit below what is
+   *  there, else on a fresh page under the running head. */
+  const section = (y: number, need: number, name: string) => {
+    if (y + need <= BOTTOM) return y + 8
+    doc.addPage()
+    return head(name)
+  }
+
   /** The running head on pages 2 on: logos, the plate and the period. */
   const head = (section: string) => {
     doc.rect(0, 0, 595.28, 4).fill(C.green)
     const rai = logo('rai-group-logo.jpeg'), ogc = logo('ogc-logo.png')
     if (rai) try { doc.image(rai, M, M - 14, { fit: [26, 26] }) } catch { /* no logo */ }
-    if (ogc) try { doc.image(ogc, M + W - 34, M - 12, { fit: [34, 24] }) } catch { /* no logo */ }
+    if (ogc) try { doc.image(ogc, M + W - 25, M - 10, { fit: [25, 18], align: 'right', valign: 'center' }) } catch { /* no logo */ }
     line(`${veh.plate}  ·  ${section}`, M + 34, M - 9, W * 0.6, { font: F.bold, size: 9 })
     line(period, M + 34, M + 2, W * 0.6, { size: 7.5, color: C.sub })
     doc.moveTo(M, M + 18).lineTo(M + W, M + 18).lineWidth(0.6).stroke(C.line)
@@ -289,7 +295,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     doc.rect(0, 0, 595.28, 6).fill(C.green)
     const rai = logo('rai-group-logo.jpeg'), ogc = logo('ogc-logo.png')
     if (rai) try { doc.image(rai, M, M - 6, { fit: [64, 64] }) } catch { /* no logo */ }
-    if (ogc) try { doc.image(ogc, M + W - 84, M, { fit: [84, 60] }) } catch { /* no logo */ }
+    if (ogc) try { doc.image(ogc, M + W - 50, M + 10, { fit: [50, 36], align: 'right', valign: 'center' }) } catch { /* no logo */ }
     line('VEHICLE TRACKING REPORT', M + 76, M + 4, W - 170, { font: F.bold, size: 9, color: C.green })
     line(veh.plate, M + 76, M + 16, W - 170, { font: F.bold, size: 30 })
     line([veh.organisation, veh.wialonName && veh.wialonName !== veh.plate ? veh.wialonName : null].filter(Boolean).join('  ·  '), M + 76, M + 48, W - 170, { size: 8.5, color: C.sub })
@@ -439,9 +445,8 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     y = box.y + box.h + 20
   }
 
-  // ════ page 3: when it drives, and the routes ════
-  doc.addPage()
-  y = head('when it drives')
+  // ════ when it drives, and the routes ════
+  y = section(y, 230, 'when it drives')
   y = title('When it drives', fig.busiestDay != null && fig.peakHour != null
     ? `Busiest day ${WEEKDAYS[fig.busiestDay]} · Peak start hour ${String(fig.peakHour).padStart(2, '0')}:00 · ${pct0(fig.beforeNoonShare)} of trips start before noon`
     : 'no trips in the period', y)
@@ -480,98 +485,8 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     y += 16
   }
 
-  // ── the movement web: the drives on the map, place to place ──
-  {
-    const byId = new Map(rv.places.map(p => [p.id, p]))
-    const edgeMap = new Map<string, { from: number; to: number; trips: number; min: number; km: number }>()
-    for (const t of rv.trips) {
-      if (t.fromPlace === t.toPlace || !byId.has(t.fromPlace) || !byId.has(t.toPlace)) continue
-      const k = `${t.fromPlace}>${t.toPlace}`
-      const e = edgeMap.get(k) ?? { from: t.fromPlace, to: t.toPlace, trips: 0, min: 0, km: 0 }
-      e.trips++; e.min += t.min; e.km += t.km
-      edgeMap.set(k, e)
-    }
-    const edges = [...edgeMap.values()].sort((a, b) => b.trips - a.trips).slice(0, 30)
-    if (edges.length) {
-      const ids = [...new Set(edges.flatMap(e => [e.from, e.to]))].sort((a, b) => a - b)
-      const keyRows = Math.ceil(Math.min(ids.length, 16) / 2)
-      let webH = BOTTOM - y - 28 - keyRows * 11 - 12
-      if (webH < 230) { doc.addPage(); y = head('movement web'); webH = Math.min(500, BOTTOM - y - 28 - keyRows * 11 - 12) }
-      y = title('Movement web', 'each drive between two places · width = trips · the arrow shows the way', y)
-      const nodes = ids.map(id => byId.get(id)!)
-      const map = await prepareMap(rv, W, webH, nodes.map(p => [p.lat, p.lng]))
-      const mx = M, my = y
-      doc.save()
-      doc.rect(mx, my, W, webH).clip()
-      const proj = mapGround(map, mx, my, W, webH, 0.45)
-      if (proj) {
-        const max = Math.max(1, ...edges.map(e => e.trips))
-        const at = (p: ReviewPlace) => ({ x: proj.px(p.lng), y: proj.py(p.lat) })
-        const labels: { pt: (t: number) => { x: number; y: number }; text: string }[] = []
-        // Quietest first, so the busy connections lie on top.
-        const quietFirst = [...edges].reverse()
-        quietFirst.forEach((e, k) => {
-          const a = at(byId.get(e.from)!), b = at(byId.get(e.to)!)
-          const w = 1.2 + 5 * Math.sqrt(e.trips / max)
-          // Bowed to one side of the way it goes, so the drive back, going
-          // the other way, bows to the other.
-          const dx = b.x - a.x, dy = b.y - a.y
-          const c = { x: (a.x + b.x) / 2 + dy * 0.16, y: (a.y + b.y) / 2 - dx * 0.16 }
-          const pt = (t: number) => ({ x: (1 - t) ** 2 * a.x + 2 * (1 - t) * t * c.x + t * t * b.x, y: (1 - t) ** 2 * a.y + 2 * (1 - t) * t * c.y + t * t * b.y })
-          doc.moveTo(a.x, a.y).quadraticCurveTo(c.x, c.y, b.x, b.y).lineWidth(w).strokeOpacity(0.75).lineCap('round').stroke(C.route)
-          doc.strokeOpacity(1)
-          // The arrowhead at 62%, turned along the curve.
-          const p0 = pt(0.6), p1 = pt(0.64)
-          const ang = Math.atan2(p1.y - p0.y, p1.x - p0.x)
-          const L = 5 + w, Wd = 3 + w * 0.7
-          const tip = { x: p1.x + Math.cos(ang) * L * 0.5, y: p1.y + Math.sin(ang) * L * 0.5 }
-          const back = { x: tip.x - Math.cos(ang) * L, y: tip.y - Math.sin(ang) * L }
-          doc.polygon([tip.x, tip.y], [back.x + Math.sin(ang) * Wd, back.y - Math.cos(ang) * Wd], [back.x - Math.sin(ang) * Wd, back.y + Math.cos(ang) * Wd])
-            .lineWidth(0.8).fillAndStroke(C.route, '#ffffff')
-          // The six busiest connections carry their count and drive time.
-          if (quietFirst.length - 1 - k < 6) labels.push({ pt, text: `${e.trips}× · ${dur(e.min / e.trips)}` })
-        })
-        const maxH = Math.max(1, ...nodes.map(p => p.hours))
-        for (const p of [...nodes].sort((a, b) => b.id - a.id)) {
-          const q = at(p)
-          placeDot(p, q.x, q.y, 6 + 6 * Math.sqrt(Math.min(1, p.hours / maxH)))
-        }
-        // Labels, busiest first, each at the first point along its curve
-        // where it covers neither another label nor a place; else left off.
-        const taken: { x: number; y: number; w: number; h: number }[] = nodes.map(p => { const q = at(p); return { x: q.x - 12, y: q.y - 12, w: 24, h: 24 } })
-        const meets = (b: { x: number; y: number; w: number; h: number }) => taken.some(o => b.x < o.x + o.w && o.x < b.x + b.w && b.y < o.y + o.h && o.y < b.y + b.h)
-        for (const l of labels.reverse()) {
-          doc.font(F.bold).fontSize(6.8)
-          const tw = doc.widthOfString(l.text) + 8
-          for (const t of [0.5, 0.4, 0.6, 0.32, 0.68, 0.25, 0.75]) {
-            const m = l.pt(t)
-            const box = { x: m.x - tw / 2, y: m.y - 6, w: tw, h: 12 }
-            if (meets(box)) continue
-            taken.push(box)
-            doc.roundedRect(box.x, box.y, tw, 12, 3).fillOpacity(0.92).fill('#ffffff').fillOpacity(1)
-            line(l.text, box.x, m.y - 3.5, tw, { font: F.bold, size: 6.8, color: C.route, align: 'center' })
-            break
-          }
-        }
-      }
-      doc.restore()
-      doc.rect(mx, my, W, webH).lineWidth(0.6).stroke(C.line)
-      line('© OpenStreetMap contributors', mx, my + webH - 10, W - 6, { size: 6, color: C.sub, align: 'right' })
-      y = my + webH + 8
-      const shown = nodes.slice(0, 16), cw = W / 2
-      shown.forEach((p, i) => {
-        const x = M + Math.floor(i / keyRows) * cw, yy = y + (i % keyRows) * 11
-        doc.circle(x + 5, yy + 3.5, 3.5).fill(KIND_COLOR[kindOf(p)])
-        line(`${p.id}. ${shortPlaceName(p)}`, x + 12, yy, cw - 60, { size: 7.2 })
-        line(`${nf(p.hours, 1)} h`, x + cw - 56, yy, 44, { size: 7.2, color: C.sub, align: 'right' })
-      })
-      y += keyRows * 11 + 8
-    }
-  }
-
-  // ════ page 4: sites, nights ════
-  doc.addPage()
-  y = head('sites')
+  // ════ sites, nights ════
+  y = section(y, 40 + 15 * (1 + Math.min(11, fig.sites.length)), 'sites')
   y = title('Top sites at a glance', 'home and the top 10 other places · activity from Google Maps · times are median arrival / departure', y)
   {
     const homeRow = fig.sites.find(x => x.home)
@@ -586,7 +501,8 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     y += 10
   }
 
-  if (areas && y + 110 < BOTTOM) {
+  if (areas) {
+    y = section(y - 8, 120, 'nights')
     y = title('Where it spent each night', 'where the unit stood at 02:00, each night of the period', y)
     const n = areas.nightly.length
     const cw = W / n
@@ -610,13 +526,13 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     doc.font(F.reg).fontSize(6.8).fillColor(C.sub).text(
       'Work sites are the company\'s factories and weighbridge yards and its own site fences. The home area is the place away from work where the unit spends the most nights, and anywhere within 3 km of it; nothing on record names a driver\'s house, so read it as where the unit sleeps.',
       M, y, { width: W, lineGap: 1 })
+    y = doc.y + 10
   }
 
-  // ════ page 5: evidence ════
-  doc.addPage()
-  y = head('evidence')
-  y = title('Fleet tracking evidence', 'the route over the period, places numbered by time spent', y)
+  // ════ evidence ════
   const mapH = 400
+  y = section(y, 40 + mapH + 8 + 7 * 11 + 14, 'evidence')
+  y = title('Fleet tracking evidence', 'the route over the period, places numbered by time spent', y)
   const map = await prepareMap(rv, W, mapH)
   {
     const mx = M, my = y
@@ -646,7 +562,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     top.forEach((p, i) => {
       const x = M + Math.floor(i / half) * cw, yy = y + (i % half) * 11
       doc.circle(x + 5, yy + 3.5, 3.5).fill(KIND_COLOR[kindOf(p)])
-      line(`${p.id}. ${shortPlaceName(p)}`, x + 12, yy, cw - 60, { size: 7.2 })
+      line(`${p.id}. ${shortPlaceName(p)}${p.activity ? ` · ${p.activity}` : ''}`, x + 12, yy, cw - 60, { size: 7.2 })
       line(`${nf(p.hours, 1)} h`, x + cw - 56, yy, 44, { size: 7.2, color: C.sub, align: 'right' })
     })
     y += half * 11 + 14
@@ -657,7 +573,10 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     type Gate = { site: string; start: number; end: number; min: number }
     const gates: Gate[] = rv.stops.filter(st => rv.places.find(p => p.id === st.place)?.kind === 'work')
       .map(st => ({ site: shortPlaceName(rv.places.find(p => p.id === st.place)!), start: st.start, end: st.end, min: st.min }))
-    const rows = gates.sort((a, b) => b.start - a.start).slice(0, Math.max(0, Math.floor((BOTTOM - y - 50) / 15)))
+    gates.sort((a, b) => b.start - a.start)
+    // Under five rows' room left: the list on a page of its own.
+    if (gates.length && BOTTOM - y - 50 < 15 * Math.min(5, gates.length)) { doc.addPage(); y = head('gate times') }
+    const rows = gates.slice(0, Math.max(0, Math.floor((BOTTOM - y - 50) / 15)))
     if (rows.length) {
       y = title('Gate times to check against CCTV', 'the latest arrivals at and departures from work sites', y)
       table([
