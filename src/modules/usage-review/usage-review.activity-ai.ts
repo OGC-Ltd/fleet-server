@@ -24,6 +24,7 @@
 
 import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
+import { persistentStore } from './usage-review.store.js'
 
 // The operator's words (2026-10-09): mechanical, entertainment, haircut, work.
 export const ACTIVITIES = [
@@ -49,8 +50,9 @@ Read every word of the name and decide what a driver most likely went there to d
 A hint, when given, is Google's own type for the place; use it when the name says nothing, but the words of the name come first.
 Do not guess from a person's name alone. Reply with JSON only: {"items":[{"i":<index>,"activity":<group or null>}]}.`
 
-type Entry = { a: Activity | null; at: number }
-const cache = new Map<string, Entry>()
+// Kept on disk (usage-review.store), so a deploy does not pay for the same
+// names again.
+const cache = persistentStore<Activity | null>('activity-ai', { hitTtlMs: TTL_MS, missTtlMs: TTL_MS, max: CACHE_MAX })
 const inFlight = new Map<string, Promise<Activity | null>>()
 
 /** "Diamond Motorcycle Spares, 0.5 km away" → "Diamond Motorcycle Spares": the
@@ -65,16 +67,10 @@ const isActivity = (v: unknown): v is Activity => typeof v === 'string' && (ACTI
 /** The model's answer for `name` if it has been asked: undefined when not. */
 export function cachedActivity(name: string | null | undefined): Activity | null | undefined {
   if (!name) return undefined
-  const e = cache.get(nameKey(name))
-  if (!e) return undefined
-  if (Date.now() - e.at > TTL_MS) { cache.delete(nameKey(name)); return undefined }
-  return e.a
+  return cache.get(nameKey(name))
 }
 
-function remember(k: string, a: Activity | null) {
-  if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value!)
-  cache.set(k, { a, at: Date.now() })
-}
+const remember = (k: string, a: Activity | null) => cache.set(k, a)
 
 /** Exported for the tests: the model's reply, kept only where it names a group. */
 export function readReply(content: string, count: number): (Activity | null)[] | null {

@@ -96,11 +96,13 @@ export interface ReviewPlace {
    *  (usage-review.poi), replaced on a download by Google's when the page
    *  looked one up ("West Kenya Sugar - Lake Agro workshop"). */
   exactName?: string | null
-  /** What the named place is, from Google's type for it ("Banking", "Food
-   *  and drink", "Medical") — what the unit most likely stopped there for.
-   *  Arrives with `exactName`, and only when the place is the spot itself,
-   *  not a neighbour some way off. */
+  /** What the named place is ("Mechanical", "Banking", "Work") — what the
+   *  unit most likely stopped there for: read from its name and its OpenStreetMap
+   *  or Google type, or by the model (usage-review.activity-ai). */
   activity?: string | null
+  /** OpenStreetMap was asked for a business here on the build, found or not,
+   *  so the page does not ask again. */
+  poiTried?: boolean
   /** Work site, the home area, or elsewhere — see usage-review.areas. Set on
    *  a download only, where the organisation's sites are read. */
   kind?: 'work' | 'home' | 'elsewhere'

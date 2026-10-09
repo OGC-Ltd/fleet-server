@@ -18,6 +18,7 @@
 import { logger } from '../../lib/logger.js'
 import { haversineM, type ReviewPlace } from './usage-review.compute.js'
 import { titleCase } from './usage-review.geocode.js'
+import { persistentStore } from './usage-review.store.js'
 
 /** The public Overpass servers: the main one, then a mirror. Each hands an IP
  *  a couple of query slots and answers 429 while they are busy. */
@@ -100,7 +101,9 @@ export function pickPoi(lat: number, lng: number, els: OsmElement[]): Poi | null
   return { name, activity: osmActivity(pick.tags!) }
 }
 
-const cache = new Map<string, Poi | null>()
+// Kept on disk (usage-review.store): businesses for three months, "none"
+// for a fortnight.
+const cache = persistentStore<Poi | null>('poi', { hitTtlMs: 90 * 86_400_000, missTtlMs: 14 * 86_400_000, max: CACHE_MAX })
 const key = (lat: number, lng: number) => `${lat.toFixed(4)},${lng.toFixed(4)}`
 
 function query(pts: { lat: number; lng: number }[]): string {
@@ -146,21 +149,28 @@ export async function namePois(places: ReviewPlace[], limit: number, budgetMs = 
   const deadline = Date.now() + budgetMs
   const todo = places.slice(0, limit)
   const all = todo.filter(p => !cache.has(key(p.lat, p.lng)))
-  for (let i = 0; i < all.length; i += BATCH) {
-    const ask = all.slice(i, i + BATCH)
-    try {
-      if (Date.now() > deadline - 5_000) break
-      const elements = await overpass(query(ask), deadline)
-      for (const p of ask) {
-        if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value!)
-        cache.set(key(p.lat, p.lng), pickPoi(p.lat, p.lng, elements))
+  const batches: ReviewPlace[][] = []
+  for (let i = 0; i < all.length; i += BATCH) batches.push(all.slice(i, i + BATCH))
+  // Two batches at a time — Overpass gives each address two slots — so three
+  // batches take the time of two, not three.
+  const worker = async () => {
+    for (let ask = batches.shift(); ask; ask = batches.shift()) {
+      try {
+        if (Date.now() > deadline - 5_000) return
+        const elements = await overpass(query(ask), deadline)
+        for (const p of ask) cache.set(key(p.lat, p.lng), pickPoi(p.lat, p.lng, elements))
+      } catch (err) {
+        logger.warn({ err: (err as Error).message }, 'Usage review: OpenStreetMap businesses not read')
       }
-    } catch (err) {
-      logger.warn({ err: (err as Error).message }, 'Usage review: OpenStreetMap businesses not read')
     }
   }
+  await Promise.all([worker(), worker()])
   for (const p of todo) {
-    const got = cache.get(key(p.lat, p.lng))
+    const k = key(p.lat, p.lng)
+    // Looked up, whether or not a business was found: the page does not ask
+    // OpenStreetMap again for it (it did, and it cost 15 s a batch).
+    if (cache.has(k)) p.poiTried = true
+    const got = cache.get(k)
     if (got) { p.exactName = got.name; p.activity = got.activity }
   }
 }
