@@ -8,7 +8,7 @@
  *            Utilisation (the period's hours as a donut).
  *   Then, flowing on from page 2 — a section starts a new page only when it
  *   does not fit below the last (operator, 2026-10-09: no extra white space):
- *     Where the Vehicle Spent its Time, place by place with home first; Daily
+ *     Where the Vehicle Spent Its Time, place by place with home first; Daily
  *     Distance against the active-day mean and median; Overnight Locations;
  *     Driving Patterns (trips by weekday and by start hour), Most Frequent
  *     Routes;
@@ -17,11 +17,12 @@
  *     Site Visits: each time it went onto a site plan or a company geofence,
  *     when it arrived, the areas inside it stood in and for how long, and
  *     when it left;
- *     Movements: every trip and every stop, day by day, on and off the work
- *     sites;
+ *     Movements: day by day, each site visit as one line, the drives between
+ *     and every stop off the work sites;
  *     Route Map and Key Locations: the route with its places numbered and
  *     named.
- *   Titles in Title Case (operator, 2026-10-09).
+ *   Titles in Title Case (operator, 2026-10-09). A figure is told once: a
+ *   section's note says what its rows do not (2026-10-10).
  *
  * In black and white, with green and amber in the charts only (see C); the
  * map in grey under a black route (operator, 2026-10-09).
@@ -35,7 +36,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import PDFDocument from 'pdfkit'
-import { fuelOf, TZ_OFFSET_MS, type ReviewPlace, type ReviewTrip } from './usage-review.compute.js'
+import { dayStartMs, fuelOf, TZ_OFFSET_MS, type ReviewPlace, type ReviewTrip } from './usage-review.compute.js'
 import type { PlaceKind } from './usage-review.areas.js'
 import type { ReadyReview } from './usage-review.service.js'
 import type { SiteVisit } from './usage-review.siteplans.js'
@@ -191,6 +192,8 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 /** "24 Sep", or with the year "24 Sep 2026" — en-GB's own short month is "Sept". */
 const dayLabel = (d: string, year = false) => `${Number(d.slice(8, 10))} ${MONTHS[Number(d.slice(5, 7)) - 1]}${year ? ` ${d.slice(0, 4)}` : ''}`
 const pct = (v: number, of: number) => (of > 0 ? `${nf((v / of) * 100, 1)}%` : '-')
+/** A share as pct, but never "0.0%" for a part that is there. */
+const share = (v: number, of: number) => (of > 0 && v > 0 && (v / of) * 100 < 0.05 ? '<0.1%' : pct(v, of))
 const pct0 = (v: number | null) => (v == null ? '-' : `${Math.round(v * 100)}%`)
 const hhmm = (m: number | null) => (m == null ? '-' : `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`)
 const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -205,13 +208,13 @@ const when = (ms: number, sameDayAs?: number) => {
 /** "07:12" in EAT. */
 const clock = (ms: number) => when(ms, ms)
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
-/** "45 min", "9 h 26 min", "3 d 4 h". */
+/** "45 min", "9 h 26 min", "3 d 4 h", "4 d". */
 const span = (ms: number) => {
   const m = Math.round(ms / 60_000)
   if (m < 60) return `${m} min`
   const h = Math.floor(m / 60), r = m % 60
   if (h < 48) return r ? `${h} h ${r} min` : `${h} h`
-  return `${Math.floor(h / 24)} d ${h % 24} h`
+  return h % 24 ? `${Math.floor(h / 24)} d ${h % 24} h` : `${h / 24} d`
 }
 
 // ── drawing ──────────────────────────────────────────────────────────────────
@@ -446,7 +449,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     y += 58
   }
 
-  y = title('Executive Summary', `${veh.plate} over ${rv.period.days} days`, y)
+  y = title('Executive Summary', `${plural(rv.period.days, 'day')} · ${nf(q.messages, 0)} messages from the tracker`, y)
   {
     const quiet = s.calendarDays - s.activeDays
     const tiles: { l: string; v: string; sub: string }[] = [
@@ -507,27 +510,31 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
    *  the donut's outer radius; returns the y under it. */
   const timeUse = (y0: number, R: number) => {
     const sp = fig.split
-    const all = sp.driving + (sp.idling ?? 0) + sp.home + sp.away
-    let yy = title('Time Utilisation', `Driving ${pct(sp.driving, all)}  ·  Idling ${sp.idling != null ? pct(sp.idling, all) : '-'}  ·  Stopped ${pct(sp.home + sp.away, all)}  ·  ${s.activeDays}/${s.calendarDays} active days`, y0)
+    // Each hour once (report.ts split), so the parts fit inside the period;
+    // the note says what the rest is rather than the key's figures again.
+    const periodH = (Math.min(rv.period.endMs, rv.builtAt) - rv.period.startMs) / 3_600_000
+    let yy = title('Time Utilisation', 'stops of 10 min or more · the rest is shorter halts and gaps in the signal', y0)
     const parts = [
       { l: 'Driving', v: sp.driving, c: C.green },
       { l: 'Idling', v: sp.idling ?? 0, c: C.amber },
-      { l: 'Stopped at home', v: sp.home, c: C.dark },
-      { l: 'Stopped away', v: sp.away, c: C.light },
+      ...(fig.hasHome ? [{ l: 'Stopped at home', v: sp.home, c: C.dark }] : []),
+      { l: fig.hasHome ? 'Stopped away' : 'Stopped', v: sp.away, c: C.light },
     ]
     const total = parts.reduce((a, p) => a + p.v, 0)
     const ri = R * 0.62, cx = M + R + 10, cy = yy + R
     donut(cx, cy, R, ri, parts.map(p => ({ v: p.v, c: p.c })))
     line(`${nf(total, 0)} h`, cx - ri, cy - 9, 2 * ri, { font: F.bold, size: 13, align: 'center' })
-    line('accounted for', cx - ri, cy + 6, 2 * ri, { size: 6.8, color: C.sub, align: 'center' })
-    let ly = cy - 2 * 18 + 1
+    line(`of the period's ${nf(periodH, 0)} h`, cx - ri, cy + 6, 2 * ri, { size: 6.8, color: C.sub, align: 'center' })
+    let ly = cy - (parts.length / 2) * 18 + 1
     const lx = M + 2 * R + 34
     for (const p of parts) {
       doc.rect(lx, ly + 1, 9, 9).fill(p.c)
-      line(`${p.l} – ${nf(p.v, 0)} h (${pct(p.v, total)})`, lx + 15, ly, 220, { size: 9 })
+      line(`${p.l} – ${nf(p.v, 1)} h (${pct(p.v, total)})`, lx + 15, ly, 220, { size: 9 })
       ly += 18
     }
-    if (sp.idling == null) line('No ignition on this tracker, so idling cannot be told from stopped.', lx, ly + 2, 240, { size: 7, color: C.sub })
+    line(sp.idling == null
+      ? 'No ignition on this tracker, so idling cannot be told from stopped.'
+      : 'Stopped is the engine off; the engine running at a standstill, in a stop or not, is idling.', lx, ly + 2, W - (lx - M), { size: 7, color: C.sub })
     yy += 2 * R + 18
     return yy
   }
@@ -541,15 +548,16 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   // ════ page 2: where the time went, how it divided, day by day ════
   doc.addPage()
   y = head('Time and Distance')
-  y = title('Where the Vehicle Spent its Time', `${nf(fig.stoppedH, 0)} h stopped at ${s.places} places · stops of 10 min or more`, y)
+  y = title('Where the Vehicle Spent Its Time', `${nf(fig.stoppedH, 0)} h stopped at ${plural(s.places, 'place')} · stops of 10 min or more`, y)
   {
+    // Hours and their share here; visits and days are Top Sites' columns.
     const rows = fig.sites.slice(0, 15).map(x => ({
       label: x.name, v: x.hours, c: KIND_COLOR[x.home ? 'home' : x.kind],
-      note: `${nf(x.hours, 1)} h · ${x.visits} visit${x.visits === 1 ? '' : 's'} · ${x.days} day${x.days === 1 ? '' : 's'}`,
+      note: `${nf(x.hours, 1)} h · ${share(x.hours, fig.stoppedH)}`,
     }))
     y = hbars(rows, y, 150, 14.5)
     let kx = M + 156
-    for (const k of ['home', 'work', 'elsewhere'] as PlaceKind[]) {
+    for (const k of (fig.hasHome ? ['home', 'work', 'elsewhere'] : ['work', 'elsewhere']) as PlaceKind[]) {
       doc.rect(kx, y + 6, 8, 8).fill(KIND_COLOR[k])
       line(k === 'home' ? 'Home' : KIND_SHORT[k], kx + 12, y + 6, 80, { size: 7.5, color: C.sub })
       kx += 82
@@ -559,7 +567,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
 
   if (!timeOnCover) y = timeUse(y, 58)
 
-  y = title('Daily Distance', 'km per day · lines over the days it moved', y)
+  y = title('Daily Distance', 'km per day · mean and median of the days it moved', y)
   {
     const days = rv.days
     // The key sits on its own line above the bars, never over them.
@@ -607,7 +615,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     areas.nightly.forEach((d, i) => { if (i % every === 0) line(dayLabel(d.date), M + i * cw - 8, y + 22, cw + 16, { size: 6.3, color: C.sub, align: 'center' }) })
     y += 36
     let kx = M
-    for (const k of ['home', 'work', 'elsewhere', null] as (PlaceKind | null)[]) {
+    for (const k of (fig.hasHome ? ['home', 'work', 'elsewhere', null] : ['work', 'elsewhere', null]) as (PlaceKind | null)[]) {
       const count = k ? areas.nights[k] : areas.nightly.filter(d => !d.kind).length
       const label = `${k ? (k === 'home' ? 'Home area' : KIND_SHORT[k]) : 'Moving or no stop'}  ${count}`
       doc.rect(kx, y + 1, 7, 7).fill(k ? KIND_COLOR[k] : C.pale)
@@ -617,7 +625,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     }
     y += 16
     doc.font(F.reg).fontSize(6.8).fillColor(C.sub).text(
-      'Work sites are the company\'s factories and weighbridge yards and its own site fences. The home area is the place away from work where the unit spends the most nights, and anywhere within 3 km of it; nothing on record names a driver\'s house, so read it as where the unit sleeps.',
+      'Work sites are the company\'s factories, its weighbridge yards and the sites it has fenced. The home area is the place away from work where the unit spends the most nights, with anywhere within 3 km of it. No record names a driver\'s house, so read it as where the unit stays overnight.',
       M, y, { width: W, lineGap: 1 })
     y = doc.y + 10
   }
@@ -626,7 +634,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
   // ════ when it drives, and the routes ════
   y = section(y, 230, 'Driving Patterns')
   y = title('Driving Patterns', fig.busiestDay != null && fig.peakHour != null
-    ? `Busiest day ${WEEKDAYS[fig.busiestDay]} · Peak start hour ${String(fig.peakHour).padStart(2, '0')}:00 · ${pct0(fig.beforeNoonShare)} of trips start before noon`
+    ? `${plural(s.trips, 'trip')} by the day and the hour they started · times in EAT`
     : 'no trips in the period', y)
   {
     const half = (W - 20) / 2
@@ -669,9 +677,9 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
 
   // ════ sites ════
   y = section(y, 40 + 15 * (1 + Math.min(11, fig.sites.length)), 'Top Sites')
-  y = title('Top Sites at a Glance', 'home and the top 10 other places · activity read from each name and Google Maps · times are median arrival / departure', y)
   {
     const homeRow = fig.sites.find(x => x.home)
+    y = title('Top Sites at a Glance', `${homeRow ? 'home and the top 10 other places' : 'the top 10 places'} · activity from the name and Google · times are medians`, y)
     const rows = [...(homeRow ? [homeRow] : []), ...fig.sites.filter(x => !x.home).slice(0, 10)]
     y = table([
       { h: 'Site', w: 168 }, { h: 'Activity', w: 76 }, { h: 'Hours', w: 40, r: true }, { h: 'Visits', w: 38, r: true }, { h: 'Days', w: 34, r: true },
@@ -753,7 +761,10 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
       doc.rect(M, y, W, 16).fill(C.panel)
       const dt = new Date(v.start + TZ_OFFSET_MS)
       line(`${WD[dt.getUTCDay()]} ${dt.getUTCDate()} ${MONTHS[dt.getUTCMonth()]}${carried ? ' (continued)' : ''}`, M + 8, y + 4.5, 200, { font: F.bold, size: 8 })
-      line(`${plural(same.length, 'visit')} · ${span(same.reduce((t, x) => t + x.end - x.start, 0))} on site`, M + W - 260, y + 5, 252, { size: 7, color: C.sub, align: 'right' })
+      // The count only: each visit carries its own time on site, and a sum
+      // of visits that run on past midnight is not that day's (2026-10-10:
+      // "Sat 8 Aug · 44 h 35 min on site", the one visit's figure twice).
+      line(plural(same.length, 'visit'), M + W - 260, y + 5, 252, { size: 7, color: C.sub, align: 'right' })
       y += 16 + 9
     }
     const fresh = () => { doc.addPage(); y = head('Site Visits') }
@@ -869,30 +880,62 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
    * pre-emit critique: P5 H4 E4 S5 R5 V4
    */
   // The rest of the period (operator, 2026-10-09: "another section that will
-  // cover the rest of the movements made on and off work areas"): every trip,
-  // and every stop of 10 min or more, day by day on one spine. A stop's dot is
-  // the kind of place it was: green a work site, dark the home area, amber
-  // anywhere else, the report's colour for what to look at. Site Visits says
-  // what happened inside each site; this says how the unit got between them
-  // and where else it stood, so the two account for the whole period.
+  // cover the rest of the movements made on and off work areas"), day by day
+  // on one spine: each visit to a site plan or company geofence as one line,
+  // the drives between, and every stop of 10 min or more off them. A dot is
+  // the kind of place: green a work site, dark the home area, amber anywhere
+  // else, the report's colour for what to look at. What it did inside a site is
+  // Site Visits' to tell, and is not told twice (2026-10-10: KCP 136P's stops
+  // and shunts inside Raiply and Naitiri repeated the ledger line by line, and
+  // pushed the last three weeks past the row limit).
   {
     const placeById = new Map(rv.places.map(pl => [pl.id, pl]))
-    type Entry =
-      | { kind: 'stop'; start: number; end: number; place: ReviewPlace | undefined; spot: string | null }
+    const visits = [...(rv.siteVisits ?? [])].sort((a, b) => a.start - b.start)
+    type Stop = { kind: 'stop'; start: number; end: number; place: ReviewPlace | undefined; spot: string | null }
+    type Entry = Stop
       | { kind: 'trip'; start: number; end: number; trip: ReviewTrip }
-    const entries: Entry[] = [
-      ...rv.stops.map(st => ({ kind: 'stop' as const, start: st.start, end: st.end, place: placeById.get(st.place), spot: st.spot ?? null })),
-      ...rv.trips.map(t => ({ kind: 'trip' as const, start: t.start, end: t.end, trip: t })),
-    ].sort((a, b) => a.start - b.start || (a.kind === 'stop' ? -1 : 1))
-    const MAX_ROWS = 400
-    const shown = entries.slice(0, MAX_ROWS)
+      | { kind: 'visit'; start: number; end: number; visit: SiteVisit }
+    /** The visit an instant falls in, if any. */
+    const visitAt = (t: number) => {
+      let lo = 0, hi = visits.length
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (visits[mid]!.start <= t) lo = mid + 1; else hi = mid }
+      const v = visits[lo - 1]
+      return v && t <= v.end ? v : null
+    }
     // A stop on the company's ground is at work, under the name of the spot
     // it stood at, whatever the place it belongs to is called.
-    const kindAt = (e: Entry & { kind: 'stop' }): PlaceKind => (e.spot ? 'work' : e.place ? kindOf(e.place) : 'elsewhere')
-    const stoppedMs = (k: PlaceKind, list: Entry[]) =>
-      list.reduce((t, e) => t + (e.kind === 'stop' && kindAt(e) === k ? e.end - e.start : 0), 0)
-    const km = (list: Entry[]) => list.reduce((t, e) => t + (e.kind === 'trip' ? e.trip.km : 0), 0)
-    const trips = (list: Entry[]) => list.filter(e => e.kind === 'trip').length
+    const kindAt = (e: Stop): PlaceKind => (e.spot ? 'work' : e.place ? kindOf(e.place) : 'elsewhere')
+    const nameOf = (e: Stop) => e.spot ?? (e.place ? shortPlaceName(e.place) : 'Unnamed place')
+
+    const entries: Entry[] = visits.map(v => ({ kind: 'visit' as const, start: v.start, end: v.end, visit: v }))
+    const loose: Entry[] = [
+      ...rv.stops.map(st => ({ kind: 'stop' as const, start: st.start, end: st.end, place: placeById.get(st.place), spot: st.spot ?? null })),
+      ...rv.trips.map(t => ({ kind: 'trip' as const, start: t.start, end: t.end, trip: t })),
+    ]
+    for (const e of loose) {
+      // Inside a visit, the visit's line tells it.
+      if (visitAt((e.start + e.end) / 2)) continue
+      // Cut at a visit it runs out of or into, so no two lines overlap: a drive
+      // ends at the fence, where the visit begins.
+      const from = visitAt(e.start), to = visitAt(e.end)
+      const start = from ? from.end : e.start, end = to ? to.start : e.end
+      if (end > start) entries.push({ ...e, start, end })
+    }
+    entries.sort((a, b) => a.start - b.start || (a.kind === 'trip' ? 1 : -1))
+    // Stops at one place with no drive between are one stay: a lorry that
+    // crept a few metres had stopped twice (Menengai Yard, 3 Aug: three rows).
+    for (let i = entries.length - 1; i > 0; i--) {
+      const e = entries[i]!, prev = entries[i - 1]!
+      if (e.kind !== 'stop' || prev.kind !== 'stop' || nameOf(e) !== nameOf(prev) || kindAt(e) !== kindAt(prev)) continue
+      prev.end = Math.max(prev.end, e.end)
+      entries.splice(i, 1)
+    }
+    const MAX_ROWS = 400
+    const shown = entries.slice(0, MAX_ROWS)
+    const stoppedMs = (k: PlaceKind, a = -Infinity, b = Infinity) => entries.reduce((t, e) =>
+      t + (e.kind === 'stop' && kindAt(e) === k ? Math.max(0, Math.min(e.end, b) - Math.max(e.start, a)) : 0), 0)
+    const onSiteMs = entries.reduce((t, e) => t + (e.kind === 'visit' ? e.end - e.start : 0), 0) + stoppedMs('work')
+    const dayRow = new Map(rv.days.map(d => [d.date, d]))
 
     // Geometry: the times, the spine, what happened, how long.
     const GUT = 84, RIGHT = 70, RH = 13
@@ -905,32 +948,35 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     let day = ''
     const dayBand = (e: Entry, carried: boolean) => {
       const d = eatDate(e.start)
-      const same = shown.filter(x => eatDate(x.start) === d)
       doc.rect(M, y, W, 16).fill(C.panel)
       const dt = new Date(e.start + TZ_OFFSET_MS)
       line(`${WD[dt.getUTCDay()]} ${dt.getUTCDate()} ${MONTHS[dt.getUTCMonth()]}${carried ? ' (continued)' : ''}`, M + 8, y + 4.5, 200, { font: F.bold, size: 8 })
-      const off = stoppedMs('elsewhere', same)
-      line([trips(same) ? `${plural(trips(same), 'trip')} · ${nf(km(same), 0)} km` : 'no trips', off ? `${span(off)} off work sites` : null].filter(Boolean).join(' · '),
+      // The day's distance, as Daily Distance has it, and the time off the
+      // work sites inside the day: a stop overnight counts to midnight. No
+      // trip count: the drives inside a site are its visit's line.
+      const dd = dayRow.get(d)
+      const off = stoppedMs('elsewhere', dayStartMs(d), dayStartMs(d) + 86_400_000)
+      line([dd && dd.km >= 0.5 ? `${nf(dd.km, dd.km < 10 ? 1 : 0)} km` : 'no driving', off >= 60_000 ? `${span(off)} off work sites` : null].filter(Boolean).join(' · '),
         M + W - 260, y + 5, 252, { size: 7, color: C.sub, align: 'right' })
       y += 16 + 8
     }
     const fresh = () => { doc.addPage(); y = head('Movements') }
 
     y = section(y, 40 + 34 + 12 + 24 + 3 * RH, 'Movements')
-    y = title('Movements', 'every trip, and every stop of 10 min or more · off work sites in amber · times in EAT', y)
+    y = title('Movements', 'a site visit is one line, told in full under Site Visits · off work sites in amber', y)
     if (!entries.length) {
       line('No trips, and no stops of 10 min or more, in the period.', M, y, W, { size: 8.5, color: C.sub })
       y += 20
     } else {
-      // The period in four figures, in the band Site Visits opens with; each
+      // The period in figures, in the band Site Visits opens with; each
       // label's swatch is the key to the dots below.
       const cells: [string, string, string | null][] = [
-        ['DRIVING', `${plural(trips(entries), 'trip')} · ${nf(km(entries), 0)} km`, null],
-        ['ON WORK SITES', span(stoppedMs('work', entries)), C.green],
-        ['OFF WORK SITES', span(stoppedMs('elsewhere', entries)), C.amber],
-        ['HOME AREA', span(stoppedMs('home', entries)), C.dark],
+        ['DRIVING', `${plural(s.trips, 'trip')} · ${nf(s.km, 0)} km`, null],
+        ['ON WORK SITES', span(onSiteMs), C.green],
+        ['OFF WORK SITES', span(stoppedMs('elsewhere')), C.amber],
+        ...(fig.hasHome ? [['HOME AREA', span(stoppedMs('home')), C.dark] as [string, string, string]] : []),
       ]
-      const cw = W / 4
+      const cw = W / cells.length
       doc.rect(M, y, W, 34).fill(C.panel)
       cells.forEach(([label, value, sw], i) => {
         const x = M + i * cw
@@ -952,7 +998,7 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
           fresh()
           dayBand(e, true)
         }
-        // The spine through every row; a stop is a dot on it.
+        // The spine through every row; a stop or a visit is a dot on it.
         doc.moveTo(SPX, y - 3).lineTo(SPX, y + RH - 3).lineWidth(0.8).stroke(C.line)
         const r = range(e.start, e.end)
         const sub = e.kind === 'trip'
@@ -962,14 +1008,20 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
           line(r.more, M + tw + 3, y + 0.8, 24, { size: 6.5, color: C.sub })
         }
         line(span(e.end - e.start), M + W - RIGHT, y, RIGHT, { size: 8, color: sub ? C.sub : C.ink, align: 'right' })
+        const dot = (k: PlaceKind) => {
+          doc.circle(SPX, y + 3.6, 2.8).fill(KIND_COLOR[k])
+          doc.circle(SPX, y + 3.6, 2.8).lineWidth(0.8).stroke(C.paper)
+        }
         if (e.kind === 'trip') {
           const t = e.trip
           line(`Drove ${nf(t.km, t.km < 10 ? 1 : 0)} km · top ${t.maxKmh} km/h`, DX, y, DW, { size: 7.6, color: C.sub })
+        } else if (e.kind === 'visit') {
+          dot('work')
+          line(e.visit.site, DX, y, DW, { size: 8 })
         } else {
           const k = kindAt(e)
-          doc.circle(SPX, y + 3.6, 2.8).fill(KIND_COLOR[k])
-          doc.circle(SPX, y + 3.6, 2.8).lineWidth(0.8).stroke(C.paper)
-          const name = e.spot ?? (e.place ? shortPlaceName(e.place) : 'Unnamed place')
+          dot(k)
+          const name = nameOf(e)
           const font = k === 'elsewhere' ? F.bold : F.reg
           line(name, DX, y, DW, { font, size: 8 })
           const note = k === 'home' ? 'home area' : k === 'elsewhere' ? e.place?.activity ?? null : null
@@ -1042,8 +1094,8 @@ export async function renderUsageReviewPdf(rv: ReadyReview, kmpl: number | null,
     top.forEach((p, i) => {
       const x = M + Math.floor(i / half) * cw, yy = y + (i % half) * 11
       doc.circle(x + 5, yy + 3.5, 3.5).fill(KIND_COLOR[kindOf(p)])
-      line(`${p.id}. ${shortPlaceName(p)}${p.activity ? ` · ${p.activity}` : ''}`, x + 12, yy, cw - 60, { size: 7.2 })
-      line(`${nf(p.hours, 1)} h`, x + cw - 56, yy, 44, { size: 7.2, color: C.sub, align: 'right' })
+      // Which circle is which; the hours are in Top Sites.
+      line(`${p.id}. ${shortPlaceName(p)}${p.activity ? ` · ${p.activity}` : ''}`, x + 12, yy, cw - 20, { size: 7.2 })
     })
     y += half * 11 + 14
   }

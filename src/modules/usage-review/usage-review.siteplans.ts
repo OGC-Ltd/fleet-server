@@ -33,7 +33,7 @@ import path from 'node:path'
 import { haversineM, isInsideFence, pointInPolygon } from '../../lib/geofence.js'
 import { ringAreaHa } from '../../lib/zone-taxonomy.js'
 import { logger } from '../../lib/logger.js'
-import type { ReviewPlace, ReviewPoint, ReviewStop } from './usage-review.compute.js'
+import { eatDay, type ReviewPlace, type ReviewPoint, type ReviewStop, type UsageReview } from './usage-review.compute.js'
 import type { Site } from './usage-review.areas.js'
 
 /** A stop this close to a surveyed pin stood at it. Kabras' pins are 4–60 m
@@ -251,6 +251,69 @@ export function nameBySite(places: ReviewPlace[], stops: ReviewStop[], plans: Si
   return named
 }
 
+/**
+ * One place per site name, in place. A place is a 400 m cluster of stops, so a
+ * site bigger than that holds several, and once each is named by the site they
+ * read as the same place twice (KCP 136P, Aug–Sep 2026: "Raiply" at 301 h and
+ * again at 114 h, "Raiply › Raiply" among the routes). Places the company's
+ * ground named alike become one: the stops and trips of the others moved onto
+ * the one with most time, its figures worked out again from its stops, and
+ * every place numbered again by time spent. Run after nameBySite and before
+ * anything else reads the places. Returns how many places were folded in.
+ */
+export function mergeSiteNamedPlaces(rv: Pick<UsageReview, 'places' | 'stops' | 'trips' | 'summary'>): number {
+  const kept = new Map<string, ReviewPlace>()
+  const into = new Map<number, ReviewPlace>()
+  for (const p of rv.places) {
+    if (!p.nameFrom || !p.exactName) continue
+    const k = `${p.nameFrom}|${p.exactName}`
+    const first = kept.get(k)
+    if (first) into.set(p.id, first); else kept.set(k, p)
+  }
+  if (!into.size) return 0
+
+  // The centre weighted by time, as the clusters' own centres are.
+  const weight = new Map<number, { lat: number; lng: number; h: number }>()
+  for (const p of rv.places) {
+    const to = into.get(p.id) ?? p
+    const w = weight.get(to.id) ?? { lat: 0, lng: 0, h: 0 }
+    const h = Math.max(p.hours, 1e-6)
+    w.lat += p.lat * h; w.lng += p.lng * h; w.h += h
+    weight.set(to.id, w)
+  }
+  for (const st of rv.stops) { const to = into.get(st.place); if (to) st.place = to.id }
+  for (const t of rv.trips) {
+    const a = into.get(t.fromPlace), b = into.get(t.toPlace)
+    if (a) t.fromPlace = a.id
+    if (b) t.toPlace = b.id
+  }
+  const places = rv.places.filter(p => !into.has(p.id))
+  const stoppedMs = rv.stops.reduce((a, st) => a + st.end - st.start, 0)
+  const r2 = (n: number) => Math.round(n * 100) / 100
+  for (const p of places) {
+    const w = weight.get(p.id)!
+    if (w.h > 0) { p.lat = w.lat / w.h; p.lng = w.lng / w.h }
+    const mine = rv.stops.filter(st => st.place === p.id)
+    const ms = mine.reduce((a, st) => a + st.end - st.start, 0)
+    p.hours = r2(ms / 3_600_000)
+    p.visits = mine.length
+    p.days = new Set(mine.map(st => eatDay(st.start))).size
+    p.share = stoppedMs ? r2((ms / stoppedMs) * 100) : 0
+    p.firstSeen = Math.min(...mine.map(st => st.start))
+    p.lastSeen = Math.max(...mine.map(st => st.end))
+  }
+
+  // Numbered again: place 1 is still where the unit spent most time.
+  places.sort((a, b) => b.hours - a.hours || a.id - b.id)
+  const renum = new Map(places.map((p, k) => [p.id, k + 1]))
+  for (const p of places) p.id = renum.get(p.id)!
+  for (const st of rv.stops) st.place = renum.get(st.place)!
+  for (const t of rv.trips) { t.fromPlace = renum.get(t.fromPlace)!; t.toPlace = renum.get(t.toPlace)! }
+  rv.places.splice(0, rv.places.length, ...places)
+  rv.summary.places = places.length
+  return into.size
+}
+
 /** Name each stop by the spot it stood at on the company's ground, in place;
  *  the Logbook's Movements reads it (ReviewStop.spot). */
 export function nameStops(stops: ReviewStop[], plans: SitePlan[], fences: Site[] = []): void {
@@ -320,6 +383,38 @@ export function siteVisits(points: ReviewPoint[], plans: SitePlan[], fences: Sit
     if (v === undefined) { v = spotAt(lat, lng, plans, fences); memo.set(k, v) }
     return v
   }
+  // Company geofences drawn over one another are one ground (KCP 136P, Aug
+  // 2026: Menengai's "Menengai Yard", "Menengai Yard NEW" and "Menengai Yard -
+  // Nakuru HQ" overlap in part, and spotAt names only the smallest holding a
+  // fix, so a lorry parked in the yard came and went a minute apart, nine
+  // visits in five days). Fences a fix stood in at once are grouped; a group's
+  // visit goes by its largest fence, and the smaller ones are its areas.
+  const named = fences.filter(f => f.fence != null && fenceHa(f) <= MAX_NAMING_FENCE_HA)
+  const parent = new Map<string, string>()
+  const group = (n: string): string => {
+    const up = parent.get(n)
+    if (up === undefined || up === n) return n
+    const root = group(up)
+    parent.set(n, root)
+    return root
+  }
+  const seen = new Set<string>()
+  for (const p of points) {
+    const k = `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`
+    if (seen.has(k)) continue
+    seen.add(k)
+    if (spot(p.lat, p.lng)?.from !== 'geofence') continue
+    const held = [...new Set(named.filter(f => inFence(p.lat, p.lng, f.fence!)).map(f => f.name))]
+    for (const n of held.slice(1)) {
+      const a = group(held[0]!), b = group(n)
+      if (a !== b) parent.set(b, a)
+    }
+  }
+  const largest = new Map<string, { name: string; ha: number }>()
+  for (const f of named) {
+    const root = group(f.name), ha = fenceHa(f), top = largest.get(root)
+    if (!top || ha > top.ha) largest.set(root, { name: f.name, ha })
+  }
   const firstT = points[0]!.t, lastT = points[points.length - 1]!.t
   const out: SiteVisit[] = []
   let cur: (SiteVisit & { key: string }) | null = null
@@ -349,16 +444,24 @@ export function siteVisits(points: ReviewPoint[], plans: SitePlan[], fences: Sit
       if (cur && p.t - cur.end > VISIT_GAP_MS) close()
       continue
     }
-    const key = `${s.from}|${s.site}`
+    let key = `${s.from}|${s.site}`, site = s.site, area = s.area
+    if (s.from === 'geofence') {
+      // The group's largest fence names the visit; a smaller fence it stood
+      // in is an area of it, and the largest's own ground is the site's.
+      const root = group(s.site)
+      site = largest.get(root)?.name ?? s.site
+      area = s.site === site ? null : s.site
+      key = `geofence|${root}`
+    }
     if (cur && cur.key !== key) close()
     if (!cur) {
-      cur = { key, site: s.site, from: s.from, start: p.t, end: p.t, startsBefore: p.t === firstT, endsAfter: false, areas: [] }
+      cur = { key, site, from: s.from, start: p.t, end: p.t, startsBefore: p.t === firstT, endsAfter: false, areas: [] }
     }
     cur.end = p.t
     cur.endsAfter = p.t === lastT
     const last = cur.areas[cur.areas.length - 1]
-    if (last && last.name === s.area) last.end = p.t
-    else cur.areas.push({ name: s.area, start: p.t, end: p.t })
+    if (last && last.name === area) last.end = p.t
+    else cur.areas.push({ name: area, start: p.t, end: p.t })
   }
   close()
   return out
