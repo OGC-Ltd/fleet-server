@@ -108,6 +108,10 @@ export interface ReviewPlace {
   kind?: 'work' | 'home' | 'elsewhere'
   /** The site a work place stands at ("Nzoia cw bridge", a geofence name). */
   site?: string | null
+  /** Set when the company's own ground named the place — a site-plan survey
+   *  or one of its geofences (usage-review.siteplans). `exactName` is then
+   *  that name, and nothing looked up later replaces it. */
+  nameFrom?: 'site-plan' | 'geofence' | null
   /** Nights (02:00 EAT) the unit stood here. */
   nights?: number
   area: string | null

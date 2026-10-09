@@ -1,0 +1,75 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Big Farm",
+    "category": "perimeter",
+    "kind": "boundary"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       35.87925,
+       -0.208398
+      ],
+      [
+       35.8748644,
+       -0.218418
+      ],
+      [
+       35.9183249,
+       -0.239815
+      ],
+      [
+       35.9314201,
+       -0.209752
+      ],
+      [
+       35.9301452,
+       -0.2091678
+      ],
+      [
+       35.927406,
+       -0.2078407
+      ],
+      [
+       35.9231019,
+       -0.2057694
+      ],
+      [
+       35.9148067,
+       -0.2016457
+      ],
+      [
+       35.9053796,
+       -0.2212357
+      ],
+      [
+       35.87925,
+       -0.208398
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Main Gate",
+    "category": "gate",
+    "kind": "point"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     35.9059224,
+     -0.2298421
+    ]
+   }
+  }
+ ]
+}
