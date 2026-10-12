@@ -9,10 +9,18 @@ import {
   reviewTheftSchema, signalAlertQuerySchema, evaluateSignalsSchema, escalateFollowUpSchema,
 } from './fuel.schema.js'
 import * as ctrl from './fuel.controller.js'
+import { getFuelReportData, reportDataQuery } from './fuel-report-data.js'
 
 const router = Router({ mergeParams: true })
 
 router.use(authenticate, requireOrgAccess)
+
+// A Fuel Report's whole period in one request: the readings, the drains and
+// the fillings, so each of the three permissions the page's separate reads
+// asked for is asked here (fuel-report-data).
+router.get('/report-data/vehicles/:vehicleId',
+  requirePermission('telemetry:read'), requirePermission('fuel_theft:read'), requirePermission('fuel_filling:read'),
+  requireVehicleInScope, validateQuery(reportDataQuery), getFuelReportData)
 
 router.get('/fillings', requirePermission('fuel_filling:read'), validateQuery(listFillingQuerySchema), ctrl.listFillings)
 router.get('/fillings/:fillingId', requirePermission('fuel_filling:read'), ctrl.getFilling)

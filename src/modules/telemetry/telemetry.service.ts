@@ -242,7 +242,8 @@ export async function getVehiclePlayback(
  * caller may keep them for good. Today's are a running total, and `since` lets
  * the caller fetch only what arrived after its last row.
  */
-export async function getVehicleDaySeries(vehicleId: string, orgId: string, q: DaySeriesQuery) {
+/** `db`: the report pool (lib/report-db) when a Fuel Report asks; the live pool otherwise. */
+export async function getVehicleDaySeries(vehicleId: string, orgId: string, q: DaySeriesQuery, db: typeof prisma = prisma) {
   const day = q.day ?? fleetDayKey().toISOString().slice(0, 10)
   const { from, to } = fleetDayBounds(day)
   if (from.getTime() > Date.now()) {
@@ -250,7 +251,7 @@ export async function getVehicleDaySeries(vehicleId: string, orgId: string, q: D
   }
   const after = q.since != null && q.since >= from.getTime() ? new Date(q.since) : null
 
-  const raw = await findDaySeries(vehicleId, orgId, from, to, after)
+  const raw = await findDaySeries(vehicleId, orgId, from, to, after, db)
   if (!raw) throw new NotFoundError('Vehicle not found')
 
   // Where the org's limit depends on place (lib/speed-policy), the limit at
@@ -259,7 +260,7 @@ export async function getVehicleDaySeries(vehicleId: string, orgId: string, q: D
   await warmSpeedPolicy(orgId)
   let lim: number[] | undefined
   if (speedPolicyFor(orgId)) {
-    const v = await prisma.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleType: true } })
+    const v = await db.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleType: true } })
     const type = v?.vehicleType ?? null
     // Each position asked once. A parked unit reports the same (5-dp) spot
     // hundreds of times a day, and this was the whole cost of the route on

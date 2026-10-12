@@ -5,10 +5,7 @@ import { requirePermission, requireVehicleInScope } from '../../middleware/autho
 import { validateBody, validateQuery } from '../../middleware/validate.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { ConflictError } from '../../core/errors/errors.js'
-import { getUsageReview, reviewForDownload, type ReadyReview } from './usage-review.service.js'
-import { buildUsageReviewXlsx } from './usage-review.xlsx.js'
-import { renderUsageReviewPdf } from './usage-review.pdf.js'
-import { classifyPlaces, loadSites } from './usage-review.areas.js'
+import { getUsageReview, pointsOf, renderReport, reviewForDownload, type ReadyReview, type RenderOptions } from './usage-review.service.js'
 import { aiActivities, aiStatus, cachedActivity, nameKey } from './usage-review.activity-ai.js'
 
 /**
@@ -80,54 +77,55 @@ async function held(req: Parameters<RequestHandler>[0]) {
   return rv
 }
 
-/** Google's names from the page, onto a copy of the held review's places:
- *  each a name, or `{ name, activity }` where Google's type says what the
- *  place is. A malformed `names` is ignored: the download falls back to
- *  OpenStreetMap. */
-function withNames(rv: ReadyReview, raw: string | undefined): ReadyReview {
-  if (!raw) return rv
-  let parsed: unknown
-  try { parsed = JSON.parse(raw) } catch { return rv }
-  if (!parsed || typeof parsed !== 'object') return rv
-  const names = parsed as Record<string, unknown>
-  const clean = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null)
-  return {
-    ...rv,
-    places: rv.places.map(pl => {
-      // Named by a site plan or geofence on the build: the company's own name
-      // for its ground beats the nearest business Google found (siteplans).
-      if (pl.nameFrom) return pl
-      const v = names[String(pl.id)]
-      const o = v && typeof v === 'object' ? v as Record<string, unknown> : { name: v }
-      const name = clean(o['name'], 120)
-      // What OpenAI read from the name, when it has been asked (the page asks
-      // as the names arrive), over the page's own reading of Google's type.
-      if (name) return { ...pl, exactName: name, activity: cachedActivity(name) ?? clean(o['activity'], 40) }
-      // No Google name: the OpenStreetMap business from the build stands.
-      return pl.exactName ? { ...pl, activity: cachedActivity(pl.exactName) ?? pl.activity ?? null } : pl
-    }),
+/** Google's names from the page, for the held review's places: each a name,
+ *  or `{ name, activity }` where Google's type says what the place is. Worked
+ *  out here, where the activity cache lives, and handed to the renderer as
+ *  overrides by place id. A malformed `names` is ignored: the download falls
+ *  back to OpenStreetMap. */
+function nameOverrides(rv: ReadyReview, raw: string | undefined): RenderOptions['overrides'] {
+  const out: RenderOptions['overrides'] = {}
+  let names: Record<string, unknown> = {}
+  if (raw) {
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object') names = parsed as Record<string, unknown>
+    } catch { /* ignored, as above */ }
   }
+  const clean = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null)
+  for (const pl of rv.places) {
+    // Named by a site plan or geofence on the build: the company's own name
+    // for its ground beats the nearest business Google found (siteplans).
+    if (pl.nameFrom) continue
+    const v = names[String(pl.id)]
+    const o = v && typeof v === 'object' ? v as Record<string, unknown> : { name: v }
+    const name = clean(o['name'], 120)
+    // What OpenAI read from the name, when it has been asked (the page asks
+    // as the names arrive), over the page's own reading of Google's type.
+    if (name) out[String(pl.id)] = { exactName: name, activity: cachedActivity(name) ?? clean(o['activity'], 40) }
+    // No Google name: the OpenStreetMap business from the build stands.
+    else if (pl.exactName) {
+      const activity = cachedActivity(pl.exactName) ?? pl.activity ?? null
+      if (activity !== (pl.activity ?? null)) out[String(pl.id)] = { exactName: pl.exactName, activity }
+    }
+  }
+  return out
 }
 
-/** Each place's kind (work site, home area, elsewhere) and the period's
- *  split by kind, onto a copy of the review — see usage-review.areas. */
-async function withAreas(rv: ReadyReview, orgId: string): Promise<ReadyReview> {
-  const { byPlace, summary } = classifyPlaces(rv.places, rv.stops, rv.period, await loadSites(orgId))
-  return {
-    ...rv,
-    areas: summary,
-    places: rv.places.map(pl => {
-      const a = byPlace.get(pl.id)
-      // A work site with no business named there is still work.
-      return a ? { ...pl, kind: a.kind, site: a.site, nights: a.nights, activity: pl.activity || (a.kind === 'work' ? 'Work' : null) } : pl
-    }),
+/** The download's file, from the worker (or made here), kept for the next. */
+async function download(req: Parameters<RequestHandler>[0], format: 'pdf' | 'xlsx') {
+  const { from, to, kmpl, names, driver } = q(req)
+  const rv = await held(req)
+  const options: RenderOptions = {
+    format, kmpl: rate(rv, kmpl), rateNote: rateNote(rv, kmpl),
+    driver: format === 'pdf' ? driver ?? null : null,
+    overrides: nameOverrides(rv, names),
   }
+  return { rv, buf: await renderReport(p(req, 'orgId'), p(req, 'vehicleId'), from, to, rv, options) }
 }
 
 const getXlsx: RequestHandler = async (req, res, next) => {
   try {
-    const rv = await withAreas(withNames(await held(req), q(req).names), p(req, 'orgId'))
-    const buf = buildUsageReviewXlsx(rv, rate(rv, q(req).kmpl), rateNote(rv, q(req).kmpl))
+    const { rv, buf } = await download(req, 'xlsx')
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     res.setHeader('Content-Disposition', `attachment; filename="${fileName(rv, 'xlsx')}"`)
     res.send(buf)
@@ -136,8 +134,7 @@ const getXlsx: RequestHandler = async (req, res, next) => {
 
 const getPdf: RequestHandler = async (req, res, next) => {
   try {
-    const rv = await withAreas(withNames(await held(req), q(req).names), p(req, 'orgId'))
-    const buf = await renderUsageReviewPdf(rv, rate(rv, q(req).kmpl), q(req).driver ?? null)
+    const { rv, buf } = await download(req, 'pdf')
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `attachment; filename="${fileName(rv, 'pdf')}"`)
     res.send(buf)
@@ -154,15 +151,13 @@ const postActivities: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
-/** The EAT calendar day of an instant (Kenya keeps no daylight saving). */
-const eatDay = (ms: number) => new Date(ms + 3 * 3_600_000).toISOString().slice(0, 10)
-
 const getDay: RequestHandler = async (req, res, next) => {
   try {
-    const rv = await held(req)
+    await held(req)
+    const { from, to } = q(req)
     const { date } = req.query as unknown as { date: string }
-    const points = rv.points
-      .filter(pt => eatDay(pt.t) === date)
+    // One day's file of the saved review, not the whole period's fixes.
+    const points = (await pointsOf(p(req, 'orgId'), p(req, 'vehicleId'), from, to, date))
       .map(pt => [pt.t, pt.lat, pt.lng, Math.round(pt.speed), pt.course, pt.ign == null ? null : pt.ign ? 1 : 0])
     sendSuccess(res, { date, points })
   } catch (err) { next(err) }

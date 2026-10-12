@@ -527,6 +527,31 @@ const schema = z.object({
   // the rate moves. A caller can still override per request.
   FUEL_PRICE_PER_LITRE: z.coerce.number().positive().optional().default(214.03),
   FUEL_CURRENCY:        z.string().optional().default('KES'),
+
+  // ── reports at scale (2026-10-10: "300+ users generating reports") ────────
+  // Logbook builds and their PDF / workbook run in a separate process,
+  // `report-worker` (src/report-worker.ts), fed by a BullMQ queue, so a busy
+  // hour of reports never stalls the live map. 'false' builds in the API
+  // process as before; so does a missing Redis, or a worker that has stopped
+  // answering (lib/queues/usage-review).
+  REPORT_WORKER_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+  // Builds the worker runs side by side. Mostly waiting on Wialon, which allows
+  // 100 sessions per user per IP and 15 M messages loaded across them; a
+  // two-month build loads ~90 k in its own session.
+  REPORT_BUILD_CONCURRENCY: z.coerce.number().int().min(1).max(20).optional().default(6),
+  // Finished reports on disk (usage-review.saved), and their cap. A past
+  // period never changes, so a report built once is served to everyone.
+  REPORT_STORE_DIR: z.string().optional().default(''),
+  REPORT_STORE_MAX_MB: z.coerce.number().int().min(50).optional().default(2048),
+  // Connections the report reads hold, apart from the live pool (lib/report-db),
+  // so a wave of reports queues on its own and never starves telemetry ingest.
+  REPORT_DB_POOL_MAX: z.coerce.number().int().min(1).max(20).optional().default(4),
+  // The live pool (lib/prisma). The worker process runs with a small one.
+  DB_POOL_MAX: z.coerce.number().int().min(1).max(50).optional().default(14),
+  // Finished fleet days of a unit's readings, shared by every Fuel Report
+  // (telemetry day-series-cache): in memory, and on disk below this cap.
+  FUEL_DAY_CACHE_MB: z.coerce.number().int().min(8).optional().default(128),
+  FUEL_DAY_DISK_MB: z.coerce.number().int().min(50).optional().default(1024),
 })
 
 // Production must talk to the real (remote) database endpoint. localhost URLs

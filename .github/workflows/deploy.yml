@@ -214,6 +214,16 @@ jobs:
           # while the API went on serving the previous build out of memory.
           # The /health check below is what catches that, so keep it.
           pm2 restart server --update-env
+          # The report worker (src/report-worker.ts): Logbook builds and their
+          # PDFs in a process of their own, so reports never stall the live map.
+          # Started the first time, restarted after. While it is down the API
+          # builds reports itself, so a failed start costs speed, not reports.
+          if pm2 describe report-worker > /dev/null 2>&1; then
+            pm2 restart report-worker --update-env
+          else
+            pm2 start dist/src/report-worker.js --name report-worker \
+              --max-memory-restart 1800M --node-args="--max-old-space-size=1536"
+          fi
           pm2 save
           REMOTE
 
