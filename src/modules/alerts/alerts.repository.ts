@@ -27,7 +27,33 @@ export interface AlertWindow {
   to: Date
   q?: string
   minOverKmh?: number
+  /** Whose read marks to read (alert_reads, users.alerts_read_at). */
+  reader?: Reader
 }
+
+/** One person's read marks: everything that arrived by `readAt` ("Mark all
+ *  read"), and each alert opened since (alert_reads). */
+export interface Reader { userId: string; readAt: Date | null }
+export type ReadFilter = 'all' | 'read' | 'unread'
+
+/**
+ * Whether this person has read the alert, as SQL. `arrivedCol` is when the
+ * alert reached the system (a fuel alert's detection, an episode's end), so
+ * "Mark all read" never covers an alert that arrived after it.
+ */
+function readSql(kind: 'FUEL' | 'SPEEDING', idCol: string, arrivedCol: string, r?: Reader): Prisma.Sql {
+  if (!r) return Prisma.sql`FALSE`
+  const floor = r.readAt ? Prisma.sql`${Prisma.raw(arrivedCol)} <= ${r.readAt} OR ` : Prisma.empty
+  return Prisma.sql`(${floor}EXISTS (SELECT 1 FROM alert_reads ar
+      WHERE ar.user_id = ${r.userId} AND ar.kind = ${kind}::"AlertKind" AND ar.alert_id = ${Prisma.raw(idCol)}))`
+}
+
+const readFilterSql = (read: ReadFilter, isRead: Prisma.Sql) => (read === 'read'
+  ? Prisma.sql`AND ${isRead}`
+  : read === 'unread' ? Prisma.sql`AND NOT ${isRead}` : Prisma.empty)
+
+const FUEL_READ = (w: AlertWindow) => readSql('FUEL', 't.id', 't.detected_at', w.reader)
+const SPEED_READ = (w: AlertWindow) => readSql('SPEEDING', 's.id', 's.ended_at', w.reader)
 
 /** `(org = a) OR (org = b AND vehicle = ANY(...))`, one arm per organisation. */
 function scopeSql(scopes: OrgScope[], orgCol: string, vehicleCol: string): Prisma.Sql {
@@ -89,9 +115,12 @@ export interface FuelAlertRow {
   dismissedAt: Date | null
   followUpStatus: string | null
   driverName: string | null
+  read: boolean
 }
 
-export function fuelRows(w: AlertWindow, scopes: OrgScope[], status: AlertStatus | 'all', cursor: Cursor | null, limit: number) {
+export function fuelRows(
+  w: AlertWindow, scopes: OrgScope[], status: AlertStatus | 'all', cursor: Cursor | null, limit: number, read: ReadFilter = 'all',
+) {
   const statusSql = status === 'all' ? Prisma.empty : Prisma.sql`AND ${FUEL_BUCKET} = ${status}`
   return prisma.$queryRaw<FuelAlertRow[]>`
     SELECT t.id, v.organisation_id AS "orgId", t.vehicle_id AS "vehicleId",
@@ -103,7 +132,7 @@ export function fuelRows(w: AlertWindow, scopes: OrgScope[], status: AlertStatus
            t.review_status::text AS "reviewStatus", t.reviewed_at AS "reviewedAt",
            t.review_note AS "reviewNote", ru.full_name AS "reviewedBy",
            t.dismissed_at AS "dismissedAt", f.status::text AS "followUpStatus",
-           d.full_name AS "driverName"
+           d.full_name AS "driverName", ${FUEL_READ(w)} AS read
       FROM fuel_thefts t
       JOIN vehicles v ON v.id = t.vehicle_id
       LEFT JOIN users ru ON ru.id = t.reviewed_by_id
@@ -111,12 +140,13 @@ export function fuelRows(w: AlertWindow, scopes: OrgScope[], status: AlertStatus
       LEFT JOIN fuel_theft_followups f ON f.theft_id = t.id
      WHERE ${fuelWhere(w, scopes)}
        ${statusSql}
+       ${readFilterSql(read, FUEL_READ(w))}
        ${cursorSql('t.began_at', 't.id', cursor)}
      ORDER BY t.began_at DESC, t.id COLLATE "C" DESC
      LIMIT ${limit + 1}`
 }
 
-export interface CountRow { orgId: string; status: AlertStatus; n: number }
+export interface CountRow { orgId: string; status: AlertStatus; read: boolean; n: number }
 /** One organisation's alerts on one fleet day (Nairobi, "YYYY-MM-DD"). */
 export interface DayRow { orgId: string; day: string; n: number }
 
@@ -126,11 +156,11 @@ const fleetDay = (col: Prisma.Sql) => Prisma.sql`to_char(${col} + interval '3 ho
 
 export function fuelCounts(w: AlertWindow, scopes: OrgScope[]) {
   return prisma.$queryRaw<CountRow[]>`
-    SELECT v.organisation_id AS "orgId", ${FUEL_BUCKET} AS status, count(*)::int AS n
+    SELECT v.organisation_id AS "orgId", ${FUEL_BUCKET} AS status, ${FUEL_READ(w)} AS read, count(*)::int AS n
       FROM fuel_thefts t
       JOIN vehicles v ON v.id = t.vehicle_id
      WHERE ${fuelWhere(w, scopes)}
-     GROUP BY 1, 2`
+     GROUP BY 1, 2, 3`
 }
 
 /** Fuel alerts a day, every state (the Alerts page's chart). */
@@ -181,9 +211,12 @@ export interface SpeedingAlertRow {
   reviewedAt: Date | null
   reviewNote: string | null
   reviewedBy: string | null
+  read: boolean
 }
 
-export function speedingRows(w: AlertWindow, scopes: OrgScope[], status: AlertStatus | 'all', cursor: Cursor | null, limit: number) {
+export function speedingRows(
+  w: AlertWindow, scopes: OrgScope[], status: AlertStatus | 'all', cursor: Cursor | null, limit: number, read: ReadFilter = 'all',
+) {
   const statusSql = status === 'all' ? Prisma.empty : Prisma.sql`AND ${SPEED_BUCKET} = ${status}`
   return prisma.$queryRaw<SpeedingAlertRow[]>`
     SELECT s.id, s.organisation_id AS "orgId", s.vehicle_id AS "vehicleId",
@@ -194,12 +227,13 @@ export function speedingRows(w: AlertWindow, scopes: OrgScope[], status: AlertSt
            s.distance_m AS "distanceM", s.driver_name AS "driverName",
            s.peak_lat AS "peakLat", s.peak_lng AS "peakLng",
            s.review_status::text AS "reviewStatus", s.reviewed_at AS "reviewedAt",
-           s.review_note AS "reviewNote", ru.full_name AS "reviewedBy"
+           s.review_note AS "reviewNote", ru.full_name AS "reviewedBy", ${SPEED_READ(w)} AS read
       FROM speeding_incidents s
       JOIN vehicles v ON v.id = s.vehicle_id
       LEFT JOIN users ru ON ru.id = s.reviewed_by_id
      WHERE ${speedingWhere(w, scopes)}
        ${statusSql}
+       ${readFilterSql(read, SPEED_READ(w))}
        ${cursorSql('s.started_at', 's.id', cursor)}
      ORDER BY s.started_at DESC, s.id COLLATE "C" DESC
      LIMIT ${limit + 1}`
@@ -207,11 +241,11 @@ export function speedingRows(w: AlertWindow, scopes: OrgScope[], status: AlertSt
 
 export function speedingCounts(w: AlertWindow, scopes: OrgScope[]) {
   return prisma.$queryRaw<CountRow[]>`
-    SELECT s.organisation_id AS "orgId", ${SPEED_BUCKET} AS status, count(*)::int AS n
+    SELECT s.organisation_id AS "orgId", ${SPEED_BUCKET} AS status, ${SPEED_READ(w)} AS read, count(*)::int AS n
       FROM speeding_incidents s
       JOIN vehicles v ON v.id = s.vehicle_id
      WHERE ${speedingWhere(w, scopes)}
-     GROUP BY 1, 2`
+     GROUP BY 1, 2, 3`
 }
 
 /** Overspeeding alerts a day, every state (the Alerts page's chart). */
@@ -240,4 +274,31 @@ export function decisionsFor(fuelIds: string[], speedingIds: string[]) {
       actor: { select: { fullName: true } },
     },
   })
+}
+
+// ── Read marks ──────────────────────────────────────────────────────────────
+
+/** Mark alerts read for one person. Marking one twice keeps the first time. */
+export function markRead(userId: string, items: { kind: 'FUEL' | 'SPEEDING'; alertId: string }[]) {
+  return prisma.alertRead.createMany({
+    data: items.map((i) => ({ userId, kind: i.kind, alertId: i.alertId })),
+    skipDuplicates: true,
+  })
+}
+
+/** When this person last marked all read (null for never). */
+export function readerOf(userId: string) {
+  return prisma.user.findUnique({ where: { id: userId }, select: { alertsReadAt: true } })
+}
+
+/**
+ * "Mark all read": everything that has arrived is read for this person. The
+ * single marks it covers are dropped: an alert read by then had arrived by
+ * then, so the time says it already.
+ */
+export async function markAllRead(userId: string, at: Date) {
+  await prisma.$transaction([
+    prisma.user.update({ where: { id: userId }, data: { alertsReadAt: at } }),
+    prisma.alertRead.deleteMany({ where: { userId, readAt: { lte: at } } }),
+  ])
 }

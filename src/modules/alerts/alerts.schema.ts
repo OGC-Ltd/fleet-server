@@ -16,6 +16,8 @@ export const listAlertsQuery = z.object({
   q: z.string().trim().max(64).optional(),
   /** Speeding only: episodes at least this far over their limit. */
   minOverKmh: z.coerce.number().min(0).max(300).optional(),
+  /** This person's read marks: unread only, read only, or both. */
+  read: z.enum(['all', 'read', 'unread']).default('all'),
   cursor: z.string().max(100).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 })
@@ -28,3 +30,12 @@ export const reviewSpeedingSchema = z.object({
   note: z.string().trim().min(3).max(2000),
 })
 export type ReviewSpeedingDto = z.infer<typeof reviewSpeedingSchema>
+
+/** Alerts this person has read: opened, or decided, on the Alerts page. */
+export const markReadSchema = z.object({
+  items: z.array(z.object({
+    kind: z.enum(['fuel', 'speeding']),
+    id: z.string().min(1).max(64),
+  })).min(1).max(200),
+})
+export type MarkReadDto = z.infer<typeof markReadSchema>

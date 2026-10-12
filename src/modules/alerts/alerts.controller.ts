@@ -2,7 +2,7 @@ import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import { UnauthorizedError } from '../../core/errors/errors.js'
 import * as service from './alerts.service.js'
-import type { ListAlertsQuery, ReviewSpeedingDto } from './alerts.schema.js'
+import type { ListAlertsQuery, MarkReadDto, ReviewSpeedingDto } from './alerts.schema.js'
 
 const userOf = (req: Parameters<RequestHandler>[0]): string => {
   const id = req.user?.id
@@ -28,6 +28,20 @@ export const summary: RequestHandler = async (req, res, next) => {
 export const history: RequestHandler = async (req, res, next) => {
   try {
     sendSuccess(res, await service.alertHistory(userOf(req)))
+  } catch (err) { next(err) }
+}
+
+/** POST /api/v1/alerts/read — mark alerts read, for the caller only. */
+export const markRead: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await service.markRead(userOf(req), (req.body as MarkReadDto).items))
+  } catch (err) { next(err) }
+}
+
+/** POST /api/v1/alerts/read-all — every alert so far is read, for the caller only. */
+export const markAllRead: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await service.markAllRead(userOf(req)))
   } catch (err) { next(err) }
 }
 
