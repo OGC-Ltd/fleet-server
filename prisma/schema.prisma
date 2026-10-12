@@ -335,6 +335,7 @@ model Organisation {
   repairReports        RepairReport[]
   repairReportItems    RepairReportItem[]
   fuelTheftFollowUps   FuelTheftFollowUp[]
+  alertDecisions       AlertDecision[]
 
   @@map("organisations")
 }
@@ -474,6 +475,8 @@ model User {
   fuelFollowUpActionSubjects FuelTheftFollowUpAction[] @relation("FollowUpActionSubject")
   geofenceViolations         GeofenceViolation[]       @relation("ViolationDriver")
   speedingIncidents          SpeedingIncident[]        @relation("SpeedingDriver")
+  speedingReviewed           SpeedingIncident[]        @relation("SpeedingReviewedBy")
+  alertDecisions             AlertDecision[]           @relation("AlertDecisions")
 
   // Audit — who assigned/unassigned
   assignmentsGranted   VehicleAssignment[] @relation("AssignedByUser")
@@ -1138,9 +1141,20 @@ model SpeedingIncident {
   meta      Json?
   createdAt DateTime @default(now()) @map("created_at")
 
+  /// What an administrator decided on the Alerts page: escalated (a real
+  /// overspeed to take up with the driver) or de-escalated (not one: a GPS
+  /// jump, a wrong limit, an authorised run). Null = nobody has decided yet.
+  /// The latest decision only; every decision, including the ones it
+  /// replaced, is in alert_decisions.
+  reviewStatus AlertOutcome? @map("review_status")
+  reviewedAt   DateTime?     @map("reviewed_at")
+  reviewedById String?       @map("reviewed_by_id")
+  reviewNote   String?       @map("review_note")
+
   organisation Organisation @relation(fields: [organisationId], references: [id])
   vehicle      Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
   driver       User?        @relation("SpeedingDriver", fields: [driverId], references: [id])
+  reviewedBy   User?        @relation("SpeedingReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
 
   /// Idempotency. startedAt is the provider's capturedAt, so two writers
   /// processing the same frame compute an identical value and the second write
@@ -1151,6 +1165,53 @@ model SpeedingIncident {
   @@index([organisationId, day]) // the rollup job
   @@index([driverId, startedAt]) // driver conduct
   @@map("speeding_incidents")
+}
+
+/// Which kind of alert a decision is about, and so which table `alertId`
+/// points into: FUEL = fuel_thefts, SPEEDING = speeding_incidents.
+enum AlertKind {
+  FUEL
+  SPEEDING
+}
+
+/// The two decisions an administrator makes on an alert (operator,
+/// 2026-10-12: "track, and manage - escalate & de-escalate").
+enum AlertOutcome {
+  ESCALATED
+  DEESCALATED
+}
+
+/// Every escalation and de-escalation made on an alert, fuel or speeding.
+/// Append-only: a decision that is changed later gets a new row, so the log
+/// says who decided what and when, including the decisions that were
+/// replaced. The alert rows carry only the latest (FuelTheft.reviewStatus,
+/// SpeedingIncident.reviewStatus), for filtering.
+///
+/// No foreign key to the alert: `alertId` points into one of two tables,
+/// named by `kind`.
+model AlertDecision {
+  id             String       @id @default(cuid())
+  organisationId String       @map("organisation_id")
+  kind           AlertKind
+  alertId        String       @map("alert_id")
+  outcome        AlertOutcome
+  /// What an escalation was for, where the kind has more than one: a fuel
+  /// alert is escalated as `theft` or `probe_fault` (fuel.schema
+  /// ESCALATION_REASONS). Null on de-escalations and on speeding.
+  reason         String?
+  /// The reason given. Required: a decision nobody explained cannot be
+  /// reviewed later.
+  note           String
+  actorId        String?      @map("actor_id")
+  at             DateTime     @default(now())
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  actor        User?        @relation("AlertDecisions", fields: [actorId], references: [id], onDelete: SetNull)
+
+  /// One alert's history, oldest first.
+  @@index([kind, alertId, at])
+  @@index([organisationId, at])
+  @@map("alert_decisions")
 }
 
 /// One sensor fault, from the moment the data showed it to the moment it

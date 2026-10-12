@@ -10,6 +10,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import type { Prisma } from '../../../generated/prisma/client.js'
+import { fuelChoices } from '../alerts/alerts.rules.js'
 
 export type FollowUpStatus = 'OPEN' | 'ACCEPTED' | 'ESCALATED' | 'DEESCALATED' | 'PROBE_FAULT' | 'PROBE_FIXED'
 
@@ -411,20 +412,33 @@ export async function openAsProbeFault(args: {
   userName: string | null
   reviewer: string
   note: string
-}): Promise<{ followUpId: string; vehicleId: string; repairItemId: string; joined: boolean } | 'dismissed' | null> {
+}): Promise<{
+  followUpId: string; vehicleId: string; repairItemId: string; joined: boolean; live: boolean; beganAt: Date
+} | 'dismissed' | null> {
   const { orgId, theftId, userId, userName, reviewer, note } = args
   const row = await prisma.fuelTheft.findFirst({
     where: { id: theftId, vehicle: { organisationId: orgId } },
-    select: { id: true, dismissedAt: true },
+    select: {
+      id: true, dismissedAt: true, reviewStatus: true, reviewedAt: true,
+      followUp: { select: { status: true } },
+    },
   })
   if (!row) return null
-  if (row.dismissedAt) return 'dismissed'
+  // Undecided, or decided on the Alerts page as a theft or not one and now
+  // found to be the probe (alerts.scope fuelChoices). Anything with a case
+  // already has its own, and a theft has one case at most.
+  if (!fuelChoices({ reviewStatus: row.reviewStatus, followUpStatus: row.followUp?.status }).includes('probe_fault')) {
+    return 'dismissed'
+  }
+  const live = row.dismissedAt == null
   return prisma.$transaction(async (tx) => {
     const now = new Date()
     const { count } = await tx.fuelTheft.updateMany({
-      where: { id: theftId, dismissedAt: null },
+      where: live
+        ? { id: theftId, dismissedAt: null }
+        : { id: theftId, reviewStatus: row.reviewStatus, reviewedAt: row.reviewedAt },
       data: {
-        dismissedAt: now, dismissedById: userId,
+        ...(live ? { dismissedAt: now, dismissedById: userId } : {}),
         reviewStatus: 'PROBE_FAULT', reviewedAt: now, reviewedById: userId, reviewNote: note,
       },
     })
@@ -464,7 +478,16 @@ export async function openAsProbeFault(args: {
       create: { eventId: theftId, eventType: 'THEFT', label: 'NOT_THEFT', labelledBy: reviewer, note: labelNote },
       update: { label: 'NOT_THEFT', note: labelNote, labelledAt: now },
     })
-    return { followUpId: followUp.id, vehicleId: full.vehicleId, repairItemId: job.id, joined: job.joined }
+    await tx.alertDecision.create({
+      data: {
+        organisationId: orgId, kind: 'FUEL', alertId: theftId, outcome: 'ESCALATED',
+        reason: 'probe_fault', note, actorId: userId, at: now,
+      },
+    })
+    return {
+      followUpId: followUp.id, vehicleId: full.vehicleId, repairItemId: job.id, joined: job.joined,
+      live, beganAt: full.beganAt,
+    }
   })
 }
 

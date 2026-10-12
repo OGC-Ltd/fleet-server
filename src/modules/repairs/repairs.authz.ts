@@ -141,6 +141,48 @@ export async function canAssignTriage(userId: string, orgId: string): Promise<Tr
 }
 
 /**
+ * `canAssignTriage` for many organisations at once: the ones among `orgIds`
+ * where this person passes it. For the Alerts page, which lists alerts from
+ * every organisation a person holds and draws Escalate / De-escalate only
+ * where they may decide; two queries however many organisations there are.
+ */
+export async function triageAssignerOrgs(userId: string, orgIds: string[]): Promise<Set<string>> {
+  if (orgIds.length === 0) return new Set()
+  const [grants, me] = await Promise.all([
+    prisma.userRole.findMany({
+      where: {
+        userId,
+        revokedAt: null,
+        role: {
+          slug: { in: [...TRIAGE_ASSIGNER_ROLE_SLUGS] },
+          OR: [{ organisationId: { in: orgIds } }, { organisationId: null }],
+        },
+      },
+      select: { role: { select: { slug: true, organisationId: true } } },
+    }),
+    prisma.user.findFirst({
+      where: { id: userId, deletedAt: null },
+      select: {
+        organisationId: true,
+        memberships: { where: { organisationId: { in: orgIds }, revokedAt: null }, select: { organisationId: true } },
+      },
+    }),
+  ])
+  // The same two arms as canAssignTriage: a platform slug passes on the role
+  // alone; any other needs a membership in the organisation. A role row with
+  // no organisation applies in every one of them.
+  const member = new Set(me ? [me.organisationId, ...me.memberships.map((m) => m.organisationId)] : [])
+  const out = new Set<string>()
+  for (const g of grants) {
+    const where = g.role.organisationId === null ? orgIds : [g.role.organisationId]
+    for (const org of where) {
+      if (PLATFORM_ROLE_SLUGS.has(g.role.slug) || member.has(org)) out.add(org)
+    }
+  }
+  return out
+}
+
+/**
  * May `userId` be handed one in `orgId`?
  *
  * Only a technician, and only one who is a member HERE. Membership is required
