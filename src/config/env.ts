@@ -347,10 +347,12 @@ const schema = z.object({
   // it, so this is a latency knob, not a data-loss one.
   NOTIFICATION_CACHE_MAX: z.coerce.number().optional().default(200),
 
-  // Set 'false' on additional instances so only ONE runs the retention sweep.
-  // BullMQ's repeatable jobs already de-duplicate on a shared Redis, so this
-  // is belt-and-braces for the case where instances point at different Redises.
-  RETENTION_SWEEP_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+  // The retention sweep, which DELETES: old telemetry fixes and raw messages,
+  // notifications, resolved alerts and incidents (lib/queues/retention).
+  // Off unless set to 'true' (operator, 2026-10-12: "do not enable cleanup, we
+  // need that data there"), so a new box or instance that leaves it unset
+  // keeps everything. The nightly rollups are NIGHTLY_ROLLUPS_ENABLED, not this.
+  RETENTION_SWEEP_ENABLED: z.string().optional().default('false').transform(v => v === 'true'),
   /**
    * The nightly rollups, separately from the sweep that deletes.
    *
