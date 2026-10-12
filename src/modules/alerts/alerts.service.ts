@@ -27,7 +27,7 @@ import {
   ALERT_KINDS, decodeCursor, fuelChoices, fuelStatus, mergePage, speedingChoices, speedingStatus,
   type AlertKindSlug, type FuelChoice, type Outcome,
 } from './alerts.rules.js'
-import type { ListAlertsQuery } from './alerts.schema.js'
+import type { ListAlertsQuery, MarkReadDto } from './alerts.schema.js'
 
 const DAY_MS = 86_400_000
 /** With no `from`, the page opens on the last week. */
@@ -97,7 +97,7 @@ function windowOf(q: ListAlertsQuery) {
 }
 
 export async function listAlerts(userId: string, q: ListAlertsQuery) {
-  const { subject, orgIds } = await reachableOrgIds(userId)
+  const [{ subject, orgIds }, reader] = await Promise.all([reachableOrgIds(userId), readerFor(userId)])
   const scopes = alertScopes(subject, orgIds)
   const { from, to } = windowOf(q)
   const cursor = decodeCursor(q.cursor)
@@ -111,7 +111,7 @@ export async function listAlerts(userId: string, q: ListAlertsQuery) {
   const picked = q.orgs.length ? scopes.filter((s) => q.orgs.includes(s.orgId)) : scopes
   const kinds: readonly AlertKindSlug[] = q.kind === 'all' ? ALERT_KINDS : [q.kind]
   const of = (kind: AlertKindSlug, list = picked) => list.filter((s) => s.kinds.includes(kind))
-  const w: repo.AlertWindow = { scopes: picked, from, to, q: q.q || undefined, minOverKmh: q.minOverKmh }
+  const w: repo.AlertWindow = { scopes: picked, from, to, q: q.q || undefined, minOverKmh: q.minOverKmh, reader }
   // Counts for every organisation, not only the picked ones, so the filter can
   // say what each holds. Asked once, with the first page: they do not page.
   const withCounts = !cursor
@@ -126,9 +126,9 @@ export async function listAlerts(userId: string, q: ListAlertsQuery) {
     withCounts && of('fuel', scopes).length ? repo.fuelCounts(w, of('fuel', scopes)) : Promise.resolve([]),
     withCounts && of('speeding', scopes).length ? repo.speedingCounts(w, of('speeding', scopes)) : Promise.resolve([]),
     kinds.includes('fuel') && of('fuel').length
-      ? repo.fuelRows(w, of('fuel'), q.status, cursor, q.limit) : Promise.resolve([]),
+      ? repo.fuelRows(w, of('fuel'), q.status, cursor, q.limit, q.read) : Promise.resolve([]),
     kinds.includes('speeding') && of('speeding').length
-      ? repo.speedingRows(w, of('speeding'), q.status, cursor, q.limit) : Promise.resolve([]),
+      ? repo.speedingRows(w, of('speeding'), q.status, cursor, q.limit, q.read) : Promise.resolve([]),
   ])
 
   const page = mergePage<{ at: Date; id: string; fuel?: repo.FuelAlertRow; speeding?: repo.SpeedingAlertRow }>([
@@ -163,6 +163,7 @@ export async function listAlerts(userId: string, q: ListAlertsQuery) {
         kind: 'fuel' as const,
         id: r.id, orgId: r.orgId, vehicleId: r.vehicleId, plate: r.plate, vehicleName: r.vehicleName,
         at: iso(r.at),
+        read: r.read,
         status: fuelStatus(r.reviewStatus),
         decision,
         history: historyOf(`FUEL:${r.id}`, decision),
@@ -199,6 +200,7 @@ export async function listAlerts(userId: string, q: ListAlertsQuery) {
       kind: 'speeding' as const,
       id: r.id, orgId: r.orgId, vehicleId: r.vehicleId, plate: r.plate, vehicleName: r.vehicleName,
       at: iso(r.at),
+      read: r.read,
       status: speedingStatus(r.reviewStatus),
       decision,
       history: historyOf(`SPEEDING:${r.id}`, decision),
@@ -243,7 +245,8 @@ export async function listAlerts(userId: string, q: ListAlertsQuery) {
 }
 
 export interface AlertSummary {
-  /** Open alerts, both kinds, every organisation this person reads. */
+  /** Open alerts this person has not read, both kinds, every organisation
+   *  they read. */
   open: number
   fuel: number
   speeding: number
@@ -258,22 +261,23 @@ export interface AlertSummary {
  * decision clears it (alerts.summary-cache).
  */
 export async function alertSummary(userId: string): Promise<AlertSummary> {
-  const { subject, orgIds } = await reachableOrgIds(userId)
-  const scopes = alertScopes(subject, orgIds)
   const now = Date.now()
   const from = fleetMidnight(now, DEFAULT_DAYS - 1)
-  const key = JSON.stringify([from.getTime(), scopes])
+  // Per person: read marks are.
+  const key = JSON.stringify(['summary', userId, from.getTime()])
   const hit = cachedSummary<AlertSummary>(key, now)
   if (hit) return hit
 
-  const w: repo.AlertWindow = { scopes, from, to: new Date(now) }
+  const [{ subject, orgIds }, reader] = await Promise.all([reachableOrgIds(userId), readerFor(userId)])
+  const scopes = alertScopes(subject, orgIds)
+  const w: repo.AlertWindow = { scopes, from, to: new Date(now), reader }
   const fuelScopes = scopes.filter((s) => s.kinds.includes('fuel'))
   const speedScopes = scopes.filter((s) => s.kinds.includes('speeding'))
   const [fuel, speeding] = await Promise.all([
     fuelScopes.length ? repo.fuelCounts(w, fuelScopes) : Promise.resolve([]),
     speedScopes.length ? repo.speedingCounts(w, speedScopes) : Promise.resolve([]),
   ])
-  const open = (rows: repo.CountRow[]) => rows.reduce((n, r) => n + (r.status === 'open' ? r.n : 0), 0)
+  const open = (rows: repo.CountRow[]) => rows.reduce((n, r) => n + (r.status === 'open' && !r.read ? r.n : 0), 0)
   const value: AlertSummary = {
     open: open(fuel) + open(speeding),
     fuel: open(fuel),
@@ -282,6 +286,28 @@ export async function alertSummary(userId: string): Promise<AlertSummary> {
   }
   keepSummary(key, value, now)
   return value
+}
+
+async function readerFor(userId: string): Promise<repo.Reader> {
+  const row = await repo.readerOf(userId)
+  return { userId, readAt: row?.alertsReadAt ?? null }
+}
+
+/** Mark alerts read for this person: opened, or decided, on the page. */
+export async function markRead(userId: string, items: MarkReadDto['items']) {
+  const { count } = await repo.markRead(userId, items.map((i) => ({
+    kind: i.kind === 'fuel' ? 'FUEL' as const : 'SPEEDING' as const, alertId: i.id,
+  })))
+  forgetAlertSummaries()
+  return { marked: count }
+}
+
+/** "Mark all read": every alert that has arrived is read for this person. */
+export async function markAllRead(userId: string) {
+  const at = new Date()
+  await repo.markAllRead(userId, at)
+  forgetAlertSummaries()
+  return { readAt: at.toISOString() }
 }
 
 export interface AlertHistory {

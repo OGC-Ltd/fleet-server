@@ -50,7 +50,7 @@ import * as userCtrl from './modules/users/user.controller.js'
 import { provisionUserSchema } from './modules/users/user.schema.js'
 import { trustProxy, parseProxyList } from './lib/trust-proxy.js'
 import * as alertsCtrl from './modules/alerts/alerts.controller.js'
-import { listAlertsQuery } from './modules/alerts/alerts.schema.js'
+import { listAlertsQuery, markReadSchema } from './modules/alerts/alerts.schema.js'
 
 export function createApp() {
   const app = express()
@@ -235,6 +235,9 @@ export function createApp() {
   // The sidebar badge: open alerts over the page's default week, held a minute.
   app.get(`${v1}/alerts/summary`, authenticate, alertsCtrl.summary)
   app.get(`${v1}/alerts/history`, authenticate, alertsCtrl.history)
+  // Read marks are the caller's own: no organisation to authorise.
+  app.post(`${v1}/alerts/read`, authenticate, validateBody(markReadSchema), alertsCtrl.markRead)
+  app.post(`${v1}/alerts/read-all`, authenticate, alertsCtrl.markAllRead)
 
   // Web Push public key — no auth; called by Service Workers before subscribe
   app.get(`${v1}/notifications/vapid-key`, notificationsCtrl.getVapidKey)

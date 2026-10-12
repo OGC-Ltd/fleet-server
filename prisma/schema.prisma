@@ -439,6 +439,10 @@ model User {
   /// machines"). A version rather than a flag, so a new tour can be shown to
   /// everybody by bumping TOUR_VERSION.
   tourSeenVersion     Int?       @map("tour_seen_version")
+  /// "Mark all read" on the Alerts page: every alert that reached the system
+  /// by then is read for this person (alerts.repository readSql). Alerts read
+  /// one at a time after it are in alert_reads. NULL for never.
+  alertsReadAt        DateTime?  @map("alerts_read_at")
   createdAt           DateTime   @default(now()) @map("created_at")
   updatedAt           DateTime   @updatedAt @map("updated_at")
   deletedAt           DateTime?  @map("deleted_at") // soft delete — preserves FK integrity on trips
@@ -477,6 +481,7 @@ model User {
   speedingIncidents          SpeedingIncident[]        @relation("SpeedingDriver")
   speedingReviewed           SpeedingIncident[]        @relation("SpeedingReviewedBy")
   alertDecisions             AlertDecision[]           @relation("AlertDecisions")
+  alertReads                 AlertRead[]
 
   // Audit — who assigned/unassigned
   assignmentsGranted   VehicleAssignment[] @relation("AssignedByUser")
@@ -1212,6 +1217,22 @@ model AlertDecision {
   @@index([kind, alertId, at])
   @@index([organisationId, at])
   @@map("alert_decisions")
+}
+
+/// One alert one person has opened (the Alerts page): read is per person, as
+/// in a mailbox. Alerts before the person's users.alerts_read_at are read
+/// without a row. Not tied to the alert by a foreign key: the id is a fuel
+/// theft's or a speeding incident's, by `kind`.
+model AlertRead {
+  userId  String    @map("user_id")
+  kind    AlertKind
+  alertId String    @map("alert_id")
+  readAt  DateTime  @default(now()) @map("read_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, kind, alertId])
+  @@map("alert_reads")
 }
 
 /// One sensor fault, from the moment the data showed it to the moment it

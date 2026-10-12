@@ -261,6 +261,69 @@ describe('GET /api/v1/alerts/summary', () => {
   })
 })
 
+describe('read marks', () => {
+  it('lists whether this person has read each alert, and narrows to unread', async () => {
+    const markedAt = new Date('2026-10-12T09:30:00Z')
+    prismaMock.user.findUnique.mockResolvedValue({ alertsReadAt: markedAt } as never)
+    answer({
+      fuelCounts: [{ orgId: 'org_a', status: 'open', read: false, n: 1 }],
+      fuel: [fuelRow('f1', 'org_a', '2026-10-12T10:00:00Z', { read: false })],
+      speeding: [speedRow('s1', 'org_a', '2026-10-12T09:00:00Z', { read: true })],
+    })
+
+    const res = await request(app).get('/api/v1/alerts?read=unread')
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.data.map((r: { id: string; read: boolean }) => [r.id, r.read])).toEqual([['f1', false], ['s1', true]])
+    expect(res.body.data.counts).toContainEqual({ orgId: 'org_a', status: 'open', read: false, n: 1, kind: 'fuel' })
+    const rows = calls.filter((c) => /FROM (fuel_thefts|speeding_incidents)/.test(c.text) && !c.text.includes('GROUP BY'))
+    expect(rows).toHaveLength(2)
+    // The caller's own marks, and everything that arrived by "Mark all read".
+    expect(rows.every((c) => c.text.includes('FROM alert_reads') && c.values.includes(ME)
+      && c.values.some((v) => v instanceof Date && v.getTime() === markedAt.getTime()))).toBe(true)
+    expect(rows.every((c) => /AND NOT \(/.test(c.text))).toBe(true)
+    expect(calls.find((c) => c.text.includes('FROM fuel_thefts'))!.text).toContain('t.detected_at <=')
+    expect((await request(app).get('/api/v1/alerts?read=maybe')).status).toBe(400)
+  })
+
+  it('badges only the open alerts this person has not read', async () => {
+    answer({
+      fuelCounts: [{ orgId: 'org_a', status: 'open', read: false, n: 2 }, { orgId: 'org_a', status: 'open', read: true, n: 3 }],
+      speedCounts: [{ orgId: 'org_a', status: 'open', read: true, n: 4 }],
+    })
+
+    const res = await request(app).get('/api/v1/alerts/summary')
+
+    expect(res.body.data).toMatchObject({ open: 2, fuel: 2, speeding: 0 })
+  })
+
+  it('marks alerts read for the caller only, once each', async () => {
+    prismaMock.alertRead.createMany.mockResolvedValue({ count: 2 })
+
+    const res = await request(app).post('/api/v1/alerts/read')
+      .send({ items: [{ kind: 'fuel', id: 'f1' }, { kind: 'speeding', id: 's1' }] })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual({ marked: 2 })
+    expect(prismaMock.alertRead.createMany).toHaveBeenCalledWith({
+      data: [{ userId: ME, kind: 'FUEL', alertId: 'f1' }, { userId: ME, kind: 'SPEEDING', alertId: 's1' }],
+      skipDuplicates: true,
+    })
+    expect((await request(app).post('/api/v1/alerts/read').send({ items: [] })).status).toBe(400)
+  })
+
+  it('marks everything so far read, and drops the single marks it covers', async () => {
+    prismaMock.$transaction.mockResolvedValue([] as never)
+
+    const res = await request(app).post('/api/v1/alerts/read-all')
+
+    expect(res.status).toBe(200)
+    const at = new Date(res.body.data.readAt)
+    expect(prismaMock.user.update).toHaveBeenCalledWith({ where: { id: ME }, data: { alertsReadAt: at } })
+    expect(prismaMock.alertRead.deleteMany).toHaveBeenCalledWith({ where: { userId: ME, readAt: { lte: at } } })
+  })
+})
+
 describe('GET /api/v1/alerts/history', () => {
   it('counts every alert ever received, a fleet day at a time, both kinds', async () => {
     answer({
