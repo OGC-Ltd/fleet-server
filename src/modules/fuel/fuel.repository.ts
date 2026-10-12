@@ -11,7 +11,8 @@ function buildDateFilter(from?: Date, to?: Date) {
 
 // ── Fillings ─────────────────────────────────────────────────────────────────
 
-export async function findAllFillings(orgId: string, q: ListFillingQuery) {
+/** `db`: the report pool (lib/report-db) when a Fuel Report asks; the live pool otherwise. */
+export async function findAllFillings(orgId: string, q: ListFillingQuery, db: typeof prisma = prisma) {
   const dateFilter = buildDateFilter(q.from, q.to)
   const where = {
     vehicle: { organisationId: orgId },
@@ -19,7 +20,7 @@ export async function findAllFillings(orgId: string, q: ListFillingQuery) {
     ...(q.reportingPeriodId ? { reportingPeriodId: q.reportingPeriodId } : {}),
     ...(dateFilter ? { filledAt: dateFilter } : {}),
   }
-  const items = await prisma.fuelFilling.findMany({
+  const items = await db.fuelFilling.findMany({
     where,
     take: q.limit + 1,
     ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
@@ -44,7 +45,7 @@ export async function createFilling(dto: CreateFillingDto) {
 
 // ── Thefts ───────────────────────────────────────────────────────────────────
 
-export async function findAllThefts(orgId: string, q: ListTheftQuery) {
+export async function findAllThefts(orgId: string, q: ListTheftQuery, db: typeof prisma = prisma) {
   const dateFilter = buildDateFilter(q.from, q.to)
   const where = {
     vehicle: { organisationId: orgId },
@@ -53,7 +54,7 @@ export async function findAllThefts(orgId: string, q: ListTheftQuery) {
     ...(dateFilter ? { beganAt: dateFilter } : {}),
     ...(q.reviewStatus ? { reviewStatus: q.reviewStatus === 'none' ? null : q.reviewStatus } : {}),
   }
-  const items = await prisma.fuelTheft.findMany({
+  const items = await db.fuelTheft.findMany({
     where,
     take: q.limit + 1,
     ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),

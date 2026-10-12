@@ -13,7 +13,8 @@ function createPrismaClient() {
   // pooler silently dropped rejects instead of pending forever (a server-side
   // statement_timeout can't fire once the socket is dead). Worst normal
   // queries run ~5–10 s, so 60 s only catches genuinely stuck ones.
-  const adapter = new PrismaPg({ connectionString: env.DATABASE_URL, max: 14, query_timeout: 60_000 })
+  // DB_POOL_MAX: 14 for the API; the report worker runs with a few (report-worker.ts).
+  const adapter = new PrismaPg({ connectionString: env.DATABASE_URL, max: env.DB_POOL_MAX, query_timeout: 60_000 })
   return new PrismaClient({ adapter })
 }
 

@@ -79,8 +79,9 @@ export interface TrackPoint {
 }
 
 /** Does this vehicle belong to this org? The guard every track path shares. */
-export async function vehicleExistsInOrg(vehicleId: string, orgId: string) {
-  const vehicle = await prisma.vehicle.findFirst({
+/** `db`: the report pool (lib/report-db) for a report's reads; the live pool otherwise. */
+export async function vehicleExistsInOrg(vehicleId: string, orgId: string, db: typeof prisma = prisma) {
+  const vehicle = await db.vehicle.findFirst({
     where: { id: vehicleId, organisationId: orgId },
     select: { id: true },
   })
@@ -314,11 +315,11 @@ export async function findPlaybackFixes(
  * missing reading is not a zero.
  */
 export async function findDaySeries(
-  vehicleId: string, orgId: string, from: Date, to: Date, after: Date | null,
+  vehicleId: string, orgId: string, from: Date, to: Date, after: Date | null, db: typeof prisma = prisma,
 ) {
-  if (!(await vehicleExistsInOrg(vehicleId, orgId))) return null
+  if (!(await vehicleExistsInOrg(vehicleId, orgId, db))) return null
 
-  const rows = await prisma.vehicleTelemetry.findMany({
+  const rows = await db.vehicleTelemetry.findMany({
     where: { vehicleId, capturedAt: after ? { gt: after, lt: to } : { gte: from, lt: to } },
     orderBy: { capturedAt: 'asc' },
     take: PLAYBACK_SCAN_CAP + 1,
