@@ -30,6 +30,8 @@ vi.mock('../../src/lib/notifications/notification.store.ts', async (importOrigin
 
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { buildApp } from '../helpers/app.js'
+import { forgetAlertSummaries } from '../../src/modules/alerts/alerts.summary-cache.js'
+import { fleetMidnight } from '../../src/modules/alerts/alerts.service.js'
 
 let app: Express
 beforeAll(async () => { app = await buildApp() })
@@ -82,6 +84,7 @@ const speedRow = (id: string, orgId: string, at: string, extra: Record<string, u
 
 beforeEach(() => {
   resetTestSubject()
+  forgetAlertSummaries()
   calls.length = 0
   feed.publish.mockReset()
   who.subject = subject({
@@ -212,6 +215,71 @@ describe('GET /api/v1/alerts', () => {
     answer({})
     expect((await request(app).get('/api/v1/alerts?cursor=nonsense')).status).toBe(400)
     expect((await request(app).get('/api/v1/alerts?from=2026-10-12&to=2026-10-01')).status).toBe(400)
+  })
+})
+
+describe('GET /api/v1/alerts/summary', () => {
+  it('counts the open alerts of both kinds over the page\'s default week', async () => {
+    answer({
+      fuelCounts: [{ orgId: 'org_a', status: 'open', n: 2 }, { orgId: 'org_b', status: 'escalated', n: 4 }],
+      speedCounts: [{ orgId: 'org_a', status: 'open', n: 5 }, { orgId: 'org_a', status: 'deescalated', n: 1 }],
+    })
+
+    const res = await request(app).get('/api/v1/alerts/summary')
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual({
+      open: 7, fuel: 2, speeding: 5, from: fleetMidnight(Date.now(), 6).toISOString(),
+    })
+    // Counts only: no rows are read for a badge.
+    expect(calls.every((c) => c.text.includes('GROUP BY'))).toBe(true)
+  })
+
+  it('answers again from memory for a minute, and counts afresh after a decision', async () => {
+    answer({ fuelCounts: [{ orgId: 'org_a', status: 'open', n: 2 }] })
+    await request(app).get('/api/v1/alerts/summary')
+    const read = calls.length
+    await request(app).get('/api/v1/alerts/summary')
+    expect(calls.length).toBe(read)
+
+    prismaMock.userRole.findMany.mockResolvedValue([{ role: { slug: 'admin' } }] as never)
+    prismaMock.user.findFirst.mockResolvedValue({ id: ME } as never)
+    prismaMock.speedingIncident.findFirst.mockResolvedValue({
+      id: 'sp1', vehicleId: 'v1', reviewStatus: null, peakKmh: 100, limitKmh: 80, vehicle: { registrationPlate: 'KDE 585S' },
+    } as never)
+    prismaMock.speedingIncident.updateMany.mockResolvedValue({ count: 1 })
+    await request(app).post(`/api/v1/organisations/${TEST_ORG_ID}/incidents/speeding/sp1/review`)
+      .send({ outcome: 'DEESCALATED', note: 'GPS jump' })
+
+    await request(app).get('/api/v1/alerts/summary')
+    expect(calls.length).toBeGreaterThan(read)
+  })
+
+  it('is midnight on the fleet clock, not the server\'s', () => {
+    // 01:30 in Nairobi on 12 Oct is 22:30 UTC on the 11th.
+    expect(fleetMidnight(Date.parse('2026-10-11T22:30:00Z')).toISOString()).toBe('2026-10-11T21:00:00.000Z')
+  })
+})
+
+describe('GET /api/v1/alerts/history', () => {
+  it('counts every alert ever received, a fleet day at a time, both kinds', async () => {
+    answer({
+      fuelCounts: [{ orgId: 'org_a', day: '2026-09-28', n: 3 }],
+      speedCounts: [{ orgId: 'org_a', day: '2026-09-28', n: 5 }, { orgId: 'org_b', day: '2026-10-12', n: 1 }],
+    })
+
+    const res = await request(app).get('/api/v1/alerts/history')
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.days).toEqual([
+      { orgId: 'org_a', day: '2026-09-28', n: 3, kind: 'fuel' },
+      { orgId: 'org_a', day: '2026-09-28', n: 5, kind: 'speeding' },
+      { orgId: 'org_b', day: '2026-10-12', n: 1, kind: 'speeding' },
+    ])
+    // Every state, from the start of time, on the fleet's clock.
+    expect(calls.every((c) => c.text.includes('GROUP BY') && !c.text.includes('review_status'))).toBe(true)
+    expect(calls.every((c) => c.text.includes("+ interval '3 hours'"))).toBe(true)
+    expect(calls.some((c) => c.values.some((v) => v instanceof Date && v.getTime() === 0))).toBe(true)
   })
 })
 

@@ -17,6 +17,20 @@ export const list: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+/** GET /api/v1/alerts/summary — the badge: open alerts over the page's default week. */
+export const summary: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await service.alertSummary(userOf(req)))
+  } catch (err) { next(err) }
+}
+
+/** GET /api/v1/alerts/history — every alert ever received, a day at a time. */
+export const history: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await service.alertHistory(userOf(req)))
+  } catch (err) { next(err) }
+}
+
 /** POST /organisations/:orgId/incidents/speeding/:incidentId/review */
 export const reviewSpeeding: RequestHandler = async (req, res, next) => {
   try {
