@@ -2,6 +2,7 @@ import { prisma } from '../../lib/prisma.js'
 import type { Prisma } from '../../../generated/prisma/client.js'
 import { ANNOUNCED_CAUSES } from './fuel-theft-classifier.js'
 import { FUEL_INCIDENT_WINDOW_MS, FUEL_INCIDENT_EPOCH, incidentReasonSlugs } from '../telemetry/telemetry.repository.js'
+import { fuelChoices } from '../alerts/alerts.rules.js'
 import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery } from './fuel.schema.js'
 
 function buildDateFilter(from?: Date, to?: Date) {
@@ -84,15 +85,18 @@ export async function findTheftById(orgId: string, id: string) {
 }
 
 /**
- * An administrator's decision on a LIVE alert: escalated (a confirmed theft) or
+ * An administrator's decision on an alert: escalated (a confirmed theft) or
  * de-escalated (not a theft). Written to the same places a follow-up's outcome
  * is (FuelTheft.reviewStatus for analytics, a FuelEventLabel for the detector)
- * so the two routes to a decision are one record.
+ * so the two routes to a decision are one record, and logged in
+ * alert_decisions with every decision before it.
  *
- * Not for a deleted alert: that one has a follow-up, and its outcome belongs
- * to whoever holds it. Returns 'dismissed' then, null when the alert is not in
- * this organisation. Deciding again replaces the earlier decision: that is
- * what escalating a de-escalated alert (or the reverse) is.
+ * Which decisions an alert still takes is alerts.scope fuelChoices: an
+ * undecided one either; one decided here, the other (changing one's mind,
+ * from the Alerts page); one deleted before Delete was retired, either, which
+ * also closes its waiting case. Returns 'dismissed' when the alert takes no
+ * such decision (escalated as a faulty probe, or decided in its case), null
+ * when it is not in this organisation.
  */
 export async function reviewTheft(args: {
   orgId: string
@@ -105,31 +109,59 @@ export async function reviewTheft(args: {
   const { orgId, id, userId, reviewer, outcome, note } = args
   const row = await prisma.fuelTheft.findFirst({
     where: { id, vehicle: { organisationId: orgId } },
-    select: { id: true, vehicleId: true, dismissedAt: true },
+    select: {
+      id: true, vehicleId: true, beganAt: true, dismissedAt: true, reviewStatus: true, reviewedAt: true,
+      followUp: { select: { id: true, status: true } },
+    },
   })
   if (!row) return null
-  if (row.dismissedAt) return 'dismissed' as const
+  const choice = outcome === 'ESCALATED' ? 'theft' : 'not_theft'
+  if (!fuelChoices({ reviewStatus: row.reviewStatus, followUpStatus: row.followUp?.status }).includes(choice)) {
+    return 'dismissed' as const
+  }
+  const live = row.dismissedAt == null
   return prisma.$transaction(async (tx) => {
     const now = new Date()
     const reviewStatus = outcome === 'ESCALATED' ? 'CONFIRMED_THEFT' as const : 'NOT_THEFT' as const
     // Deciding an alert is the ONLY way it leaves the dashboard (operator,
     // 2026-09-30: no Delete button, so nothing goes without a trail). The
-    // decision, its note and who made it stay on the row. Conditional on still
-    // being live, so a decision that lands first wins.
+    // decision, its note and who made it stay on the row. Conditional on the
+    // row still standing as it was read, so a decision that lands first wins.
     const { count } = await tx.fuelTheft.updateMany({
-      where: { id, dismissedAt: null },
+      where: live ? { id, dismissedAt: null } : { id, reviewStatus: row.reviewStatus, reviewedAt: row.reviewedAt },
       data: {
         reviewStatus, reviewedAt: now, reviewedById: userId, reviewNote: note,
-        dismissedAt: now, dismissedById: userId,
+        ...(live ? { dismissedAt: now, dismissedById: userId } : {}),
       },
     })
     if (count === 0) return 'dismissed' as const
-    const dismissedIds = await sweepUnitSiblings(tx, { id, vehicleId: row.vehicleId, userId, now })
+    // Only a decision that takes the alert off the map uncovers the unit's
+    // older ones there; changing an earlier decision moves nothing.
+    const dismissedIds = live
+      ? await sweepUnitSiblings(tx, { id, vehicleId: row.vehicleId, userId, now, beganAt: row.beganAt })
+      : []
+    // Deleted before Delete was retired and still waiting in its case: the
+    // decision closes the case, logged there as its owner's would be.
+    if (row.followUp && (row.followUp.status === 'OPEN' || row.followUp.status === 'ACCEPTED')) {
+      await tx.fuelTheftFollowUp.update({
+        where: { id: row.followUp.id },
+        data: { status: outcome, resolvedAt: now },
+      })
+      await tx.fuelTheftFollowUpAction.create({
+        data: { followUpId: row.followUp.id, kind: outcome, actorId: userId, note, at: now },
+      })
+    }
     const label = outcome === 'ESCALATED' ? 'THEFT' : 'NOT_THEFT'
     await tx.fuelEventLabel.upsert({
       where: { eventId_eventType_labelledBy: { eventId: id, eventType: 'THEFT', labelledBy: reviewer } },
       create: { eventId: id, eventType: 'THEFT', label, labelledBy: reviewer, note },
       update: { label, note, labelledAt: now },
+    })
+    await tx.alertDecision.create({
+      data: {
+        organisationId: orgId, kind: 'FUEL', alertId: id, outcome,
+        reason: outcome === 'ESCALATED' ? 'theft' : null, note, actorId: userId, at: now,
+      },
     })
     const decided = await tx.fuelTheft.findUniqueOrThrow({
       where: { id },
@@ -150,12 +182,16 @@ export async function reviewTheft(args: {
  * reads as the alert coming straight back. Every other incident the dashboard
  * could still show for this vehicle (the snapshot's own filter: announced,
  * inside the window, after the epoch) goes with it. The rows are kept.
+ *
+ * Only the ones that began no later than it (`beganAt`), when given: deciding
+ * an older alert from the Alerts page uncovers nothing, and must not take a
+ * newer one off the map undecided.
  */
 export async function sweepUnitSiblings(
   tx: Prisma.TransactionClient,
-  args: { id: string; vehicleId: string; userId: string | null; now: Date },
+  args: { id: string; vehicleId: string; userId: string | null; now: Date; beganAt?: Date },
 ): Promise<string[]> {
-  const { id, vehicleId, userId, now } = args
+  const { id, vehicleId, userId, now, beganAt } = args
   const siblings = await tx.fuelTheft.findMany({
     where: {
       vehicleId,
@@ -163,6 +199,7 @@ export async function sweepUnitSiblings(
       dismissedAt: null,
       beganAt: {
         gte: new Date(Math.max(now.getTime() - FUEL_INCIDENT_WINDOW_MS, FUEL_INCIDENT_EPOCH.getTime())),
+        ...(beganAt ? { lte: beganAt } : {}),
       },
       OR: [
         { drainCause: { in: [...ANNOUNCED_CAUSES] } },

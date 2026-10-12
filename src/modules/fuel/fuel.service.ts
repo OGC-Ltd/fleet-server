@@ -78,6 +78,14 @@ export async function theftOutcomes(orgId: string, q: TheftOutcomesQuery) {
   }
 }
 
+/**
+ * Why a decision was refused although the alert exists: it was escalated as a
+ * faulty probe (its case is in Fuel Audit), it was decided in its case, it
+ * already carries this decision, or somebody else decided it a moment ago.
+ */
+const UNDECIDABLE = 'This alert cannot take that decision now: it is already decided that way, '
+  + 'it was escalated as a faulty probe (see Fuel Audit), or somebody else has just decided it. Reload to see where it stands.'
+
 /** May this account escalate or de-escalate a live alert here? */
 export async function canReviewTheft(orgId: string, userId: string | null) {
   return userId != null && (await canAssignTriage(userId, orgId)).ok
@@ -105,9 +113,7 @@ export async function reviewTheft(
   const reviewer = me?.email ?? me?.fullName ?? userId
   const row = await repo.reviewTheft({ orgId, id, userId, reviewer, outcome, note })
   if (!row) throw new NotFoundError('Fuel theft')
-  if (row === 'dismissed') {
-    throw new ConflictError('This alert has already been decided and is off the dashboard')
-  }
+  if (row === 'dismissed') throw new ConflictError(UNDECIDABLE)
 
   const review = {
     status: row.reviewStatus ?? (outcome === 'ESCALATED' ? 'CONFIRMED_THEFT' : 'NOT_THEFT'),
@@ -152,14 +158,13 @@ export async function reviewTheft(
 async function escalateAsProbeFault(orgId: string, id: string, userId: string, note: string) {
   const done = await escalateLiveAsProbeFault(orgId, id, userId, note)
   if (!done) throw new NotFoundError('Fuel theft')
-  if (done === 'dismissed') {
-    throw new ConflictError('This alert has already been decided and is off the dashboard')
-  }
+  if (done === 'dismissed') throw new ConflictError(UNDECIDABLE)
   // The unit's older live alerts go with it, as with any decision (see
-  // repo.sweepUnitSiblings). After the case is stored: a failure here leaves
-  // an older alert showing, never a decision unrecorded.
-  const swept = await prisma.$transaction((tx) => repo.sweepUnitSiblings(tx, {
-    id, vehicleId: done.vehicleId, userId, now: new Date(),
+  // repo.sweepUnitSiblings), when this one was on the map to uncover them.
+  // After the case is stored: a failure here leaves an older alert showing,
+  // never a decision unrecorded.
+  const swept = !done.live ? [] : await prisma.$transaction((tx) => repo.sweepUnitSiblings(tx, {
+    id, vehicleId: done.vehicleId, userId, now: new Date(), beganAt: done.beganAt,
   })).catch((err) => {
     logger.warn({ err, theftId: id }, 'Fuel review: could not clear the unit\'s older alerts')
     return [] as string[]

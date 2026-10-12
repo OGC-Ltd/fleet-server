@@ -49,6 +49,8 @@ import { validateQuery, validateBody } from './middleware/validate.js'
 import * as userCtrl from './modules/users/user.controller.js'
 import { provisionUserSchema } from './modules/users/user.schema.js'
 import { trustProxy, parseProxyList } from './lib/trust-proxy.js'
+import * as alertsCtrl from './modules/alerts/alerts.controller.js'
+import { listAlertsQuery } from './modules/alerts/alerts.schema.js'
 
 export function createApp() {
   const app = express()
@@ -224,6 +226,12 @@ export function createApp() {
   // does not know it yet. It spans the caller's memberships and returns
   // identity only — see vehicle-lookup.ts.
   app.get(`${v1}/vehicle-lookup`, authenticate, vehicleLookup)
+
+  // The Alerts page: fuel and overspeeding alerts across every organisation
+  // the caller holds. Not under :orgId for the same reason as the lookup; it
+  // authorises per organisation itself (alerts.scope). Deciding an alert is
+  // still an org-scoped route.
+  app.get(`${v1}/alerts`, authenticate, validateQuery(listAlertsQuery), alertsCtrl.list)
 
   // Web Push public key — no auth; called by Service Workers before subscribe
   app.get(`${v1}/notifications/vapid-key`, notificationsCtrl.getVapidKey)
