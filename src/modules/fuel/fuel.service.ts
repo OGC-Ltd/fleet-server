@@ -9,6 +9,8 @@ import { publishNotification } from '../../lib/notifications/notification.store.
 // Who decides a live alert is who assigns a follow-up: the organisation's
 // administrator or the platform administrator (repairs.authz). One rule.
 import { canAssignTriage } from '../repairs/repairs.authz.js'
+// The Alerts badge counts open alerts; a decision changes that count.
+import { forgetAlertSummaries } from '../alerts/alerts.summary-cache.js'
 import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, TheftOutcomesQuery, EscalationReason } from './fuel.schema.js'
 
 export const listFillings = (orgId: string, q: ListFillingQuery) => repo.findAllFillings(orgId, q)
@@ -114,6 +116,7 @@ export async function reviewTheft(
   const row = await repo.reviewTheft({ orgId, id, userId, reviewer, outcome, note })
   if (!row) throw new NotFoundError('Fuel theft')
   if (row === 'dismissed') throw new ConflictError(UNDECIDABLE)
+  forgetAlertSummaries()
 
   const review = {
     status: row.reviewStatus ?? (outcome === 'ESCALATED' ? 'CONFIRMED_THEFT' : 'NOT_THEFT'),
@@ -159,6 +162,7 @@ async function escalateAsProbeFault(orgId: string, id: string, userId: string, n
   const done = await escalateLiveAsProbeFault(orgId, id, userId, note)
   if (!done) throw new NotFoundError('Fuel theft')
   if (done === 'dismissed') throw new ConflictError(UNDECIDABLE)
+  forgetAlertSummaries()
   // The unit's older live alerts go with it, as with any decision (see
   // repo.sweepUnitSiblings), when this one was on the map to uncover them.
   // After the case is stored: a failure here leaves an older alert showing,

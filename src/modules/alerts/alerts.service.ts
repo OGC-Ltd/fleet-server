@@ -21,6 +21,7 @@ import { canAssignTriage, triageAssignerOrgs } from '../repairs/repairs.authz.js
 import { probeHoldVehicleIds } from '../fuel/probe-hold.js'
 import { FUEL_INCIDENT_WINDOW_MS } from '../telemetry/telemetry.repository.js'
 import * as repo from './alerts.repository.js'
+import { cachedSummary, forgetAlertSummaries, keepSummary } from './alerts.summary-cache.js'
 import { alertScopes } from './alerts.scope.js'
 import {
   ALERT_KINDS, decodeCursor, fuelChoices, fuelStatus, mergePage, speedingChoices, speedingStatus,
@@ -31,6 +32,14 @@ import type { ListAlertsQuery } from './alerts.schema.js'
 const DAY_MS = 86_400_000
 /** With no `from`, the page opens on the last week. */
 const DEFAULT_DAYS = 7
+/** Nairobi is UTC+3 all year. */
+const FLEET_OFFSET_MS = 3 * 3_600_000
+
+/** Midnight on the fleet's clock, `daysBack` days before today (the page's own period start). */
+export function fleetMidnight(now: number, daysBack = 0): Date {
+  const local = now + FLEET_OFFSET_MS
+  return new Date(local - (local % DAY_MS) - FLEET_OFFSET_MS - daysBack * DAY_MS)
+}
 /** The widest window served, as on the incident reports. */
 const MAX_SPAN_DAYS = 366
 /** Place names warmed in the background per page; the rest show coordinates. */
@@ -233,6 +242,84 @@ export async function listAlerts(userId: string, q: ListAlertsQuery) {
   }
 }
 
+export interface AlertSummary {
+  /** Open alerts, both kinds, every organisation this person reads. */
+  open: number
+  fuel: number
+  speeding: number
+  /** The start of the window counted: the page's default "7 days". */
+  from: string
+}
+
+/**
+ * The Alerts badge: how many alerts are open over the page's default window
+ * (today and the six days before it, on the fleet's clock), so the number on
+ * the badge is the number the page opens on. Held a minute per reach; a
+ * decision clears it (alerts.summary-cache).
+ */
+export async function alertSummary(userId: string): Promise<AlertSummary> {
+  const { subject, orgIds } = await reachableOrgIds(userId)
+  const scopes = alertScopes(subject, orgIds)
+  const now = Date.now()
+  const from = fleetMidnight(now, DEFAULT_DAYS - 1)
+  const key = JSON.stringify([from.getTime(), scopes])
+  const hit = cachedSummary<AlertSummary>(key, now)
+  if (hit) return hit
+
+  const w: repo.AlertWindow = { scopes, from, to: new Date(now) }
+  const fuelScopes = scopes.filter((s) => s.kinds.includes('fuel'))
+  const speedScopes = scopes.filter((s) => s.kinds.includes('speeding'))
+  const [fuel, speeding] = await Promise.all([
+    fuelScopes.length ? repo.fuelCounts(w, fuelScopes) : Promise.resolve([]),
+    speedScopes.length ? repo.speedingCounts(w, speedScopes) : Promise.resolve([]),
+  ])
+  const open = (rows: repo.CountRow[]) => rows.reduce((n, r) => n + (r.status === 'open' ? r.n : 0), 0)
+  const value: AlertSummary = {
+    open: open(fuel) + open(speeding),
+    fuel: open(fuel),
+    speeding: open(speeding),
+    from: from.toISOString(),
+  }
+  keepSummary(key, value, now)
+  return value
+}
+
+export interface AlertHistory {
+  /** Alerts a fleet day per organisation, every state, since the first one. */
+  days: { orgId: string; kind: AlertKindSlug; day: string; n: number }[]
+}
+
+/**
+ * Every alert ever received, a day at a time (the Alerts page's chart): both
+ * kinds, every state, every organisation this person reads. Held a minute per
+ * reach, as the badge is: it is read on every visit to the page.
+ */
+export async function alertHistory(userId: string): Promise<AlertHistory> {
+  const { subject, orgIds } = await reachableOrgIds(userId)
+  const scopes = alertScopes(subject, orgIds)
+  const now = Date.now()
+  const key = JSON.stringify(['history', scopes])
+  const hit = cachedSummary<AlertHistory>(key, now)
+  if (hit) return hit
+
+  // From the start of time: the fuel side floors itself at its epoch.
+  const w: repo.AlertWindow = { scopes, from: new Date(0), to: new Date(now) }
+  const fuelScopes = scopes.filter((s) => s.kinds.includes('fuel'))
+  const speedScopes = scopes.filter((s) => s.kinds.includes('speeding'))
+  const [fuel, speeding] = await Promise.all([
+    fuelScopes.length ? repo.fuelDays(w, fuelScopes) : Promise.resolve([]),
+    speedScopes.length ? repo.speedingDays(w, speedScopes) : Promise.resolve([]),
+  ])
+  const value: AlertHistory = {
+    days: [
+      ...fuel.map((r) => ({ ...r, kind: 'fuel' as const })),
+      ...speeding.map((r) => ({ ...r, kind: 'speeding' as const })),
+    ],
+  }
+  keepSummary(key, value, now)
+  return value
+}
+
 /**
  * Escalate (a real overspeed, to be taken up with the driver) or de-escalate
  * (not one) an overspeeding episode. The organisation's administrators and
@@ -274,6 +361,7 @@ export async function reviewSpeeding(orgId: string, id: string, userId: string, 
     return true
   })
   if (!stored) throw new ConflictError('Somebody else decided this alert a moment ago. Reload to see their decision.')
+  forgetAlertSummaries()
 
   const me = await prisma.user.findUnique({ where: { id: userId }, select: { fullName: true } })
   const by = me?.fullName ?? null

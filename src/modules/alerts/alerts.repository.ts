@@ -117,10 +117,26 @@ export function fuelRows(w: AlertWindow, scopes: OrgScope[], status: AlertStatus
 }
 
 export interface CountRow { orgId: string; status: AlertStatus; n: number }
+/** One organisation's alerts on one fleet day (Nairobi, "YYYY-MM-DD"). */
+export interface DayRow { orgId: string; day: string; n: number }
+
+// The columns are UTC timestamps without a zone; Nairobi is UTC+3 all year,
+// so the fleet day is three hours on, whatever the session's time zone.
+const fleetDay = (col: Prisma.Sql) => Prisma.sql`to_char(${col} + interval '3 hours', 'YYYY-MM-DD')`
 
 export function fuelCounts(w: AlertWindow, scopes: OrgScope[]) {
   return prisma.$queryRaw<CountRow[]>`
     SELECT v.organisation_id AS "orgId", ${FUEL_BUCKET} AS status, count(*)::int AS n
+      FROM fuel_thefts t
+      JOIN vehicles v ON v.id = t.vehicle_id
+     WHERE ${fuelWhere(w, scopes)}
+     GROUP BY 1, 2`
+}
+
+/** Fuel alerts a day, every state (the Alerts page's chart). */
+export function fuelDays(w: AlertWindow, scopes: OrgScope[]) {
+  return prisma.$queryRaw<DayRow[]>`
+    SELECT v.organisation_id AS "orgId", ${fleetDay(Prisma.sql`t.began_at`)} AS day, count(*)::int AS n
       FROM fuel_thefts t
       JOIN vehicles v ON v.id = t.vehicle_id
      WHERE ${fuelWhere(w, scopes)}
@@ -192,6 +208,16 @@ export function speedingRows(w: AlertWindow, scopes: OrgScope[], status: AlertSt
 export function speedingCounts(w: AlertWindow, scopes: OrgScope[]) {
   return prisma.$queryRaw<CountRow[]>`
     SELECT s.organisation_id AS "orgId", ${SPEED_BUCKET} AS status, count(*)::int AS n
+      FROM speeding_incidents s
+      JOIN vehicles v ON v.id = s.vehicle_id
+     WHERE ${speedingWhere(w, scopes)}
+     GROUP BY 1, 2`
+}
+
+/** Overspeeding alerts a day, every state (the Alerts page's chart). */
+export function speedingDays(w: AlertWindow, scopes: OrgScope[]) {
+  return prisma.$queryRaw<DayRow[]>`
+    SELECT s.organisation_id AS "orgId", ${fleetDay(Prisma.sql`s.started_at`)} AS day, count(*)::int AS n
       FROM speeding_incidents s
       JOIN vehicles v ON v.id = s.vehicle_id
      WHERE ${speedingWhere(w, scopes)}

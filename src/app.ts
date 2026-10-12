@@ -232,6 +232,9 @@ export function createApp() {
   // authorises per organisation itself (alerts.scope). Deciding an alert is
   // still an org-scoped route.
   app.get(`${v1}/alerts`, authenticate, validateQuery(listAlertsQuery), alertsCtrl.list)
+  // The sidebar badge: open alerts over the page's default week, held a minute.
+  app.get(`${v1}/alerts/summary`, authenticate, alertsCtrl.summary)
+  app.get(`${v1}/alerts/history`, authenticate, alertsCtrl.history)
 
   // Web Push public key — no auth; called by Service Workers before subscribe
   app.get(`${v1}/notifications/vapid-key`, notificationsCtrl.getVapidKey)
