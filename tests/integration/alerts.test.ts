@@ -138,6 +138,26 @@ describe('GET /api/v1/alerts', () => {
     expect(speedingRead.values).not.toContain('org_b')
   })
 
+  it('puts the alert that arrived last on top, not the one that began last', async () => {
+    answer({
+      // A fall that began at 01:15 and was only called at 04:30…
+      fuel: [fuelRow('f-late', 'org_a', '2026-10-13T01:15:00Z', { detectedAt: new Date('2026-10-13T04:30:00Z') })],
+      // …and an overspeed from 04:00 to 04:14.
+      speeding: [speedRow('s-new', 'org_a', '2026-10-13T04:00:00Z', { endedAt: new Date('2026-10-13T04:14:00Z') })],
+    })
+
+    const res = await request(app).get('/api/v1/alerts')
+
+    expect(res.body.data.data.map((r: { id: string }) => r.id)).toEqual(['f-late', 's-new'])
+    expect(res.body.data.data[0]).toMatchObject({ at: '2026-10-13T01:15:00.000Z', arrivedAt: '2026-10-13T04:30:00.000Z' })
+    expect(res.body.data.data[1]).toMatchObject({ arrivedAt: '2026-10-13T04:14:00.000Z' })
+    // Each kind is read off the database in the same order, and pages on it.
+    const fuelRead = calls.find((c) => c.text.includes('FROM fuel_thefts') && c.text.includes('LIMIT'))!
+    expect(fuelRead.text).toContain('ORDER BY t.detected_at DESC')
+    const speedingRead = calls.find((c) => c.text.includes('FROM speeding_incidents') && c.text.includes('LIMIT'))!
+    expect(speedingRead.text).toContain('ORDER BY s.ended_at DESC')
+  })
+
   it('lets the platform administrator decide everywhere, and an administrator only where a member', async () => {
     answer({})
     prismaMock.userRole.findMany.mockResolvedValue([{ role: { slug: 'super_admin', organisationId: null } }] as never)

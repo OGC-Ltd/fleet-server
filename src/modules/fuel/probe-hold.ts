@@ -1,25 +1,27 @@
 /**
- * Units on PROBE HOLD: flagged for a fuel probe repair, so never flagged for a
- * critical fuel theft until that is resolved (operator, 2026-10-01).
- *
- * A probe found faulty reads falls that did not happen, and every one of them
- * would otherwise come back as a "possible theft" on a unit everybody already
- * knows is waiting on the workshop. The hold starts the moment the unit is
- * flagged for the repair and ends only when the issue is resolved:
+ * Units REPORTED for a fuel probe repair (the name "probe hold" is older than
+ * the rule). The unit counts as reported from the moment it is flagged for the
+ * repair until the issue is resolved:
  *
  *   an open fuel probe job in Repairs (targetKind 'probe', or a
  *     fuel_probe_dead fault), not yet signed off; or
  *   a fuel case found to be a faulty probe (PROBE_FAULT) that has not closed.
  *     A repair signed off UNSUCCESSFUL leaves its cases PROBE_FAULT, so the
- *     hold survives a failed repair and lifts only on PROBE_FIXED.
+ *     flag survives a failed repair and lifts only on PROBE_FIXED.
  *
- * What the hold changes: no theft announcement from the adjudicator, no red
- * unit or fuel theft alert on the map, and a provider fuel-drain notification
- * arrives as a warning, not critical. What it does not: the ledger still
- * records every drain, so the history is there once the probe is trusted again.
+ * What it changes: nothing is held back. 2026-10-01 to 2026-10-13 such a unit
+ * was never flagged for a fuel theft until the repair closed; the operator
+ * reversed that on 2026-10-13: "do not put a unit on hold, but we can
+ * highlight it was reported". So its alerts are raised, announced and shown
+ * like any other, at their own severity, and each says the unit is already
+ * reported (PROBE_REPORTED_NOTE in the message; `probeHold` on the unit and
+ * the alert for the screens).
  */
 
 import { prisma } from '../../lib/prisma.js'
+
+/** Said at the end of a fuel alert's message on a reported unit. */
+export const PROBE_REPORTED_NOTE = 'This unit is already reported for a fuel probe repair.'
 
 /** The vehicles among `vehicleIds` that are on probe hold. */
 export async function probeHoldVehicleIds(vehicleIds: string[]): Promise<Set<string>> {

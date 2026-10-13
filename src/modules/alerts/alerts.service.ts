@@ -131,9 +131,14 @@ export async function listAlerts(userId: string, q: ListAlertsQuery) {
       ? repo.speedingRows(w, of('speeding'), q.status, cursor, q.limit, q.read) : Promise.resolve([]),
   ])
 
+  // Newest ARRIVAL first (operator, 2026-10-13: "we always need the latest
+  // alerts to be on the top"): a fuel alert when it was raised, an overspeed
+  // when it ended, which is when each reaches the page. Ordered by when the
+  // event began, a fall called hours after it started sat under every
+  // overspeed since. The window still picks by when it happened.
   const page = mergePage<{ at: Date; id: string; fuel?: repo.FuelAlertRow; speeding?: repo.SpeedingAlertRow }>([
-    fuel.map((r) => ({ at: r.at, id: r.id, fuel: r })),
-    speeding.map((r) => ({ at: r.at, id: r.id, speeding: r })),
+    fuel.map((r) => ({ at: r.detectedAt, id: r.id, fuel: r })),
+    speeding.map((r) => ({ at: r.endedAt, id: r.id, speeding: r })),
   ], q.limit)
 
   const pageFuel = page.rows.flatMap((r) => (r.fuel ? [r.fuel] : []))
@@ -163,6 +168,7 @@ export async function listAlerts(userId: string, q: ListAlertsQuery) {
         kind: 'fuel' as const,
         id: r.id, orgId: r.orgId, vehicleId: r.vehicleId, plate: r.plate, vehicleName: r.vehicleName,
         at: iso(r.at),
+        arrivedAt: iso(r.detectedAt),
         read: r.read,
         status: fuelStatus(r.reviewStatus),
         decision,
@@ -184,7 +190,7 @@ export async function listAlerts(userId: string, q: ListAlertsQuery) {
           driverName: r.driverName,
           probeHold,
           // Still on the map: what the map's own query would return for it.
-          live: r.reviewStatus == null && r.dismissedAt == null && !probeHold
+          live: r.reviewStatus == null && r.dismissedAt == null
             && now - new Date(r.at).getTime() < FUEL_INCIDENT_WINDOW_MS,
         },
       }
@@ -200,6 +206,7 @@ export async function listAlerts(userId: string, q: ListAlertsQuery) {
       kind: 'speeding' as const,
       id: r.id, orgId: r.orgId, vehicleId: r.vehicleId, plate: r.plate, vehicleName: r.vehicleName,
       at: iso(r.at),
+      arrivedAt: iso(r.endedAt),
       read: r.read,
       status: speedingStatus(r.reviewStatus),
       decision,

@@ -10,7 +10,7 @@ vi.mock('../../src/lib/zone-presence.js', () => ({ resolveEstatePlaces: vi.fn(as
 
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { eventBus } from '../../src/lib/event-bus.js'
-import { probeHoldVehicleIds } from '../../src/modules/fuel/probe-hold.js'
+import { PROBE_REPORTED_NOTE, probeHoldVehicleIds } from '../../src/modules/fuel/probe-hold.js'
 import { ingestWialonNotifications } from '../../src/modules/webhooks/wialon-notifications.service.js'
 
 beforeEach(() => {
@@ -25,10 +25,12 @@ beforeEach(() => {
   vi.spyOn(eventBus, 'publish').mockImplementation(() => undefined as never)
 })
 
+const message = () =>
+  (prismaMock.providerAlert.create.mock.calls.at(-1)?.[0] as { data: { message: string } }).data.message
 const severity = () =>
   (prismaMock.providerAlert.create.mock.calls.at(-1)?.[0] as { data: { severity: string } }).data.severity
 
-describe('probe hold', () => {
+describe('units reported for a probe repair', () => {
   it('holds a unit with an open probe job or an open probe-fault case, and asks for both', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.$queryRaw as any).mockResolvedValue([{ vehicle_id: 'veh_1' }])
@@ -46,17 +48,22 @@ describe('probe hold', () => {
     expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
   })
 
-  it('files a provider fuel-drain alert on a held unit as a warning, not critical', async () => {
+  // Operator, 2026-10-13: "do not put a unit on hold, but we can highlight it
+  // was reported". A reported unit's alert keeps its severity and says so.
+  it('keeps a provider fuel-drain alert critical on a reported unit, and says it was reported', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.$queryRaw as any).mockResolvedValue([{ vehicle_id: 'veh_1' }])
     await ingestWialonNotifications([{ notification: 'Fuel drain', unitId: 1, time: '2026-10-01 09:00:00' }] as never)
-    expect(severity()).toBe('warning')
+    expect(severity()).toBe('critical')
+    expect(message()).toMatch(/Fuel drain — DZ 20/)
+    expect(message()).toContain(PROBE_REPORTED_NOTE)
   })
 
-  it('keeps it critical on a unit that is not held', async () => {
+  it('says nothing of a repair on a unit that is not reported', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.$queryRaw as any).mockResolvedValue([])
     await ingestWialonNotifications([{ notification: 'Fuel drain', unitId: 1, time: '2026-10-01 09:01:00' }] as never)
     expect(severity()).toBe('critical')
+    expect(message()).not.toContain(PROBE_REPORTED_NOTE)
   })
 })
