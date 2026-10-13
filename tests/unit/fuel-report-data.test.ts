@@ -12,7 +12,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fuel-days-'))
 process.env['FUEL_DAY_CACHE_DIR'] = dir
 
-const reportPool = { name: 'report pool' }
+const reportPool = { name: 'report pool', vehicle: { findUnique: async () => ({ deviceId: 'rfs:1' }) } }
 vi.mock('../../src/lib/report-db.js', () => ({ reportDb: () => reportPool }))
 vi.mock('../../src/lib/prisma.js', () => ({ prisma: {} }))
 const daySeries = vi.fn(async (_v: string, _o: string, q: { day: string }, db: unknown) => {
@@ -60,7 +60,7 @@ describe('the day cache', () => {
     await cache.keepDay('veh9', '2026-09-01', '{"a":1}', now)
     expect(await cache.cachedDay('veh9', '2026-09-01', now)).toBe('{"a":1}')
     cache._clearDayMemory()
-    const f = path.join(dir, 'veh9', '2026-09-01.json.gz')
+    const f = path.join(dir, 'veh9', '2026-09-01.v3.json.gz')
     fs.utimesSync(f, new Date(now), new Date(now))
     expect(await cache.cachedDay('veh9', '2026-09-01', now)).toBe('{"a":1}')        // from disk
     expect(await cache.cachedDay('veh9', '2026-09-01', now + cache.TTL_MS)).toBeNull()

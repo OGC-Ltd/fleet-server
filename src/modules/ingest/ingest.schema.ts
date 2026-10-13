@@ -23,6 +23,9 @@ export const telemetryPayloadSchema = z.object({
   accelXG:        z.number().min(-16).max(16).optional(),
   accelYG:        z.number().min(-16).max(16).optional(),
   accelZG:        z.number().min(-16).max(16).optional(),
+  /** Supply voltages at this fix, volts: the vehicle's electrics and the tracker's own battery. */
+  extVoltageV:    z.number().min(0).max(60).optional(),
+  intVoltageV:    z.number().min(0).max(60).optional(),
   fuelLevelMl:    z.number().int().nonnegative().optional(),
   fuelUsedMl:     z.number().int().optional(),
   cargoWeightKg:  z.number().nonnegative().optional(),

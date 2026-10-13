@@ -71,6 +71,14 @@ export interface VehicleTelemetryFrame {
    */
   accelG?:           AccelAxes | null
 
+  /**
+   * The tracker's external supply and internal battery voltages at this fix,
+   * in volts, from the same message as the position. Absent where the unit
+   * sends none. Not `batteryVoltageV`, which another provider fills.
+   */
+  extVoltageV?:      number | null
+  intVoltageV?:      number | null
+
   // ── Fuel / FLS sensor ─────────────────────────────────────────────────────
   fuelLevelMl:       number | null
   fuelUsedMl:        number | null     // delta since last ping; negative = suspect theft

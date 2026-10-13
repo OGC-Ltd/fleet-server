@@ -575,6 +575,34 @@ export function tankCapacityOf(sensors: Record<string, WialonSensor> | undefined
 /** Teltonika's accelerometer axes, AVL ids 17/18/19, in X/Y/Z order. */
 const ACCEL_PARAMS = ['io_17', 'io_18', 'io_19'] as const
 
+/** A message's supply voltages, in volts; null where the message has none. */
+export interface SupplyVolts {
+  ext: number | null
+  int: number | null
+}
+
+/** Volts above this are not a supply reading; past 100 the firmware sent millivolts. */
+const VOLT_LIMIT = 60
+
+/**
+ * The tracker's external supply and internal battery voltages from one
+ * message's params (`pwr_ext`, `pwr_int`), or null when it carries neither.
+ * Most firmwares send volts (`27.99`); a value over 100 is read as millivolts.
+ * A negative or impossible value is dropped, not clamped.
+ */
+export function readVoltages(params: Record<string, unknown> | null | undefined): SupplyVolts | null {
+  if (!params) return null
+  const volts = (raw: unknown): number | null => {
+    let v = asNumber(raw)
+    if (v == null) return null
+    if (v > 100) v /= 1000
+    return v >= 0 && v <= VOLT_LIMIT ? Math.round(v * 100) / 100 : null
+  }
+  const ext = volts(params['pwr_ext'])
+  const int = volts(params['pwr_int'])
+  return ext == null && int == null ? null : { ext, int }
+}
+
 /**
  * The most a tracker accelerometer can report, in g. Teltonika's range tops out
  * at ±16 g; a value past it is not a reading.

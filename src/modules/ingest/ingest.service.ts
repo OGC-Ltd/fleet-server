@@ -58,6 +58,16 @@ export function accelColumns(dto: TelemetryPayload): {
   return { accelXG: g(dto.accelXG), accelYG: g(dto.accelYG), accelZG: g(dto.accelZG) }
 }
 
+/**
+ * The two voltage columns for one frame, in volts. Re-checked as the axes are:
+ * the poller skips the HTTP schema. Always both keys, `null` when absent.
+ */
+export function voltColumns(dto: TelemetryPayload): { extVoltageV: number | null; intVoltageV: number | null } {
+  const v = (x: unknown): number | null =>
+    typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= 60 ? x : null
+  return { extVoltageV: v(dto.extVoltageV), intVoltageV: v(dto.intVoltageV) }
+}
+
 export async function processTelemetry(
   orgId: string,
   dto: TelemetryPayload,
@@ -121,6 +131,8 @@ export async function processTelemetry(
       ...ignitionColumns(dto),
       // Accelerometer axes, written in the same change that adds the columns.
       ...accelColumns(dto),
+      // Supply voltages, written in the same change that adds the columns.
+      ...voltColumns(dto),
       fuelLevelMl:   dto.fuelLevelMl,
       fuelUsedMl:    dto.fuelUsedMl,
       cargoWeightKg: dto.cargoWeightKg,

@@ -311,6 +311,8 @@ class TelemetryPoller {
           accelXG:       frame.accelG?.x ?? undefined,
           accelYG:       frame.accelG?.y ?? undefined,
           accelZG:       frame.accelG?.z ?? undefined,
+          extVoltageV:   frame.extVoltageV ?? frame.batteryVoltageV ?? undefined,
+          intVoltageV:   frame.intVoltageV ?? undefined,
           fuelLevelMl:   frame.fuelLevelMl ?? undefined,
           fuelUsedMl:    frame.fuelUsedMl ?? undefined,
           cargoWeightKg: frame.cargoWeightKg ?? undefined,

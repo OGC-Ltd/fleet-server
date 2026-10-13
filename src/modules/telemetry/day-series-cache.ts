@@ -32,14 +32,17 @@ export const TTL_MS = 24 * 3_600_000
 
 const dir = () => process.env['FUEL_DAY_CACHE_DIR'] || path.resolve(process.cwd(), '.cache', 'fuel-days')
 const safe = (s: string) => s.replace(/[^A-Za-z0-9_-]/g, '_')
-const fileOf = (vehicleId: string, day: string) => path.join(dir(), safe(vehicleId), `${safe(day)}.json.gz`)
+/** Bumped when the day's columns change, so a day kept before is read again.
+ *  2: `alt`; 3: `vext`, `vint` (2026-10-13). */
+const FORMAT = 3
+const fileOf = (vehicleId: string, day: string) => path.join(dir(), safe(vehicleId), `${safe(day)}.v${FORMAT}.json.gz`)
 
 /** Whether a day that ended at `endMs` is finished enough to keep. */
 export const settled = (endMs: number, now = Date.now()) => now - endMs >= SETTLE_MS
 
 const mem = new Map<string, { json: string; at: number }>()
 let memBytes = 0
-const keyOf = (vehicleId: string, day: string) => `${vehicleId}|${day}`
+const keyOf = (vehicleId: string, day: string) => `${vehicleId}|${day}|v${FORMAT}`
 
 function remember(key: string, json: string, at: number) {
   const old = mem.get(key)
