@@ -2594,6 +2594,17 @@ model VehicleTelemetry {
   accelYG Float? @map("accel_y_g") @db.Real
   accelZG Float? @map("accel_z_g") @db.Real
 
+  /// ── Supply voltages ──────────────────────────────────────────────────────
+  /// The tracker's external supply (the vehicle's own electrics, ~12 or ~24 V,
+  /// higher while the alternator charges) and its internal backup battery
+  /// (~4 V), in volts, from the same message as the position — Wialon
+  /// `pwr_ext` / `pwr_int`. For the Fuel Report graph's voltage lines
+  /// (operator, 2026-10-13). Stored from 2026-10-13 on; a day before that is
+  /// filled from Wialon's messages when a report asks (fuel-report-data).
+  /// NULL means the unit sent none. REAL for the same reason as the axes.
+  extVoltageV Float? @map("ext_voltage_v") @db.Real
+  intVoltageV Float? @map("int_voltage_v") @db.Real
+
   // Fuel (FLS sensor reading)
   fuelLevelMl Int? @map("fuel_level_ml") // calibrated tank level in millilitres
   fuelUsedMl  Int? @map("fuel_used_ml") // delta vs. previous ping (negative = impossible → flag)

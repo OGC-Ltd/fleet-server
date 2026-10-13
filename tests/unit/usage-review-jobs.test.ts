@@ -133,6 +133,28 @@ describe('a Logbook build', () => {
     expect((await svc.getUsageReview('org1', 'veh1', '2026-09-01', '2026-09-02')).status).toBe('running')
   })
 
+  // Operator, 2026-10-13: "on the logbook we can render the cached data".
+  it('looks without building: the saved review, a build under way, or none', async () => {
+    expect(await svc.peekUsageReview('org1', 'veh1', '2026-09-01', '2026-09-02')).toMatchObject({ status: 'none' })
+    expect(queue.add).not.toHaveBeenCalled()
+
+    await svc.getUsageReview('org1', 'veh1', '2026-09-01', '2026-09-02')
+    expect(await svc.peekUsageReview('org1', 'veh1', '2026-09-01', '2026-09-02')).toMatchObject({ status: 'running', stage: 'queued' })
+    expect(queue.add).toHaveBeenCalledTimes(1)
+
+    await saved.saveReview(key, closed(Date.UTC(2026, 8, 10)))
+    const st = await svc.peekUsageReview('org1', 'veh1', '2026-09-01', '2026-09-02')
+    expect(st.status).toBe('ready')
+    expect(st.outdated).toBeUndefined()
+  })
+
+  it('shows an outdated review of an open period when only looking, marked', async () => {
+    const open = { ...closed(Date.now() - 11 * 60_000), period: { from: '2026-09-01', to: '2026-09-02', days: 2, startMs: 0, endMs: Date.now() + DAY } }
+    await saved.saveReview(key, open as Parameters<typeof saved.saveReview>[1])
+    expect(await svc.peekUsageReview('org1', 'veh1', '2026-09-01', '2026-09-02')).toMatchObject({ status: 'ready', outdated: true })
+    expect(queue.add).not.toHaveBeenCalled()
+  })
+
   it('builds in the API process, and keeps it, when the worker is not answering', async () => {
     workerUp = false
     const k2 = saved.reviewKey('org1', 'veh1', '2026-09-03', '2026-09-03')

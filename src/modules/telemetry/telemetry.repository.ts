@@ -325,7 +325,8 @@ export async function findDaySeries(
     take: PLAYBACK_SCAN_CAP + 1,
     select: {
       capturedAt: true, lat: true, lng: true, speedKmh: true,
-      engineOn: true, fuelLevelMl: true, engineHoursMeter: true,
+      engineOn: true, fuelLevelMl: true, engineHoursMeter: true, altitudeM: true,
+      extVoltageV: true, intVoltageV: true,
     },
   })
 
@@ -340,6 +341,11 @@ export async function findDaySeries(
     lat: [] as (number | null)[], lng: [] as (number | null)[],
     spd: [] as (number | null)[], eng: [] as (0 | 1 | null)[],
     fuelMl: [] as (number | null)[], hrs: [] as (number | null)[],
+    // Metres above sea level, for the Fuel Report graph's Altitude line
+    // (operator, 2026-10-13).
+    alt: [] as (number | null)[],
+    // Supply voltages, volts: the vehicle's electrics and the tracker's battery.
+    vext: [] as (number | null)[], vint: [] as (number | null)[],
   }
   for (const r of rows) {
     cols.t.push(Math.round((r.capturedAt.getTime() - base) / 1000))
@@ -349,6 +355,9 @@ export async function findDaySeries(
     cols.eng.push(r.engineOn == null ? null : r.engineOn ? 1 : 0)
     cols.fuelMl.push(round(r.fuelLevelMl, 0))
     cols.hrs.push(round(r.engineHoursMeter, 3))
+    cols.alt.push(round(r.altitudeM, 0))
+    cols.vext.push(round(r.extVoltageV, 2))
+    cols.vint.push(round(r.intVoltageV, 2))
   }
   return { cols, truncated }
 }

@@ -286,12 +286,15 @@ async function run(job: Job, orgId: string, vehicleId: string, from: string, to:
 }
 
 export interface ReviewStatus {
-  status: 'running' | 'ready' | 'failed'
+  status: 'running' | 'ready' | 'failed' | 'none'
   stage: Stage
   progress: { done: number; total: number }
   startedAt: number
   error?: string
   review?: ReadyReview
+  /** peekUsageReview: a saved review of a period still open, built a while
+   *  ago — shown as it is, with a rebuild offered. */
+  outdated?: boolean
 }
 
 /** A held review is current when its period had closed when it was built, or
@@ -381,6 +384,38 @@ export async function getUsageReview(orgId: string, vehicleId: string, from: str
     if (st) return st
   }
   return local(key, orgId, vehicleId, from, to)
+}
+
+/**
+ * The review for this unit and period only if it is already to hand: the
+ * saved one, or the progress of a build already under way. Never starts a
+ * build — `status: 'none'` when there is nothing — so the Logbook can show a
+ * review it built before as soon as the unit and period are picked
+ * (operator, 2026-10-13: "on the logbook we can render the cached data").
+ */
+export async function peekUsageReview(orgId: string, vehicleId: string, from: string, to: string): Promise<ReviewStatus> {
+  validatePeriod(from, to)
+  sweep()
+  const key = reviewKey(orgId, vehicleId, from, to)
+  const saved = await loadReview(key)
+  if (saved && current(saved)) return ready(saved)
+  if (jobs.has(key)) return local(key, orgId, vehicleId, from, to)
+  // Saved but the period was still open when it was built, a while ago: still
+  // worth showing at once, marked, rather than a blank page.
+  if (saved) return { ...ready(saved), outdated: true }
+  const q = reviewQueue()
+  const job: QueueJob | undefined = q ? await q.getJob(freshIds.get(key) ?? buildId(key)) : undefined
+  if (job) {
+    const state = await job.getState()
+    if (state === 'active' || state === 'waiting' || state === 'delayed' || state === 'prioritized' || state === 'waiting-children') {
+      const pr = (job.progress ?? {}) as Partial<BuildProgress>
+      return {
+        status: 'running', stage: state === 'active' ? pr.stage ?? 'loading' : 'queued',
+        progress: { done: pr.done ?? 0, total: pr.total ?? 0 }, startedAt: job.timestamp,
+      }
+    }
+  }
+  return { status: 'none', stage: 'queued', progress: { done: 0, total: 0 }, startedAt: 0 }
 }
 
 /**

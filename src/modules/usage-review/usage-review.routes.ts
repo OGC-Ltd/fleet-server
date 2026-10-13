@@ -5,14 +5,14 @@ import { requirePermission, requireVehicleInScope } from '../../middleware/autho
 import { validateBody, validateQuery } from '../../middleware/validate.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { ConflictError } from '../../core/errors/errors.js'
-import { getUsageReview, pointsOf, renderReport, reviewForDownload, type ReadyReview, type RenderOptions } from './usage-review.service.js'
+import { getUsageReview, peekUsageReview, pointsOf, renderReport, reviewForDownload, type ReadyReview, type RenderOptions } from './usage-review.service.js'
 import { aiActivities, aiStatus, cachedActivity, nameKey } from './usage-review.activity-ai.js'
 
 /**
  * Unit usage review — drive hours, distance, fuel (estimated) and the places a
  * unit spent its time, over a chosen period, with the workbook and PDF.
  *
- *   GET …/vehicles/:vehicleId/usage-review?from&to[&fresh=1]
+ *   GET …/vehicles/:vehicleId/usage-review?from&to[&fresh=1][&cached=1]
  *       202 + progress while it builds, 200 + the review when ready.
  *   GET …/vehicles/:vehicleId/usage-review/xlsx?from&to[&kmpl][&names]
  *   GET …/vehicles/:vehicleId/usage-review/pdf?from&to[&kmpl][&names][&driver]
@@ -36,6 +36,8 @@ const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
 const reviewQuery = z.object({
   from: day, to: day,
   fresh: z.enum(['0', '1']).optional(),
+  // Only what is already built or building: never starts a build.
+  cached: z.enum(['0', '1']).optional(),
   kmpl: z.coerce.number().positive().max(100).optional(),
   names: z.string().max(8000).optional(),
   driver: z.string().max(120).optional(),
@@ -57,10 +59,12 @@ function forPage(rv: ReadyReview) {
 
 const getReview: RequestHandler = async (req, res, next) => {
   try {
-    const { from, to, fresh } = q(req)
-    const st = await getUsageReview(p(req, 'orgId'), p(req, 'vehicleId'), from, to, fresh === '1')
+    const { from, to, fresh, cached } = q(req)
+    const st = cached === '1' && fresh !== '1'
+      ? await peekUsageReview(p(req, 'orgId'), p(req, 'vehicleId'), from, to)
+      : await getUsageReview(p(req, 'orgId'), p(req, 'vehicleId'), from, to, fresh === '1')
     if (st.status === 'ready' && st.review) return sendSuccess(res, { ...st, review: forPage(st.review) })
-    sendSuccess(res, st, st.status === 'failed' ? 200 : 202)
+    sendSuccess(res, st, st.status === 'failed' || st.status === 'none' ? 200 : 202)
   } catch (err) { next(err) }
 }
 

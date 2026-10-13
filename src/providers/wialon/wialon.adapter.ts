@@ -50,7 +50,7 @@ import { env } from '../../config/env.js'
 import type { AccelAxes, TelemetryProvider, VehicleTelemetryFrame } from '../telemetry-provider.js'
 import { WialonClient, type WialonPosition } from './wialon.client.js'
 import {
-  readFuel, readIgnition, readFuelProbeFault, readCamera, readAccelerometer, carriesFuelReading, hasFuelSensor,
+  readFuel, readIgnition, readFuelProbeFault, readCamera, readAccelerometer, readVoltages, type SupplyVolts, carriesFuelReading, hasFuelSensor,
   type FuelProbeFault, type CameraState, type WialonSensor,
 } from './wialon.sensors.js'
 import { noteConnection, connectionCounts } from '../../lib/connection-state.js'
@@ -292,9 +292,11 @@ export class WialonLiveAdapter implements TelemetryProvider {
       // newer message without a fix would otherwise stamp its reading on an
       // older position.
       const accel = u.lmsg?.t === u.pos.t ? accelOf(u.lmsg?.p) : NO_ACCEL
+      // Voltages as the axes: only from the message the position came from.
+      const volts = u.lmsg?.t === u.pos.t ? readVoltages(u.lmsg?.p) : null
 
       const carried = this.carried(u.id)
-      const frame = toFrame(u.id, u.nm, u.pos, carried, accel)
+      const frame = toFrame(u.id, u.nm, u.pos, carried, accel, true, volts)
       if (frame) { frames.push(frame); this.noteRow(u.id, u.pos, carried.ignitionOn) }
     }
 
@@ -339,7 +341,7 @@ export class WialonLiveAdapter implements TelemetryProvider {
       if (!this.earnsRow(m.unitId, m.pos, carried.ignitionOn)) { thinned++; continue }
 
       // The event is the raw message itself, so its params are this fix's own.
-      const frame = toFrame(m.unitId, this.unitNames.get(m.unitId) ?? String(m.unitId), m.pos, carried, accelOf(m.params), m.ownTime)
+      const frame = toFrame(m.unitId, this.unitNames.get(m.unitId) ?? String(m.unitId), m.pos, carried, accelOf(m.params), m.ownTime, readVoltages(m.params))
       if (frame) { frames.push(frame); this.noteRow(m.unitId, m.pos, carried.ignitionOn) }
     }
 
@@ -466,6 +468,7 @@ function toFrame(
   c: Carried,
   accel: AccelRead = NO_ACCEL,
   ownTime = true,
+  volts: SupplyVolts | null = null,
 ): VehicleTelemetryFrame | null {
   if (!p || !Number.isFinite(p.y) || !Number.isFinite(p.x)) return null
   // A frame without a usable timestamp is unwritable (capturedAt is part of
@@ -503,6 +506,9 @@ function toFrame(
     engineHoursMeter: engineHours,
     // This message's own accelerometer, never a carried-forward one.
     accelG:           accel.axes,
+    // This message's own supply voltages, never carried forward.
+    extVoltageV:      volts?.ext ?? null,
+    intVoltageV:      volts?.int ?? null,
 
     // Calibrated probe reading; null when the unit has no fuel sensor or no
     // calibration table — never a raw ADC value.
