@@ -20,7 +20,7 @@
  * the severity say so rather than implying we corroborated it.
  */
 
-import { isOnProbeHold } from './probe-hold.js'
+import { isOnProbeHold, PROBE_REPORTED_NOTE } from './probe-hold.js'
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { env } from '../../config/env.js'
@@ -82,7 +82,7 @@ export interface AdjudicateOutcome {
   stillPending:   number
   published:      number
   /** Not announced: the unit is on probe hold (fuel/probe-hold). */
-  probeHold?:     number
+  probeReported?: number
   /** Millilitres reclassified as never having left the tank. */
   recoveredMl:    number
   /**
@@ -652,10 +652,12 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     // summary keeps only what nobody can call a theft. The ledger row above is
     // written either way.
     if (!mayUseTheftWording(verdict.cause.cause) && env.FUEL_RATE_ALERTS !== 'live') continue
-    // Probe hold (operator, 2026-10-01): a unit flagged for a fuel probe
-    // repair is never announced as a fuel theft until the repair resolves it.
-    // The ledger row above is still written. See fuel/probe-hold.
-    if (await isOnProbeHold(t.vehicleId)) { out.probeHold = (out.probeHold ?? 0) + 1; continue }
+    // A unit already reported for a fuel probe repair is announced like any
+    // other, and the message says it was reported (operator, 2026-10-13: "do
+    // not put a unit on hold, but we can highlight it was reported"). It used
+    // to be held silent until the repair closed. See fuel/probe-hold.
+    const probeReported = await isOnProbeHold(t.vehicleId)
+    if (probeReported) out.probeReported = (out.probeReported ?? 0) + 1
 
     const cause = verdict.cause
     const plate = t.vehicle.registrationPlate
@@ -723,7 +725,7 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
       // second event is a coincidence often enough to be worth staying quiet
       // about — of the five repeat vehicles measured, two stopped at two.
       severity:  cause.cause === 'SIPHON' || history.totalCount >= 3 ? 'critical' : 'warning',
-      text:      `${headline}${repeat}`,
+      text:      `${headline}${repeat}${probeReported ? ` ${PROBE_REPORTED_NOTE}` : ''}`,
       at:        t.beganAt,
       plate,
       vehicleId: t.vehicleId,

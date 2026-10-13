@@ -824,6 +824,10 @@ export async function findFleetSnapshot(orgId: string) {
       tankCapacityLitres: true,
       // What the machine is, per RaiFactorySuite's register (KASULU only).
       machineName: true,
+      // The register's standard burn rate (KASULU only), for the card's
+      // "today against standard".
+      ratedConsumption: true,
+      ratedConsumptionBasis: true,
       // The provider's own unit id — how lib/connection-state is keyed, so the
       // service layer can attach the provider's connection verdict.
       deviceId: true,
@@ -962,12 +966,12 @@ export async function findFleetSnapshot(orgId: string) {
        -- counts in the 30-day history below); it is just no longer announced.
        AND t.dismissed_at IS NULL
      ORDER BY t.vehicle_id, t.began_at DESC`
-  // Probe hold: a unit flagged for a fuel probe repair shows no fuel theft
-  // incident until the repair resolves it (fuel/probe-hold).
-  // Asked for every unit, not only the flagged ones: the unit card shows the
-  // hold too (operator, 2026-10-01), so it travels as `probeHold` below.
+  // Units already reported for a fuel probe repair (fuel/probe-hold). Their
+  // fuel incidents show like any other's (operator, 2026-10-13: "do not put a
+  // unit on hold, but we can highlight it was reported"); the flag travels as
+  // `probeHold` below so the card and the alert can say it was reported.
   const onHold = await probeHoldVehicleIds(vehicleIds)
-  const incidentByVehicle = new Map(incidents.filter(i => !onHold.has(i.vehicle_id)).map(i => [i.vehicle_id, i]))
+  const incidentByVehicle = new Map(incidents.map(i => [i.vehicle_id, i]))
 
   /**
    * The unit's recent record, for the vehicles that have an open incident.
@@ -1057,12 +1061,17 @@ export async function findFleetSnapshot(orgId: string) {
         // set on the KASULU units it lists and null everywhere else. The unit
         // card shows it in place of the label it reads off the unit code.
         machineName: v.machineName ?? null,
+        // The register's standard burn: L/h when the basis is HOURS, km/L when
+        // DISTANCE. Null on every unit the register does not rate, so the
+        // card compares only where there is a standard to compare with.
+        ratedConsumption:      v.ratedConsumption ?? null,
+        ratedConsumptionBasis: v.ratedConsumption != null ? v.ratedConsumptionBasis ?? null : null,
         // Separates "the probe is broken" from "no probe fitted" — both of
         // which leave fuelLevelMl null, and only one of which is a job for
         // the workshop.
         fuelProbeFault: ping?.fuel_probe_fault ?? false,
-        // Flagged for a fuel probe repair: fuel theft alerts are held until it
-        // is resolved (fuel/probe-hold). The unit card says so.
+        // Already reported for a fuel probe repair (fuel/probe-hold). Nothing
+        // is held back for it; the card and the alerts say it was reported.
         probeHold: onHold.has(v.id),
 
         // On-board recorder. `hasCamera` defaults FALSE (no recorder is the

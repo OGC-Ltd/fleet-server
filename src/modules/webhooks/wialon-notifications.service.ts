@@ -15,7 +15,7 @@
  * idempotent while still letting the same rule fire again later.
  */
 
-import { isOnProbeHold } from '../fuel/probe-hold.js'
+import { isOnProbeHold, PROBE_REPORTED_NOTE } from '../fuel/probe-hold.js'
 import { createHash } from 'crypto'
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
@@ -123,12 +123,11 @@ export async function ingestWialonNotifications(
       .update(`${n.notification}|${n.unit ?? n.unitId ?? '?'}|${Math.floor(at.getTime() / 60_000)}`)
       .digest('hex').slice(0, 24)
 
-    // Probe hold: a fuel-drain rule firing on a unit flagged for a fuel probe
-    // repair is kept, as a warning rather than critical (fuel/probe-hold).
-    const severity = severityOf(n.notification) === 'critical' && isFuelLossRule(n.notification)
-      && vehicle?.id && await isOnProbeHold(vehicle.id)
-      ? 'warning' as const
-      : severityOf(n.notification)
+    // A fuel-drain rule firing on a unit already reported for a fuel probe
+    // repair keeps its severity, and the message says the unit was reported
+    // (operator, 2026-10-13; it used to drop to a warning). fuel/probe-hold.
+    const severity = severityOf(n.notification)
+    const probeReported = isFuelLossRule(n.notification) && vehicle?.id != null && await isOnProbeHold(vehicle.id)
     const plate = vehicle?.registrationPlate ?? (n.unit?.trim() || null)
 
     // CALIBRATE THE PLACE AGAINST OUR OWN OVERLAY.
@@ -169,7 +168,7 @@ export async function ingestWialonNotifications(
     // swapped for our boundary. Verbatim match only: no parsing, and if the
     // coordinate resolved to nothing the sentence is left exactly as sent.
     const authored = n.text?.trim()
-    const message = authored
+    const said = authored
       ? (n.zone && place.length > 0 ? authored.split(n.zone).join(placeLabel!) : authored)
       : [
           n.notification,
@@ -183,6 +182,7 @@ export async function ingestWialonNotifications(
           n.fuelLevelL != null ? `(tank ${litres(n.fuelLevelL)})` : null,
           n.speed != null ? `${n.speed} km/h` : null,
         ].filter(Boolean).join(' ')
+    const message = probeReported ? `${said} ${PROBE_REPORTED_NOTE}` : said
 
     const existing = await prisma.providerAlert.findUnique({ where: { externalId }, select: { id: true } })
     if (existing) { out.duplicate++; continue }

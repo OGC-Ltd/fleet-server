@@ -141,8 +141,8 @@ export function fuelRows(
      WHERE ${fuelWhere(w, scopes)}
        ${statusSql}
        ${readFilterSql(read, FUEL_READ(w))}
-       ${cursorSql('t.began_at', 't.id', cursor)}
-     ORDER BY t.began_at DESC, t.id COLLATE "C" DESC
+       ${cursorSql('t.detected_at', 't.id', cursor)}
+     ORDER BY t.detected_at DESC, t.id COLLATE "C" DESC
      LIMIT ${limit + 1}`
 }
 
@@ -234,8 +234,8 @@ export function speedingRows(
      WHERE ${speedingWhere(w, scopes)}
        ${statusSql}
        ${readFilterSql(read, SPEED_READ(w))}
-       ${cursorSql('s.started_at', 's.id', cursor)}
-     ORDER BY s.started_at DESC, s.id COLLATE "C" DESC
+       ${cursorSql('s.ended_at', 's.id', cursor)}
+     ORDER BY s.ended_at DESC, s.id COLLATE "C" DESC
      LIMIT ${limit + 1}`
 }
 
