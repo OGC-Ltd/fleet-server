@@ -37,6 +37,7 @@ import { resolveEstatePlaces } from '../../lib/zone-presence.js'
 // the movement tracker applies before it will call a unit moving.
 import { STALE_FIX_MS } from '../../lib/movement-state.js'
 import { getMaintenanceHistoryCached, getOrgVehicleMaintenance, DEFAULT_HISTORY_WINDOW_DAYS } from '../telemetry/maintenance.cache.js'
+import { GRAMMAR_RULES, tidyProse } from '../../lib/prose-grammar.js'
 
 export interface AiInsight {
   msg:         string
@@ -44,6 +45,9 @@ export interface AiInsight {
   activeCount: number
   totalCount:  number
   generatedAt: string
+  /** Who wrote `msg`: the model, or buildFleetFallback from the same facts.
+   *  The card titles the second "Fleet summary" rather than claiming AI. */
+  source:      'model' | 'facts'
 }
 export interface AiInsightResponse {
   configured: boolean
@@ -1839,7 +1843,7 @@ async function generateFor(orgId: string): Promise<void> {
       body: JSON.stringify({
         model: env.OPENAI_MODEL,
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: SYSTEM_PROMPT + GRAMMAR_RULES },
           { role: 'user', content: JSON.stringify(facts) },
         ],
         response_format: { type: 'json_object' },
@@ -1856,7 +1860,8 @@ async function generateFor(orgId: string): Promise<void> {
     // wording is that it invented nothing.
     const invented = fabricatedFigures(parsed.msg, facts)
     const leaked   = leakedFieldNames(parsed.msg)
-    const msg = invented.length || leaked.length ? buildFleetFallback(facts) : parsed.msg
+    const fromModel = !invented.length && !leaked.length
+    const msg = tidyProse(fromModel ? parsed.msg : buildFleetFallback(facts))
     if (invented.length) {
       logger.warn(
         { orgId, invented, rejected: parsed.msg },
@@ -1873,7 +1878,7 @@ async function generateFor(orgId: string): Promise<void> {
     const risk = (['Low', 'Medium', 'High'] as const).find(r => r === parsed.risk) ?? 'Medium'
     insights.set(orgId, {
       configured: true,
-      insight: { msg, risk, activeCount, totalCount, generatedAt: new Date().toISOString() },
+      insight: { msg, risk, activeCount, totalCount, generatedAt: new Date().toISOString(), source: fromModel ? 'model' : 'facts' },
     })
     // The TEXT, not just the level. The card is the only place this is
     // otherwise visible, and that needs a browser and a login — so a brief that
@@ -1882,7 +1887,7 @@ async function generateFor(orgId: string): Promise<void> {
     // `brief`, NOT `msg` — pino owns `msg` for the log message itself, so a
     // field of that name is silently overwritten and the text never appears.
     logger.info(
-      { orgId, risk, brief: msg, source: invented.length ? 'facts' : 'model', live: facts.fleetNow },
+      { orgId, risk, brief: msg, source: fromModel ? 'model' : 'facts', live: facts.fleetNow },
       'AI insight refreshed',
     )
   } catch (err) {
@@ -1894,8 +1899,8 @@ async function generateFor(orgId: string): Promise<void> {
       insights.set(orgId, {
         configured: true,
         insight: {
-          msg: buildFleetFallback(facts), risk: 'Medium',
-          activeCount, totalCount, generatedAt: new Date().toISOString(),
+          msg: tidyProse(buildFleetFallback(facts)), risk: 'Medium',
+          activeCount, totalCount, generatedAt: new Date().toISOString(), source: 'facts',
         },
       })
       logger.warn({ err, orgId }, 'AI insight: model failed — the facts-only brief stands')
