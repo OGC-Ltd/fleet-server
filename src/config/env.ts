@@ -284,6 +284,14 @@ const schema = z.object({
   // OpenWeather — powers the route weather card (server-side proxy; key never ships to the client)
   OPENWEATHER_API_KEY: z.string().optional().default(''),
 
+  // Google Routes + Isochrones — the route ahead and the 15/30/60-minute reach
+  // of a tracked unit, both from its Wialon fix (modules/route-ahead). OFF
+  // unless set, and the key is a SERVER key: the browser's
+  // VITE_GOOGLE_MAPS_API_KEY is referrer-restricted and would be refused here.
+  // Both APIs must be enabled on the key's Cloud project; Isochrones is pre-GA.
+  GOOGLE_ROUTING_ENABLED: z.string().optional().default('false').transform(v => v === 'true'),
+  GOOGLE_ROUTING_API_KEY: z.string().optional().default(''),
+
   // ── notification cache + retention (lib/redis, lib/queues) ───────────────
   // UNSET is a supported production state: the notification cache degrades to
   // Postgres and the BullMQ retention sweep does not run. The box is a
