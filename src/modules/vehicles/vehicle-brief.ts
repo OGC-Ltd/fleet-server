@@ -43,6 +43,7 @@ import { getOpenTripsCached } from '../dispatches/open-trips.cache.js'
 // and could not tell a dispatch driver from a standing assignment.
 import { getFleetSnapshot } from '../telemetry/telemetry.service.js'
 import { NO_FUEL_ARRIVED } from '../fuel/fuel-adjudication.js'
+import { GRAMMAR_RULES, tidyProse } from '../../lib/prose-grammar.js'
 
 /** How long one vehicle's brief stays fresh. */
 const CACHE_TTL_MS = 10 * 60_000
@@ -634,7 +635,7 @@ export function modelBriefRejectionReason(msg: string, f: VehicleFacts): string 
 
 async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
   const fallback = (): VehicleBrief => ({
-    msg: buildFallback(facts), source: 'facts', generatedAt: new Date().toISOString(), facts,
+    msg: tidyProse(buildFallback(facts)), source: 'facts', generatedAt: new Date().toISOString(), facts,
   })
   if (!env.OPENAI_API_KEY) return fallback()
 
@@ -645,7 +646,7 @@ async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
       body: JSON.stringify({
         model: env.OPENAI_MODEL,
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: SYSTEM_PROMPT + GRAMMAR_RULES },
           { role: 'user',   content: JSON.stringify(facts) },
         ],
         response_format: { type: 'json_object' },
@@ -676,7 +677,7 @@ async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
       return fallback()
     }
 
-    return { msg: parsed.msg, source: 'model', generatedAt: new Date().toISOString(), facts }
+    return { msg: tidyProse(parsed.msg), source: 'model', generatedAt: new Date().toISOString(), facts }
   } catch (err) {
     logger.warn({ err, plate: facts.plate }, 'Vehicle brief: model failed — the facts-only brief stands')
     return fallback()
@@ -723,7 +724,7 @@ export async function getVehicleBrief(orgId: string, vehicleId: string): Promise
     if (!facts) throw new Error('vehicle not found')
 
     const immediate: VehicleBrief = {
-      msg: buildFallback(facts), source: 'facts', generatedAt: new Date().toISOString(), facts,
+      msg: tidyProse(buildFallback(facts)), source: 'facts', generatedAt: new Date().toISOString(), facts,
     }
     remember(key, immediate)
 
