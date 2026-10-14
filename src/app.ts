@@ -17,6 +17,7 @@ import orgRoutes from './modules/organisations/organisation.routes.js'
 import userRoutes from './modules/users/user.routes.js'
 import roleRoutes from './modules/roles/role.routes.js'
 import vehicleRoutes from './modules/vehicles/vehicle.routes.js'
+import routeAheadRoutes from './modules/route-ahead/route-ahead.routes.js'
 import { lookup as vehicleLookup } from './modules/vehicles/vehicle-lookup.js'
 import tripRoutes from './modules/trips/trip.routes.js'
 import fuelRoutes from './modules/fuel/fuel.routes.js'
@@ -261,6 +262,7 @@ export function createApp() {
   // depends on. Non-matching paths fall through to vehicleRoutes as before.
   app.use(orgBase, telemetryRoutes)
   app.use(orgBase, usageReviewRoutes)
+  app.use(orgBase, routeAheadRoutes)
   app.use(orgBase, vehicleRoutes)
   app.use(`${orgBase}/trips`, tripRoutes)
   app.use(`${orgBase}/trips`, cargoRoutes)
