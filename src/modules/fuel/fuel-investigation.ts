@@ -38,6 +38,7 @@ import { haversineM } from '../../lib/dispatch-trip.js'
 import { NotFoundError } from '../../core/errors/errors.js'
 import { findPlaybackFixes, type PlaybackPoint } from '../telemetry/telemetry.repository.js'
 import { findTheftById } from './fuel.repository.js'
+import { prisma } from '../../lib/prisma.js'
 import {
   googleRoutingAvailable, isochrone, snapToRoads, nearestRoad, GoogleRoutingError, type LatLng,
 } from '../../providers/google-routing/index.js'
@@ -87,6 +88,8 @@ export interface ZoneOrigin extends LatLng {
 
 export interface Investigation {
   format: number
+  /** What it investigates: a fuel alert, or a unit halted mid-journey. */
+  kind?: 'fuel' | 'halt'
   theftId: string
   vehicleId: string
   plate: string | null
@@ -323,5 +326,93 @@ export async function getInvestigation(orgId: string, theftId: string): Promise<
     return inv
   })().finally(() => inflight.delete(key))
   inflight.set(key, p)
+  return p
+}
+
+// ── a halted unit ───────────────────────────────────────────────────────────
+
+/** How far back from the halt the route is drawn. */
+export const HALT_BEFORE_MS = 60 * 60_000
+/** A long halt is drawn up to this long after it began. */
+const HALT_AFTER_CAP_MS = 6 * 60 * 60_000
+/** A halt's answer is rebuilt at most this often: the halt is still going on. */
+const HALT_TTL_MS = 5 * 60_000
+/** Drive zones from the same spot are reused this long. */
+const ZONE_TTL_MS = 60 * 60_000
+
+const haltCache = new Map<string, { at: number; inv: Investigation }>()
+const zoneCache = new Map<string, { at: number; zones: Investigation['zones'] }>()
+const remember = <V>(m: Map<string, V>, k: string, v: V) => {
+  m.delete(k); m.set(k, v)
+  if (m.size > 2_000) m.delete(m.keys().next().value as string)
+}
+
+/**
+ * The same investigation for a unit halted mid-journey (the map's Halted
+ * list, operator 2026-10-15): where it stopped, its route from an hour before
+ * the halt to now, the stops on it, and the 5/10/15-minute drive zones from
+ * where it stands. Never saved: the halt is still going on. Built at most
+ * every five minutes per halt, zones reused per spot for an hour.
+ */
+export async function getHaltInvestigation(orgId: string, vehicleId: string, sinceMs: number): Promise<Investigation> {
+  const key = `${orgId}/${vehicleId}/${Math.floor(sinceMs / 60_000)}`
+  const hit = haltCache.get(key)
+  const now = Date.now()
+  if (hit && now - hit.at < HALT_TTL_MS) return hit.inv
+  const running = inflight.get(`halt:${key}`)
+  if (running) return running
+  const p = (async () => {
+    const vehicle = await prisma.vehicle.findFirst({ where: { id: vehicleId, organisationId: orgId }, select: { id: true, name: true } })
+    if (!vehicle) throw new NotFoundError('Vehicle')
+    const from = new Date(sinceMs - HALT_BEFORE_MS)
+    const to = new Date(Math.min(now, sinceMs + HALT_AFTER_CAP_MS))
+    const fixes = await findPlaybackFixes(vehicleId, orgId, from, to)
+    const track: TrackPoint[] = (fixes?.points ?? []).map((pt: PlaybackPoint) => ({
+      t: pt.t, lat: pt.lat, lng: pt.lng, spd: pt.spd ?? null, eng: pt.eng ?? null,
+      ...(pt.gapBefore ? { gapBefore: true as const } : {}),
+    }))
+    const point = pickIncidentPoint(track, sinceMs, sinceMs)
+    if (point) point.basis = 'Last recorded position as the unit halted'
+
+    let zones: Investigation['zones'] = { minutes: [...ZONE_MINUTES], items: [], reason: null, from: null }
+    if (!googleRoutingAvailable()) zones.reason = 'Drive zones are switched off on this server'
+    else if (!point) zones.reason = 'No recorded position near the halt'
+    else {
+      const zk = `${point.lat.toFixed(4)},${point.lng.toFixed(4)}`
+      const z = zoneCache.get(zk)
+      if (z && now - z.at < ZONE_TTL_MS) zones = z.zones
+      else {
+        try {
+          zones.items = (await zonesFrom(point, track, sinceMs, zones)).filter((x) => x.geometry != null)
+          remember(zoneCache, zk, { at: now, zones })
+        } catch (err) {
+          zones.reason = why(err)
+          logger.warn({ err, vehicleId }, 'Halt investigation: isochrones failed')
+        }
+      }
+    }
+
+    const inv: Investigation = {
+      format: INVESTIGATION_FORMAT,
+      kind: 'halt',
+      theftId: `halt:${vehicleId}:${sinceMs}`,
+      vehicleId,
+      plate: vehicle.name ?? null,
+      beganAt: new Date(sinceMs).toISOString(),
+      detectedAt: new Date(sinceMs).toISOString(),
+      litres: 0,
+      window: { from: from.toISOString(), to: to.toISOString() },
+      point,
+      track,
+      truncated: fixes?.truncated ?? false,
+      snapped: { segments: [], reason: 'Not drawn for a halt' },
+      zones,
+      builtAt: new Date(now).toISOString(),
+      final: false,
+    }
+    remember(haltCache, key, { at: now, inv })
+    return inv
+  })().finally(() => inflight.delete(`halt:${key}`))
+  inflight.set(`halt:${key}`, p)
   return p
 }
