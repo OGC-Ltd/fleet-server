@@ -8,7 +8,7 @@ import { BadRequestError } from '../../core/errors/errors.js'
 import { getRouteAhead, getReach, REACH_MINUTES } from './route-ahead.service.js'
 import { googleRoutingAvailable } from '../../providers/google-routing/index.js'
 import { getHaltInvestigation, getTripInvestigation } from '../fuel/fuel-investigation.js'
-import { getHubs, getInbound, ARRIVAL_MINUTES } from './hub-arrivals.js'
+import { getHubs, getInbound, getInboundAt, ARRIVAL_MINUTES } from './hub-arrivals.js'
 
 const routeQuery = z.object({
   destLat:  z.coerce.number().min(-90).max(90).optional(),
@@ -41,8 +41,18 @@ const inboundQuery = z.object({
     .transform((s) => [...new Set(s.split(',').map(Number))])
     .refine((a) => a.length > 0 && a.length <= 3 && a.every((m) => Number.isInteger(m) && m >= 1 && m <= 60),
       'minutes: up to three whole numbers from 1 to 60'),
-  mode: z.enum(['DRIVE', 'TWO_WHEELER']).optional().default('DRIVE'),
-})
+  // Whose drive times: one class at its measured speed, all at their own,
+  // or Google's two-wheeler. `mode=TWO_WHEELER` is the old spelling of it.
+  cls: z.enum(['all', 'VEHICLE', 'TRACTOR', 'TRUCK', 'CAR', 'MOTORBIKE']).optional(),
+  mode: z.enum(['DRIVE', 'TWO_WHEELER']).optional(),
+  available: z.enum(['0', '1']).optional().default('0').transform((s) => s === '1'),
+}).transform((q) => ({ ...q, cls: q.cls ?? (q.mode === 'TWO_WHEELER' ? 'MOTORBIKE' as const : 'all' as const) }))
+
+const pointQuery = z.object({
+  lat: z.coerce.number().min(-90).max(90),
+  lng: z.coerce.number().min(-180).max(180),
+  name: z.string().trim().max(80).optional(),
+}).and(inboundQuery)
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -53,7 +63,15 @@ const hubs: RequestHandler = async (req, res, next) => {
 const inbound: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as z.infer<typeof inboundQuery>
-    sendSuccess(res, await getInbound(p(req, 'orgId'), p(req, 'hubKey'), { minutes: q.minutes, mode: q.mode }))
+    sendSuccess(res, await getInbound(p(req, 'orgId'), p(req, 'hubKey'), { minutes: q.minutes, cls: q.cls, available: q.available }))
+  } catch (err) { next(err) }
+}
+
+const inboundAt: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as z.infer<typeof pointQuery>
+    sendSuccess(res, await getInboundAt(p(req, 'orgId'), { lat: q.lat, lng: q.lng, name: q.name ?? null },
+      { minutes: q.minutes, cls: q.cls, available: q.available }))
   } catch (err) { next(err) }
 }
 
@@ -106,6 +124,8 @@ router.get('/routing/status', authenticate, requireOrgAccess, (_req, res) => {
 const fleetGuard = [authenticate, requireOrgAccess, requirePermission('vehicle:read')]
 router.get('/routing/hubs', ...fleetGuard, hubs)
 router.get('/routing/hubs/:hubKey/inbound', ...fleetGuard, validateQuery(inboundQuery), inbound)
+// "Suggest a unit": the same for a spot picked on the map.
+router.get('/routing/point/inbound', ...fleetGuard, validateQuery(pointQuery), inboundAt)
 
 // The road from the unit's Wialon fix to where it is going, with a traffic ETA.
 router.get('/vehicles/:vehicleId/route-ahead', ...guard, validateQuery(routeQuery), routeAhead)

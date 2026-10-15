@@ -15,6 +15,12 @@
  *           the no-traffic time beside it, and whether its open dispatch is
  *           bound for the hub or returning to it. Ranked by arrival.
  *
+ * Phase 1 (operator, 2026-10-15): each unit is free, busy or stale, and the
+ * list can be narrowed to the free ones; drive times are scaled by the
+ * unit's class (unit-class, measured from our own runs) since Google times a
+ * car; past the 60-minute rings a drive time is given a band; and any spot on
+ * the map can stand in for a hub — "suggest a unit" (getInboundAt).
+ *
  * ## Cost
  *
  * Rings are cached ten minutes per hub, mode and minutes; a matrix two
@@ -37,6 +43,7 @@ import { homeSites } from '../fuel/fuel-investigation.js'
 import {
   googleRoutingAvailable, isochrone, routeMatrixTo, GoogleRoutingError, MATRIX_MAX, type TravelMode,
 } from '../../providers/google-routing/index.js'
+import { unitClass, etaFactor, type UnitClass } from './unit-class.js'
 
 export const ARRIVAL_MINUTES = [15, 30, 60] as const
 /** A fix older than this says nothing about where the unit is now. */
@@ -54,7 +61,7 @@ const MATRIX_TTL_MS = 2 * 60_000
 export interface Hub extends Point {
   key: string
   name: string
-  kind: 'yard' | 'factory' | 'weighbridge' | 'destination'
+  kind: 'yard' | 'factory' | 'weighbridge' | 'destination' | 'point'
 }
 
 export interface Arrival {
@@ -65,13 +72,22 @@ export interface Arrival {
   fixAt: string
   speedKmh: number | null
   straightM: number
-  /** By road, live traffic. */
+  unitClass: UnitClass
+  /** By road. */
   distanceM: number
+  /** Calibrated: Google's no-traffic time × the class factor, plus today's
+   *  traffic delay. `googleS` is Google's own (car) answer, for comparison. */
   etaS: number
-  /** The same drive with no traffic; `delayS` is the difference. */
   staticS: number
   delayS: number
+  googleS: number
+  factor: number
+  factorRuns: number
   arriveAt: string
+  /** Past the rings: "1–2 h", "2–4 h", "4 h+"; null inside them. */
+  band: string | null
+  /** free: fresh position, no open dispatch; busy: on a dispatch; stale: no position in 30 min. */
+  status: 'free' | 'busy' | 'stale'
   /** The smallest ring it is inside by drive time, or null beyond them all. */
   withinMin: number | null
   /** dispatched: its open run is bound for this hub; returning: it is coming back to it. */
@@ -83,6 +99,10 @@ export interface Inbound {
   enabled: true
   hub: Hub
   mode: TravelMode
+  cls: ArrivalClass
+  available: boolean
+  /** The speed the rings are drawn for. */
+  ringFactor: { cls: string; factor: number; runs: number }
   minutes: number[]
   rings: { minutes: number; geometry: unknown }[]
   ringsReason: string | null
@@ -93,12 +113,14 @@ export interface Inbound {
   noRoute: number
   /** Not asked about: too far, or past the per-request cap. */
   leftOut: number
+  /** Left out by "available only": busy or stale. */
+  filteredOut: number
   computedAt: string
 }
 
 const hubsCache = new Map<string, { at: number; hubs: Hub[] }>()
 const ringCache = new Map<string, { at: number; geometry: unknown }>()
-const matrixCache = new Map<string, { at: number; out: Omit<Inbound, 'rings' | 'ringsReason'> }>()
+const matrixCache = new Map<string, { at: number; out: Omit<Inbound, 'rings' | 'ringsReason' | 'hub' | 'ringFactor'> }>()
 const inflight = new Map<string, Promise<unknown>>()
 
 function remember<V>(m: Map<string, V>, k: string, v: V) {
@@ -177,29 +199,76 @@ const googleError = (err: unknown) =>
     : (err as Error)?.name === 'TimeoutError' ? 'Google did not answer in time'
     : 'Google could not be reached'
 
-async function rings(hub: Hub, minutes: number[], mode: TravelMode, now: number) {
+/**
+ * What the drive times are for. A unit class times every unit in it by that
+ * class's measured factor and draws the rings at its speed (a tractor's
+ * 60 minutes is a far smaller area than a car's); `all` times each unit by
+ * its own class and draws the rings at a lorry's; VEHICLE is every unit that
+ * is not a tractor (trucks and cars, each at its own factor, rings at a
+ * lorry's), the window's "Truck or car"; MOTORBIKE is Google's
+ * two-wheeler mode, uncalibrated.
+ */
+export type ArrivalClass = 'all' | 'VEHICLE' | 'TRACTOR' | 'TRUCK' | 'CAR' | 'MOTORBIKE'
+
+/** Google refuses a drive zone past this many minutes. */
+const RING_CAP_MIN = 60
+
+async function rings(hub: Point, minutes: number[], mode: TravelMode, factor: number, now: number) {
   return Promise.all(minutes.map(async (m) => {
-    const key = `${hub.lat.toFixed(5)},${hub.lng.toFixed(5)}:${mode}:${m}`
+    // A class at `factor` covers in m minutes what a car covers in m / factor.
+    const carMin = Math.max(1, Math.min(RING_CAP_MIN, Math.round(m / factor)))
+    const key = `${hub.lat.toFixed(5)},${hub.lng.toFixed(5)}:${mode}:${carMin}`
     const hit = ringCache.get(key)
     if (hit && now - hit.at < RINGS_TTL_MS) return { minutes: m, geometry: hit.geometry }
-    const geometry = await shared(`ring:${key}`, () => isochrone(hub, m * 60, { direction: 'TO', mode, traffic: true }))
+    const geometry = await shared(`ring:${key}`, () => isochrone(hub, carMin * 60, { direction: 'TO', mode, traffic: true }))
     remember(ringCache, key, { at: Date.now(), geometry })
     return { minutes: m, geometry }
   }))
 }
 
-interface SnapRow { vehicleId: string; name: string | null; lat: number | null; lng: number | null; speedKmh: number | null; capturedAt: string | null }
+interface SnapRow {
+  vehicleId: string; name: string | null; vehicleType: string | null
+  lat: number | null; lng: number | null; speedKmh: number | null; capturedAt: string | null
+}
 
-async function arrivals(orgId: string, hub: Hub, minutes: number[], mode: TravelMode, now: number): Promise<Omit<Inbound, 'rings' | 'ringsReason'>> {
+/** Over this, a unit's position is too old to dispatch it on. */
+const AVAILABLE_FIX_MS = 30 * 60_000
+
+/** A drive time past the rings, in words: "1–2 h", "2–4 h", "4 h+". */
+export function etaBand(etaS: number): string | null {
+  if (etaS <= RING_CAP_MIN * 60) return null
+  if (etaS <= 2 * 3600) return '1–2 h'
+  if (etaS <= 4 * 3600) return '2–4 h'
+  return '4 h+'
+}
+
+/**
+ * Whether a unit can be sent: `free` (a fresh position and no open dispatch),
+ * `busy` (on a dispatch) or `stale` (no position in the last half hour).
+ */
+export function availability(fixAtMs: number, onRun: boolean, now: number): Arrival['status'] {
+  if (onRun) return 'busy'
+  return now - fixAtMs > AVAILABLE_FIX_MS ? 'stale' : 'free'
+}
+
+async function arrivals(
+  orgId: string, hub: Point, minutes: number[], cls: ArrivalClass, availableOnly: boolean, now: number,
+): Promise<Omit<Inbound, 'rings' | 'ringsReason' | 'hub' | 'ringFactor'>> {
   const [snap, open] = await Promise.all([getFleetSnapshotCached(orgId), getOpenTripsCached(orgId)])
   const rows = (Array.isArray(snap) ? snap : []) as unknown as SnapRow[]
+  const mode: TravelMode = cls === 'MOTORBIKE' ? 'TWO_WHEELER' : 'DRIVE'
 
   const atHub: Inbound['atHub'] = []
-  const cands: (SnapRow & { lat: number; lng: number; straightM: number; run: Arrival['run']; destination: string | null })[] = []
+  type Cand = SnapRow & { lat: number; lng: number; straightM: number; run: Arrival['run']; destination: string | null; cls: UnitClass; status: Arrival['status'] }
+  const cands: Cand[] = []
   let leftOut = 0
+  let filteredOut = 0
   for (const r of rows) {
     if (r.lat == null || r.lng == null || !r.capturedAt) continue
-    if (now - Date.parse(r.capturedAt) > FRESH_MS) continue
+    const fixMs = Date.parse(r.capturedAt)
+    if (now - fixMs > FRESH_MS) continue
+    const c = unitClass(r.vehicleType, r.name)
+    if (cls === 'VEHICLE' ? c === 'TRACTOR' : cls !== 'all' && cls !== 'MOTORBIKE' && c !== cls) continue
     const straightM = haversineM(hub, { lat: r.lat, lng: r.lng })
     if (straightM <= YARD_RADIUS_M) { atHub.push({ vehicleId: r.vehicleId, plate: r.name }); continue }
     const trip = open.byVehicle.get(r.vehicleId)
@@ -212,23 +281,29 @@ async function arrivals(orgId: string, hub: Hub, minutes: number[], mode: Travel
       if (trip.arrivedAt == null && dest && haversineM(dest, hub) < SAME_PLACE_M) run = 'dispatched'
       else if (trip.arrivedAt != null && gate && haversineM(gate, hub) < SAME_PLACE_M) run = 'returning'
     }
+    const status = availability(fixMs, Boolean(trip), now)
+    if (availableOnly && status !== 'free') { filteredOut++; continue }
     if (straightM > FAR_M && !run) { leftOut++; continue }
-    cands.push({ ...r, lat: r.lat, lng: r.lng, straightM, run, destination: trip?.destination ?? null })
+    cands.push({ ...r, lat: r.lat, lng: r.lng, straightM, run, destination: trip?.destination ?? null, cls: c, status })
   }
-  // The runs bound for this hub first, then the nearest.
-  cands.sort((a, b) => Number(Boolean(b.run)) - Number(Boolean(a.run)) || a.straightM - b.straightM)
+  // Bound for this hub first, then the free ones, then by distance: the
+  // per-request cap goes to the units that can actually be sent.
+  const rank = (c: Cand) => (c.run ? 0 : c.status === 'free' ? 1 : 2)
+  cands.sort((a, b) => rank(a) - rank(b) || a.straightM - b.straightM)
   const asked = cands.slice(0, MATRIX_MAX)
   leftOut += cands.length - asked.length
 
   const cells = await routeMatrixTo(asked.map((c) => ({ lat: c.lat, lng: c.lng })), hub, mode)
-  const computedAt = new Date(now)
   const units: Arrival[] = cells.map((cell) => {
     const c = asked[cell.index]!
-    const etaS = Math.round(cell.durationS)
-    const staticS = Math.round(cell.staticDurationS)
+    const f = cls === 'MOTORBIKE' ? { factor: 1, runs: 0 } : etaFactor(c.cls)
+    const staticS = Math.round(cell.staticDurationS * f.factor)
+    const delayS = Math.max(0, Math.round(cell.durationS - cell.staticDurationS))
+    const etaS = staticS + delayS
     return {
       vehicleId: c.vehicleId,
       plate: c.name,
+      unitClass: c.cls,
       lat: c.lat,
       lng: c.lng,
       fixAt: c.capturedAt!,
@@ -237,40 +312,47 @@ async function arrivals(orgId: string, hub: Hub, minutes: number[], mode: Travel
       distanceM: cell.distanceM,
       etaS,
       staticS,
-      delayS: Math.max(0, etaS - staticS),
+      delayS,
+      googleS: Math.round(cell.durationS),
+      factor: f.factor,
+      factorRuns: f.runs,
       arriveAt: new Date(now + etaS * 1000).toISOString(),
       withinMin: minutes.find((m) => etaS <= m * 60) ?? null,
+      band: etaBand(etaS),
       run: c.run,
+      status: c.status,
       destination: c.destination,
     }
   }).sort((a, b) => a.etaS - b.etaS)
 
   return {
-    enabled: true, hub, mode, minutes,
+    enabled: true, mode, cls, available: availableOnly, minutes,
     units, atHub,
     noRoute: asked.length - cells.length,
     leftOut,
-    computedAt: computedAt.toISOString(),
+    filteredOut,
+    computedAt: new Date(now).toISOString(),
   }
 }
 
-export async function getInbound(
-  orgId: string, hubKey: string, opts: { minutes: number[]; mode: TravelMode },
-): Promise<Inbound | { enabled: false }> {
-  if (!googleRoutingAvailable()) return { enabled: false }
-  const hub = (await getHubs(orgId)).find((h) => h.key === hubKey)
-  if (!hub) throw new NotFoundError('Hub')
+export interface InboundOpts { minutes: number[]; cls: ArrivalClass; available: boolean }
+
+async function inbound(orgId: string, hub: Hub, opts: InboundOpts): Promise<Inbound> {
   const now = Date.now()
   const minutes = [...opts.minutes].sort((a, b) => a - b)
+  const mode: TravelMode = opts.cls === 'MOTORBIKE' ? 'TWO_WHEELER' : 'DRIVE'
+  // The rings are drawn for one speed: the class asked for, a lorry's for all.
+  const ringClass: UnitClass = opts.cls === 'all' || opts.cls === 'MOTORBIKE' || opts.cls === 'VEHICLE' ? 'TRUCK' : opts.cls
+  const ringFactor = opts.cls === 'MOTORBIKE' ? { factor: 1, runs: 0 } : etaFactor(ringClass)
 
-  const mk = `${orgId}:${hub.key}:${opts.mode}:${minutes.join(',')}`
+  const mk = `${orgId}:${hub.lat.toFixed(4)},${hub.lng.toFixed(4)}:${opts.cls}:${opts.available ? 1 : 0}:${minutes.join(',')}`
   const hit = matrixCache.get(mk)
   const [r, m] = await Promise.allSettled([
-    rings(hub, minutes, opts.mode, now),
+    rings(hub, minutes, mode, ringFactor.factor, now),
     hit && now - hit.at < MATRIX_TTL_MS
       ? Promise.resolve(hit.out)
       : shared(`matrix:${mk}`, async () => {
-          const out = await arrivals(orgId, hub, minutes, opts.mode, now)
+          const out = await arrivals(orgId, hub, minutes, opts.cls, opts.available, now)
           remember(matrixCache, mk, { at: now, out })
           return out
         }),
@@ -286,7 +368,30 @@ export async function getInbound(
   }
   return {
     ...m.value,
+    hub,
+    ringFactor: { cls: opts.cls === 'MOTORBIKE' ? 'MOTORBIKE' : ringClass, ...ringFactor },
     rings: r.status === 'fulfilled' ? r.value.filter((x) => x.geometry != null) : [],
     ringsReason,
   }
+}
+
+export async function getInbound(orgId: string, hubKey: string, opts: InboundOpts): Promise<Inbound | { enabled: false }> {
+  if (!googleRoutingAvailable()) return { enabled: false }
+  const hub = (await getHubs(orgId)).find((h) => h.key === hubKey)
+  if (!hub) throw new NotFoundError('Hub')
+  return inbound(orgId, hub, opts)
+}
+
+/**
+ * "Suggest a unit": the same answer for a spot picked on the map — a farm
+ * with no name yet, a breakdown, a load waiting by the road. Rounded to
+ * ~100 m so a second click beside the first reuses its answer.
+ */
+export async function getInboundAt(
+  orgId: string, point: Point & { name?: string | null }, opts: InboundOpts,
+): Promise<Inbound | { enabled: false }> {
+  if (!googleRoutingAvailable()) return { enabled: false }
+  const lat = Math.round(point.lat * 1000) / 1000
+  const lng = Math.round(point.lng * 1000) / 1000
+  return inbound(orgId, { key: `point-${lat},${lng}`, name: point.name?.trim() || 'Picked spot', lat, lng, kind: 'point' }, opts)
 }
