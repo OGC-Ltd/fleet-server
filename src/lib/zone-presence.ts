@@ -276,6 +276,9 @@ export function assignedZoneStatus(orgId: string, vehicleId: string): AssignedZo
 // seconds. Re-announcing the same zone for a vehicle is suppressed for this
 // long.
 const REANNOUNCE_COOLDOWN_MS = 10 * 60_000
+
+/** ~100 m of latitude: how far a nested zone's box may stray past its container's. */
+const NEST_SLACK_DEG = 0.001
 const lastAnnouncedAt = new Map<string, number>()
 
 /**
@@ -495,6 +498,34 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
     else      { told.delete(z.id); exited.push(z) }
   }
 
+  // ── The rest of the same crossing rides along ────────────────────────────
+  //
+  // Nested zones share a gate. Leaving Sukari, a unit crosses the factory's
+  // edge and the compound's a few seconds apart, so the two dwells start on
+  // different frames, finish on different frames, and the feed said "left
+  // SUKARI INDURSTRIES FACTORY" then "left Sukari industries" a minute later
+  // (operator, 2026-10-16: the same message relayed twice). So when a crossing
+  // is announced, any other zone the unit has ALREADY crossed the same way —
+  // raw state changed, dwell still running — is announced with it, once.
+  const fold = (list: CachedZone[], inside: boolean) => {
+    if (list.length === 0) return
+    for (const z of zones) {
+      if (!z.estate || list.includes(z)) continue
+      if (inside && z.keepOut) continue      // a keep-out entry is a breach, never an arrival
+      const w = waiting.get(z.id)
+      if (!w || w.inside !== inside || now.has(z.id) !== inside) continue
+      const key = `${p.vehicleId}:${z.id}:${inside ? 'in' : 'out'}`
+      if (at - (lastAnnouncedAt.get(key) ?? 0) < REANNOUNCE_COOLDOWN_MS) continue
+      waiting.delete(z.id)
+      lastAnnouncedAt.set(key, at)
+      if (inside) told.add(z.id)
+      else        told.delete(z.id)
+      list.push(z)
+    }
+  }
+  fold(exited, false)
+  fold(entered, true)
+
   if (entered.length === 0 && exited.length === 0 && breached.length === 0) return
 
   // Live feed + durable history + cache — see notifications/notification.store.
@@ -575,7 +606,18 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
     publish(lead, 'i', 'ZONE_ENTRY', 'success', text)
   }
 
-  const departures = exited.sort(bySpecificity)
+  // Leaving a zone and the zone around it at once is leaving the outer one:
+  // "left Sukari industries", not "left SUKARI INDURSTRIES FACTORY and Sukari
+  // industries", which is one gate named twice. Containment is judged by box
+  // and size — the in-memory zones carry no exact geometry test between two
+  // shapes — with ~100 m of slack, because the two Sukari rings were drawn
+  // separately in Wialon and the factory's edge strays a few metres past the
+  // compound's (84.40 of its 84.48 ha overlap, measured 2026-10-16).
+  const within = (inner: CachedZone, outer: CachedZone) =>
+    outer !== inner && outer.areaHa != null && inner.areaHa != null && outer.areaHa > inner.areaHa
+    && inner.box.minLat >= outer.box.minLat - NEST_SLACK_DEG && inner.box.maxLat <= outer.box.maxLat + NEST_SLACK_DEG
+    && inner.box.minLng >= outer.box.minLng - NEST_SLACK_DEG && inner.box.maxLng <= outer.box.maxLng + NEST_SLACK_DEG
+  const departures = exited.filter(z => !exited.some(o => within(z, o))).sort(bySpecificity)
   if (departures.length > 0) {
     const lead = departures[0]!
     const rest = departures.slice(1)
