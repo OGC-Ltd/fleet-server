@@ -34,13 +34,14 @@ import zlib from 'node:zlib'
 import { promisify } from 'node:util'
 import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
-import { haversineM } from '../../lib/dispatch-trip.js'
+import { haversineM, YARD_RADIUS_M } from '../../lib/dispatch-trip.js'
+import { getOpenTripsCached } from '../dispatches/open-trips.cache.js'
 import { NotFoundError } from '../../core/errors/errors.js'
 import { findPlaybackFixes, type PlaybackPoint } from '../telemetry/telemetry.repository.js'
 import { findTheftById } from './fuel.repository.js'
 import { prisma } from '../../lib/prisma.js'
 import {
-  googleRoutingAvailable, isochrone, snapToRoads, nearestRoad, GoogleRoutingError, type LatLng,
+  googleRoutingAvailable, isochrone, snapToRoads, nearestRoad, computeRoute, GoogleRoutingError, type LatLng,
 } from '../../providers/google-routing/index.js'
 
 const gzip = promisify(zlib.gzip)
@@ -89,7 +90,7 @@ export interface ZoneOrigin extends LatLng {
 export interface Investigation {
   format: number
   /** What it investigates: a fuel alert, or a unit halted mid-journey. */
-  kind?: 'fuel' | 'halt'
+  kind?: 'fuel' | 'halt' | 'trip'
   theftId: string
   vehicleId: string
   plate: string | null
@@ -415,4 +416,297 @@ export async function getHaltInvestigation(orgId: string, vehicleId: string, sin
   })().finally(() => inflight.delete(`halt:${key}`))
   inflight.set(`halt:${key}`, p)
   return p
+}
+
+// ── a unit's trip from its factory ──────────────────────────────────────────
+
+/** How far back the trip is looked for without a dispatch. */
+export const TRIP_LOOKBACK_MS = 12 * 60 * 60_000
+/** A dispatch's track starts this long before it was raised: a cane run's
+ *  clock is the clerk's, and the truck may already be rolling. */
+const TRIP_LEAD_MS = 2 * 60 * 60_000
+/** Never more than this much track. */
+const TRIP_MAX_MS = 36 * 60 * 60_000
+/** Shown either side of leaving and coming back. */
+const TRIP_PAD_MS = 10 * 60_000
+/** A trip is rebuilt at most this often: the unit is still on it. */
+const TRIP_TTL_MS = 2 * 60_000
+/** A planned road between two fixed places changes rarely. */
+const PLAN_TTL_MS = 24 * 60 * 60_000
+/** Road matching is asked for on demand and reused this long. */
+const SNAP_TTL_MS = 10 * 60_000
+/** Fixes fed to the road match are at least this far apart: Google fills
+ *  the road between them (interpolate), and it needs them under 300 m. */
+const SNAP_SPACING_M = 120
+
+export interface TripPlace extends LatLng { name: string | null }
+
+export interface TripInfo {
+  /** Where the run starts: the dispatch's gate, else the organisation's yard. */
+  origin: TripPlace | null
+  /** The dispatch's destination, when it names a place we can put on a map. */
+  destination: (TripPlace & { source: 'stated' | 'measured' }) | null
+  /** Named on the dispatch, placed or not. */
+  destinationName: string | null
+  dispatch: {
+    externalId: string
+    dispatchedAt: string
+    driverName: string | null
+    serialNumber: string | null
+    status: string
+    kind: 'SALES' | 'CANE'
+  } | null
+  /** When the unit left the origin, and came back, read from the track. */
+  departedAt: string | null
+  returnedAt: string | null
+  /** First fix at the destination after the dispatch (dispatch-trip). */
+  arrivedAt: string | null
+  /** True while the unit stands inside the origin's yard. */
+  atOrigin: boolean
+  /** Google's road from origin to destination: the run as planned. */
+  planned: { path: [number, number][]; distanceM: number; durationS: number } | null
+  plannedReason: string | null
+}
+
+export type TripInvestigation = Investigation & { trip: TripInfo }
+
+const tripCache = new Map<string, { at: number; inv: TripInvestigation }>()
+const planCache = new Map<string, { at: number; plan: TripInfo['planned']; reason: string | null }>()
+const snapCache = new Map<string, { at: number; snapped: Investigation['snapped'] }>()
+const tripInflight = new Map<string, Promise<TripInvestigation>>()
+
+/**
+ * The outing the trip is about, as indices into `track`.
+ *
+ * `departed` is the first fix outside `radiusM` of the origin after a fix
+ * inside it — with a dispatch, the first such exit at or after `notBeforeMs`
+ * (the dispatch less a lead, the clerk's clock being loose); without one, the
+ * latest exit. A dispatched unit already out when the track opens departed
+ * before it, so the outing starts at the first fix. `returned` is the first
+ * fix back inside after that, or null while it is still out.
+ */
+export function tripLeg(
+  track: { t: number; lat: number; lng: number }[], origin: LatLng, radiusM: number, notBeforeMs: number | null,
+): { departed: number | null; returned: number | null; atOrigin: boolean } {
+  const inside = track.map((p) => haversineM(origin, p) <= radiusM)
+  const exits: number[] = []
+  for (let i = 1; i < track.length; i++) if (inside[i - 1] && !inside[i]) exits.push(i)
+  const atOrigin = inside.length > 0 && inside[inside.length - 1] === true
+  let departed: number | null
+  if (notBeforeMs != null) {
+    departed = exits.find((i) => track[i]!.t >= notBeforeMs) ?? null
+    if (departed == null && track.length > 0 && !inside[0]) departed = 0
+  } else {
+    departed = exits.length ? exits[exits.length - 1]! : null
+  }
+  let returned: number | null = null
+  if (departed != null) {
+    for (let i = departed + 1; i < track.length; i++) if (inside[i]) { returned = i; break }
+  }
+  return { departed, returned, atOrigin }
+}
+
+const tidyName = (s: string | null) => s?.replace(/\s+(Limited|Ltd\.?)$/i, '').trim() || null
+
+async function plannedRoad(origin: LatLng, dest: LatLng, now: number): Promise<{ plan: TripInfo['planned']; reason: string | null }> {
+  const key = `${origin.lat.toFixed(4)},${origin.lng.toFixed(4)}>${dest.lat.toFixed(4)},${dest.lng.toFixed(4)}`
+  const hit = planCache.get(key)
+  if (hit && now - hit.at < PLAN_TTL_MS) return hit
+  try {
+    const r = await computeRoute(origin, dest)
+    const out = r
+      ? { plan: { path: r.path, distanceM: r.distanceM, durationS: Math.round(r.staticDurationS || r.durationS) }, reason: null }
+      : { plan: null, reason: 'Google found no road between the two' }
+    remember(planCache, key, { at: now, ...out })
+    return out
+  } catch (err) {
+    logger.warn({ err }, 'Trip investigation: planned road failed')
+    return { plan: null, reason: why(err) }
+  }
+}
+
+/**
+ * A unit's run from its factory (operator, 2026-10-15, for Sukari: "the start
+ * is at the Sukari Industries; some units we can capture their destination,
+ * which is a webhook from FactorySuite"): where it left from, where the
+ * dispatch says it is going, the road Google would take between the two, the
+ * route it actually drove since it left (with its stops), and the 5/10/15-
+ * minute drive zones from where it is now.
+ *
+ * Origin: the dispatch's gate (factory_code), else the organisation's yard.
+ * A unit with no dispatch still gets its latest outing from the yard. Built
+ * at most every two minutes; the road match (`snap`) only when asked for,
+ * since it is billed per hundred fixes and a day's run is thousands.
+ */
+export async function getTripInvestigation(
+  orgId: string, vehicleId: string, opts: { snap?: boolean } = {},
+): Promise<TripInvestigation> {
+  const now = Date.now()
+  const key = `${orgId}/${vehicleId}`
+  let base = tripCache.get(key)
+  if (!base || now - base.at >= TRIP_TTL_MS) {
+    let running = tripInflight.get(key)
+    if (!running) {
+      running = buildTrip(orgId, vehicleId, now).finally(() => tripInflight.delete(key))
+      tripInflight.set(key, running)
+    }
+    base = { at: now, inv: await running }
+    remember(tripCache, key, base)
+  }
+  const inv = base.inv
+  if (!opts.snap) return inv
+  return { ...inv, snapped: await snapTrip(key, inv, now) }
+}
+
+async function snapTrip(key: string, inv: Investigation, now: number): Promise<Investigation['snapped']> {
+  if (!googleRoutingAvailable()) return { segments: [], reason: 'Road matching is switched off on this server' }
+  const sk = `${key}/${inv.track[0]?.t ?? 0}/${inv.track[inv.track.length - 1]?.t ?? 0}`
+  const hit = snapCache.get(sk)
+  if (hit && now - hit.at < SNAP_TTL_MS) return hit.snapped
+  const thin = (seg: TrackPoint[]) => {
+    const out: TrackPoint[] = []
+    for (const p of seg) {
+      const prev = out[out.length - 1]
+      if (!prev || haversineM(prev, p) >= SNAP_SPACING_M) out.push(p)
+    }
+    const end = seg[seg.length - 1]
+    const tail = out[out.length - 1]
+    if (end && tail && tail !== end && haversineM(tail, end) >= 15) out.push(end)
+    return out
+  }
+  let snapped: Investigation['snapped']
+  try {
+    const segments = (await Promise.all(stretches(inv.track).map(thin).filter((s) => s.length >= 2).map((s) => snapToRoads(s))))
+      .filter((s) => s.length >= 2)
+    snapped = { segments, reason: segments.length ? null : STILL }
+  } catch (err) {
+    logger.warn({ err, vehicleId: inv.vehicleId }, 'Trip investigation: snap to roads failed')
+    snapped = { segments: [], reason: why(err) }
+  }
+  remember(snapCache, sk, { at: now, snapped })
+  return snapped
+}
+
+async function buildTrip(orgId: string, vehicleId: string, now: number): Promise<TripInvestigation> {
+  const [vehicle, open] = await Promise.all([
+    prisma.vehicle.findFirst({ where: { id: vehicleId, organisationId: orgId }, select: { id: true, name: true } }),
+    getOpenTripsCached(orgId),
+  ])
+  if (!vehicle) throw new NotFoundError('Vehicle')
+  const run = open.byVehicle.get(vehicleId) ?? null
+
+  // The gate the run left from, named as the operator knows it: Sukari's own
+  // gate is "Sukari Industries", not the provider's site label "Ndhiwa".
+  let origin: TripPlace | null = null
+  if (run?.originLat != null && run.originLng != null) {
+    const gate = { lat: run.originLat, lng: run.originLng }
+    const ownYard = open.yard != null && haversineM(open.yard, gate) < 3_000
+    origin = { ...gate, name: ownYard ? tidyName(open.yardName) : run.originName }
+  } else if (open.yard) {
+    origin = { ...open.yard, name: tidyName(open.yardName) }
+  }
+
+  const dispatchedMs = run ? Date.parse(run.dispatchedAt) : null
+  const notBefore = dispatchedMs != null ? dispatchedMs - TRIP_LEAD_MS : null
+  const fromMs = Math.max(now - TRIP_MAX_MS, notBefore ?? now - TRIP_LOOKBACK_MS)
+  const fixes = await findPlaybackFixes(vehicleId, orgId, new Date(fromMs), new Date(now + 60_000))
+  let track: TrackPoint[] = (fixes?.points ?? []).map((pt: PlaybackPoint) => ({
+    t: pt.t, lat: pt.lat, lng: pt.lng, spd: pt.spd ?? null, eng: pt.eng ?? null,
+    ...(pt.gapBefore ? { gapBefore: true as const } : {}),
+  }))
+
+  let departedAt: string | null = null
+  let returnedAt: string | null = null
+  let atOrigin = false
+  if (origin && track.length) {
+    const leg = tripLeg(track, origin, YARD_RADIUS_M, notBefore)
+    atOrigin = leg.atOrigin
+    if (leg.departed != null) {
+      const d = track[leg.departed]!.t
+      const r = leg.returned != null ? track[leg.returned]!.t : null
+      departedAt = new Date(d).toISOString()
+      returnedAt = r != null ? new Date(r).toISOString() : null
+      const lo = d - TRIP_PAD_MS
+      const hi = r != null ? r + TRIP_PAD_MS : Infinity
+      track = track.filter((p) => p.t >= lo && p.t <= hi)
+      const first = track[0]
+      if (first?.gapBefore) track[0] = { t: first.t, lat: first.lat, lng: first.lng, spd: first.spd, eng: first.eng }
+    }
+  }
+
+  // Where it is now (or where it came back to): the zones' start.
+  const last = track[track.length - 1] ?? null
+  const point: IncidentPoint | null = last
+    ? { lat: last.lat, lng: last.lng, fixAt: new Date(last.t).toISOString(), offsetS: 0, movedM: 0,
+        basis: returnedAt ? 'Back at the yard' : 'Latest recorded position' }
+    : null
+
+  let zones: Investigation['zones'] = { minutes: [...ZONE_MINUTES], items: [], reason: null, from: null }
+  if (!googleRoutingAvailable()) zones.reason = 'Drive zones are switched off on this server'
+  else if (!point || !last) zones.reason = 'No recorded position for this unit'
+  else {
+    const zk = `${point.lat.toFixed(4)},${point.lng.toFixed(4)}`
+    const z = zoneCache.get(zk)
+    if (z && now - z.at < ZONE_TTL_MS) zones = z.zones
+    else {
+      try {
+        zones.items = (await zonesFrom(point, track, last.t, zones)).filter((x) => x.geometry != null)
+        remember(zoneCache, zk, { at: now, zones })
+      } catch (err) {
+        zones.reason = why(err)
+        logger.warn({ err, vehicleId }, 'Trip investigation: isochrones failed')
+      }
+    }
+  }
+
+  const destination: TripInfo['destination'] = run?.destinationLat != null && run.destinationLng != null
+    ? { lat: run.destinationLat, lng: run.destinationLng, name: run.destination,
+        source: run.destinationSource === 'stated' ? 'stated' : 'measured' }
+    : null
+  let planned: TripInfo['planned'] = null
+  let plannedReason: string | null = null
+  if (!run) plannedReason = 'No open dispatch for this unit'
+  else if (!destination) plannedReason = run.destination ? `${run.destination} has not been placed on the map yet` : 'The dispatch names no destination'
+  else if (!origin) plannedReason = 'The yard this run left from is not known'
+  else if (!googleRoutingAvailable()) plannedReason = 'Routing is switched off on this server'
+  else ({ plan: planned, reason: plannedReason } = await plannedRoad(origin, destination, now))
+
+  const beganMs = departedAt ? Date.parse(departedAt) : dispatchedMs ?? track[0]?.t ?? now
+  return {
+    format: INVESTIGATION_FORMAT,
+    kind: 'trip',
+    theftId: `trip:${vehicleId}`,
+    vehicleId,
+    plate: vehicle.name ?? null,
+    beganAt: new Date(beganMs).toISOString(),
+    detectedAt: new Date(beganMs).toISOString(),
+    litres: 0,
+    window: { from: new Date(track[0]?.t ?? fromMs).toISOString(), to: new Date(last?.t ?? now).toISOString() },
+    point,
+    track,
+    truncated: fixes?.truncated ?? false,
+    snapped: { segments: [], reason: 'Asked for separately' },
+    zones,
+    builtAt: new Date(now).toISOString(),
+    final: false,
+    trip: {
+      origin,
+      destination,
+      destinationName: run?.destination ?? null,
+      dispatch: run ? {
+        externalId: run.externalId,
+        dispatchedAt: run.dispatchedAt,
+        driverName: run.driverName || null,
+        serialNumber: run.serialNumber,
+        status: run.status,
+        kind: run.departureIsSignOut ? 'SALES' : 'CANE',
+      } : null,
+      departedAt,
+      returnedAt,
+      arrivedAt: run?.arrivedAt ?? null,
+      atOrigin,
+      planned,
+      plannedReason,
+    },
+  }
 }
