@@ -534,7 +534,7 @@ const sitesCache = new Map<string, { at: number; sites: TripPlace[] }>()
  * Nzoia too") starts from its factory yard's weighbridges instead — Nzoia's
  * CW and HD bridges are operator-given, and are one place.
  */
-async function homeSites(orgId: string, now: number): Promise<TripPlace[]> {
+export async function homeSites(orgId: string, now: number): Promise<TripPlace[]> {
   const hit = sitesCache.get(orgId)
   if (hit && now - hit.at < SITES_TTL_MS) return hit.sites
   const rows = await prisma.$queryRawUnsafe<{ name: string; lat: number; lng: number }[]>(

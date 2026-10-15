@@ -8,6 +8,7 @@ import { BadRequestError } from '../../core/errors/errors.js'
 import { getRouteAhead, getReach, REACH_MINUTES } from './route-ahead.service.js'
 import { googleRoutingAvailable } from '../../providers/google-routing/index.js'
 import { getHaltInvestigation, getTripInvestigation } from '../fuel/fuel-investigation.js'
+import { getHubs, getInbound, ARRIVAL_MINUTES } from './hub-arrivals.js'
 
 const routeQuery = z.object({
   destLat:  z.coerce.number().min(-90).max(90).optional(),
@@ -34,7 +35,27 @@ const tripQuery = z.object({
   snap: z.enum(['0', '1']).optional().default('0').transform((s) => s === '1'),
 })
 
+const inboundQuery = z.object({
+  // Reverse isochrones: Google caps a drive at 60 minutes.
+  minutes: z.string().optional().default(ARRIVAL_MINUTES.join(','))
+    .transform((s) => [...new Set(s.split(',').map(Number))])
+    .refine((a) => a.length > 0 && a.length <= 3 && a.every((m) => Number.isInteger(m) && m >= 1 && m <= 60),
+      'minutes: up to three whole numbers from 1 to 60'),
+  mode: z.enum(['DRIVE', 'TWO_WHEELER']).optional().default('DRIVE'),
+})
+
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
+
+const hubs: RequestHandler = async (req, res, next) => {
+  try { sendSuccess(res, { enabled: googleRoutingAvailable(), hubs: await getHubs(p(req, 'orgId')) }) } catch (err) { next(err) }
+}
+
+const inbound: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as z.infer<typeof inboundQuery>
+    sendSuccess(res, await getInbound(p(req, 'orgId'), p(req, 'hubKey'), { minutes: q.minutes, mode: q.mode }))
+  } catch (err) { next(err) }
+}
 
 const tripInvestigation: RequestHandler = async (req, res, next) => {
   try {
@@ -78,6 +99,13 @@ const guard = [authenticate, requireOrgAccess, requirePermission('vehicle:read')
 router.get('/routing/status', authenticate, requireOrgAccess, (_req, res) => {
   sendSuccess(res, { enabled: googleRoutingAvailable(), reachMinutes: REACH_MINUTES })
 })
+
+// Arrivals at a hub: the organisation's hubs, then for one of them the
+// reverse isochrones (where it can be reached from in 15/30/60 min, live
+// traffic) and every unit's live drive time to it (hub-arrivals).
+const fleetGuard = [authenticate, requireOrgAccess, requirePermission('vehicle:read')]
+router.get('/routing/hubs', ...fleetGuard, hubs)
+router.get('/routing/hubs/:hubKey/inbound', ...fleetGuard, validateQuery(inboundQuery), inbound)
 
 // The road from the unit's Wialon fix to where it is going, with a traffic ETA.
 router.get('/vehicles/:vehicleId/route-ahead', ...guard, validateQuery(routeQuery), routeAhead)

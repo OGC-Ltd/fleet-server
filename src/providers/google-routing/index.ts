@@ -139,8 +139,12 @@ export function areaGeometry(geo: unknown): AreaGeometry | null {
  * DRIVE at 3600 s. Traffic-aware, so the 15-minute ring at 07:30 is honestly
  * smaller than the one at 14:00.
  */
+/** How a vehicle moves, as Google names it. Lorries and tractors drive. */
+export type TravelMode = 'DRIVE' | 'TWO_WHEELER'
+
 export async function isochrone(
-  origin: LatLng, seconds: number, opts: { traffic?: boolean } = {},
+  origin: LatLng, seconds: number,
+  opts: { traffic?: boolean; direction?: 'FROM' | 'TO'; mode?: TravelMode } = {},
 ): Promise<AreaGeometry | null> {
   const j = await post<{ isochrone?: { geoJson?: unknown } }>(
     'https://isochrones.googleapis.com/v1/isochrones:generate',
@@ -149,8 +153,11 @@ export async function isochrone(
       // top level: `location`, not `origin.location` (Google rejects that).
       location: { latitude: origin.lat, longitude: origin.lng },
       travelDuration: `${Math.min(Math.round(seconds), 3600)}s`,
-      travelMode: 'DRIVE',
-      travelDirection: 'FROM',
+      travelMode: opts.mode ?? 'DRIVE',
+      // FROM: where a vehicle at `origin` can get to. TO, the reverse: every
+      // place from which `origin` can be REACHED in the time — an inbound
+      // zone around a hub.
+      travelDirection: opts.direction ?? 'FROM',
       // Live traffic for a unit on the road now; none for a past incident,
       // where today's traffic says nothing about that hour.
       routingPreference: opts.traffic === false ? 'TRAFFIC_UNAWARE' : 'TRAFFIC_AWARE',
@@ -214,4 +221,46 @@ export async function nearestRoad(p: LatLng): Promise<LatLng | null> {
   const loc = j.snappedPoints?.[0]?.location
   return loc && Number.isFinite(loc.latitude) && Number.isFinite(loc.longitude)
     ? { lat: loc.latitude!, lng: loc.longitude! } : null
+}
+
+export interface MatrixCell {
+  /** Index into the origins given. */
+  index: number
+  /** Live-traffic drive time and the same drive with no traffic, seconds. */
+  durationS: number
+  staticDurationS: number
+  distanceM: number
+}
+
+/** Google refuses a TRAFFIC_AWARE matrix of more than this many cells. */
+export const MATRIX_MAX = 100
+
+/**
+ * Routes API computeRouteMatrix: many origins to ONE destination, with live
+ * traffic — every unit's drive time to a hub in one request. A unit with no
+ * road to it is left out; the caller reads the missing index as "no route".
+ */
+export async function routeMatrixTo(origins: LatLng[], destination: LatLng, mode: TravelMode = 'DRIVE'): Promise<MatrixCell[]> {
+  if (!origins.length) return []
+  if (origins.length > MATRIX_MAX) throw new GoogleRoutingError(`At most ${MATRIX_MAX} origins a request`, 400)
+  const rows = await post<{
+    originIndex?: number; duration?: string; staticDuration?: string; distanceMeters?: number; condition?: string
+  }[]>(
+    'https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix',
+    {
+      origins: origins.map((p) => ({ waypoint: waypoint(p) })),
+      destinations: [{ waypoint: waypoint(destination) }],
+      travelMode: mode,
+      routingPreference: 'TRAFFIC_AWARE',
+    },
+    'originIndex,duration,staticDuration,distanceMeters,condition',
+  )
+  return (Array.isArray(rows) ? rows : [])
+    .filter((r) => r.condition === 'ROUTE_EXISTS' && r.originIndex != null)
+    .map((r) => ({
+      index: r.originIndex ?? 0,
+      durationS: parseDuration(r.duration),
+      staticDurationS: parseDuration(r.staticDuration ?? r.duration),
+      distanceM: r.distanceMeters ?? 0,
+    }))
 }
