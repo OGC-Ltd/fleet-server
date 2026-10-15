@@ -1,4 +1,4 @@
-// Fleet AI Insight — an hourly operations brief written by OpenAI (gpt-5-nano
+// Fleet AI Insight — an operations brief, refreshed every ten minutes, written by OpenAI (gpt-5-nano
 // acting as the fleet's duty analyst) over the shift in progress, framed by the
 // SAME aggregates the Analytics, Drivers and Maintenance pages render.
 //
@@ -10,7 +10,7 @@
 //
 // Rendering is seamless because the model is NEVER on the request path:
 // startAiInsightWarmer() generates each org's brief at boot and then every
-// REFRESH_MS (1 hour), and the endpoint serves whatever is in memory
+// REFRESH_MS (10 minutes), and the endpoint serves whatever is in memory
 // instantly. A cold miss (first request before the boot warm finishes) kicks
 // a background generation and returns { insight: null } so clients show
 // their local heuristic summary until the brief lands — no spinner, no wait.
@@ -30,7 +30,6 @@ import { getDeliveriesAnalytics } from '../analytics/deliveries.cache.js'
 // attached by this service rather than by the cached query — and they are
 // exactly the live signals this brief is built on.
 import { getFleetSnapshot } from '../telemetry/telemetry.service.js'
-import { isOrgActive } from '../../lib/warm-cache.js'
 import { resolveEstatePlaces } from '../../lib/zone-presence.js'
 // The SHARED staleness threshold, not a second copy of it. Beyond this age a
 // fix cannot support a claim about what the vehicle is doing — the same rule
@@ -54,7 +53,22 @@ export interface AiInsightResponse {
   insight:    AiInsight | null
 }
 
-const REFRESH_MS = 60 * 60_000   // regenerate each org's brief hourly
+// Every ten minutes (operator, 2026-10-16; hourly before).
+const REFRESH_MS = 10 * 60_000
+
+/**
+ * Who has asked for a brief, and when. The sweep regenerates only these.
+ *
+ * Not `isOrgActive`: that reads the warm caches' activity, and generating a
+ * brief reads through those caches, so it marks the organisation active for
+ * fifteen minutes. Hourly that lapsed before the next run; every ten minutes
+ * it never would, and every organisation would be briefed (one model call
+ * each) for ever whether anyone looked or not. Only `getAiInsight` — the card
+ * asking, every five minutes while it is on screen — writes here.
+ */
+const ASKED_WINDOW_MS = 15 * 60_000
+const lastAsked = new Map<string, number>()
+const recentlyAsked = (orgId: string) => (lastAsked.get(orgId) ?? 0) > Date.now() - ASKED_WINDOW_MS
 
 /**
  * A place name as prose rather than as a database key.
@@ -1918,6 +1932,7 @@ async function generateFor(orgId: string): Promise<void> {
  *  returns insight:null so clients render their local fallback meanwhile. */
 export async function getAiInsight(orgId: string): Promise<AiInsightResponse> {
   if (!env.OPENAI_API_KEY) return { configured: false, insight: null }
+  lastAsked.set(orgId, Date.now())
   const hit = insights.get(orgId)
   if (hit) return hit
   void generateFor(orgId)
@@ -1925,11 +1940,11 @@ export async function getAiInsight(orgId: string): Promise<AiInsightResponse> {
 }
 
 /**
- * Hourly regeneration — started from index.ts.
+ * Regeneration every REFRESH_MS (ten minutes) — started from index.ts.
  *
  * The FIRST pass covers every organisation, so each has a brief from boot.
- * After that it regenerates only organisations somebody has actually looked at
- * in the last fifteen minutes, for two reasons:
+ * After that it regenerates only organisations whose brief somebody has asked
+ * for in the last fifteen minutes (`lastAsked`), for two reasons:
  *
  *   · Every generation is a model call. Briefing a fleet nobody has opened all
  *     day is money spent on prose no one reads.
@@ -1943,9 +1958,10 @@ export async function getAiInsight(orgId: string): Promise<AiInsightResponse> {
  * brief, and a cold miss generates in the background while the client renders
  * its own fallback. Same stale-while-revalidate bargain the caches make.
  *
- * This does not feed itself. The activity window is fifteen minutes and this
- * runs hourly, so an organisation generated at T is no longer active at T+60 —
- * only a real read keeps it in the set.
+ * This does not feed itself: only `getAiInsight` writes `lastAsked`, and
+ * generation never calls it, so only a real read keeps an organisation in the
+ * set. (Filtering on `isOrgActive` would feed itself at this interval — see
+ * `lastAsked`.)
  */
 export function startAiInsightWarmer(): () => void {
   if (!env.OPENAI_API_KEY) return () => {}
@@ -1954,7 +1970,7 @@ export function startAiInsightWarmer(): () => void {
   const sweep = async () => {
     try {
       const all  = await prisma.organisation.findMany({ select: { id: true } })
-      const orgs = primed ? all.filter(o => isOrgActive(o.id)) : all
+      const orgs = primed ? all.filter(o => recentlyAsked(o.id)) : all
       if (primed && orgs.length < all.length) {
         logger.debug({ briefing: orgs.length, of: all.length }, 'AI insight sweep skipping idle organisations')
       }
