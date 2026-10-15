@@ -39,7 +39,7 @@ import { NotFoundError } from '../../core/errors/errors.js'
 import { findPlaybackFixes, type PlaybackPoint } from '../telemetry/telemetry.repository.js'
 import { findTheftById } from './fuel.repository.js'
 import {
-  googleRoutingAvailable, isochrone, snapToRoads, GoogleRoutingError,
+  googleRoutingAvailable, isochrone, snapToRoads, nearestRoad, GoogleRoutingError, type LatLng,
 } from '../../providers/google-routing/index.js'
 
 const gzip = promisify(zlib.gzip)
@@ -76,6 +76,15 @@ export interface IncidentPoint {
 
 export interface Zone { minutes: number; geometry: unknown }
 
+/** Where the zones were measured from, when that is not the point itself. */
+export interface ZoneOrigin extends LatLng {
+  /** Metres from the incident point to this start. */
+  offsetM: number
+  basis: string
+  /** When the unit was there, for a start taken from the track. */
+  fixAt: string | null
+}
+
 export interface Investigation {
   format: number
   theftId: string
@@ -89,7 +98,7 @@ export interface Investigation {
   track: TrackPoint[]
   truncated: boolean
   snapped: { segments: [number, number][][]; reason: string | null }
-  zones: { minutes: number[]; items: Zone[]; reason: string | null }
+  zones: { minutes: number[]; items: Zone[]; reason: string | null; from: ZoneOrigin | null }
   builtAt: string
   /** True once saved: the answer will not change. */
   final: boolean
@@ -191,7 +200,56 @@ const inflight = new Map<string, Promise<Investigation>>()
 const STILL = 'The unit did not move in this window'
 
 const why = (err: unknown) =>
-  err instanceof GoogleRoutingError ? `Google: ${err.message}` : 'Google could not be reached'
+  !(err instanceof GoogleRoutingError) ? 'Google could not be reached'
+    : err.message.startsWith('The point') ? err.message
+    : OFF_ROAD.test(err.message) ? 'The point is too far from a road for Google to measure from'
+    : `Google: ${err.message}`
+
+/** Google's answer when the start is too far from any road. */
+const OFF_ROAD = /road segment|snapping tolerance|NotFound/i
+
+/** Fast enough that the unit must have been on a road. */
+const ON_ROAD_KMH = 20
+
+/**
+ * The 5/10/15-minute zones from the point.
+ *
+ * A point standing off-road (a machine in a field) is refused by the
+ * Isochrones API. The zones are then measured from, in order: the nearest
+ * road Google knows (nearestRoads, which only searches a few tens of metres),
+ * else the recorded fix nearest in time to the fall at which the unit was
+ * driving at road speed. `zones.from` says which, where, and how far from the
+ * point, so the map never passes a road start off as the incident.
+ */
+async function zonesFrom(point: LatLng, track: TrackPoint[], beganMs: number, zones: Investigation['zones']): Promise<Zone[]> {
+  const run = (o: LatLng) => Promise.all(ZONE_MINUTES.map(async (m) =>
+    ({ minutes: m, geometry: await isochrone(o, m * 60, { traffic: false }) })))
+  try {
+    return await run(point)
+  } catch (err) {
+    if (!(err instanceof GoogleRoutingError) || !OFF_ROAD.test(err.message)) throw err
+  }
+  const road = await nearestRoad(point).catch(() => null)
+  const tried: { at: LatLng; basis: string; fixAt: string | null }[] = []
+  if (road) tried.push({ at: road, basis: 'The nearest road to the point', fixAt: null })
+  const driving = track
+    .filter((p) => (p.spd ?? 0) >= ON_ROAD_KMH)
+    .sort((a, b) => Math.abs(a.t - beganMs) - Math.abs(b.t - beganMs))
+  if (driving[0]) {
+    const p = driving[0]
+    tried.push({ at: p, basis: 'Where the unit was driving on a road nearest in time to the fall', fixAt: new Date(p.t).toISOString() })
+  }
+  for (const c of tried) {
+    try {
+      const out = await run(c.at)
+      zones.from = { lat: c.at.lat, lng: c.at.lng, offsetM: Math.round(haversineM(point, c.at)), basis: c.basis, fixAt: c.fixAt }
+      return out
+    } catch (err) {
+      if (!(err instanceof GoogleRoutingError) || !OFF_ROAD.test(err.message)) throw err
+    }
+  }
+  throw new GoogleRoutingError('The point is off-road, and no road start near it could be found', 404)
+}
 
 async function build(orgId: string, theftId: string, now: number): Promise<Investigation> {
   const theft = await findTheftById(orgId, theftId)
@@ -210,16 +268,14 @@ async function build(orgId: string, theftId: string, now: number): Promise<Inves
   const point = pickIncidentPoint(track, beganMs, detectedMs)
 
   const on = googleRoutingAvailable()
-  const zones: Investigation['zones'] = { minutes: [...ZONE_MINUTES], items: [], reason: null }
+  const zones: Investigation['zones'] = { minutes: [...ZONE_MINUTES], items: [], reason: null, from: null }
   const snapped: Investigation['snapped'] = { segments: [], reason: null }
   if (!on) {
     zones.reason = 'Drive zones are switched off on this server'
     snapped.reason = 'Road matching is switched off on this server'
   } else {
     const [z, s] = await Promise.allSettled([
-      point
-        ? Promise.all(ZONE_MINUTES.map(async (m) => ({ minutes: m, geometry: await isochrone(point, m * 60, { traffic: false }) })))
-        : Promise.resolve([]),
+      point ? zonesFrom(point, track, beganMs, zones) : Promise.resolve([]),
       Promise.all(stretches(track).map((seg) => moving(seg)).filter((seg) => seg.length >= 2).map((seg) => snapToRoads(seg))),
     ])
     if (!point) zones.reason = 'No recorded position near the fall'

@@ -195,3 +195,23 @@ export async function snapToRoads(points: LatLng[]): Promise<[number, number][]>
   }
   return out
 }
+
+/**
+ * Roads API nearestRoads: the closest point on a road to `p`, or null when
+ * Google knows no road near it. For a start point standing off-road (a
+ * machine in a field), which the Isochrones API refuses.
+ */
+export async function nearestRoad(p: LatLng): Promise<LatLng | null> {
+  const url = new URL('https://roads.googleapis.com/v1/nearestRoads')
+  url.searchParams.set('points', `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`)
+  url.searchParams.set('key', env.GOOGLE_ROUTING_API_KEY)
+  const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) })
+  const j = await res.json().catch(() => ({})) as {
+    snappedPoints?: { location?: { latitude?: number; longitude?: number } }[]
+    error?: { message?: string }
+  }
+  if (!res.ok) throw new GoogleRoutingError(j.error?.message || `Google returned ${res.status}`, res.status)
+  const loc = j.snappedPoints?.[0]?.location
+  return loc && Number.isFinite(loc.latitude) && Number.isFinite(loc.longitude)
+    ? { lat: loc.latitude!, lng: loc.longitude! } : null
+}
