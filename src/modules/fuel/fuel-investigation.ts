@@ -427,6 +427,11 @@ export const TRIP_LOOKBACK_MS = 12 * 60 * 60_000
 const TRIP_LEAD_MS = 2 * 60 * 60_000
 /** Never more than this much track. */
 const TRIP_MAX_MS = 36 * 60 * 60_000
+/** A unit out of its yard longer than the lookback is followed back this far
+ *  (Menengai's tankers are out for days); its last visit is looked for over
+ *  TRIP_SEEN_MS. */
+const TRIP_LONG_MS = 48 * 60 * 60_000
+const TRIP_SEEN_MS = 7 * 24 * 60 * 60_000
 /** Shown either side of leaving and coming back. */
 const TRIP_PAD_MS = 10 * 60_000
 /** A trip is rebuilt at most this often: the unit is still on it. */
@@ -459,6 +464,8 @@ export interface TripInfo {
   /** When the unit left the origin, and came back, read from the track. */
   departedAt: string | null
   returnedAt: string | null
+  /** Last fix inside the origin, when that is older than the track shown. */
+  lastAtOriginAt: string | null
   /** First fix at the destination after the dispatch (dispatch-trip). */
   arrivedAt: string | null
   /** True while the unit stands inside the origin's yard. */
@@ -507,6 +514,79 @@ export function tripLeg(
 }
 
 const tidyName = (s: string | null) => s?.replace(/\s+(Limited|Ltd\.?)$/i, '').trim() || null
+
+/** Geofences that name a place a run starts from. */
+const HOME_FENCE = '(yard|factory|mill|depot|(^| )hq( |$))'
+const SITES_TTL_MS = 60 * 60_000
+const sitesCache = new Map<string, { at: number; sites: TripPlace[] }>()
+
+/**
+ * The yards and factories an organisation's runs start from, for a fleet
+ * with no single yard on record (operator, 2026-10-15: West Kenya, Kabras
+ * and Menengai, "the same" as Sukari): its own geofences named as a yard,
+ * factory, mill, depot or HQ — Kabras Sugar Factory, Naitiri Factory,
+ * Menengai Yard (Nakuru HQ). Each at its fence's centre. Fences within a
+ * kilometre of one another are one place (Menengai draws its yard three
+ * times); the operator's mixed-case name is kept over a shouted code.
+ */
+async function homeSites(orgId: string, now: number): Promise<TripPlace[]> {
+  const hit = sitesCache.get(orgId)
+  if (hit && now - hit.at < SITES_TTL_MS) return hit.sites
+  const rows = await prisma.$queryRawUnsafe<{ name: string; lat: number; lng: number }[]>(
+    `SELECT name, ST_Y(ST_Centroid(geom::geometry)) AS lat, ST_X(ST_Centroid(geom::geometry)) AS lng
+       FROM geofences WHERE organisation_id = $1 AND geom IS NOT NULL AND name ~* '${HOME_FENCE}'`,
+    orgId,
+  ).catch((err) => { logger.warn({ err, orgId }, 'Trip investigation: home sites'); return [] })
+  const shout = (n: string) => n === n.toUpperCase()
+  const ranked = rows
+    .filter((r) => Number.isFinite(r.lat) && Number.isFinite(r.lng))
+    .sort((a, b) => Number(shout(a.name)) - Number(shout(b.name)) || b.name.length - a.name.length)
+  const sites: TripPlace[] = []
+  for (const r of ranked) {
+    if (sites.some((s) => haversineM(s, r) < 1_000)) continue
+    sites.push({ lat: Number(r.lat), lng: Number(r.lng), name: r.name.trim() })
+  }
+  remember(sitesCache, orgId, { at: now, sites })
+  return sites
+}
+
+/** When the unit was last inside any of `sites` (7 days), and which. */
+async function lastInside(vehicleId: string, sites: TripPlace[], now: number): Promise<{ site: TripPlace; at: number } | null> {
+  if (!/^[a-z0-9]{20,32}$/i.test(vehicleId)) return null
+  const since = new Date(now - TRIP_SEEN_MS)
+  const deg = (YARD_RADIUS_M * 1.5) / 111_320
+  const found = await Promise.all(sites.map(async (site) => {
+    const rows = await prisma.$queryRawUnsafe<{ at: Date | null }[]>(
+      `SELECT max(captured_at) AS at FROM vehicle_telemetries
+        WHERE vehicle_id = $1 AND captured_at >= $2
+          AND lat BETWEEN $3::float8 - $5::float8 AND $3::float8 + $5::float8
+          AND lng BETWEEN $4::float8 - $5::float8 AND $4::float8 + $5::float8
+          AND 2 * 6371000 * asin(sqrt(power(sin(radians(lat - $3::float8) / 2), 2)
+              + cos(radians($3::float8)) * cos(radians(lat)) * power(sin(radians(lng - $4::float8) / 2), 2))) <= $6::float8`,
+      vehicleId, since, site.lat, site.lng, deg, YARD_RADIUS_M,
+    ).catch((err) => { logger.warn({ err, vehicleId }, 'Trip investigation: last visit'); return [] })
+    const at = rows[0]?.at
+    return at ? { site, at: at.getTime() } : null
+  }))
+  return found.filter((x) => x != null).sort((a, b) => b!.at - a!.at)[0] ?? null
+}
+
+/**
+ * Of several yards, the one this outing started from: the one the unit most
+ * recently drove out of, else the one it stands in now. Null when the track
+ * never touches any of them.
+ */
+export function startingSite<S extends LatLng>(track: { t: number; lat: number; lng: number }[], sites: S[], radiusM: number): S | null {
+  let best: S | null = null
+  let bestT = -Infinity
+  let standing: S | null = null
+  for (const site of sites) {
+    const leg = tripLeg(track, site, radiusM, null)
+    if (leg.departed != null && track[leg.departed]!.t > bestT) { best = site; bestT = track[leg.departed]!.t }
+    if (leg.atOrigin) standing = site
+  }
+  return best ?? standing
+}
 
 async function plannedRoad(origin: LatLng, dest: LatLng, now: number): Promise<{ plan: TripInfo['planned']; reason: string | null }> {
   const key = `${origin.lat.toFixed(4)},${origin.lng.toFixed(4)}>${dest.lat.toFixed(4)},${dest.lng.toFixed(4)}`
@@ -605,19 +685,44 @@ async function buildTrip(orgId: string, vehicleId: string, now: number): Promise
   } else if (open.yard) {
     origin = { ...open.yard, name: tidyName(open.yardName) }
   }
+  // No gate on the dispatch and no yard on record: the fleet's own yards and
+  // factories, chosen once the track is read.
+  const sites = origin ? [] : await homeSites(orgId, now)
 
   const dispatchedMs = run ? Date.parse(run.dispatchedAt) : null
   const notBefore = dispatchedMs != null ? dispatchedMs - TRIP_LEAD_MS : null
   const fromMs = Math.max(now - TRIP_MAX_MS, notBefore ?? now - TRIP_LOOKBACK_MS)
   const fixes = await findPlaybackFixes(vehicleId, orgId, new Date(fromMs), new Date(now + 60_000))
-  let track: TrackPoint[] = (fixes?.points ?? []).map((pt: PlaybackPoint) => ({
+  const toTrack = (f: typeof fixes): TrackPoint[] => (f?.points ?? []).map((pt: PlaybackPoint) => ({
     t: pt.t, lat: pt.lat, lng: pt.lng, spd: pt.spd ?? null, eng: pt.eng ?? null,
     ...(pt.gapBefore ? { gapBefore: true as const } : {}),
   }))
+  let track = toTrack(fixes)
+  let truncated = fixes?.truncated ?? false
+
+  // Out of its yard for longer than the lookback (no dispatch to say when
+  // it left): find its last visit, and read the track from there when that
+  // is within two days.
+  let lastAtOriginAt: string | null = null
+  const homes = origin ? [origin] : sites
+  if (!run && homes.length && !homes.some((h) => track.some((pt) => haversineM(h, pt) <= YARD_RADIUS_M))) {
+    const seen = await lastInside(vehicleId, homes, now)
+    if (seen) {
+      if (!origin) origin = seen.site
+      if (now - seen.at <= TRIP_LONG_MS) {
+        const more = await findPlaybackFixes(vehicleId, orgId, new Date(seen.at - TRIP_PAD_MS), new Date(now + 60_000))
+        track = toTrack(more)
+        truncated = more?.truncated ?? false
+      } else {
+        lastAtOriginAt = new Date(seen.at).toISOString()
+      }
+    }
+  }
 
   let departedAt: string | null = null
   let returnedAt: string | null = null
   let atOrigin = false
+  if (!origin && sites.length) origin = startingSite(track, sites, YARD_RADIUS_M) ?? (sites.length === 1 ? sites[0]! : null)
   if (origin && track.length) {
     const leg = tripLeg(track, origin, YARD_RADIUS_M, notBefore)
     atOrigin = leg.atOrigin
@@ -684,7 +789,7 @@ async function buildTrip(orgId: string, vehicleId: string, now: number): Promise
     window: { from: new Date(track[0]?.t ?? fromMs).toISOString(), to: new Date(last?.t ?? now).toISOString() },
     point,
     track,
-    truncated: fixes?.truncated ?? false,
+    truncated,
     snapped: { segments: [], reason: 'Asked for separately' },
     zones,
     builtAt: new Date(now).toISOString(),
@@ -703,6 +808,7 @@ async function buildTrip(orgId: string, vehicleId: string, now: number): Promise
       } : null,
       departedAt,
       returnedAt,
+      lastAtOriginAt,
       arrivedAt: run?.arrivedAt ?? null,
       atOrigin,
       planned,
