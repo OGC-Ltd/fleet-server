@@ -139,7 +139,9 @@ export function areaGeometry(geo: unknown): AreaGeometry | null {
  * DRIVE at 3600 s. Traffic-aware, so the 15-minute ring at 07:30 is honestly
  * smaller than the one at 14:00.
  */
-export async function isochrone(origin: LatLng, seconds: number): Promise<AreaGeometry | null> {
+export async function isochrone(
+  origin: LatLng, seconds: number, opts: { traffic?: boolean } = {},
+): Promise<AreaGeometry | null> {
   const j = await post<{ isochrone?: { geoJson?: unknown } }>(
     'https://isochrones.googleapis.com/v1/isochrones:generate',
     {
@@ -149,10 +151,47 @@ export async function isochrone(origin: LatLng, seconds: number): Promise<AreaGe
       travelDuration: `${Math.min(Math.round(seconds), 3600)}s`,
       travelMode: 'DRIVE',
       travelDirection: 'FROM',
-      routingPreference: 'TRAFFIC_AWARE',
+      // Live traffic for a unit on the road now; none for a past incident,
+      // where today's traffic says nothing about that hour.
+      routingPreference: opts.traffic === false ? 'TRAFFIC_UNAWARE' : 'TRAFFIC_AWARE',
       enableSmoothing: true,
       polygonFidelity: 'MEDIUM',
     },
   )
   return areaGeometry(j.isochrone?.geoJson)
+}
+
+/** Google's Roads API takes at most this many points a request. */
+export const SNAP_BATCH = 100
+
+/**
+ * Roads API snapToRoads: recorded fixes matched to the roads they most likely
+ * lie on, with the road's shape filled in between (`interpolate`).
+ *
+ * A computed line, never the record: the caller keeps the raw fixes beside it.
+ * Batches of 100 overlap by one point so the line is continuous; a point the
+ * previous batch already returned is dropped at the seam.
+ */
+export async function snapToRoads(points: LatLng[]): Promise<[number, number][]> {
+  if (points.length < 2) return []
+  const out: [number, number][] = []
+  for (let start = 0; start < points.length - 1; start += SNAP_BATCH - 1) {
+    const chunk = points.slice(start, start + SNAP_BATCH)
+    const url = new URL('https://roads.googleapis.com/v1/snapToRoads')
+    url.searchParams.set('path', chunk.map((p) => `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`).join('|'))
+    url.searchParams.set('interpolate', 'true')
+    url.searchParams.set('key', env.GOOGLE_ROUTING_API_KEY)
+    const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) })
+    const j = await res.json().catch(() => ({})) as {
+      snappedPoints?: { location?: { latitude?: number; longitude?: number } }[]
+      error?: { message?: string }
+    }
+    if (!res.ok) throw new GoogleRoutingError(j.error?.message || `Google returned ${res.status}`, res.status)
+    const pts = (j.snappedPoints ?? [])
+      .map((p) => [p.location?.latitude, p.location?.longitude] as [number, number])
+      .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b))
+    if (start > 0 && pts.length) pts.shift()
+    out.push(...pts)
+  }
+  return out
 }

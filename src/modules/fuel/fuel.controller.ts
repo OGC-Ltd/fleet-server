@@ -1,4 +1,5 @@
 import type { RequestHandler } from 'express'
+import { getInvestigation } from './fuel-investigation.js'
 import { sendSuccess } from '../../core/response/response.js'
 import * as service from './fuel.service.js'
 import * as followUps from './fuel-followup.service.js'
@@ -308,5 +309,11 @@ export const unitPerformance: RequestHandler = async (req, res, next) => {
     const unit = await getUnitPerformance(p(req, 'orgId'), p(req, 'vehicleId'), from, to)
     if (!unit) throw new NotFoundError('Vehicle')
     sendSuccess(res, { from, to, unit })
+  } catch (err) { next(err) }
+}
+
+export const theftInvestigation: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await getInvestigation(p(req, 'orgId'), p(req, 'theftId')))
   } catch (err) { next(err) }
 }

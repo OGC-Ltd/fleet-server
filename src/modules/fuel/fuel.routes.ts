@@ -45,6 +45,10 @@ router.get('/thefts/outcomes', requirePermission('fuel_theft:read'), validateQue
 // whether to draw Escalate / De-escalate for this viewer.
 router.get('/thefts/review-rights', requirePermission('fuel_theft:read'), ctrl.theftReviewRights)
 router.get('/thefts/:theftId', requirePermission('fuel_theft:read'), ctrl.getTheft)
+// The alert's investigation map: the point, the recorded track an hour either
+// side, the track matched to roads and the 5/10/15-minute drive zones
+// (fuel-investigation). Saved once the hour after the fall is over.
+router.get('/thefts/:theftId/investigation', requirePermission('fuel_theft:read'), requirePermission('telemetry:read'), ctrl.theftInvestigation)
 router.post('/thefts', requirePermission('fuel_theft:create'), ingestLimiter, validateBody(createTheftSchema), ctrl.createTheft)
 // ARCHIVED 2026-10-01: "Delete" on the incident window is retired; an alert
 // leaves the dashboard only by escalation or de-escalation (/review below).
