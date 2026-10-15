@@ -19,7 +19,7 @@ import { logger } from '../../lib/logger.js'
 import { publishNotification } from '../../lib/notifications/notification.store.js'
 import { canAssignTriage, triageAssignerOrgs } from '../repairs/repairs.authz.js'
 import { probeHoldVehicleIds } from '../fuel/probe-hold.js'
-import { FUEL_INCIDENT_WINDOW_MS } from '../telemetry/telemetry.repository.js'
+import { incidentStaysOpen } from '../telemetry/telemetry.repository.js'
 import * as repo from './alerts.repository.js'
 import { cachedSummary, forgetAlertSummaries, keepSummary } from './alerts.summary-cache.js'
 import { alertScopes } from './alerts.scope.js'
@@ -190,8 +190,8 @@ export async function listAlerts(userId: string, q: ListAlertsQuery) {
           driverName: r.driverName,
           probeHold,
           // Still on the map: what the map's own query would return for it.
-          live: r.reviewStatus == null && r.dismissedAt == null
-            && now - new Date(r.at).getTime() < FUEL_INCIDENT_WINDOW_MS,
+          live: r.reviewStatus == null
+            && incidentStaysOpen({ cause: r.cause, reviewStatus: r.reviewStatus, dismissedAt: r.dismissedAt, beganAtMs: new Date(r.at).getTime() }, now),
         },
       }
     }
