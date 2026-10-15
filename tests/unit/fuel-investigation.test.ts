@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { pickIncidentPoint, stretches, tripLeg, type TrackPoint } from '../../src/modules/fuel/fuel-investigation.js'
+import { pickIncidentPoint, stretches, tripLeg, startingSite, type TrackPoint } from '../../src/modules/fuel/fuel-investigation.js'
 
 const T0 = Date.UTC(2026, 9, 15, 9, 0)
 const min = (m: number) => T0 + m * 60_000
@@ -73,5 +73,24 @@ describe('tripLeg', () => {
 
   it('a unit that never left has no outing', () => {
     expect(tripLeg([inY(0), inY(10)], yard, 800, null)).toEqual({ departed: null, returned: null, atOrigin: true })
+  })
+})
+
+describe('startingSite', () => {
+  const a = { lat: 0, lng: 34, name: 'A' }
+  const b = { lat: 0.1, lng: 34, name: 'B' }
+  const at = (m: number, s: { lat: number; lng: number }, k = 0) => pt(m, s.lat + 0.02 * k, s.lng)
+
+  it('takes the yard the unit most recently drove out of', () => {
+    const track = [at(0, a), at(10, a, 1), at(60, b), at(70, b, 1)]
+    expect(startingSite(track, [a, b], 800)?.name).toBe('B')
+  })
+
+  it('takes the yard it stands in when it never left one', () => {
+    expect(startingSite([at(0, a, 2), at(10, b)], [a, b], 800)?.name).toBe('B')
+  })
+
+  it('is null when the track touches no yard', () => {
+    expect(startingSite([at(0, a, 2), at(5, a, 3)], [a, b], 800)).toBeNull()
   })
 })
