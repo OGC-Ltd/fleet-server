@@ -36,6 +36,7 @@ import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
 import { haversineM, YARD_RADIUS_M } from '../../lib/dispatch-trip.js'
 import { getOpenTripsCached } from '../dispatches/open-trips.cache.js'
+import { WEIGHBRIDGES } from '../weighments/weighbridge.geography.js'
 import { NotFoundError } from '../../core/errors/errors.js'
 import { findPlaybackFixes, type PlaybackPoint } from '../telemetry/telemetry.repository.js'
 import { findTheftById } from './fuel.repository.js'
@@ -528,6 +529,10 @@ const sitesCache = new Map<string, { at: number; sites: TripPlace[] }>()
  * Menengai Yard (Nakuru HQ). Each at its fence's centre. Fences within a
  * kilometre of one another are one place (Menengai draws its yard three
  * times); the operator's mixed-case name is kept over a shouted code.
+ *
+ * A fleet with no such fence (Nzoia, operator 2026-10-15: "turn it on for
+ * Nzoia too") starts from its factory yard's weighbridges instead — Nzoia's
+ * CW and HD bridges are operator-given, and are one place.
  */
 async function homeSites(orgId: string, now: number): Promise<TripPlace[]> {
   const hit = sitesCache.get(orgId)
@@ -541,6 +546,13 @@ async function homeSites(orgId: string, now: number): Promise<TripPlace[]> {
   const ranked = rows
     .filter((r) => Number.isFinite(r.lat) && Number.isFinite(r.lng))
     .sort((a, b) => Number(shout(a.name)) - Number(shout(b.name)) || b.name.length - a.name.length)
+  if (ranked.length === 0) {
+    const org = await prisma.organisation.findUnique({ where: { id: orgId }, select: { code: true } })
+    const title = (n: string) => n.toLowerCase().replace(/(^|[^a-z])([a-z])/g, (_m, pre: string, c: string) => pre + c.toUpperCase())
+    for (const w of WEIGHBRIDGES) {
+      if (org?.code && w.orgCode === org.code) ranked.push({ name: `${title(w.centerName)} Factory Yard`, lat: w.lat, lng: w.lng })
+    }
+  }
   const sites: TripPlace[] = []
   for (const r of ranked) {
     if (sites.some((s) => haversineM(s, r) < 1_000)) continue
