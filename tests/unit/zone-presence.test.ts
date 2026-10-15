@@ -124,6 +124,38 @@ describe('the Live Feed names our overlay, not the provider', () => {
     const exit = published.find(n => n.alertType === 'ZONE_EXIT')
     expect(exit?.text).toBe('MUFINDI: EX 24 left Workshop A and is now in FARM #215.')
   })
+
+  // Sukari, 2026-10-16: "left SUKARI INDURSTRIES FACTORY" then, a minute later,
+  // "left Sukari industries" — one drive through one gate. The inner edge is
+  // crossed a frame before the outer one, so the two dwells end apart.
+  it('leaves a zone and the zone around it as ONE message, naming the outer', async () => {
+    const v = `veh-gate-${seq}`
+    await ping(v, OUTSIDE.lat, OUTSIDE.lng, tick(0))
+    for (let i = 0; i < 4; i++) await ping(v, IN_SHOP.lat, IN_SHOP.lng, tick(2))
+    published.length = 0
+
+    await ping(v, -3.995, 30.02, tick(1))          // past the workshop edge, still on the farm
+    await ping(v, OUTSIDE.lat, OUTSIDE.lng, tick(1)) // past the farm edge a minute later
+    for (let i = 0; i < 8; i++) await ping(v, OUTSIDE.lat, OUTSIDE.lng, tick(1))
+
+    const exits = published.filter(n => n.alertType === 'ZONE_EXIT')
+    expect(exits).toHaveLength(1)
+    expect(exits[0]?.text).toBe('MUFINDI: EX 24 left FARM #215.')
+  })
+
+  it('arrives through a shared gate as ONE message, naming the inner', async () => {
+    const v = `veh-gate-in-${seq}`
+    await ping(v, OUTSIDE.lat, OUTSIDE.lng, tick(0))
+    await ping(v, OUTSIDE.lat, OUTSIDE.lng, tick(1))
+    published.length = 0
+
+    await ping(v, -3.995, 30.02, tick(1))            // onto the farm
+    for (let i = 0; i < 8; i++) await ping(v, IN_SHOP.lat, IN_SHOP.lng, tick(1)) // into the workshop a minute later
+
+    const arrivals = published.filter(n => n.alertType === 'ZONE_ENTRY')
+    expect(arrivals).toHaveLength(1)
+    expect(arrivals[0]?.text).toMatch(/^MUFINDI: EX 24 arrived at Workshop A\b/)
+  })
 })
 
 describe('dwell — a boundary is not an event', () => {
