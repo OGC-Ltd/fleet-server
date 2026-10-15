@@ -179,6 +179,35 @@ describe('trackYardDeparture', () => {
     await trackYardDeparture(input(CLEAR))
     expect(published()[0]![0]['text']).toBe('KTCC 870B · AUGUSTINE OWINO NYAMWOK cleared the gate to OPAPO.')
   })
+
+  it('does not quote the gap to a sign-out from an earlier, never-closed trip', async () => {
+    // KDL 713E, 2026-10-16: its newest open dispatch was signed out on 8 Oct
+    // and never closed, and the feed said "cleared the gate to OPAPO, 10261
+    // minutes after signing out". That record is not this trip's paperwork.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.dispatch.findFirst as any).mockResolvedValue({
+      id: 'dsp_stale', destination: 'OPAPO',
+      dispatchedAt: new Date(T0 - 10_259 * 60_000),
+    })
+    await trackYardDeparture(input(AT_GATE))
+    await trackYardDeparture(input(CLEAR))
+
+    expect(published()).toHaveLength(1)
+    expect(published()[0]![0]['text']).toBe('KTCC 870B · AUGUSTINE OWINO NYAMWOK cleared the gate.')
+  })
+
+  it('still quotes a long but real wait in the yard', async () => {
+    // 638 minutes was the longest real wait in 60 days of published lines.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.dispatch.findFirst as any).mockResolvedValue({
+      id: 'dsp_3', destination: 'OPAPO', dispatchedAt: new Date(T0 - 638 * 60_000),
+    })
+    await trackYardDeparture(input(AT_GATE))
+    await trackYardDeparture(input(CLEAR))
+    expect(published()[0]![0]['text']).toBe(
+      'KTCC 870B · AUGUSTINE OWINO NYAMWOK cleared the gate to OPAPO, 640 minutes after signing out.',
+    )
+  })
 })
 
 /**
@@ -257,6 +286,21 @@ describe('trackYardArrival', () => {
     expect(arrivals[0]![0]['text']).toBe(
       'KTCC 870B · AUGUSTINE OWINO NYAMWOK arrived at the gate.',
     )
+  })
+
+  it('does not say where from, or for how long, against a never-closed dispatch', async () => {
+    // KDL 713E again: "arrived at the gate from OPAPO, having been out for
+    // 170.9 h" — measured from the same week-old open dispatch.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.dispatch.findFirst as any).mockResolvedValue({
+      id: 'dsp_stale', destination: 'OPAPO', dispatchedAt: new Date(T0 - 170 * 3_600_000),
+    })
+
+    await frame(FAR)
+    await frame(AT_GATE)
+
+    const arrivals = published().filter(c => c[0]!['alertType'] === 'MOVEMENT_ENTRY')
+    expect(arrivals[0]![0]['text']).toBe('KTCC 870B · AUGUSTINE OWINO NYAMWOK arrived at the gate.')
   })
 
   it('stays silent for an org with no gate recorded', async () => {

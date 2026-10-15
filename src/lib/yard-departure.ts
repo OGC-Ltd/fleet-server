@@ -61,6 +61,26 @@ import { isPlausibleFix } from './fix-plausibility.js'
  */
 const DEPARTURE_BUFFER_M = 40
 
+/**
+ * How old an open dispatch may be and still be THIS trip's sign-out.
+ *
+ * Nothing on our side closes a dispatch, and FactorySuite often never does:
+ * on 2026-10-16 there were 715 open dispatches, 631 of them over a day old. The
+ * newest open one is therefore often last week's paperwork, and pairing with it
+ * produced "KDL 713E … cleared the gate to OPAPO, 10261 minutes after signing
+ * out" — measured from a sign-out on 8 Oct. Over 60 days of published lines the
+ * real waits run continuously from 2 to 638 minutes, then nothing until 3,076;
+ * 118 of 292 lines (40%) quoted a stale gap. 12 h keeps every real one.
+ */
+const DEPARTURE_SIGN_OUT_MAX_AGE_MS = 12 * 3_600_000
+
+/**
+ * The same for an arrival, measured from sign-out to return. Closed cane trips
+ * over 60 days: median 9.0 h, p95 27.9 h; sales median 22 h, p90 71 h. A unit
+ * "out for 170.9 h" is one whose dispatch was never closed, not a long trip.
+ */
+const ARRIVAL_SIGN_OUT_MAX_AGE_MS = 72 * 3_600_000
+
 /** Used when an organisation records a gate but no radius for it. */
 const DEFAULT_GATE_RADIUS_M = 60
 
@@ -266,8 +286,12 @@ async function announceArrival(p: YardDepartureInput): Promise<void> {
     orderBy: { dispatchedAt: 'desc' },
     select:  { id: true, destination: true, dispatchedAt: true },
   })
-  const from = dispatch?.destination ? ` from ${dispatch.destination}` : ''
-  const awayMs = dispatch ? at.getTime() - dispatch.dispatchedAt.getTime() : 0
+  // A dispatch older than any real trip is an unclosed record, not where this
+  // unit has been — say neither where from nor how long.
+  const current = dispatch && at.getTime() - dispatch.dispatchedAt.getTime() <= ARRIVAL_SIGN_OUT_MAX_AGE_MS
+    ? dispatch : null
+  const from = current?.destination ? ` from ${current.destination}` : ''
+  const awayMs = current ? at.getTime() - current.dispatchedAt.getTime() : 0
   const away = awayMs >= 60_000
     ? `, having been out for ${awayMs >= 3_600_000
         ? `${(awayMs / 3_600_000).toFixed(1)} h`
@@ -320,15 +344,19 @@ async function announce(p: YardDepartureInput, st: VehicleState, precision: Prec
 
   const at   = new Date(p.capturedAt)
   const who  = p.driverName ? ` · ${p.driverName}` : ''
-  const dest = dispatch.destination ? ` to ${dispatch.destination}` : ''
+  // How long it actually stood in the yard after being signed out — the number
+  // the provider's version could never carry, because it fired at zero. Only
+  // when the sign-out is recent enough to be this trip's: an older open
+  // dispatch is an unclosed record, and its destination and age describe some
+  // earlier trip (see DEPARTURE_SIGN_OUT_MAX_AGE_MS).
+  const waitedMs = at.getTime() - dispatch.dispatchedAt.getTime()
+  const current  = waitedMs <= DEPARTURE_SIGN_OUT_MAX_AGE_MS
+  const dest = current && dispatch.destination ? ` to ${dispatch.destination}` : ''
   // "is clear of the yard to OYANI" does not read; "bound for" does. Same fact,
   // and only the third branch below needs it — "cleared the gate to OYANI" is
   // already a sentence.
-  const bound = dispatch.destination ? ` bound for ${dispatch.destination}` : ''
-  // How long it actually stood in the yard after being signed out — the number
-  // the provider's version could never carry, because it fired at zero.
-  const waitedMs = at.getTime() - dispatch.dispatchedAt.getTime()
-  const waited   = waitedMs >= 60_000
+  const bound = current && dispatch.destination ? ` bound for ${dispatch.destination}` : ''
+  const waited   = current && waitedMs >= 60_000
     ? `, ${Math.round(waitedMs / 60_000)} minutes after signing out`
     : ''
 
