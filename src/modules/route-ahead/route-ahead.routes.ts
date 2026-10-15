@@ -7,7 +7,7 @@ import { sendSuccess } from '../../core/response/response.js'
 import { BadRequestError } from '../../core/errors/errors.js'
 import { getRouteAhead, getReach, REACH_MINUTES } from './route-ahead.service.js'
 import { googleRoutingAvailable } from '../../providers/google-routing/index.js'
-import { getHaltInvestigation } from '../fuel/fuel-investigation.js'
+import { getHaltInvestigation, getTripInvestigation } from '../fuel/fuel-investigation.js'
 
 const routeQuery = z.object({
   destLat:  z.coerce.number().min(-90).max(90).optional(),
@@ -29,7 +29,19 @@ const haltQuery = z.object({
     .refine((ms) => ms <= Date.now() + 60_000 && ms >= Date.now() - 7 * 86_400_000, 'since: within the last 7 days'),
 })
 
+const tripQuery = z.object({
+  // 1 = also match the route to roads (billed per hundred fixes, so asked for).
+  snap: z.enum(['0', '1']).optional().default('0').transform((s) => s === '1'),
+})
+
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
+
+const tripInvestigation: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as z.infer<typeof tripQuery>
+    sendSuccess(res, await getTripInvestigation(p(req, 'orgId'), p(req, 'vehicleId'), { snap: q.snap }))
+  } catch (err) { next(err) }
+}
 
 const haltInvestigation: RequestHandler = async (req, res, next) => {
   try {
@@ -72,6 +84,10 @@ router.get('/vehicles/:vehicleId/route-ahead', ...guard, validateQuery(routeQuer
 // A halted unit: where it stopped, its route since an hour before, its stops
 // and the 5/10/15-minute drive zones from where it stands (fuel-investigation).
 router.get('/vehicles/:vehicleId/halt-investigation', ...guard, validateQuery(haltQuery), haltInvestigation)
+// A unit's run from its factory: the yard it left, the dispatch's destination
+// and Google's road between them, the route it drove, its stops, and the drive
+// zones from where it is now (fuel-investigation getTripInvestigation).
+router.get('/vehicles/:vehicleId/trip-investigation', ...guard, validateQuery(tripQuery), tripInvestigation)
 // How far it can drive in 15 / 30 / 60 minutes from where it is.
 router.get('/vehicles/:vehicleId/reach', ...guard, validateQuery(reachQuery), reach)
 
