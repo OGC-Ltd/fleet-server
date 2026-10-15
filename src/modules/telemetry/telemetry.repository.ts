@@ -749,6 +749,26 @@ import { env } from '../../config/env.js'
 export const FUEL_INCIDENT_WINDOW_MS = 24 * 60 * 60 * 1000
 
 /**
+ * A THEFT case nobody has reviewed is not bound by that window (operator,
+ * 2026-10-15: "keep undismissed theft cases on the map and in the fuel alerts
+ * list until someone reviews them, instead of dropping them after 24 hours").
+ * Measured that morning: 30 theft cases in a week were never looked at and
+ * had quietly expired — Nzoia KTCC 224P's 58 L among them — while the
+ * Administrator was deciding the rest within hours. It stays until it is
+ * dismissed or given a review; anything else still lapses after 24 h.
+ */
+export function incidentStaysOpen(
+  r: { cause: string | null; reviewStatus: string | null; dismissedAt: Date | string | null; beganAtMs: number },
+  now: number,
+): boolean {
+  if (r.dismissedAt != null) return false
+  if (r.reviewStatus == null && r.cause != null && (ANNOUNCED_CAUSES as readonly string[]).includes(r.cause)) {
+    return r.beganAtMs >= FUEL_INCIDENT_EPOCH.getTime()
+  }
+  return now - r.beganAtMs < FUEL_INCIDENT_WINDOW_MS && r.beganAtMs >= FUEL_INCIDENT_EPOCH.getTime()
+}
+
+/**
  * The cause reasons, beyond the announced CAUSES, that make an open fuel
  * incident — the red vehicle, the fuel alerts list, the incident window.
  *
@@ -967,7 +987,11 @@ export async function findFleetSnapshot(orgId: string) {
      WHERE t.vehicle_id = ANY(${vehicleIds}::text[])
        AND (t.drain_cause::text = ANY(${ANNOUNCED_CAUSES as unknown as string[]}::text[])
          OR t.cause_reason      = ANY(${incidentReasonSlugs()}::text[]))
-       AND t.began_at >= ${new Date(Date.now() - FUEL_INCIDENT_WINDOW_MS)}
+       -- The last 24 h, or a theft case nobody has reviewed yet, however old
+       -- (incidentStaysOpen): it waits on the map for a decision.
+       AND (t.began_at >= ${new Date(Date.now() - FUEL_INCIDENT_WINDOW_MS)}
+         OR (t.review_status IS NULL
+             AND t.drain_cause::text = ANY(${ANNOUNCED_CAUSES as unknown as string[]}::text[])))
        -- The clean slate. Both bounds are on began_at, so this is the same
        -- index walk with a tighter floor — no extra cost. See the constant.
        AND t.began_at >= ${FUEL_INCIDENT_EPOCH}

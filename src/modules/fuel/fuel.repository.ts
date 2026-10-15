@@ -192,18 +192,20 @@ export async function sweepUnitSiblings(
   args: { id: string; vehicleId: string; userId: string | null; now: Date; beganAt?: Date },
 ): Promise<string[]> {
   const { id, vehicleId, userId, now, beganAt } = args
+  // The same set the map shows (telemetry incidentStaysOpen): the last 24 h,
+  // plus every theft case still waiting for a review, however old — or
+  // deciding the newest would put the next unreviewed one up in its place.
+  const upTo = beganAt ? { lte: beganAt } : {}
+  const recent = new Date(Math.max(now.getTime() - FUEL_INCIDENT_WINDOW_MS, FUEL_INCIDENT_EPOCH.getTime()))
   const siblings = await tx.fuelTheft.findMany({
     where: {
       vehicleId,
       id: { not: id },
       dismissedAt: null,
-      beganAt: {
-        gte: new Date(Math.max(now.getTime() - FUEL_INCIDENT_WINDOW_MS, FUEL_INCIDENT_EPOCH.getTime())),
-        ...(beganAt ? { lte: beganAt } : {}),
-      },
       OR: [
-        { drainCause: { in: [...ANNOUNCED_CAUSES] } },
-        { causeReason: { in: incidentReasonSlugs() } },
+        { drainCause: { in: [...ANNOUNCED_CAUSES] }, beganAt: { gte: recent, ...upTo } },
+        { drainCause: { in: [...ANNOUNCED_CAUSES] }, reviewStatus: null, beganAt: { gte: FUEL_INCIDENT_EPOCH, ...upTo } },
+        { causeReason: { in: incidentReasonSlugs() }, beganAt: { gte: recent, ...upTo } },
       ],
     },
     select: { id: true },
