@@ -101,6 +101,18 @@ describe('live movement window', () => {
     expect(emitted()).toHaveLength(2)
   })
 
+  it("joins FactorySuite's gate line, which carries a plate but no vehicleId", () => {
+    publishNotification(gateIn)
+    publishNotification(ev({
+      id: 'mv-77', source: 'controltech', alertType: 'MOVEMENT_EXIT', vehicleId: null, plate: 'KTCC 774G',
+      text: `${WHO} left the yard to OPAPO.`, at: new Date(T + 60_000),
+    }))
+    vi.advanceTimersByTime(MOVEMENT_WINDOW_MS)
+    expect(emitted()).toHaveLength(1)
+    expect(emitted()[0]!['text']).toBe(`${WHO} arrived at the gate (01:33) and left the yard to OPAPO (01:34).`)
+    expect(emitted()[0]!['vehicleId']).toBe('veh_1')
+  })
+
   it('releases what is held on shutdown', () => {
     publishNotification(gateIn)
     publishNotification(factory)
