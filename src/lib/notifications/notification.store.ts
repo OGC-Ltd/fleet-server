@@ -30,6 +30,7 @@ import { prisma } from '../prisma.js'
 import { logger } from '../logger.js'
 import { emitDashboardFeed } from '../sse.js'
 import { cacheNotification, type NotificationItem } from './notification-cache.js'
+import { holdMovement, isGroupableMovement, setMovementEmitter } from './movement-window.js'
 
 const FLEET_TZ = 'Africa/Nairobi'
 const clockFmt = new Intl.DateTimeFormat('en-GB', {
@@ -192,6 +193,17 @@ export function publishNotification(input: PublishNotificationInput): Notificati
 
   if (!admit(input)) return item
 
+  // A routine crossing waits up to five minutes for the vehicle's related ones
+  // and reaches the feed as one line — see movement-window. The ROW is written
+  // now, as always: reports read movements one row per event. A replay
+  // (persist: false) is history already told, so it is never held.
+  if (persist && isGroupableMovement(input)) {
+    void writeNotification(input)
+      .catch((err) => logger.warn({ err, feedId: id }, 'Notification persist failed — item is still held for the feed'))
+    holdMovement(orgId, item, emitLive)
+    return item
+  }
+
   // 1. Live dashboards first — never blocked by storage.
   emitDashboardFeed(orgId, item)
 
@@ -207,6 +219,13 @@ export function publishNotification(input: PublishNotificationInput): Notificati
 
   return item
 }
+
+/** What a closed movement window does with its one line: SSE, then the hot cache. */
+function emitLive(orgId: string, item: NotificationItem): void {
+  emitDashboardFeed(orgId, item)
+  void cacheNotification(orgId, item)
+}
+setMovementEmitter(emitLive)
 
 /** The durable write on its own, so both callers below share one upsert. */
 function writeNotification(input: PublishNotificationInput): Promise<unknown> {
