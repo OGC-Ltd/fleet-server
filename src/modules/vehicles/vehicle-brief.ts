@@ -47,7 +47,7 @@ import { GRAMMAR_RULES, tidyProse } from '../../lib/prose-grammar.js'
 
 /** How long a click's fresh request waits for the model before answering
  *  from facts (the model still lands detached if it is slower). Measured on
- *  the box 2026-10-20: gpt-5-nano at minimal reasoning answers in ~1 s. */
+ *  the box 2026-10-20: VEHICLE_BRIEF_MODEL answers in ~2 s, ~2.8 s at worst. */
 const FRESH_WAIT_MS = 4_000
 
 /** How long one vehicle's brief stays fresh. */
@@ -546,7 +546,7 @@ export function buildFallback(f: VehicleFacts): string {
   return parts.join(' ')
 }
 
-const SYSTEM_PROMPT =
+export const SYSTEM_PROMPT =
   'You brief the duty operator of a Kenyan haulage fleet on ONE vehicle. You receive a JSON object of ' +
   'MEASURED facts about that vehicle today. Write 3-4 short sentences, at most 75 words, in this shape: ' +
   'which vehicle and who is driving it and since when, what the vehicle has done today (distance covered, ' +
@@ -570,7 +570,7 @@ const SYSTEM_PROMPT =
   'the PAST tense: that person drove it today, and it is back. In that case there is no destination, leg or due ' +
   'back — use lastRunDestination, lastRunDispatchedAtLocal and lastRunReturnedAtLocal instead, and do not imply ' +
   'the vehicle is still out. ' +
-  'A null means the fleet does not know that fact: SAY NOTHING ABOUT IT AT ALL. Do not write "not reported", ' +
+  'A fact missing from the JSON, or null, is one the fleet does not know: SAY NOTHING ABOUT IT AT ALL. Do not write "not reported", ' +
   '"no data", "unknown", "not recorded" or any other phrase announcing an absence — a shorter brief is the ' +
   'correct output, and an operator reading a list of things we failed to measure learns nothing. ' +
   'CRITICAL: use ONLY numbers present in the JSON. Never estimate, extrapolate, round differently, or invent a ' +
@@ -595,6 +595,11 @@ const ABSENCE_PHRASE = /\b(not (reported|recorded|available|known|provided)|no d
  * sentence no longer contains it at all, so falling back is a strictly correct
  * outcome.
  */
+/** A field name or placeholder leaking into the prose: "driven by null",
+ *  "run  today" (an empty number), "0th run", "online=false". Seen from
+ *  gpt-5-nano at minimal reasoning, 2026-10-20. */
+const PLACEHOLDER_PHRASE = /\b(null|undefined|NaN|0th)\b|[a-z][A-Z][a-z]+Local\b|\w {2,}\w|\w=\w/
+
 const OUTBOUND_PHRASE = /\b(on (its|the) way out|out(-|\s)?bound|heading out|en route out|on its way there)\b/i
 
 /**
@@ -615,6 +620,9 @@ const OUTBOUND_PHRASE = /\b(on (its|the) way out|out(-|\s)?bound|heading out|en 
 export function modelBriefRejectionReason(msg: string, f: VehicleFacts): string | null {
   const absence = msg.match(ABSENCE_PHRASE)
   if (absence) return `narrates an absence ("${absence[0]}")`
+
+  const placeholder = msg.match(PLACEHOLDER_PHRASE)
+  if (placeholder) return `leaks a placeholder ("${placeholder[0]}")`
 
   const outbound = msg.match(OUTBOUND_PHRASE)
   if (outbound) return `states the vehicle is outbound ("${outbound[0]}")`
@@ -638,6 +646,27 @@ export function modelBriefRejectionReason(msg: string, f: VehicleFacts): string 
   return null
 }
 
+/**
+ * The facts as the model sees them: only what we know.
+ *
+ * Nulls, empty lists and the run count when it is not to be mentioned are
+ * left out rather than sent and forbidden. At minimal reasoning (2026-10-20)
+ * gpt-5-nano narrated every null it was shown — "the driver name is not
+ * reported", "driven by null", "run  today" — and most replies were rejected.
+ * A field it never sees, it cannot narrate. The validator and the fallback
+ * still read the full facts.
+ */
+export function factsForModel(f: VehicleFacts): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(f)) {
+    if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) continue
+    out[k] = v
+  }
+  if (f.runsToday < 2) { delete out.runsToday; delete out.runsCompletedToday; delete out.runIndex; delete out.earlierRunDestinations }
+  if (!f.refuelCount) delete out.refuelCount
+  return out
+}
+
 async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
   const fallback = (): VehicleBrief => ({
     msg: tidyProse(buildFallback(facts)), source: 'facts', generatedAt: new Date().toISOString(), facts,
@@ -649,17 +678,16 @@ async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.OPENAI_API_KEY}` },
       body: JSON.stringify({
-        model: env.OPENAI_MODEL,
+        model: env.VEHICLE_BRIEF_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT + GRAMMAR_RULES },
-          { role: 'user',   content: JSON.stringify(facts) },
+          { role: 'user',   content: JSON.stringify(factsForModel(facts)) },
         ],
         response_format: { type: 'json_object' },
-        // Minimal reasoning (operator 2026-10-20: "it has to be supercharged").
-        // The facts are given and the task is phrasing them: measured on the
-        // box, gpt-5-nano took 5–8 s at its default effort on a small unit and
-        // ~1 s at minimal. Only the gpt-5 family takes the field.
-        ...(env.OPENAI_MODEL.startsWith('gpt-5') && { reasoning_effort: 'minimal' }),
+        // Its own model and effort (operator 2026-10-20: "it has to be
+        // supercharged"); see VEHICLE_BRIEF_MODEL in config/env for the
+        // measurements. Only the gpt-5 family takes the effort field.
+        ...(env.VEHICLE_BRIEF_MODEL.startsWith('gpt-5') && { reasoning_effort: env.VEHICLE_BRIEF_EFFORT }),
       }),
       // Generous, because this no longer blocks anybody: the operator already
       // has the facts brief. Measured on the box, gpt-5-nano did not answer
@@ -725,8 +753,8 @@ async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
  * `fresh`) pick it up from the cache.
  *
  * Supercharged 2026-10-20: a fresh request waits up to FRESH_WAIT_MS for the
- * model and answers with its wording when it lands in time (about a second at
- * minimal reasoning), so one click is one round trip to the AI brief.
+ * model and answers with its wording when it lands in time (about two seconds,
+ * see VEHICLE_BRIEF_MODEL), so one click is one round trip to the AI brief.
  */
 export async function getVehicleBrief(
   orgId: string, vehicleId: string, { fresh = false }: { fresh?: boolean } = {},
