@@ -45,6 +45,11 @@ import { getFleetSnapshot } from '../telemetry/telemetry.service.js'
 import { NO_FUEL_ARRIVED } from '../fuel/fuel-adjudication.js'
 import { GRAMMAR_RULES, tidyProse } from '../../lib/prose-grammar.js'
 
+/** How long a click's fresh request waits for the model before answering
+ *  from facts (the model still lands detached if it is slower). Measured on
+ *  the box 2026-10-20: gpt-5-nano at minimal reasoning answers in ~1 s. */
+const FRESH_WAIT_MS = 4_000
+
 /** How long one vehicle's brief stays fresh. */
 const CACHE_TTL_MS = 10 * 60_000
 
@@ -650,6 +655,11 @@ async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
           { role: 'user',   content: JSON.stringify(facts) },
         ],
         response_format: { type: 'json_object' },
+        // Minimal reasoning (operator 2026-10-20: "it has to be supercharged").
+        // The facts are given and the task is phrasing them: measured on the
+        // box, gpt-5-nano took 5–8 s at its default effort on a small unit and
+        // ~1 s at minimal. Only the gpt-5 family takes the field.
+        ...(env.OPENAI_MODEL.startsWith('gpt-5') && { reasoning_effort: 'minimal' }),
       }),
       // Generous, because this no longer blocks anybody: the operator already
       // has the facts brief. Measured on the box, gpt-5-nano did not answer
@@ -713,6 +723,10 @@ async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
  * again and asks the model again whatever lastModelAsk says; the model's
  * version still lands detached, and the panel's follow-up reads (without
  * `fresh`) pick it up from the cache.
+ *
+ * Supercharged 2026-10-20: a fresh request waits up to FRESH_WAIT_MS for the
+ * model and answers with its wording when it lands in time (about a second at
+ * minimal reasoning), so one click is one round trip to the AI brief.
  */
 export async function getVehicleBrief(
   orgId: string, vehicleId: string, { fresh = false }: { fresh?: boolean } = {},
@@ -746,9 +760,15 @@ export async function getVehicleBrief(
     const askedAt = lastModelAsk.get(key) ?? 0
     if (env.OPENAI_API_KEY && (fresh || Date.now() - askedAt >= CACHE_TTL_MS)) {
       lastModelAsk.set(key, Date.now())
-      void askModel(facts)
-        .then((brief) => { if (brief.source === 'model') remember(key, brief) })
-        .catch(() => { /* askModel already fell back and logged */ })
+      const asked = askModel(facts)
+        .then((brief) => { if (brief.source === 'model') remember(key, brief); return brief })
+        .catch(() => immediate /* askModel already fell back and logged */)
+      if (fresh) {
+        const quick = await Promise.race([
+          asked, new Promise<null>((r) => setTimeout(() => r(null), FRESH_WAIT_MS)),
+        ])
+        if (quick?.source === 'model') return quick
+      }
     }
 
     return immediate
