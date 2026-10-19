@@ -1,7 +1,8 @@
 /**
- * Google Routes API (computeRoutes) and Isochrones API (generate), server-side.
+ * Google Routes API (computeRoutes, computeRouteMatrix) and Roads API, server-side.
+ * (The Isochrones API was removed on request, 2026-10-19.)
  *
- * Two calls and nothing else. Both take a point the server already holds — the
+ * Every call takes a point the server already holds — the
  * unit's latest Wialon fix — so no phone, app or driver is involved, which is
  * the whole reason this was chosen over Navigation Connect (see
  * docs/navigation-connect-plan.md, on hold).
@@ -113,60 +114,8 @@ export async function computeRoute(origin: LatLng, destination: LatLng): Promise
   }
 }
 
-/** Polygon or MultiPolygon geometry, whatever wrapper Google put it in. */
-type AreaGeometry = { type: 'Polygon' | 'MultiPolygon'; coordinates: unknown }
-
-export function areaGeometry(geo: unknown): AreaGeometry | null {
-  const g = geo as { type?: string; geometry?: unknown; features?: unknown[]; coordinates?: unknown }
-  if (!g || typeof g !== 'object') return null
-  if (g.type === 'Polygon' || g.type === 'MultiPolygon') return { type: g.type, coordinates: g.coordinates }
-  if (g.type === 'Feature') return areaGeometry(g.geometry)
-  if (g.type === 'FeatureCollection' && Array.isArray(g.features)) {
-    // Several polygons in one collection: fold them into one MultiPolygon.
-    const parts: unknown[] = []
-    for (const f of g.features) {
-      const a = areaGeometry(f)
-      if (a?.type === 'Polygon') parts.push(a.coordinates)
-      else if (a?.type === 'MultiPolygon') parts.push(...(a.coordinates as unknown[]))
-    }
-    return parts.length ? { type: 'MultiPolygon', coordinates: parts } : null
-  }
-  return null
-}
-
-/**
- * Where a vehicle can drive to from `origin` within `seconds`. Google caps
- * DRIVE at 3600 s. Traffic-aware, so the 15-minute ring at 07:30 is honestly
- * smaller than the one at 14:00.
- */
 /** How a vehicle moves, as Google names it. Lorries and tractors drive. */
 export type TravelMode = 'DRIVE' | 'TWO_WHEELER'
-
-export async function isochrone(
-  origin: LatLng, seconds: number,
-  opts: { traffic?: boolean; direction?: 'FROM' | 'TO'; mode?: TravelMode } = {},
-): Promise<AreaGeometry | null> {
-  const j = await post<{ isochrone?: { geoJson?: unknown } }>(
-    'https://isochrones.googleapis.com/v1/isochrones:generate',
-    {
-      // `origin` is a oneof in the proto, so in JSON its member sits at the
-      // top level: `location`, not `origin.location` (Google rejects that).
-      location: { latitude: origin.lat, longitude: origin.lng },
-      travelDuration: `${Math.min(Math.round(seconds), 3600)}s`,
-      travelMode: opts.mode ?? 'DRIVE',
-      // FROM: where a vehicle at `origin` can get to. TO, the reverse: every
-      // place from which `origin` can be REACHED in the time — an inbound
-      // zone around a hub.
-      travelDirection: opts.direction ?? 'FROM',
-      // Live traffic for a unit on the road now; none for a past incident,
-      // where today's traffic says nothing about that hour.
-      routingPreference: opts.traffic === false ? 'TRAFFIC_UNAWARE' : 'TRAFFIC_AWARE',
-      enableSmoothing: true,
-      polygonFidelity: 'MEDIUM',
-    },
-  )
-  return areaGeometry(j.isochrone?.geoJson)
-}
 
 /** Google's Roads API takes at most this many points a request. */
 export const SNAP_BATCH = 100
@@ -201,26 +150,6 @@ export async function snapToRoads(points: LatLng[]): Promise<[number, number][]>
     out.push(...pts)
   }
   return out
-}
-
-/**
- * Roads API nearestRoads: the closest point on a road to `p`, or null when
- * Google knows no road near it. For a start point standing off-road (a
- * machine in a field), which the Isochrones API refuses.
- */
-export async function nearestRoad(p: LatLng): Promise<LatLng | null> {
-  const url = new URL('https://roads.googleapis.com/v1/nearestRoads')
-  url.searchParams.set('points', `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`)
-  url.searchParams.set('key', env.GOOGLE_ROUTING_API_KEY)
-  const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) })
-  const j = await res.json().catch(() => ({})) as {
-    snappedPoints?: { location?: { latitude?: number; longitude?: number } }[]
-    error?: { message?: string }
-  }
-  if (!res.ok) throw new GoogleRoutingError(j.error?.message || `Google returned ${res.status}`, res.status)
-  const loc = j.snappedPoints?.[0]?.location
-  return loc && Number.isFinite(loc.latitude) && Number.isFinite(loc.longitude)
-    ? { lat: loc.latitude!, lng: loc.longitude! } : null
 }
 
 export interface MatrixCell {

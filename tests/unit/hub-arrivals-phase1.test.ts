@@ -19,7 +19,7 @@ describe('unitClass', () => {
 })
 
 describe('etaBand', () => {
-  it('bands only past the rings', () => {
+  it('bands only past an hour', () => {
     expect(etaBand(59 * 60)).toBeNull()
     expect(etaBand(61 * 60)).toBe('1–2 h')
     expect(etaBand(3 * 3600)).toBe('2–4 h')

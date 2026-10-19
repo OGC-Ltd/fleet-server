@@ -5,7 +5,7 @@ import { requirePermission, requireVehicleInScope } from '../../middleware/autho
 import { validateQuery } from '../../middleware/validate.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { BadRequestError } from '../../core/errors/errors.js'
-import { getRouteAhead, getReach, REACH_MINUTES } from './route-ahead.service.js'
+import { getRouteAhead } from './route-ahead.service.js'
 import { googleRoutingAvailable } from '../../providers/google-routing/index.js'
 import { getHaltInvestigation, getTripInvestigation } from '../fuel/fuel-investigation.js'
 import { getHubs, getInbound, getInboundAt, ARRIVAL_MINUTES } from './hub-arrivals.js'
@@ -14,14 +14,6 @@ const routeQuery = z.object({
   destLat:  z.coerce.number().min(-90).max(90).optional(),
   destLng:  z.coerce.number().min(-180).max(180).optional(),
   destName: z.string().trim().max(80).optional(),
-})
-
-const reachQuery = z.object({
-  // "15,30,60". Google caps a drive at 60 minutes.
-  minutes: z.string().optional().default(REACH_MINUTES.join(','))
-    .transform((s) => [...new Set(s.split(',').map(Number))])
-    .refine((a) => a.length > 0 && a.length <= 3 && a.every((m) => Number.isInteger(m) && m >= 1 && m <= 60),
-      'minutes: up to three whole numbers from 1 to 60'),
 })
 
 const haltQuery = z.object({
@@ -36,7 +28,7 @@ const tripQuery = z.object({
 })
 
 const inboundQuery = z.object({
-  // Reverse isochrones: Google caps a drive at 60 minutes.
+  // The drive-time bands each unit is placed in.
   minutes: z.string().optional().default(ARRIVAL_MINUTES.join(','))
     .transform((s) => [...new Set(s.split(',').map(Number))])
     .refine((a) => a.length > 0 && a.length <= 3 && a.every((m) => Number.isInteger(m) && m >= 1 && m <= 60),
@@ -100,27 +92,19 @@ const routeAhead: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
-const reach: RequestHandler = async (req, res, next) => {
-  try {
-    const q = req.query as unknown as z.infer<typeof reachQuery>
-    sendSuccess(res, await getReach(p(req, 'orgId'), p(req, 'vehicleId'), q.minutes))
-  } catch (err) { next(err) }
-}
-
 const router = Router({ mergeParams: true })
 // Guards per route, not router.use: this router is mounted at the org root, so
 // a router-wide guard would run on every request passing through to the next.
 const guard = [authenticate, requireOrgAccess, requirePermission('vehicle:read'), requireVehicleInScope]
 
-// Whether the two below are switched on, so the dashboard can keep its
+// Whether routing is switched on, so the dashboard can keep its
 // straight-line ETA instead of promising a road route that will never come.
 router.get('/routing/status', authenticate, requireOrgAccess, (_req, res) => {
-  sendSuccess(res, { enabled: googleRoutingAvailable(), reachMinutes: REACH_MINUTES })
+  sendSuccess(res, { enabled: googleRoutingAvailable() })
 })
 
-// Arrivals at a hub: the organisation's hubs, then for one of them the
-// reverse isochrones (where it can be reached from in 15/30/60 min, live
-// traffic) and every unit's live drive time to it (hub-arrivals).
+// Arrivals at a hub: the organisation's hubs, then for one of them every
+// unit's live drive time to it (hub-arrivals).
 const fleetGuard = [authenticate, requireOrgAccess, requirePermission('vehicle:read')]
 router.get('/routing/hubs', ...fleetGuard, hubs)
 router.get('/routing/hubs/:hubKey/inbound', ...fleetGuard, validateQuery(inboundQuery), inbound)
@@ -129,14 +113,12 @@ router.get('/routing/point/inbound', ...fleetGuard, validateQuery(pointQuery), i
 
 // The road from the unit's Wialon fix to where it is going, with a traffic ETA.
 router.get('/vehicles/:vehicleId/route-ahead', ...guard, validateQuery(routeQuery), routeAhead)
-// A halted unit: where it stopped, its route since an hour before, its stops
-// and the 5/10/15-minute drive zones from where it stands (fuel-investigation).
+// A halted unit: where it stopped, its route since an hour before and its
+// stops (fuel-investigation).
 router.get('/vehicles/:vehicleId/halt-investigation', ...guard, validateQuery(haltQuery), haltInvestigation)
 // A unit's run from its factory: the yard it left, the dispatch's destination
-// and Google's road between them, the route it drove, its stops, and the drive
-// zones from where it is now (fuel-investigation getTripInvestigation).
+// and Google's road between them, the route it drove and its stops
+// (fuel-investigation getTripInvestigation).
 router.get('/vehicles/:vehicleId/trip-investigation', ...guard, validateQuery(tripQuery), tripInvestigation)
-// How far it can drive in 15 / 30 / 60 minutes from where it is.
-router.get('/vehicles/:vehicleId/reach', ...guard, validateQuery(reachQuery), reach)
 
 export default router

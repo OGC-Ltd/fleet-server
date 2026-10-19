@@ -1,15 +1,12 @@
 /**
- * Arrivals at a hub (operator, 2026-10-15): "reverse isochrones to optimise
- * inbound routing and arrival times — coordinating drivers returning to a
+ * Arrivals at a hub (operator, 2026-10-15): "optimise inbound routing and
+ * arrival times — coordinating drivers returning to a
  * central hub, Naitiri to Raiply or back, Sukari to Oyani, Nyaondo, Opapo".
  *
  *   hubs    the places an organisation's runs start and end: its yard or
  *           yard/factory geofences, the factories it dispatches from, its
  *           weighbridge yards, and the destinations its dispatches name that
  *           are placed (stated, or measured from ten or more round trips).
- *   rings   REVERSE isochrones (Google, travelDirection TO, live traffic):
- *           every place from which the hub can be reached within 15, 30 and
- *           60 minutes right now. Inbound service zones, not a radius.
  *   units   every unit of the organisation with a recent fix, with its
  *           live-traffic drive time to the hub (one Route Matrix request),
  *           the no-traffic time beside it, and whether its open dispatch is
@@ -18,13 +15,13 @@
  * Phase 1 (operator, 2026-10-15): each unit is free, busy or stale, and the
  * list can be narrowed to the free ones; drive times are scaled by the
  * unit's class (unit-class, measured from our own runs) since Google times a
- * car; past the 60-minute rings a drive time is given a band; and any spot on
+ * car; past 60 minutes a drive time is given a band; and any spot on
  * the map can stand in for a hub — "suggest a unit" (getInboundAt).
  *
  * ## Cost
  *
- * Rings are cached ten minutes per hub, mode and minutes; a matrix two
- * minutes per hub and mode. At most MATRIX_MAX units are asked about — the
+ * A matrix is cached two minutes per hub and mode. (The reverse-isochrone
+ * rings were removed on request, 2026-10-19.) At most MATRIX_MAX units are asked about — the
  * dispatched and returning ones first, then the nearest — and the answer says
  * how many were left out.
  */
@@ -41,7 +38,7 @@ import { FACTORIES } from '../webhooks/factory-map.js'
 import { WEIGHBRIDGES } from '../weighments/weighbridge.geography.js'
 import { homeSites } from '../fuel/fuel-investigation.js'
 import {
-  googleRoutingAvailable, isochrone, routeMatrixTo, GoogleRoutingError, MATRIX_MAX, type TravelMode,
+  googleRoutingAvailable, routeMatrixTo, GoogleRoutingError, MATRIX_MAX, type TravelMode,
 } from '../../providers/google-routing/index.js'
 import { unitClass, etaFactor, type UnitClass } from './unit-class.js'
 
@@ -55,7 +52,6 @@ const SAME_PLACE_M = 1_000
 /** A measured destination needs this many round trips to be a hub. */
 const MIN_SAMPLES = 10
 const HUBS_TTL_MS = 60 * 60_000
-const RINGS_TTL_MS = 10 * 60_000
 const MATRIX_TTL_MS = 2 * 60_000
 
 export interface Hub extends Point {
@@ -84,11 +80,11 @@ export interface Arrival {
   factor: number
   factorRuns: number
   arriveAt: string
-  /** Past the rings: "1–2 h", "2–4 h", "4 h+"; null inside them. */
+  /** Past 60 minutes: "1–2 h", "2–4 h", "4 h+"; null inside it. */
   band: string | null
   /** free: fresh position, no open dispatch; busy: on a dispatch; stale: no position in 30 min. */
   status: 'free' | 'busy' | 'stale'
-  /** The smallest ring it is inside by drive time, or null beyond them all. */
+  /** The smallest drive-time band (minutes) it is inside, or null beyond them all. */
   withinMin: number | null
   /** dispatched: its open run is bound for this hub; returning: it is coming back to it. */
   run: 'dispatched' | 'returning' | null
@@ -101,11 +97,7 @@ export interface Inbound {
   mode: TravelMode
   cls: ArrivalClass
   available: boolean
-  /** The speed the rings are drawn for. */
-  ringFactor: { cls: string; factor: number; runs: number }
   minutes: number[]
-  rings: { minutes: number; geometry: unknown }[]
-  ringsReason: string | null
   units: Arrival[]
   /** Inside the hub's yard now. */
   atHub: { vehicleId: string; plate: string | null }[]
@@ -119,8 +111,7 @@ export interface Inbound {
 }
 
 const hubsCache = new Map<string, { at: number; hubs: Hub[] }>()
-const ringCache = new Map<string, { at: number; geometry: unknown }>()
-const matrixCache = new Map<string, { at: number; out: Omit<Inbound, 'rings' | 'ringsReason' | 'hub' | 'ringFactor'> }>()
+const matrixCache = new Map<string, { at: number; out: Omit<Inbound, 'hub'> }>()
 const inflight = new Map<string, Promise<unknown>>()
 
 function remember<V>(m: Map<string, V>, k: string, v: V) {
@@ -201,30 +192,15 @@ const googleError = (err: unknown) =>
 
 /**
  * What the drive times are for. A unit class times every unit in it by that
- * class's measured factor and draws the rings at its speed (a tractor's
- * 60 minutes is a far smaller area than a car's); `all` times each unit by
- * its own class and draws the rings at a lorry's; VEHICLE is every unit that
- * is not a tractor (trucks and cars, each at its own factor, rings at a
- * lorry's), the window's "Truck or car"; MOTORBIKE is Google's
- * two-wheeler mode, uncalibrated.
+ * class's measured factor; `all` times each unit by its own class; VEHICLE is
+ * every unit that is not a tractor (trucks and cars, each at its own factor),
+ * the window's "Truck or car"; MOTORBIKE is Google's two-wheeler mode,
+ * uncalibrated.
  */
 export type ArrivalClass = 'all' | 'VEHICLE' | 'TRACTOR' | 'TRUCK' | 'CAR' | 'MOTORBIKE'
 
-/** Google refuses a drive zone past this many minutes. */
-const RING_CAP_MIN = 60
-
-async function rings(hub: Point, minutes: number[], mode: TravelMode, factor: number, now: number) {
-  return Promise.all(minutes.map(async (m) => {
-    // A class at `factor` covers in m minutes what a car covers in m / factor.
-    const carMin = Math.max(1, Math.min(RING_CAP_MIN, Math.round(m / factor)))
-    const key = `${hub.lat.toFixed(5)},${hub.lng.toFixed(5)}:${mode}:${carMin}`
-    const hit = ringCache.get(key)
-    if (hit && now - hit.at < RINGS_TTL_MS) return { minutes: m, geometry: hit.geometry }
-    const geometry = await shared(`ring:${key}`, () => isochrone(hub, carMin * 60, { direction: 'TO', mode, traffic: true }))
-    remember(ringCache, key, { at: Date.now(), geometry })
-    return { minutes: m, geometry }
-  }))
-}
+/** Past this, a drive time is given a band instead. */
+const BAND_FROM_MIN = 60
 
 interface SnapRow {
   vehicleId: string; name: string | null; vehicleType: string | null
@@ -234,9 +210,9 @@ interface SnapRow {
 /** Over this, a unit's position is too old to dispatch it on. */
 const AVAILABLE_FIX_MS = 30 * 60_000
 
-/** A drive time past the rings, in words: "1–2 h", "2–4 h", "4 h+". */
+/** A drive time past an hour, in words: "1–2 h", "2–4 h", "4 h+". */
 export function etaBand(etaS: number): string | null {
-  if (etaS <= RING_CAP_MIN * 60) return null
+  if (etaS <= BAND_FROM_MIN * 60) return null
   if (etaS <= 2 * 3600) return '1–2 h'
   if (etaS <= 4 * 3600) return '2–4 h'
   return '4 h+'
@@ -253,7 +229,7 @@ export function availability(fixAtMs: number, onRun: boolean, now: number): Arri
 
 async function arrivals(
   orgId: string, hub: Point, minutes: number[], cls: ArrivalClass, availableOnly: boolean, now: number,
-): Promise<Omit<Inbound, 'rings' | 'ringsReason' | 'hub' | 'ringFactor'>> {
+): Promise<Omit<Inbound, 'hub'>> {
   const [snap, open] = await Promise.all([getFleetSnapshotCached(orgId), getOpenTripsCached(orgId)])
   const rows = (Array.isArray(snap) ? snap : []) as unknown as SnapRow[]
   const mode: TravelMode = cls === 'MOTORBIKE' ? 'TWO_WHEELER' : 'DRIVE'
@@ -340,38 +316,20 @@ export interface InboundOpts { minutes: number[]; cls: ArrivalClass; available: 
 async function inbound(orgId: string, hub: Hub, opts: InboundOpts): Promise<Inbound> {
   const now = Date.now()
   const minutes = [...opts.minutes].sort((a, b) => a - b)
-  const mode: TravelMode = opts.cls === 'MOTORBIKE' ? 'TWO_WHEELER' : 'DRIVE'
-  // The rings are drawn for one speed: the class asked for, a lorry's for all.
-  const ringClass: UnitClass = opts.cls === 'all' || opts.cls === 'MOTORBIKE' || opts.cls === 'VEHICLE' ? 'TRUCK' : opts.cls
-  const ringFactor = opts.cls === 'MOTORBIKE' ? { factor: 1, runs: 0 } : etaFactor(ringClass)
-
   const mk = `${orgId}:${hub.lat.toFixed(4)},${hub.lng.toFixed(4)}:${opts.cls}:${opts.available ? 1 : 0}:${minutes.join(',')}`
   const hit = matrixCache.get(mk)
-  const [r, m] = await Promise.allSettled([
-    rings(hub, minutes, mode, ringFactor.factor, now),
-    hit && now - hit.at < MATRIX_TTL_MS
-      ? Promise.resolve(hit.out)
-      : shared(`matrix:${mk}`, async () => {
-          const out = await arrivals(orgId, hub, minutes, opts.cls, opts.available, now)
-          remember(matrixCache, mk, { at: now, out })
-          return out
-        }),
-  ])
-  if (m.status === 'rejected') {
-    logger.warn({ err: m.reason, hub: hub.key }, 'Arrivals: route matrix failed')
-    throw new AppError(googleError(m.reason), 502)
-  }
-  let ringsReason: string | null = null
-  if (r.status === 'rejected') {
-    ringsReason = googleError(r.reason)
-    logger.warn({ err: r.reason, hub: hub.key }, 'Arrivals: reverse isochrones failed')
-  }
-  return {
-    ...m.value,
-    hub,
-    ringFactor: { cls: opts.cls === 'MOTORBIKE' ? 'MOTORBIKE' : ringClass, ...ringFactor },
-    rings: r.status === 'fulfilled' ? r.value.filter((x) => x.geometry != null) : [],
-    ringsReason,
+  try {
+    const out = hit && now - hit.at < MATRIX_TTL_MS
+      ? hit.out
+      : await shared(`matrix:${mk}`, async () => {
+          const o = await arrivals(orgId, hub, minutes, opts.cls, opts.available, now)
+          remember(matrixCache, mk, { at: now, out: o })
+          return o
+        })
+    return { ...out, hub }
+  } catch (err) {
+    logger.warn({ err, hub: hub.key }, 'Arrivals: route matrix failed')
+    throw new AppError(googleError(err), 502)
   }
 }
 
