@@ -2,6 +2,7 @@ import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as service from './vehicle.service.js'
 import { getVehicleBrief } from './vehicle-brief.js'
+import { getVehicleInsight } from './vehicle-insight.js'
 import type { CreateGroupDto, UpdateGroupDto, CreateVehicleDto, UpdateVehicleDto, CreateAssignmentDto, ListQuery } from './vehicle.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -98,5 +99,14 @@ export const getBrief: RequestHandler = async (req, res, next) => {
     // `?fresh=1` once per click on the unit: measured and phrased anew.
     const brief = await getVehicleBrief(p(req, 'orgId'), p(req, 'vehicleId'), { fresh: req.query.fresh === '1' })
     sendSuccess(res, brief)
+  } catch (err) { next(err) }
+}
+
+// GET /organisations/:orgId/vehicles/:vehicleId/insight
+// The newest stored insight, at once (see vehicle-insight). null when the unit
+// has none and no signals to write one from.
+export const getInsight: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await getVehicleInsight(p(req, 'orgId'), p(req, 'vehicleId')))
   } catch (err) { next(err) }
 }

@@ -22,6 +22,9 @@ router.get('/vehicles/:vehicleId', requirePermission('vehicle:read'), requireVeh
 // on demand (see vehicle-brief) rather than warmed, because a 597-vehicle
 // fleet cannot have every unit's narrative regenerated on a timer.
 router.get('/vehicles/:vehicleId/brief', requirePermission('vehicle:read'), requireVehicleInScope, ctrl.getBrief)
+// The unit's insight — findings, memory and one action — written in the
+// background (see vehicle-insight) and read here instantly on a click.
+router.get('/vehicles/:vehicleId/insight', requirePermission('vehicle:read'), requireVehicleInScope, ctrl.getInsight)
 router.patch('/vehicles/:vehicleId', requirePermission('vehicle:update'), requireVehicleInScope, validateBody(updateVehicleSchema), ctrl.update)
 router.delete('/vehicles/:vehicleId', requirePermission('vehicle:delete'), requireVehicleInScope, ctrl.remove)
 
