@@ -1,7 +1,7 @@
 /**
- * The road ahead of a tracked unit, and how far it can get.
+ * The road ahead of a tracked unit.
  *
- * Both start from the unit's latest Wialon fix — the same position the map
+ * It starts from the unit's latest Wialon fix — the same position the map
  * draws — so there is no phone and no driver in the loop.
  *
  * ## Where it is going
@@ -14,12 +14,11 @@
  *
  * ## Cost
  *
- * Every computeRoutes and isochrone call is billed. A tracked map re-asks on
- * every fix, so answers are cached: a route is reused while the unit has moved
- * less than ROUTE_REUSE_M and is younger than ROUTE_MAX_AGE_MS, and is never
- * re-fetched more often than ROUTE_MIN_AGE_MS; a reach ring is reused for
- * anything within ~100 m of the same spot for REACH_TTL_MS. Concurrent asks for
- * the same answer share one request.
+ * Every computeRoutes call is billed. A tracked map re-asks on every fix, so
+ * answers are cached: a route is reused while the unit has moved less than
+ * ROUTE_REUSE_M and is younger than ROUTE_MAX_AGE_MS, and is never re-fetched
+ * more often than ROUTE_MIN_AGE_MS. Concurrent asks for the same answer share
+ * one request.
  */
 
 import { AppError } from '../../core/errors/AppError.js'
@@ -29,17 +28,15 @@ import { logger } from '../../lib/logger.js'
 import { findLatest } from '../telemetry/telemetry.repository.js'
 import { getOpenTripsCached } from '../dispatches/open-trips.cache.js'
 import {
-  computeRoute, isochrone, googleRoutingAvailable, GoogleRoutingError,
+  computeRoute, googleRoutingAvailable, GoogleRoutingError,
   type RoadRoute,
 } from '../../providers/google-routing/index.js'
 
 export const ROUTE_MIN_AGE_MS = 30_000
 export const ROUTE_MAX_AGE_MS = 3 * 60_000
 export const ROUTE_REUSE_M = 250
-export const REACH_TTL_MS = 10 * 60_000
 /** Within this of the destination the unit is there; no route is asked for. */
 export const ARRIVED_M = 300
-export const REACH_MINUTES = [15, 30, 60] as const
 
 export interface Destination extends Point {
   name: string | null
@@ -66,7 +63,6 @@ const MAX_ENTRIES = 2_000
 
 interface RouteEntry { destKey: string; origin: Point; at: number; route: RoadRoute | null }
 const routes = new Map<string, RouteEntry>()
-const reach = new Map<string, { at: number; geometry: unknown }>()
 const inflight = new Map<string, Promise<unknown>>()
 
 function remember<K, V>(m: Map<K, V>, k: K, v: V) {
@@ -126,7 +122,7 @@ async function dispatchDestination(orgId: string, vehicleId: string): Promise<De
   return { lat: trip.destinationLat, lng: trip.destinationLng, name: trip.destination, source: 'dispatch' }
 }
 
-// ── the two answers ─────────────────────────────────────────────────────────
+// ── the answer ─────────────────────────────────────────────────────────
 
 export async function getRouteAhead(
   orgId: string,
@@ -170,33 +166,8 @@ export async function getRouteAhead(
   }
 }
 
-export interface ReachRing { minutes: number; geometry: unknown }
-
-export async function getReach(
-  orgId: string,
-  vehicleId: string,
-  minutes: number[],
-): Promise<{ enabled: false } | { enabled: true; origin: (Point & { fixAt: string }) | null; rings: ReachRing[] }> {
-  if (!googleRoutingAvailable()) return { enabled: false }
-  const origin = await latestFix(orgId, vehicleId)
-  if (!origin) return { enabled: true, origin, rings: [] }
-
-  // ~100 m grid: a parked unit's GPS jitter must not buy a new polygon.
-  const spot = `${origin.lat.toFixed(3)},${origin.lng.toFixed(3)}`
-  const rings = await Promise.all(minutes.map(async (m) => {
-    const key = `${spot}:${m}`
-    const hit = reach.get(key)
-    if (hit && Date.now() - hit.at < REACH_TTL_MS) return { minutes: m, geometry: hit.geometry }
-    const geometry = await shared(`reach:${key}`, () => isochrone(origin, m * 60).catch(googleError))
-    remember(reach, key, { at: Date.now(), geometry })
-    return { minutes: m, geometry }
-  }))
-  return { enabled: true, origin, rings }
-}
-
 /** Tests only. */
 export function _resetRouteAheadCaches() {
   routes.clear()
-  reach.clear()
   inflight.clear()
 }

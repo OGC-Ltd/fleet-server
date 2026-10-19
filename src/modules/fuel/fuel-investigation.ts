@@ -1,7 +1,7 @@
 /**
  * A fuel alert's investigation map (operator, 2026-10-15): where it happened,
- * how the unit moved around it, and how far a vehicle could have got from
- * there. Three layers that must never be mistaken for one another:
+ * and how the unit moved around it. Layers that must never be mistaken for
+ * one another:
  *
  *   point   WHERE the unit stood when the fuel began to fall — a recorded
  *           fix, with how far its time is from the fall and how much the unit
@@ -14,9 +14,9 @@
  *           it is labelled as such and kept beside the record, never instead
  *           of it. Snapped one recorded stretch at a time: a silence is an
  *           unknown, not a road.
- *   zones   where a vehicle could DRIVE from the point in 5, 10 and 15
- *           minutes (Google Isochrones, no traffic: today's traffic says
- *           nothing about that hour). Search areas, not evidence.
+ *
+ * The 5/10/15-minute drive zones (Google Isochrones) were removed on request,
+ * 2026-10-19.
  *
  * ## Kept once complete
  *
@@ -42,7 +42,7 @@ import { findPlaybackFixes, type PlaybackPoint } from '../telemetry/telemetry.re
 import { findTheftById } from './fuel.repository.js'
 import { prisma } from '../../lib/prisma.js'
 import {
-  googleRoutingAvailable, isochrone, snapToRoads, nearestRoad, computeRoute, GoogleRoutingError, type LatLng,
+  googleRoutingAvailable, snapToRoads, computeRoute, GoogleRoutingError, type LatLng,
 } from '../../providers/google-routing/index.js'
 
 const gzip = promisify(zlib.gzip)
@@ -51,7 +51,6 @@ const gunzip = promisify(zlib.gunzip)
 /** Raised when the saved shape or the way it is built changes. */
 export const INVESTIGATION_FORMAT = 1
 export const AROUND_MS = 60 * 60_000
-export const ZONE_MINUTES = [5, 10, 15] as const
 /** How long after the window closes before it is saved: late fixes arrive. */
 const SETTLE_MS = 10 * 60_000
 
@@ -77,17 +76,6 @@ export interface IncidentPoint {
   basis: string
 }
 
-export interface Zone { minutes: number; geometry: unknown }
-
-/** Where the zones were measured from, when that is not the point itself. */
-export interface ZoneOrigin extends LatLng {
-  /** Metres from the incident point to this start. */
-  offsetM: number
-  basis: string
-  /** When the unit was there, for a start taken from the track. */
-  fixAt: string | null
-}
-
 export interface Investigation {
   format: number
   /** What it investigates: a fuel alert, or a unit halted mid-journey. */
@@ -103,7 +91,6 @@ export interface Investigation {
   track: TrackPoint[]
   truncated: boolean
   snapped: { segments: [number, number][][]; reason: string | null }
-  zones: { minutes: number[]; items: Zone[]; reason: string | null; from: ZoneOrigin | null }
   builtAt: string
   /** True once saved: the answer will not change. */
   final: boolean
@@ -205,56 +192,7 @@ const inflight = new Map<string, Promise<Investigation>>()
 const STILL = 'The unit did not move in this window'
 
 const why = (err: unknown) =>
-  !(err instanceof GoogleRoutingError) ? 'Google could not be reached'
-    : err.message.startsWith('The point') ? err.message
-    : OFF_ROAD.test(err.message) ? 'The point is too far from a road for Google to measure from'
-    : `Google: ${err.message}`
-
-/** Google's answer when the start is too far from any road. */
-const OFF_ROAD = /road segment|snapping tolerance|NotFound/i
-
-/** Fast enough that the unit must have been on a road. */
-const ON_ROAD_KMH = 20
-
-/**
- * The 5/10/15-minute zones from the point.
- *
- * A point standing off-road (a machine in a field) is refused by the
- * Isochrones API. The zones are then measured from, in order: the nearest
- * road Google knows (nearestRoads, which only searches a few tens of metres),
- * else the recorded fix nearest in time to the fall at which the unit was
- * driving at road speed. `zones.from` says which, where, and how far from the
- * point, so the map never passes a road start off as the incident.
- */
-async function zonesFrom(point: LatLng, track: TrackPoint[], beganMs: number, zones: Investigation['zones']): Promise<Zone[]> {
-  const run = (o: LatLng) => Promise.all(ZONE_MINUTES.map(async (m) =>
-    ({ minutes: m, geometry: await isochrone(o, m * 60, { traffic: false }) })))
-  try {
-    return await run(point)
-  } catch (err) {
-    if (!(err instanceof GoogleRoutingError) || !OFF_ROAD.test(err.message)) throw err
-  }
-  const road = await nearestRoad(point).catch(() => null)
-  const tried: { at: LatLng; basis: string; fixAt: string | null }[] = []
-  if (road) tried.push({ at: road, basis: 'The nearest road to the point', fixAt: null })
-  const driving = track
-    .filter((p) => (p.spd ?? 0) >= ON_ROAD_KMH)
-    .sort((a, b) => Math.abs(a.t - beganMs) - Math.abs(b.t - beganMs))
-  if (driving[0]) {
-    const p = driving[0]
-    tried.push({ at: p, basis: 'Where the unit was driving on a road nearest in time to the fall', fixAt: new Date(p.t).toISOString() })
-  }
-  for (const c of tried) {
-    try {
-      const out = await run(c.at)
-      zones.from = { lat: c.at.lat, lng: c.at.lng, offsetM: Math.round(haversineM(point, c.at)), basis: c.basis, fixAt: c.fixAt }
-      return out
-    } catch (err) {
-      if (!(err instanceof GoogleRoutingError) || !OFF_ROAD.test(err.message)) throw err
-    }
-  }
-  throw new GoogleRoutingError('The point is off-road, and no road start near it could be found', 404)
-}
+  !(err instanceof GoogleRoutingError) ? 'Google could not be reached' : `Google: ${err.message}`
 
 async function build(orgId: string, theftId: string, now: number): Promise<Investigation> {
   const theft = await findTheftById(orgId, theftId)
@@ -273,30 +211,25 @@ async function build(orgId: string, theftId: string, now: number): Promise<Inves
   const point = pickIncidentPoint(track, beganMs, detectedMs)
 
   const on = googleRoutingAvailable()
-  const zones: Investigation['zones'] = { minutes: [...ZONE_MINUTES], items: [], reason: null, from: null }
   const snapped: Investigation['snapped'] = { segments: [], reason: null }
   if (!on) {
-    zones.reason = 'Drive zones are switched off on this server'
     snapped.reason = 'Road matching is switched off on this server'
   } else {
-    const [z, s] = await Promise.allSettled([
-      point ? zonesFrom(point, track, beganMs, zones) : Promise.resolve([]),
-      Promise.all(stretches(track).map((seg) => moving(seg)).filter((seg) => seg.length >= 2).map((seg) => snapToRoads(seg))),
-    ])
-    if (!point) zones.reason = 'No recorded position near the fall'
-    else if (z.status === 'fulfilled') zones.items = z.value.filter((x) => x.geometry != null)
-    else { zones.reason = why(z.reason); logger.warn({ err: z.reason, theftId }, 'Investigation: isochrones failed') }
-    if (s.status === 'fulfilled') snapped.segments = s.value.filter((seg) => seg.length >= 2)
-    else { snapped.reason = why(s.reason); logger.warn({ err: s.reason, theftId }, 'Investigation: snap to roads failed') }
+    try {
+      const segs = await Promise.all(stretches(track).map((seg) => moving(seg)).filter((seg) => seg.length >= 2).map((seg) => snapToRoads(seg)))
+      snapped.segments = segs.filter((seg) => seg.length >= 2)
+    } catch (err) {
+      snapped.reason = why(err)
+      logger.warn({ err, theftId }, 'Investigation: snap to roads failed')
+    }
     if (!snapped.reason && !snapped.segments.length) snapped.reason = STILL
   }
 
-  // Final only when the whole window is past AND every Google layer came
-  // back: a failed call would otherwise be frozen into the evidence.
+  // Final only when the whole window is past AND the road match came back: a
+  // failed call would otherwise be frozen into the evidence.
   const complete = now >= toMs + SETTLE_MS
-  const zonesOk = !on || !point || zones.items.length > 0
   const snapOk = !on || !snapped.reason || snapped.reason === STILL
-  const final = complete && zonesOk && snapOk
+  const final = complete && snapOk
   return {
     format: INVESTIGATION_FORMAT,
     theftId: theft.id,
@@ -310,7 +243,6 @@ async function build(orgId: string, theftId: string, now: number): Promise<Inves
     track,
     truncated: fixes?.truncated ?? false,
     snapped,
-    zones,
     builtAt: new Date(now).toISOString(),
     final,
   }
@@ -339,11 +271,8 @@ export const HALT_BEFORE_MS = 60 * 60_000
 const HALT_AFTER_CAP_MS = 6 * 60 * 60_000
 /** A halt's answer is rebuilt at most this often: the halt is still going on. */
 const HALT_TTL_MS = 5 * 60_000
-/** Drive zones from the same spot are reused this long. */
-const ZONE_TTL_MS = 60 * 60_000
 
 const haltCache = new Map<string, { at: number; inv: Investigation }>()
-const zoneCache = new Map<string, { at: number; zones: Investigation['zones'] }>()
 const remember = <V>(m: Map<string, V>, k: string, v: V) => {
   m.delete(k); m.set(k, v)
   if (m.size > 2_000) m.delete(m.keys().next().value as string)
@@ -352,9 +281,8 @@ const remember = <V>(m: Map<string, V>, k: string, v: V) => {
 /**
  * The same investigation for a unit halted mid-journey (the map's Halted
  * list, operator 2026-10-15): where it stopped, its route from an hour before
- * the halt to now, the stops on it, and the 5/10/15-minute drive zones from
- * where it stands. Never saved: the halt is still going on. Built at most
- * every five minutes per halt, zones reused per spot for an hour.
+ * the halt to now and the stops on it. Never saved: the halt is still going
+ * on. Built at most every five minutes per halt.
  */
 export async function getHaltInvestigation(orgId: string, vehicleId: string, sinceMs: number): Promise<Investigation> {
   const key = `${orgId}/${vehicleId}/${Math.floor(sinceMs / 60_000)}`
@@ -376,24 +304,6 @@ export async function getHaltInvestigation(orgId: string, vehicleId: string, sin
     const point = pickIncidentPoint(track, sinceMs, sinceMs)
     if (point) point.basis = 'Last recorded position as the unit halted'
 
-    let zones: Investigation['zones'] = { minutes: [...ZONE_MINUTES], items: [], reason: null, from: null }
-    if (!googleRoutingAvailable()) zones.reason = 'Drive zones are switched off on this server'
-    else if (!point) zones.reason = 'No recorded position near the halt'
-    else {
-      const zk = `${point.lat.toFixed(4)},${point.lng.toFixed(4)}`
-      const z = zoneCache.get(zk)
-      if (z && now - z.at < ZONE_TTL_MS) zones = z.zones
-      else {
-        try {
-          zones.items = (await zonesFrom(point, track, sinceMs, zones)).filter((x) => x.geometry != null)
-          remember(zoneCache, zk, { at: now, zones })
-        } catch (err) {
-          zones.reason = why(err)
-          logger.warn({ err, vehicleId }, 'Halt investigation: isochrones failed')
-        }
-      }
-    }
-
     const inv: Investigation = {
       format: INVESTIGATION_FORMAT,
       kind: 'halt',
@@ -408,7 +318,6 @@ export async function getHaltInvestigation(orgId: string, vehicleId: string, sin
       track,
       truncated: fixes?.truncated ?? false,
       snapped: { segments: [], reason: 'Not drawn for a halt' },
-      zones,
       builtAt: new Date(now).toISOString(),
       final: false,
     }
@@ -622,8 +531,7 @@ async function plannedRoad(origin: LatLng, dest: LatLng, now: number): Promise<{
  * is at the Sukari Industries; some units we can capture their destination,
  * which is a webhook from FactorySuite"): where it left from, where the
  * dispatch says it is going, the road Google would take between the two, the
- * route it actually drove since it left (with its stops), and the 5/10/15-
- * minute drive zones from where it is now.
+ * route it actually drove since it left, with its stops.
  *
  * Origin: the dispatch's gate (factory_code), else the organisation's yard.
  * A unit with no dispatch still gets its latest outing from the yard. Built
@@ -751,30 +659,12 @@ async function buildTrip(orgId: string, vehicleId: string, now: number): Promise
     }
   }
 
-  // Where it is now (or where it came back to): the zones' start.
+  // Where it is now (or where it came back to).
   const last = track[track.length - 1] ?? null
   const point: IncidentPoint | null = last
     ? { lat: last.lat, lng: last.lng, fixAt: new Date(last.t).toISOString(), offsetS: 0, movedM: 0,
         basis: returnedAt ? 'Back at the yard' : 'Latest recorded position' }
     : null
-
-  let zones: Investigation['zones'] = { minutes: [...ZONE_MINUTES], items: [], reason: null, from: null }
-  if (!googleRoutingAvailable()) zones.reason = 'Drive zones are switched off on this server'
-  else if (!point || !last) zones.reason = 'No recorded position for this unit'
-  else {
-    const zk = `${point.lat.toFixed(4)},${point.lng.toFixed(4)}`
-    const z = zoneCache.get(zk)
-    if (z && now - z.at < ZONE_TTL_MS) zones = z.zones
-    else {
-      try {
-        zones.items = (await zonesFrom(point, track, last.t, zones)).filter((x) => x.geometry != null)
-        remember(zoneCache, zk, { at: now, zones })
-      } catch (err) {
-        zones.reason = why(err)
-        logger.warn({ err, vehicleId }, 'Trip investigation: isochrones failed')
-      }
-    }
-  }
 
   const destination: TripInfo['destination'] = run?.destinationLat != null && run.destinationLng != null
     ? { lat: run.destinationLat, lng: run.destinationLng, name: run.destination,
@@ -803,7 +693,6 @@ async function buildTrip(orgId: string, vehicleId: string, now: number): Promise
     track,
     truncated,
     snapped: { segments: [], reason: 'Asked for separately' },
-    zones,
     builtAt: new Date(now).toISOString(),
     final: false,
     trip: {

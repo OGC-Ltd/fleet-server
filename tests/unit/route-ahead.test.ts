@@ -1,10 +1,10 @@
 /**
- * Route ahead + reach: the pure parts — decoding Google's answers, and the rule
+ * Route ahead: the pure parts — decoding Google's answers, and the rule
  * that decides when a cached (billed) route may stand in for a new one.
  */
 
 import { describe, it, expect } from 'vitest'
-import { decodePolyline, parseDuration, areaGeometry } from '../../src/providers/google-routing/index.js'
+import { decodePolyline, parseDuration } from '../../src/providers/google-routing/index.js'
 import { routeReusable, ROUTE_MIN_AGE_MS, ROUTE_MAX_AGE_MS } from '../../src/modules/route-ahead/route-ahead.service.js'
 
 describe('decodePolyline', () => {
@@ -24,24 +24,6 @@ describe('parseDuration', () => {
     expect(parseDuration('1234s')).toBe(1234)
     expect(parseDuration('12.5s')).toBe(12.5)
     expect(parseDuration(undefined)).toBe(0)
-  })
-})
-
-describe('areaGeometry', () => {
-  const ring = [[[34, -0.8], [34.1, -0.8], [34.1, -0.9], [34, -0.8]]]
-  it('accepts a bare polygon, a Feature and a FeatureCollection', () => {
-    expect(areaGeometry({ type: 'Polygon', coordinates: ring })).toEqual({ type: 'Polygon', coordinates: ring })
-    expect(areaGeometry({ type: 'Feature', geometry: { type: 'Polygon', coordinates: ring } })?.type).toBe('Polygon')
-    const fc = areaGeometry({ type: 'FeatureCollection', features: [
-      { type: 'Feature', geometry: { type: 'Polygon', coordinates: ring } },
-      { type: 'Feature', geometry: { type: 'Polygon', coordinates: ring } },
-    ] })
-    expect(fc?.type).toBe('MultiPolygon')
-    expect((fc?.coordinates as unknown[]).length).toBe(2)
-  })
-  it('refuses anything that is not an area', () => {
-    expect(areaGeometry({ type: 'Point', coordinates: [34, -0.8] })).toBeNull()
-    expect(areaGeometry(null)).toBeNull()
   })
 })
 
