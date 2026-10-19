@@ -39,12 +39,24 @@ const GROUPABLE_TYPES = new Set(['ZONE_ENTRY', 'ZONE_EXIT', 'MOVEMENT_ENTRY', 'M
 
 const SEVERITY_RANK: Record<string, number> = { info: 0, success: 1, warning: 2, critical: 3 }
 
+/**
+ * Which vehicle a line is about. By PLATE first: FactorySuite's gate lines
+ * ("left the yard", "returned to the yard") carry the plate but no vehicleId,
+ * and setting one on their rows would make the operations report count them as
+ * extra departures. Spacing and case are ignored, since the provider's plate
+ * and ours are written differently.
+ */
+function movementKey(i: { vehicleId?: string | null; plate?: string | null }): string | null {
+  if (i.plate) return `p:${i.plate.replace(/\s+/g, '').toUpperCase()}`
+  return i.vehicleId ? `v:${i.vehicleId}` : null
+}
+
 /** A routine crossing that belongs to a vehicle — the only kind worth holding. */
 export function isGroupableMovement(i: {
-  alertType?: string | null; vehicleId?: string | null; severity?: string; type?: string
+  alertType?: string | null; vehicleId?: string | null; plate?: string | null; severity?: string; type?: string
 }): boolean {
   const sev = i.severity ?? i.type ?? ''
-  return Boolean(i.vehicleId)
+  return movementKey(i) != null
     && GROUPABLE_TYPES.has(i.alertType ?? '')
     && (sev === 'info' || sev === 'success')
 }
@@ -109,7 +121,8 @@ export function combineMovementItems(members: NotificationItem[]): NotificationI
   return {
     ...last,
     // Stable for the same group whichever path builds it — live or a read.
-    id:   `mg-${first.vehicleId}-${Date.parse(first.ts)}`,
+    id:   `mg-${sorted.find(m => m.vehicleId)?.vehicleId ?? movementKey(first)}-${Date.parse(first.ts)}`,
+    vehicleId: sorted.find(m => m.vehicleId)?.vehicleId ?? null,
     type,
     text,
     // Placed at its FIRST event. Paging back uses `before = oldest ts on the
@@ -147,7 +160,7 @@ export function groupMovementItems(items: NotificationItem[], nowMs = Date.now()
 
   for (const it of asc) {
     if (!isGroupableMovement(it)) { out.push(it); continue }
-    const key = it.vehicleId!
+    const key = movementKey(it)!
     const ms  = Date.parse(it.ts)
     const g   = open.get(key)
     if (g && ms - g.startMs <= MOVEMENT_WINDOW_MS) { g.members.push(it); continue }
@@ -179,7 +192,7 @@ type Emit = (orgId: string, item: NotificationItem) => void
  * window (a backlog arriving late) closes the open group and starts the next.
  */
 export function holdMovement(orgId: string, item: NotificationItem, emit: Emit): void {
-  const key = `${orgId}:${item.vehicleId}`
+  const key = `${orgId}:${movementKey(item)}`
   const ms  = Date.parse(item.ts)
   const g   = pending.get(key)
 
