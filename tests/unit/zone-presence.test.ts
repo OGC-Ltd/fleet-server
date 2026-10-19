@@ -193,6 +193,32 @@ describe('a fence that another fence already names stays silent', () => {
     ])
   })
 
+  it('names only the innermost of the three Menengai yard drawings', async () => {
+    const yard = (id: string, name: string, lat: number, lng: number, size: number) => ({
+      id, name, type: 'POLYGON', mode: 'BLOCKLIST', isActive: false,
+      centerLat: null, centerLng: null, radiusM: null, widthM: null, polygonCoords: ring(lat, lng, size),
+    })
+    ;(prisma.geofence.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      yard('cms24shdh000dscv7g18rmwp0', 'Menengai Yard - Nakuru HQ', -0.83, 34.37, 0.02),
+      yard('cmtqro8eh0000cnqfbij3z5av', 'Menengai Yard NEW', -0.828, 34.372, 0.016),
+      yard('menengai-yard', 'Menengai Yard', -0.826, 34.374, 0.012),
+    ])
+    const v = `veh-menengai-${seq}`
+    await ping(v, ROAD.lat, ROAD.lng, tick(0))
+    await ping(v, ROAD.lat, ROAD.lng, tick(1))
+    published.length = 0
+
+    await ping(v, -0.829, 34.371, tick(1))                                  // HQ only
+    await ping(v, -0.827, 34.373, tick(1))                                  // HQ + NEW
+    for (let i = 0; i < 6; i++) await ping(v, FACTORY.lat, FACTORY.lng, tick(1)) // all three
+    for (let i = 0; i < 6; i++) await ping(v, ROAD.lat, ROAD.lng, tick(1))
+
+    expect(published.map(n => n.text)).toEqual([
+      'MUFINDI: EX 24 arrived at Menengai Yard.',
+      'MUFINDI: EX 24 left Menengai Yard.',
+    ])
+  })
+
   it('says nothing for a unit that only ever enters the compound', async () => {
     const v = `veh-sukari-edge-${seq}`
     await ping(v, ROAD.lat, ROAD.lng, tick(0))

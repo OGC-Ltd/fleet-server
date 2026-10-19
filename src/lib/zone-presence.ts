@@ -59,15 +59,27 @@ interface CachedZone {
  * Fences that are tracked but never narrated, because another fence already
  * names the same place.
  *
- * SUKARI: "Sukari industries" is the compound drawn round "SUKARI INDURSTRIES
- * FACTORY" — the operator's words, 2026-10-19: "they are one". Every trip
- * through the gate said both, a minute apart. The factory is the one kept:
- * it is the place operators name. By id, not name, so a rename in Wialon
- * cannot quietly bring the second line back. Presence, logbook places and a
- * keep-out breach (were it ever enforced) still see the fence.
+ * Each site below was drawn more than once in Wialon, and every trip through it
+ * was announced once per drawing, a minute apart. SUKARI first, in the
+ * operator's words, 2026-10-19: the compound and the factory "are one". The
+ * rest were found the same way on 2026-10-19 and agree on two counts: they are
+ * the only same-org polygon pairs where the smaller lies >=85% inside the larger
+ * and covers >=40% of it, and the only pairs announced together hundreds of
+ * times in the previous 14 days (Sukari 929, Kabras 548, Menengai 160).
+ * Nested places that are genuinely different — a nursery inside a farm, under
+ * 4% of its area — fail the first test and keep both lines.
+ *
+ * The SMALLEST drawing at each site is the one kept: it is the most specific,
+ * and the one the arrival sentence already leads with. By id, not name, so a
+ * rename in Wialon cannot quietly bring the second line back. Presence, logbook
+ * places and a keep-out breach (were one ever enforced) still see these fences.
  */
 const SILENT_ZONE_IDS = new Set([
-  'cms24soq5000sscv7rzasdue3',   // SUKARI · Sukari industries
+  'cms24soq5000sscv7rzasdue3',   // SUKARI   · "Sukari industries" round SUKARI INDURSTRIES FACTORY
+  'cms24sp1z000tscv7lr8vdgfj',   // KABRAS   · "Kabras Sugar Factory (West Kenya)" round KABRAS FACTORY -WKS (95% / 89% overlap)
+  'cmtqro8eh0000cnqfbij3z5av',   // MENENGAI · "Menengai Yard NEW" round Menengai Yard (98% / 95%)
+  'cms24shdh000dscv7g18rmwp0',   // MENENGAI · "Menengai Yard - Nakuru HQ" round both (98% / 84%)
+  'cms24tfnf002xscv7tvrz6x2w',   // KASULU   · "Workshop A" round workshop1 (workshop1 100% inside, 62% of its area)
 ])
 
 /**
