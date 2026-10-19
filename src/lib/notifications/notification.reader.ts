@@ -11,6 +11,7 @@ import { prisma } from '../prisma.js'
 import { readCachedNotifications, primeCache, readCachedVehicleDay, cacheVehicleDay, type NotificationItem } from './notification-cache.js'
 import { env } from '../../config/env.js'
 import { fleetDayBounds } from '../provider-time.js'
+import { groupMovementItems } from './movement-window.js'
 
 const FLEET_TZ = 'Africa/Nairobi'
 const clockFmt = new Intl.DateTimeFormat('en-GB', {
@@ -167,7 +168,10 @@ export async function getNotifications(
     },
   })
 
-  const items = rows.map(toItem)
+  // Postgres keeps one row per crossing; the feed shows a vehicle's crossings
+  // within five minutes as one line. Grouped here with the live window's rule,
+  // so a reload shows what the live feed did (see movement-window).
+  const items = groupMovementItems(rows.map(toItem))
 
   // Warm the cache from the authoritative store so the next first-page read is
   // hot. Only for the UNFILTERED first page — priming from a deep page would
@@ -185,7 +189,7 @@ export async function getNotifications(
    * that would cache a truncated day as if it were the whole one.
    */
   if (vehicleId && day && dayRange && dayComplete && !before && !alertTypes?.length && !severities?.length
-      && items.length < capped) {
+      && rows.length < capped) {
     void cacheVehicleDay(vehicleId, day, items, dayRange.from.getTime())
   }
 

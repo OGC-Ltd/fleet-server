@@ -25,6 +25,7 @@ import { startFuelRateDigest } from './lib/queues/fuel-rate-digest.js'
 import { startTripBuild } from './lib/queues/trips.js'
 import { startOutboundWorker } from './lib/queues/outbound.js'
 import { disconnectRedis } from './lib/redis.js'
+import { flushAllMovementWindows } from './lib/notifications/movement-window.js'
 import { staticRoutePairs } from './providers/raifactorysuite/raifactorysuite.simulator.js'
 
 async function main() {
@@ -149,6 +150,8 @@ async function main() {
     stopCacheWarmer()
     stopAiInsightWarmer()
     stopVehicleInsightSweep()
+    // Release movement lines still waiting in their five-minute window.
+    flushAllMovementWindows()
     await stopPushDispatcher().catch((err) => logger.warn({ err }, 'Push worker thread shutdown failed'))
     await disconnectRedis().catch((err) => logger.warn({ err }, 'Redis disconnect failed'))
     server.close(async () => {
