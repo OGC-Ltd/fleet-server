@@ -51,7 +51,24 @@ interface CachedZone {
   areaHa: number | null
   /** Where the fence can be at all — tried before the exact test. See fenceBox. */
   box: FenceBox
+  /** Never named in the feed — see SILENT_ZONE_IDS. */
+  silent: boolean
 }
+
+/**
+ * Fences that are tracked but never narrated, because another fence already
+ * names the same place.
+ *
+ * SUKARI: "Sukari industries" is the compound drawn round "SUKARI INDURSTRIES
+ * FACTORY" — the operator's words, 2026-10-19: "they are one". Every trip
+ * through the gate said both, a minute apart. The factory is the one kept:
+ * it is the place operators name. By id, not name, so a rename in Wialon
+ * cannot quietly bring the second line back. Presence, logbook places and a
+ * keep-out breach (were it ever enforced) still see the fence.
+ */
+const SILENT_ZONE_IDS = new Set([
+  'cms24soq5000sscv7rzasdue3',   // SUKARI · Sukari industries
+])
 
 /**
  * isInsideFence, with the zone's box tried first. Same answer; most zones are
@@ -375,6 +392,7 @@ async function getZones(orgId: string): Promise<CachedZone[]> {
       estate: isEstateFeature(category),
       areaHa: geometry.type === 'POLYGON' ? ringAreaHa(geometry.polygonCoords) : null,
       box: fenceBox(geometry),
+      silent: SILENT_ZONE_IDS.has(r.id),
     })
   }
   zoneCache.set(orgId, { zones, loadedAt: Date.now() })
@@ -472,6 +490,9 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
     // raw crossing, the frame it happens.
     if (z.keepOut && isIn && !before.has(z.id)) breached.push(z)
 
+    // Another fence names this place — no arrival or exit of its own.
+    if (z.silent) continue
+
     if (isIn === told.has(z.id)) { waiting.delete(z.id); continue }
 
     // The change is real only once it has held for a dwell — see DWELL_MS.
@@ -510,7 +531,7 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
   const fold = (list: CachedZone[], inside: boolean) => {
     if (list.length === 0) return
     for (const z of zones) {
-      if (!z.estate || list.includes(z)) continue
+      if (!z.estate || z.silent || list.includes(z)) continue
       if (inside && z.keepOut) continue      // a keep-out entry is a breach, never an arrival
       const w = waiting.get(z.id)
       if (!w || w.inside !== inside || now.has(z.id) !== inside) continue
@@ -623,7 +644,7 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
     const rest = departures.slice(1)
     // Where it ended up matters more than what it left, when we know it.
     const stillIn = zones
-      .filter(z => z.estate && z.areaHa != null && now.has(z.id))
+      .filter(z => z.estate && !z.silent && z.areaHa != null && now.has(z.id))
       .sort(bySpecificity)[0]
 
     const text = `${who} left ${lead.name}`

@@ -158,6 +158,52 @@ describe('the Live Feed names our overlay, not the provider', () => {
   })
 })
 
+// Sukari, 2026-10-19: "Sukari industries" is the compound drawn round
+// "SUKARI INDURSTRIES FACTORY", and the operator's word is that they are one
+// place. Only the factory is ever named. Synthetic geometry, real ids.
+describe('a fence that another fence already names stays silent', () => {
+  const SUKARI = [
+    { id: 'cms24soq5000sscv7rzasdue3', name: 'Sukari industries', type: 'POLYGON', mode: 'BLOCKLIST', isActive: false,
+      centerLat: null, centerLng: null, radiusM: null, widthM: null, polygonCoords: ring(-0.83, 34.37, 0.02) },
+    { id: 'cmtqrn0c500000qqfw09llcew', name: 'SUKARI INDURSTRIES FACTORY', type: 'POLYGON', mode: 'BLOCKLIST', isActive: false,
+      centerLat: null, centerLng: null, radiusM: null, widthM: null, polygonCoords: ring(-0.826, 34.374, 0.012) },
+  ]
+  const ROAD    = { lat: -0.85,  lng: 34.36 }    // outside both
+  const COMPOUND = { lat: -0.828, lng: 34.372 }  // inside the compound only
+  const FACTORY = { lat: -0.82,  lng: 34.38 }    // inside both
+
+  beforeEach(() => {
+    ;(prisma.geofence.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(SUKARI)
+  })
+
+  it('names only the factory, in and out through the compound', async () => {
+    const v = `veh-sukari-${seq}`
+    await ping(v, ROAD.lat, ROAD.lng, tick(0))
+    await ping(v, ROAD.lat, ROAD.lng, tick(1))
+    published.length = 0
+
+    await ping(v, COMPOUND.lat, COMPOUND.lng, tick(1))                       // through the outer fence
+    for (let i = 0; i < 6; i++) await ping(v, FACTORY.lat, FACTORY.lng, tick(1)) // into the factory
+    await ping(v, COMPOUND.lat, COMPOUND.lng, tick(1))                       // out of the factory
+    for (let i = 0; i < 6; i++) await ping(v, ROAD.lat, ROAD.lng, tick(1))     // and off the compound
+
+    expect(published.map(n => n.text)).toEqual([
+      'MUFINDI: EX 24 arrived at SUKARI INDURSTRIES FACTORY.',
+      'MUFINDI: EX 24 left SUKARI INDURSTRIES FACTORY.',
+    ])
+  })
+
+  it('says nothing for a unit that only ever enters the compound', async () => {
+    const v = `veh-sukari-edge-${seq}`
+    await ping(v, ROAD.lat, ROAD.lng, tick(0))
+    await ping(v, ROAD.lat, ROAD.lng, tick(1))
+    published.length = 0
+    for (let i = 0; i < 6; i++) await ping(v, COMPOUND.lat, COMPOUND.lng, tick(1))
+    for (let i = 0; i < 6; i++) await ping(v, ROAD.lat, ROAD.lng, tick(1))
+    expect(published).toHaveLength(0)
+  })
+})
+
 describe('dwell — a boundary is not an event', () => {
   it('ignores a vehicle that clips a corner and carries on', async () => {
     const v = `veh-clip-${seq}`
