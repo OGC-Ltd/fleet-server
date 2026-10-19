@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from 'vitest'
 import {
-  buildFallback, modelBriefRejectionReason, type VehicleFacts,
+  buildFallback, factsForModel, modelBriefRejectionReason, type VehicleFacts,
 } from '../../src/modules/vehicles/vehicle-brief.js'
 
 const facts = (over: Partial<VehicleFacts> = {}): VehicleFacts => ({
@@ -307,5 +307,32 @@ describe('modelBriefRejectionReason', () => {
   it('does not require a driver the fleet does not have', () => {
     const msg = 'KCW 865K has covered 61.4 km today on a run to OPAPO.'
     expect(modelBriefRejectionReason(msg, facts({ driver: null, driverSource: null }))).toBeNull()
+  })
+})
+
+// 2026-10-20: gpt-5-nano at minimal reasoning narrated every null it was shown.
+describe('placeholders never reach the operator', () => {
+  it.each([
+    ['KMGJ 333W driven by  on  its 0th run today.', /placeholder/],
+    ['West Sugar-CH27112 driver: null. It has covered 61.4 km today.', /placeholder/],
+    ['KCW 865K has covered 61.4 km today; dispatchedAtLocal 23:16.', /placeholder/],
+    ['CIVIL - EXCAVATOR001 has been online=false since 00:13, 61.4 km today.', /placeholder/],
+  ])('rejects %s', (msg, why) => {
+    expect(modelBriefRejectionReason(msg, facts({ driver: null, driverSource: null }))).toMatch(why)
+  })
+})
+
+describe('factsForModel', () => {
+  it('sends only what is known', () => {
+    const f = factsForModel(facts({ driver: null, driverSource: null, refuelCount: 0, refuelLocations: [], refuelledLitres: null, runsToday: 1, runsCompletedToday: 0, runIndex: 1, earlierRunDestinations: [] }))
+    for (const k of ['driver', 'driverSource', 'refuelCount', 'refuelLocations', 'refuelledLitres', 'runsToday', 'runsCompletedToday', 'runIndex', 'earlierRunDestinations']) {
+      expect(f).not.toHaveProperty(k)
+    }
+    expect(f).toMatchObject({ plate: 'KCW 865K', distanceTodayKm: 61.4 })
+  })
+
+  it('keeps a zero distance and the run count from two runs up', () => {
+    const f = factsForModel(facts({ distanceTodayKm: 0, runsToday: 2, runIndex: 2 }))
+    expect(f).toMatchObject({ distanceTodayKm: 0, runsToday: 2, runIndex: 2 })
   })
 })

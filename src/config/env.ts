@@ -118,6 +118,12 @@ const schema = z.object({
   // reports { configured: false } and clients fall back to the local summary.
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL:   z.string().default('gpt-5-nano'),
+  // The per-unit brief (vehicles/vehicle-brief.ts), its own model so a click
+  // is fast: measured on the box 2026-10-20 over 14 units, gpt-5.4-nano at low
+  // reasoning passed every reply in ~2 s; gpt-5-nano needed 5–12 s at low and
+  // failed 12 of 14 at minimal. The project's key offers only these two.
+  VEHICLE_BRIEF_MODEL:  z.string().default('gpt-5.4-nano'),
+  VEHICLE_BRIEF_EFFORT: z.string().default('low'),
   // DeepSeek, asked when OpenAI cannot answer (no key, no credit, a timeout):
   // the Logbook's place activities (usage-review.activity-ai). Its API speaks
   // OpenAI's chat-completions. Unset = no fallback.
