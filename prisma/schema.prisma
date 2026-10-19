@@ -338,6 +338,7 @@ model Organisation {
   alertDecisions       AlertDecision[]
 
   @@map("organisations")
+  vehicleInsights VehicleInsight[]
 }
 
 /// Named role scoped to an organisation (e.g. "fleet_manager", "driver", "mechanic").
@@ -831,6 +832,7 @@ model Vehicle {
   speedingIncidents  SpeedingIncident[]
   sensorFaults       SensorFaultEpisode[]
   incidentDailyStats VehicleIncidentDailyStat[]
+  insights           VehicleInsight[]
   providerAlerts     ProviderAlert[]
   notifications      Notification[]
   dispatches         Dispatch[]
@@ -3169,4 +3171,34 @@ enum WeighmentCategory {
   /// Cane weighed at an outstation and weighed again on arrival at the
   /// factory, so the ticket carries two complete pairs.
   CANE_TRANSFER
+}
+
+/// The unit's insight, written in the background and read on a click — and,
+/// kept as history, its memory: each new insight is given the last few, with
+/// what has since become of everything they flagged (vehicle-insight.ts).
+model VehicleInsight {
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  vehicleId      String   @map("vehicle_id")
+  generatedAt    DateTime @default(now()) @map("generated_at")
+  /// 'model' when the model wrote it, 'facts' when the server did.
+  source   String
+  model    String?
+  headline String
+  /// [{ kind, text, refs: [{ kind, id }] }]
+  findings Json
+  action   String?
+  /// 'low' | 'medium' | 'high'
+  risk     String
+  /// The measured signals it was written from, and their hash: a unit is
+  /// rewritten only when these change (or the last is old).
+  signals     Json
+  signalsHash String @map("signals_hash")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+  vehicle      Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId, generatedAt(sort: Desc)])
+  @@index([organisationId, generatedAt])
+  @@map("vehicle_insights")
 }

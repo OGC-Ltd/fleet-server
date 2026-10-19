@@ -124,6 +124,10 @@ const schema = z.object({
   // failed 12 of 14 at minimal. The project's key offers only these two.
   VEHICLE_BRIEF_MODEL:  z.string().default('gpt-5.4-nano'),
   VEHICLE_BRIEF_EFFORT: z.string().default('low'),
+  // The per-unit insight sweep (vehicles/vehicle-insight.ts): written in the
+  // background, read instantly on a click. 'false' stops the sweep; a click
+  // still writes that one unit.
+  VEHICLE_INSIGHT_ENABLED: z.enum(['true', 'false']).default('true').transform(v => v === 'true'),
   // DeepSeek, asked when OpenAI cannot answer (no key, no credit, a timeout):
   // the Logbook's place activities (usage-review.activity-ai). Its API speaks
   // OpenAI's chat-completions. Unset = no fallback.

@@ -15,6 +15,7 @@ import { stopPushDispatcher }       from './lib/push-dispatcher.js'
 import { startCacheWarmer } from './lib/warm-cache.js'
 import { warmRoadRoutes } from './lib/road-routes.js'
 import { startAiInsightWarmer } from './modules/dashboard/ai-insight.js'
+import { startVehicleInsightSweep } from './modules/vehicles/vehicle-insight.js'
 import { WialonLiveAdapter } from './providers/wialon/wialon.adapter.js'
 import { startRaiFactorySuiteReconciler } from './providers/raifactorysuite/raifactorysuite.reconciler.js'
 import { startRetentionSweep } from './lib/queues/retention.js'
@@ -56,6 +57,9 @@ async function main() {
   // Hourly AI operations brief per org (dashboard/ai-insight.ts) — generated
   // in the background so the endpoint always answers from memory.
   const stopAiInsightWarmer = startAiInsightWarmer()
+  // Each unit's insight, rewritten in the background when its signals change,
+  // so a click on the map reads it instantly (vehicles/vehicle-insight.ts).
+  const stopVehicleInsightSweep = startVehicleInsightSweep()
   // (The live feed used to be seeded here into a shared in-memory ring. Each
   // SSE client now replays its OWN org's history from the durable store on
   // connect — see lib/sse.ts's replayDashboardFeed — so there is nothing to
@@ -144,6 +148,7 @@ async function main() {
     stopSimEventsWorker()
     stopCacheWarmer()
     stopAiInsightWarmer()
+    stopVehicleInsightSweep()
     await stopPushDispatcher().catch((err) => logger.warn({ err }, 'Push worker thread shutdown failed'))
     await disconnectRedis().catch((err) => logger.warn({ err }, 'Redis disconnect failed'))
     server.close(async () => {
