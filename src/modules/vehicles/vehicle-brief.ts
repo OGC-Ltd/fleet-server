@@ -707,12 +707,20 @@ async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
  * quoting 0.4 km beside a card reading 3.1 km is the operator's problem.
  * Re-measuring does not re-ask the model — see lastModelAsk — so a unit driving
  * all afternoon costs the same completions as one standing still.
+ *
+ * `fresh` (operator 2026-10-19: "the insight should be computed per click"):
+ * the panel asks with it once per click on a unit. It skips the cache, measures
+ * again and asks the model again whatever lastModelAsk says; the model's
+ * version still lands detached, and the panel's follow-up reads (without
+ * `fresh`) pick it up from the cache.
  */
-export async function getVehicleBrief(orgId: string, vehicleId: string): Promise<VehicleBrief> {
+export async function getVehicleBrief(
+  orgId: string, vehicleId: string, { fresh = false }: { fresh?: boolean } = {},
+): Promise<VehicleBrief> {
   const key = `${orgId}:${vehicleId}`
 
   const hit = cache.get(key)
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS && await distanceStillAgrees(orgId, vehicleId, hit.brief)) {
+  if (!fresh && hit && Date.now() - hit.at < CACHE_TTL_MS && await distanceStillAgrees(orgId, vehicleId, hit.brief)) {
     return hit.brief
   }
 
@@ -736,7 +744,7 @@ export async function getVehicleBrief(orgId: string, vehicleId: string): Promise
     // gate each of those would buy a completion for a sentence that differs
     // from the last one by a decimal point.
     const askedAt = lastModelAsk.get(key) ?? 0
-    if (env.OPENAI_API_KEY && Date.now() - askedAt >= CACHE_TTL_MS) {
+    if (env.OPENAI_API_KEY && (fresh || Date.now() - askedAt >= CACHE_TTL_MS)) {
       lastModelAsk.set(key, Date.now())
       void askModel(facts)
         .then((brief) => { if (brief.source === 'model') remember(key, brief) })

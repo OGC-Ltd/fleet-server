@@ -95,7 +95,8 @@ export const endAssignment: RequestHandler = async (req, res, next) => {
 
 export const getBrief: RequestHandler = async (req, res, next) => {
   try {
-    const brief = await getVehicleBrief(p(req, 'orgId'), p(req, 'vehicleId'))
+    // `?fresh=1` once per click on the unit: measured and phrased anew.
+    const brief = await getVehicleBrief(p(req, 'orgId'), p(req, 'vehicleId'), { fresh: req.query.fresh === '1' })
     sendSuccess(res, brief)
   } catch (err) { next(err) }
 }
