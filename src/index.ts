@@ -27,9 +27,15 @@ import { startOutboundWorker } from './lib/queues/outbound.js'
 import { disconnectRedis } from './lib/redis.js'
 import { flushAllMovementWindows } from './lib/notifications/movement-window.js'
 import { staticRoutePairs } from './providers/raifactorysuite/raifactorysuite.simulator.js'
+import { ensureAllOrganisationsHaveCatalogueRoles } from './modules/roles/role.catalogue.js'
 
 async function main() {
   await connectDB()
+
+  // Every organisation holds the standard roles; ones created since the last
+  // seed run had none (modules/roles/role.catalogue). Additive, off the
+  // critical path, and it never fails the boot.
+  void ensureAllOrganisationsHaveCatalogueRoles()
 
   const app = createApp()
 
