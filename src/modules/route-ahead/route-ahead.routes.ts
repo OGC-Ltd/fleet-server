@@ -8,7 +8,7 @@ import { BadRequestError } from '../../core/errors/errors.js'
 import { getRouteAhead } from './route-ahead.service.js'
 import { googleRoutingAvailable } from '../../providers/google-routing/index.js'
 import { getHaltInvestigation, getTripInvestigation } from '../fuel/fuel-investigation.js'
-import { getHubs, getInbound, getInboundAt, ARRIVAL_MINUTES } from './hub-arrivals.js'
+import { getHubs, getInbound, getInboundAt, getArrivalClasses, ARRIVAL_MINUTES } from './hub-arrivals.js'
 
 const routeQuery = z.object({
   destLat:  z.coerce.number().min(-90).max(90).optional(),
@@ -35,7 +35,7 @@ const inboundQuery = z.object({
       'minutes: up to three whole numbers from 1 to 60'),
   // Whose drive times: one class at its measured speed, all at their own,
   // or Google's two-wheeler. `mode=TWO_WHEELER` is the old spelling of it.
-  cls: z.enum(['all', 'VEHICLE', 'TRACTOR', 'TRUCK', 'CAR', 'MOTORBIKE']).optional(),
+  cls: z.enum(['all', 'VEHICLE', 'TRACTOR', 'TRUCK', 'CAR', 'PLANT', 'MOTORBIKE']).optional(),
   mode: z.enum(['DRIVE', 'TWO_WHEELER']).optional(),
   available: z.enum(['0', '1']).optional().default('0').transform((s) => s === '1'),
 }).transform((q) => ({ ...q, cls: q.cls ?? (q.mode === 'TWO_WHEELER' ? 'MOTORBIKE' as const : 'all' as const) }))
@@ -49,7 +49,13 @@ const pointQuery = z.object({
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
 const hubs: RequestHandler = async (req, res, next) => {
-  try { sendSuccess(res, { enabled: googleRoutingAvailable(), hubs: await getHubs(p(req, 'orgId')) }) } catch (err) { next(err) }
+  try {
+    const orgId = p(req, 'orgId')
+    const [list, classes] = await Promise.all([getHubs(orgId), getArrivalClasses(orgId)])
+    // How many units each of the window's classes holds, so it offers Plant
+    // only where the fleet has plant.
+    sendSuccess(res, { enabled: googleRoutingAvailable(), hubs: list, classes })
+  } catch (err) { next(err) }
 }
 
 const inbound: RequestHandler = async (req, res, next) => {

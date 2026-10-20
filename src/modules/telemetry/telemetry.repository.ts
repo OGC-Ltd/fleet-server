@@ -853,6 +853,7 @@ export async function findFleetSnapshot(orgId: string) {
       tankCapacityLitres: true,
       // What the machine is, per RaiFactorySuite's register (KASULU only).
       machineName: true,
+      equipmentType: true,
       // The register's standard burn rate (KASULU only), for the card's
       // "today against standard".
       ratedConsumption: true,
@@ -1094,6 +1095,9 @@ export async function findFleetSnapshot(orgId: string) {
         // set on the KASULU units it lists and null everywhere else. The unit
         // card shows it in place of the label it reads off the unit code.
         machineName: v.machineName ?? null,
+        // The register's normalised type ("Excavator", "Mahindra Tractor"),
+        // which hub Arrivals classes the unit by.
+        equipmentType: v.equipmentType ?? null,
         // The register's standard burn: L/h when the basis is HOURS, km/L when
         // DISTANCE. Null on every unit the register does not rate, so the
         // card compares only where there is a standard to compare with.
