@@ -192,10 +192,12 @@ const googleError = (err: unknown) =>
 
 /**
  * What the drive times are for. A unit class times every unit in it by that
- * class's measured factor; `all` times each unit by its own class; VEHICLE is
- * every unit that is not a tractor (trucks and cars, each at its own factor),
- * the window's "Truck or car"; PLANT is the register's excavators, dozers,
- * loaders, graders, cranes (KASULU); MOTORBIKE is Google's two-wheeler mode,
+ * class's measured factor; `all` times each unit by its own class; the window
+ * offers TRACTOR, TRUCK, CAR and PLANT (operator, 2026-10-20: "tractors to
+ * tractors, trucks to trucks, cars to cars"); VEHICLE, trucks and cars
+ * together, is the old "Truck or car" list, kept for clients that still ask;
+ * PLANT is the register's excavators, dozers, loaders, graders, cranes (KASULU)
+ * and Sukari's company machines; MOTORBIKE is Google's two-wheeler mode,
  * uncalibrated. A FIXED unit (a generator) is in none of them.
  */
 export type ArrivalClass = 'all' | 'VEHICLE' | 'TRACTOR' | 'TRUCK' | 'CAR' | 'PLANT' | 'MOTORBIKE'
@@ -209,11 +211,11 @@ export function inArrivalClass(c: UnitClass, cls: ArrivalClass): boolean {
 }
 
 /** The window's classes, and how many of the fleet's units each holds. */
-export const WINDOW_CLASSES = ['VEHICLE', 'TRACTOR', 'PLANT'] as const
+export const WINDOW_CLASSES = ['TRACTOR', 'TRUCK', 'CAR', 'PLANT', 'VEHICLE'] as const
 export type WindowClass = typeof WINDOW_CLASSES[number]
 
 export function classCounts(rows: SnapRow[]): Record<WindowClass, number> {
-  const out: Record<WindowClass, number> = { VEHICLE: 0, TRACTOR: 0, PLANT: 0 }
+  const out: Record<WindowClass, number> = { TRACTOR: 0, TRUCK: 0, CAR: 0, PLANT: 0, VEHICLE: 0 }
   for (const r of rows) {
     const c = snapClass(r)
     for (const w of WINDOW_CLASSES) if (inArrivalClass(c, w)) out[w]++
