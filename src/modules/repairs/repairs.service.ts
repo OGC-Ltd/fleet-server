@@ -9,9 +9,8 @@ import * as repo from './repairs.repository.js'
 import { reportResolution, reportStageChange } from './repairs.notify.js'
 import { notifyRepairAssignment } from './repairs.assignment-mail.js'
 import { canAssignTriage, canReceiveTriage, canSignOffTriage } from './repairs.authz.js'
-import { ForbiddenError } from '../../core/errors/errors.js'
+import { ConflictError, ForbiddenError } from '../../core/errors/errors.js'
 import { repairSignedOff } from '../fuel/fuel-followup.service.js'
-import { assertNoOutstandingParts } from './repairs.overhaul.js'
 import type { AssignRepairItem, CreateRepairReport, ResolveItem, SetStage, RespondToAssignment } from './repairs.schema.js'
 
 export { notifyRepairAssignment }
@@ -369,8 +368,9 @@ export async function closeItem(itemId: string, orgId: string, userId: string, d
     }
   }
 
-  // A fixed probe has its spares fitted; a failed sign-off never waits on them.
-  if (dto.verdict === 'fixed') await assertNoOutstandingParts(itemId, orgId)
+  // 'Fixed' is the Control Room's to say, after somebody else completed the
+  // job (repairs.workflow verify). Only the unsuccessful close remains here.
+  if (dto.verdict === 'fixed') throw new ConflictError('Complete the job in Workshop: the Control Room verifies it fixed')
 
   const item = await repo.resolveItem(itemId, orgId, userId, dto)
   if (!item) return null
