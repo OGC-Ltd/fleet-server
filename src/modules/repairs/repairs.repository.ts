@@ -345,10 +345,12 @@ export async function respondToAssignment(
   })
 }
 
-export async function findItems(orgId: string, q: ListItemsQuery) {
+export async function findItems(orgId: string, q: ListItemsQuery, vehicleScope: Set<string> | null = null) {
   const rows = await prisma.repairReportItem.findMany({
     where: {
       organisationId: orgId,
+      ...(vehicleScope ? { vehicleId: { in: [...vehicleScope] } } : {}),
+      ...(q.queue ? { queue: q.queue } : {}),
       ...(q.status === 'open'       ? { resolvedAt: null }                              : {}),
       // Signed off, split by WHICH end it reached. See the note on `status` in
       // repairs.schema: a failed job filed under "Resolved" is a job nobody
@@ -365,6 +367,13 @@ export async function findItems(orgId: string, q: ListItemsQuery) {
       ...itemInclude,
       report: { select: { id: true, reportedAt: true, reportedBy: { select: { fullName: true } } } },
       resolvedBy: { select: { id: true, fullName: true } },
+      workshopTechnician: { select: { id: true, fullName: true } },
+      // The live workshop day, for the Repairs list's Workshop day column.
+      bookings: {
+        where: { status: { in: ['booked', 'arrived'] } },
+        select: { id: true, bookingDate: true, status: true, workshop: { select: { name: true } } },
+        take: 1,
+      },
     },
     orderBy: { id: 'desc' },
     take: q.limit + 1,

@@ -28,6 +28,14 @@ import {
   setInspectionSchema, addSparePartSchema, updateSparePartSchema,
 } from './repairs.schema.js'
 import * as ctrl from './repairs.controller.js'
+import * as wf from './repairs.workflow.controller.js'
+import {
+  flagUnitsSchema, pathSchema, assessmentSchema, bookingSchema, cancelBookingSchema,
+  workshopAssignSchema, damageSchema, warrantyVoidSchema, warrantyClearSchema, workEntrySchema,
+  completeSchema, verifySchema, voidSchema, sourcePartSchema, issuePartSchema,
+  investigationUpdateSchema, availabilityQuerySchema, dayQuerySchema, workshopUpdateSchema,
+} from './repairs.workflow.schema.js'
+import { z } from 'zod'
 import { requireWorkableJob } from './repairs.authz.js'
 import { emitDashboardRepairChanged } from '../../lib/sse.js'
 
@@ -75,6 +83,47 @@ router.get('/items/:itemId/overhaul', requirePermissionStrict('repair:read'), ct
 router.post('/items/:itemId/inspections', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(setInspectionSchema), ctrl.setInspection)
 router.post('/items/:itemId/parts', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(addSparePartSchema), ctrl.addSparePart)
 router.post('/items/:itemId/parts/:partId', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(updateSparePartSchema), ctrl.updateSparePart)
+
+/*
+ * The Vehicle Support and Repair Workflow (repairs.workflow, plan §4). Every
+ * write is strict for the reason the header gives. The ones that touch the
+ * work itself (path, damage, warranty, work log, complete) also need a job the
+ * caller may work; the Control Room's (flag, assess, book, arrive, verify) do
+ * not, and apply the caller's vehicle scope in the service instead.
+ */
+router.get('/queue', requirePermissionStrict('repair:claim'), wf.queue)
+router.get('/service-states', requirePermission('repair:read'), wf.serviceStates)
+router.get('/workshops', requirePermission('repair:read'), wf.workshops)
+router.get('/workshops/:workshopId/availability', requirePermission('repair:read'), validateQuery(availabilityQuerySchema), wf.availability)
+router.get('/workshops/:workshopId/day', requirePermission('repair:read'), validateQuery(dayQuerySchema), wf.workshopDay)
+router.post('/workshops/:workshopId', requirePermissionStrict('repair:assign'), validateBody(workshopUpdateSchema), wf.updateWorkshop)
+// Security reads are strict: these are allegations against named drivers.
+router.get('/security-investigations', requirePermissionStrict('security_case:read'), wf.investigations)
+router.get('/security-investigations/holders', requirePermissionStrict('security_case:read'), wf.securityHolders)
+router.post('/security-investigations/:investigationId', requirePermissionStrict('security_case:update'), validateBody(investigationUpdateSchema), wf.updateInvestigation)
+
+router.get('/flaggable-units', requirePermissionStrict('repair:flag'), wf.flaggableUnits)
+router.post('/flags', requirePermissionStrict('repair:flag'), validateBody(flagUnitsSchema), wf.flagUnits)
+router.post('/items/:itemId/forward', requirePermissionStrict('repair:flag'), validateBody(z.object({ queue: z.enum(['controltech', 'workshop']).optional() })), wf.forward)
+router.post('/items/:itemId/claim', requirePermissionStrict('repair:claim'), wf.claim)
+router.post('/items/:itemId/path', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(pathSchema), wf.path)
+router.post('/items/:itemId/assessment', requirePermissionStrict('repair:assess'), validateBody(assessmentSchema), wf.assess)
+router.post('/items/:itemId/booking', requirePermissionStrict('repair:book'), validateBody(bookingSchema), wf.book)
+router.post('/items/:itemId/booking/cancel', requirePermissionStrict('repair:book'), validateBody(cancelBookingSchema), wf.cancelBooking)
+router.post('/items/:itemId/arrive', requirePermissionStrict('repair:book'), wf.arrive)
+router.post('/items/:itemId/workshop-assign', requirePermissionStrict('repair:book'), validateBody(workshopAssignSchema), wf.workshopAssign)
+router.post('/items/:itemId/damage', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(damageSchema), wf.damage)
+router.post('/items/:itemId/warranty-void', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(warrantyVoidSchema), wf.voidWarranty)
+router.post('/items/:itemId/warranty-void/clear', requirePermissionStrict('security_case:update'), validateBody(warrantyClearSchema), wf.clearWarranty)
+router.post('/items/:itemId/work', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(workEntrySchema), wf.work)
+router.post('/items/:itemId/complete', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(completeSchema), wf.complete)
+router.post('/items/:itemId/verify', requirePermissionStrict('repair:verify'), validateBody(verifySchema), wf.verify)
+router.post('/items/:itemId/void', requirePermissionStrict('repair:verify'), validateBody(voidSchema), wf.voidJob)
+router.get('/items/:itemId/ticket', requirePermission('repair:read'), wf.ticket)
+// Sourcing and issuing are not the job's assignee's: ControlTech and stores act on any job.
+router.post('/items/:itemId/parts/:partId/source', requirePermissionStrict('repair:parts_source'), validateBody(sourcePartSchema), wf.sourcePart)
+router.post('/items/:itemId/parts/:partId/issue', requirePermissionStrict('repair:parts_issue'), validateBody(issuePartSchema), wf.issuePart)
+
 // Last: `/items` would otherwise be swallowed by `/:reportId`.
 router.get('/:reportId', requirePermission('repair:read'), ctrl.getReport)
 

@@ -68,6 +68,16 @@ const STAGE_LABEL: Record<string, string> = {
   // so the label can read the way people say it without the column drifting
   // from what it holds.
   failed:           'Unsuccessful',
+  // The Repair Workflow's stages (repairs.workflow).
+  forwarded:           'With ControlTech',
+  remote_fix:          'Remote fix',
+  awaiting_assessment: 'Awaiting assessment',
+  booked:              'Booked in',
+  towing:              'Towing',
+  field_inspection:    'Field inspection',
+  in_workshop:         'In workshop',
+  completed:           'Awaiting verification',
+  void:                'Void',
 }
 
 /** `fuel_probe_dead` -> `Fuel probe dead`. The episode kinds are snake_case. */

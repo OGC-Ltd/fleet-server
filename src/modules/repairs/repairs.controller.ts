@@ -1,5 +1,6 @@
 import type { RequestHandler } from 'express'
 import * as overhaul from './repairs.overhaul.js'
+import { holdsPermission } from '../../middleware/authorize.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { ConflictError, NotFoundError, UnprocessableError } from '../../core/errors/errors.js'
 import * as repo from './repairs.repository.js'
@@ -20,7 +21,8 @@ export const listReports: RequestHandler = async (req, res, next) => {
 
 export const listItems: RequestHandler = async (req, res, next) => {
   try {
-    const result = await repo.findItems(p(req, 'orgId'), req.query as unknown as ListItemsQuery)
+    // A vehicle-scoped Control Room holder sees the jobs on their own units.
+    const result = await repo.findItems(p(req, 'orgId'), req.query as unknown as ListItemsQuery, req.authz?.vehicleIds ?? null)
     sendSuccess(res, result.data, 200, { cursor: result.cursor, hasNextPage: result.hasNextPage })
   } catch (err) { next(err) }
 }
@@ -179,7 +181,9 @@ export const setInspection: RequestHandler = async (req, res, next) => {
 
 export const addSparePart: RequestHandler = async (req, res, next) => {
   try {
-    sendSuccess(res, await overhaul.addSparePart(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as AddSparePart), 201)
+    // A stores holder issues an in-stock part at once; anyone else requests it.
+    const canIssue = await holdsPermission(req, 'repair:parts_issue')
+    sendSuccess(res, await overhaul.addSparePart(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as AddSparePart, canIssue), 201)
   } catch (err) { next(err) }
 }
 

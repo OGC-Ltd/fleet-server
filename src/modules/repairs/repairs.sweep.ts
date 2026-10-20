@@ -32,6 +32,7 @@ import {
 } from './repairs.escalation.js'
 import { escalationRecipients, reportEscalation, reportOpenDigest } from './repairs.notify.js'
 import { humanKind, repairRecipients } from './repairs.service.js'
+import { workflowSweep } from './repairs.workflow.js'
 
 /** What the sweep did, for the job's return value and the log line. */
 export interface SweepResult {
@@ -132,6 +133,14 @@ export async function runRepairSweep(now = new Date()): Promise<SweepResult> {
 
   for (const [orgId, counts] of byOrg) {
     await reportOpenDigest(orgId, counts, now)
+  }
+
+  // The Repair Workflow's own chases (no-shows, unverified, unclaimed). Never
+  // allowed to fail the digest above.
+  try {
+    await workflowSweep(now)
+  } catch (err) {
+    logger.error({ err }, 'repair sweep: workflow checks failed')
   }
 
   const result: SweepResult = { scanned: open.length, escalated, orgs: byOrg.size }

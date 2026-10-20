@@ -288,9 +288,12 @@ export const requireWorkableJob: RequestHandler = async (req, _res, next) => {
     const itemId = req.params['itemId'] as string
     const job = await prisma.repairReportItem.findFirst({
       where: { id: itemId, organisationId: orgId },
-      select: { assignedToId: true, assignmentStatus: true },
+      select: { assignedToId: true, assignmentStatus: true, workshopTechnicianId: true },
     })
     if (!job) throw new NotFoundError('Repair job not found')
+    // Repair Workflow: the workshop technician works the job in the workshop
+    // as well as the ControlTech technician who triaged it.
+    if (job.workshopTechnicianId && job.workshopTechnicianId === req.user?.id) return next()
     if (job.assignedToId !== req.user?.id) {
       throw new ForbiddenError('This job is not assigned to you. You can read it, but only the technician it is assigned to can work it')
     }

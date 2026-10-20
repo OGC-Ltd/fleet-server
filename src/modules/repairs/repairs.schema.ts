@@ -19,7 +19,13 @@ const OUTCOMES = ['fixing', 'needs_spare', 'cannot_fix'] as const
  * somebody has to stand behind, so it is reachable only through the resolve
  * route, which demands an account of the fix. Postgres holds that rule too.
  */
-export const STAGES = ['pending', 'spare_outsourced', 'fixing', 'fixed', 'failed'] as const
+export const STAGES = [
+  'pending', 'spare_outsourced', 'fixing', 'fixed', 'failed',
+  // The Vehicle Support and Repair Workflow (migration 20261020180000). Moved
+  // only by their own routes (repairs.workflow), never by the stage buttons.
+  'forwarded', 'remote_fix', 'awaiting_assessment', 'booked', 'towing',
+  'field_inspection', 'in_workshop', 'completed', 'void',
+] as const
 export type Stage = (typeof STAGES)[number]
 
 /**
@@ -72,7 +78,7 @@ function utcToday(): Date {
  * `<input type="date">` emits precisely this format, so the dashboard sends
  * what it holds and nothing serialises a Date on the way out.
  */
-const calendarDay = z.string()
+export const calendarDay = z.string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'Give the date as YYYY-MM-DD')
   .transform((v) => new Date(`${v}T00:00:00.000Z`))
   // `2026-02-31` has the right shape and is not a day. ISO parsing rejects an
@@ -236,6 +242,8 @@ export const listItemsQuerySchema = z.object({
   // One unit's repair history — the detail panel's tracking line. Served by
   // the [vehicle_id, created_at] index the table has carried from the start.
   vehicleId: z.string().min(1).optional(),
+  // Repair Workflow: the ControlTech queue or the workshop's jobs.
+  queue:     z.enum(['controltech', 'workshop']).optional(),
 })
 
 export type CreateRepairReport = z.infer<typeof createRepairReportSchema>
@@ -256,7 +264,9 @@ export type ListItemsQuery     = z.infer<typeof listItemsQuerySchema>
 export const INSPECTION_COMPONENTS = ['probe', 'probe_cable', 'tank_bracket', 'tracker', 'calibration'] as const
 
 export const setInspectionSchema = z.object({
-  component: z.enum(INSPECTION_COMPONENTS),
+  // Checked against the job's own category checklist in repairs.overhaul
+  // (repairs.workflow.schema CHECKLISTS); the CHECK was dropped in 20261020180000.
+  component: z.string().trim().min(1).max(64),
   verdict:   z.enum(['ok', 'faulty', 'replaced']),
   note:      z.string().trim().max(1000).optional(),
 })
@@ -269,6 +279,15 @@ export const addSparePartSchema = z.object({
   /** The supplier's promised day, YYYY-MM-DD, today or later. */
   expectedAt: calendarDay.optional(),
   note:       z.string().trim().max(1000).optional(),
+  /**
+   * Workflow step 5. Absent = today's behaviour, a part already ordered.
+   * 'inventory' = from stores: issued at once by a stores holder
+   * (repair:parts_issue), otherwise requested from stores. 'controltech' =
+   * not in stock: requested, for ControlTech to source.
+   */
+  source:     z.enum(['inventory', 'controltech']).optional(),
+  itemCode:   z.string().trim().max(100).optional(),
+  store:      z.string().trim().max(200).optional(),
 })
 
 export const updateSparePartSchema = z.object({
