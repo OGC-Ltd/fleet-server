@@ -112,6 +112,19 @@ export const PERMISSION_CATALOGUE = {
   'repair:assign':         'Assign a repair job to a technician',
   'repair:resolve':        'Close a repair job',
   'repair:work_any':       'Work any open repair job, not only an accepted one of your own',
+  // Vehicle Support and Repair Workflow (migration 20261020180000). The
+  // Control Room flags and books; the supervisor of it also assesses and
+  // verifies; ControlTech claims from its queue and sources parts.
+  'repair:flag':           'Flag a unit for repair',
+  'repair:assess':         'Assess whether a unit can reach the workshop',
+  'repair:book':           'Book a unit into the workshop and record its arrival',
+  'repair:claim':          'Claim a job from the ControlTech queue',
+  'repair:verify':         'Verify a completed repair, or void a job',
+  'repair:parts_issue':    'Issue a spare part from stores',
+  'repair:parts_source':   'Source a requested spare part',
+  // Opened by suspected malicious damage on a repair; never gates the repair.
+  'security_case:read':    'View security investigations',
+  'security_case:update':  'Update security investigations',
 
   // Device credentials. Minting one is a way to write telemetry for a whole
   // organisation, so it stays with administration rather than operations.
@@ -194,6 +207,8 @@ const ORG_EVERYTHING: PermissionSlug[] = [
   // Work ANY open job, not only one assigned to you and accepted
   // (repairs.authz requireWorkableJob). Not held by the technician.
   'repair:work_any',
+  'repair:flag', 'repair:assess', 'repair:book', 'repair:verify',
+  'repair:parts_issue', 'repair:parts_source',
   'vehicle:create', 'vehicle:update', 'vehicle:delete',
   'trip:create',
   'cargo:read', 'cargo:update', 'cargo:delete',
@@ -271,6 +286,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       // Lifted out of ORG_EVERYTHING — see the note there. This role and the
       // platform administrator are the only two that hand out a triage.
       'repair:assign',
+      'security_case:read', 'security_case:update',
       'fuel_theft:triage',
       'fuel_audit:read',
       'user:create', 'user:update', 'user:delete', 'user:assign_role',
@@ -301,10 +317,16 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
 
   {
     slug: 'fleet_analyst', name: 'Fleet Analyst', platform: false, vehicleScopable: false,
-    description: 'Reads the fleet and reports on it. Changes nothing.',
-    // Read and export, and not one verb that writes — the point of the role is
-    // to answer questions about the fleet, and an analyst who can amend a trip
-    // is an analyst whose figures nobody can trust.
+    description: 'Reads the fleet and reports on it. Flags units for repair and books them in; changes nothing else.',
+    // Read and export, and not one verb that amends a record — the point of
+    // the role is to answer questions about the fleet, and an analyst who can
+    // amend a trip is an analyst whose figures nobody can trust.
+    //
+    // THE ONE EXCEPTION: `repair:flag` and `repair:book`. The operator named
+    // the analyst as one of the three Control Room roles (2026-10-20), and the
+    // Control Room flags faulty units and books them into the workshop. Both
+    // create a repair record; neither touches a figure the role reports on.
+    // Assessing and verifying stay with the supervisor.
     //
     // NOT vehicleScopable, deliberately, and for the reason spelled out on
     // `supervisor`: the analytics endpoints compute ORG-WIDE aggregates that
@@ -320,6 +342,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'fuel_filling:read', 'fuel_theft:read', 'fuel_audit:read',
       'weighbridge:read', 'weighbridge:export',
       'geofence:read', 'route:read', 'dispatch:read',
+      'repair:read', 'repair:flag', 'repair:book',
     ],
   },
 
@@ -338,6 +361,8 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'fuel_theft:read', 'fuel_theft:create', 'fuel_theft:triage', 'fuel_audit:read', 'fuel_filling:read',
       'driver:read',
       'report:read', 'report:export', 'report:operations',
+      // Suspected malicious damage found in a repair (Repair Workflow 4.2).
+      'security_case:read', 'security_case:update',
     ],
   },
   {
@@ -349,6 +374,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'geofence:read', 'fuel_theft:read', 'fuel_audit:read', 'fuel_filling:read',
       'driver:read',
       'report:read', 'report:operations',
+      'security_case:read',
     ],
   },
 
@@ -391,7 +417,14 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     //
     // Restore it when analytics learns the scope; the invariant is pinned in
     // tests/unit/permissions-matrix.
-    permissions: [...TRACKING, ...MAP_TOOLS, 'dashboard:read', 'trip:read'],
+    //
+    // The Control Room (Repair Workflow, operator 2026-10-20): flag and book
+    // like the analyst and the operator, and the two accountable calls,
+    // assessing whether a unit can reach the workshop and verifying a repair.
+    permissions: [
+      ...TRACKING, ...MAP_TOOLS, 'dashboard:read', 'trip:read',
+      'repair:read', 'repair:flag', 'repair:book', 'repair:assess', 'repair:verify',
+    ],
   },
   {
     slug: 'operator', name: 'Operator', platform: false, vehicleScopable: true,
@@ -415,6 +448,8 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     permissions: [
       ...TRACKING.filter((pm) => pm !== 'map:read'),
       'weighbridge:read',
+      // Control Room (Repair Workflow): flag a faulty unit and book it in.
+      'repair:read', 'repair:flag', 'repair:book',
     ],
   },
 
@@ -464,6 +499,9 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       ...TRACKING.filter((pm) => pm !== 'map:read'),
       'sensor:read',
       'repair:read', 'repair:create', 'repair:resolve',
+      // Repair Workflow: claim from the ControlTech queue; source the parts
+      // a workshop job is missing.
+      'repair:claim', 'repair:parts_source',
       // Fuel alert follow-ups: named by the operator as a case holder. See
       // fuel-followup.service. The follow-up carries its own copy of the
       // incident, so this opens no fuel screen beyond the case itself.

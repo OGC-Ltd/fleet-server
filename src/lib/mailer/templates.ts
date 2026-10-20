@@ -428,3 +428,50 @@ export function fuelAuditReportEmail(r: FuelAuditReport): RenderedMail {
 
   return { category: 'fuel-audit-report', subject, text: t.join('\n'), html }
 }
+
+/**
+ * One event on the Vehicle Support and Repair Workflow (repairs.workflow.notify).
+ * Plate, ticket number and stage up front, the detail lines below, a link to
+ * the job. In-app notifications and email are the agreed channel (operator,
+ * 2026-10-20), so this is the email half of every workflow notice.
+ */
+export function repairWorkflowEmail(opts: {
+  orgName:   string
+  headline:  string
+  plate:     string
+  ticketNo?: string | null | undefined
+  stage:     string
+  lines:     { label: string; value: string }[]
+  critical?: boolean
+  link?:     string | undefined
+}): RenderedMail {
+  const ref = opts.ticketNo ? `${opts.plate} · ${opts.ticketNo}` : opts.plate
+  const text = [
+    `${opts.headline}`,
+    '',
+    `Unit: ${opts.plate}`,
+    ...(opts.ticketNo ? [`Ticket: ${opts.ticketNo}`] : []),
+    `Stage: ${opts.stage}`,
+    ...opts.lines.map((l) => `${l.label}: ${l.value}`),
+    '',
+    `${opts.orgName}`,
+    ...(opts.link ? [`Open the job: ${opts.link}`] : []),
+  ].join('\n')
+  const row = (k: string, v: string) =>
+    `<tr><td style="padding:3px 14px 3px 0;color:#64748b;vertical-align:top">${esc(k)}</td><td style="padding:3px 0">${esc(v)}</td></tr>`
+  const badge = opts.critical
+    ? '<p style="margin:0 0 12px"><span style="display:inline-block;padding:3px 10px;border-radius:999px;background:#b91c1c;color:#fff;font-weight:600;font-size:13px">Needs attention</span></p>'
+    : ''
+  const html = shell(
+    esc(opts.headline),
+    `${badge}<table style="border-collapse:collapse;font-size:14px">
+       ${row('Unit', opts.plate)}
+       ${opts.ticketNo ? row('Ticket', opts.ticketNo) : ''}
+       ${row('Stage', opts.stage)}
+       ${opts.lines.map((l) => row(l.label, l.value)).join('')}
+     </table>
+     <p style="margin:14px 0 0;font-size:12px;color:#64748b">${esc(opts.orgName)}</p>`,
+    opts.link ? { href: opts.link, label: 'Open the job' } : undefined,
+  )
+  return { category: 'repair-workflow', subject: `${opts.headline} — ${ref}`, text, html }
+}

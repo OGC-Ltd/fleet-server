@@ -334,6 +334,7 @@ model Organisation {
   weighments           Weighment[]
   repairReports        RepairReport[]
   repairReportItems    RepairReportItem[]
+  workshops            Workshop[]
   fuelTheftFollowUps   FuelTheftFollowUp[]
   alertDecisions       AlertDecision[]
 
@@ -500,6 +501,9 @@ model User {
   repairItemsAssigned   RepairReportItem[] @relation("RepairItemsAssigned")
   repairItemsAssignedBy RepairReportItem[] @relation("RepairItemsAssignedBy")
   repairItemsResolved   RepairReportItem[] @relation("RepairItemsResolved")
+  /// Workflow: jobs this person works in the workshop, and investigations they hold.
+  repairItemsWorkshop   RepairReportItem[] @relation("RepairItemsWorkshopTech")
+  securityInvestigationsAssigned SecurityInvestigation[] @relation("SecurityInvestigationsAssigned")
 
   @@index([organisationId])
   @@index([email])
@@ -838,6 +842,7 @@ model Vehicle {
   dispatches         Dispatch[]
   weighments         Weighment[]
   repairReportItems  RepairReportItem[]
+  securityInvestigations SecurityInvestigation[]
 
   @@index([organisationId])
   @@index([vehicleGroupId])
@@ -1517,7 +1522,63 @@ model RepairReportItem {
   fixNote        String?   @map("fix_note")
   recommendation String?
 
+  // -- Vehicle Support and Repair Workflow (migration 20261020180000) --
+  /// fuel_probe | tracker | sensor | engine | transmission | brakes |
+  /// suspension_steering | tyres | electrical | hydraulics | body | other (CHECK).
+  /// Routes the job (repairs.workflow.schema FAULT_CATEGORIES) and picks its checklist.
+  faultCategory          String?   @map("fault_category")
+  /// What the Control Room saw. Required with outcome 'flagged' (CHECK).
+  suspectedFault         String?   @map("suspected_fault")
+  /// controltech | workshop. Null = a hand-assigned job from before the workflow.
+  queue                  String?
+  forwardedAt            DateTime? @map("forwarded_at")
+  /// remote | physical: the ControlTech technician's call.
+  path                   String?
+  pathNote               String?   @map("path_note")
+  pathDecidedById        String?   @map("path_decided_by_id")
+  pathDecidedAt          DateTime? @map("path_decided_at")
+  /// RT-YYYY-NNNNN from sequence repair_ticket_seq, issued on arrival. UNIQUE.
+  ticketNo               String?   @unique @map("ticket_no")
+  ticketIssuedAt         DateTime? @map("ticket_issued_at")
+  /// The second assignee slot: who works it in the workshop. A user, or a
+  /// mechanic named on the ticket who has no account (plan Q4).
+  workshopTechnicianId   String?   @map("workshop_technician_id")
+  workshopTechnicianName String?   @map("workshop_technician_name")
+  diagnosis              String?
+  /// genuine | suspected_malicious (CHECK)
+  damageClass            String?   @map("damage_class")
+  damageNote             String?   @map("damage_note")
+  damageClassifiedById   String?   @map("damage_classified_by_id")
+  damageClassifiedAt     DateTime? @map("damage_classified_at")
+  /// The warranty of the damaged unit or components, void for suspected
+  /// malicious damage (operator, 2026-10-20: "warranty"). Empty components = the whole unit.
+  warrantyVoid           Boolean   @default(false) @map("warranty_void")
+  warrantyVoidNote       String?   @map("warranty_void_note")
+  warrantyVoidComponents String[]  @default([]) @map("warranty_void_components")
+  warrantyVoidedById     String?   @map("warranty_voided_by_id")
+  warrantyVoidedAt       DateTime? @map("warranty_voided_at")
+  /// The technician's completion, awaiting the Control Room.
+  completedAt            DateTime? @map("completed_at")
+  completedById          String?   @map("completed_by_id")
+  /// pass | fail (CHECK)
+  testResult             String?   @map("test_result")
+  testNote               String?   @map("test_note")
+  /// The Control Room's verification. A flagged job reaches 'fixed' only with one (CHECK).
+  verifiedAt             DateTime? @map("verified_at")
+  verifiedById           String?   @map("verified_by_id")
+  verifyNote             String?   @map("verify_note")
+  voidReason             String?   @map("void_reason")
+  precededById           String?   @map("preceded_by_id")
+
   createdAt DateTime @default(now()) @map("created_at")
+
+  workshopTechnician    User?                  @relation("RepairItemsWorkshopTech", fields: [workshopTechnicianId], references: [id], onDelete: SetNull)
+  precededBy            RepairReportItem?      @relation("RepairItemSuccession", fields: [precededById], references: [id], onDelete: SetNull)
+  succeededBy           RepairReportItem[]     @relation("RepairItemSuccession")
+  assessments           RepairAssessment[]
+  bookings              WorkshopBooking[]
+  workEntries           RepairWorkEntry[]
+  securityInvestigation SecurityInvestigation?
 
   report       RepairReport        @relation(fields: [reportId], references: [id], onDelete: Cascade)
   organisation Organisation        @relation(fields: [organisationId], references: [id])
@@ -1553,7 +1614,8 @@ model RepairInspection {
   id             String   @id @default(cuid())
   organisationId String   @map("organisation_id")
   repairItemId   String   @map("repair_item_id")
-  /// probe | probe_cable | tank_bracket | tracker | calibration (CHECK)
+  /// From the job's category checklist (repairs.workflow.schema CHECKLISTS).
+  /// Was a CHECK of the five probe components until 20261020180000.
   component      String
   /// ok | faulty | replaced (CHECK)
   verdict        String
@@ -1590,8 +1652,21 @@ model RepairSparePart {
   /// Required on that step: a collected part with no date to fit it by is a
   /// part that sits in a store. The job's expectedResolutionAt follows it.
   fixPlannedAt   DateTime? @map("fix_planned_at") @db.Date
-  /// ordered | received | fitted | cancelled (CHECK)
+  /// requested | ordered | received | issued | fitted | cancelled (CHECK)
+  ///   controltech: requested -> ordered -> received -> fitted
+  ///   inventory:   requested -> issued -> fitted (cancelled = returned)
   status         String    @default("ordered")
+  /// inventory (stores) | controltech (sourced). CHECK.
+  source         String    @default("controltech")
+  requestedAt    DateTime? @map("requested_at")
+  issuedById     String?   @map("issued_by_id")
+  issuedBy       String?   @map("issued_by_name")
+  issuedAt       DateTime? @map("issued_at")
+  /// RaiFactorySuite references, once the stores endpoint is confirmed (plan Q7b).
+  fsStore        String?   @map("fs_store")
+  fsItemCode     String?   @map("fs_item_code")
+  fsIssueId      String?   @map("fs_issue_id")
+  orderRef       String?   @map("order_ref")
   note           String?
   orderedById    String?   @map("ordered_by_id")
   orderedBy      String?   @map("ordered_by_name")
@@ -1606,6 +1681,121 @@ model RepairSparePart {
   @@index([repairItemId])
   @@index([organisationId, status])
   @@map("repair_spare_parts")
+}
+
+/// The Control Room's call on a unit that needs physical work: can it be
+/// driven to the workshop? One row per assessment; a unit can be reassessed.
+/// CHECKs: a reason whenever it is not roadworthy; roadworthy <=> workshop.
+model RepairAssessment {
+  id                 String   @id @default(cuid())
+  organisationId     String   @map("organisation_id")
+  repairItemId       String   @map("repair_item_id")
+  roadworthy         Boolean
+  /// workshop | tow | field_inspection (CHECK)
+  intervention       String
+  reason             String?
+  /// { towProvider?, location?, team?, note? }
+  interventionDetail Json?    @map("intervention_detail")
+  assessedById       String?  @map("assessed_by_id")
+  assessedBy         String?  @map("assessed_by_name")
+  assessedAt         DateTime @default(now()) @map("assessed_at")
+
+  repairItem RepairReportItem @relation(fields: [repairItemId], references: [id], onDelete: Cascade)
+
+  @@index([repairItemId])
+  @@map("repair_assessments")
+}
+
+/// An Auto Workshop and its daily intake of booked vehicles.
+model Workshop {
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  name           String
+  /// Booked vehicles a day (operator, 2026-10-20). A column, so it changes without a migration.
+  dailyCapacity  Int      @default(3) @map("daily_capacity")
+  location       String?
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organisation Organisation      @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  bookings     WorkshopBooking[]
+
+  @@index([organisationId])
+  @@map("workshops")
+}
+
+/// A roadworthy unit booked into a workshop day. Only these count against the
+/// cap; a tow or a field inspection holds no slot.
+///
+/// NOTE: a PARTIAL UNIQUE INDEX Prisma cannot express, one live booking per
+/// job (workshop_bookings_live_job_uniq, migration 20261020180000).
+model WorkshopBooking {
+  id             String    @id @default(cuid())
+  organisationId String    @map("organisation_id")
+  workshopId     String    @map("workshop_id")
+  repairItemId   String    @map("repair_item_id")
+  bookingDate    DateTime  @map("booking_date") @db.Date
+  /// booked | arrived | cancelled | no_show (CHECK)
+  status         String    @default("booked")
+  bookedById     String?   @map("booked_by_id")
+  bookedBy       String?   @map("booked_by_name")
+  bookedAt       DateTime  @default(now()) @map("booked_at")
+  arrivedAt      DateTime? @map("arrived_at")
+  cancelReason   String?   @map("cancel_reason")
+  cancelledAt    DateTime? @map("cancelled_at")
+
+  workshop   Workshop         @relation(fields: [workshopId], references: [id], onDelete: Cascade)
+  repairItem RepairReportItem @relation(fields: [repairItemId], references: [id], onDelete: Cascade)
+
+  @@index([workshopId, bookingDate])
+  @@index([repairItemId])
+  @@map("workshop_bookings")
+}
+
+/// Opened when a job's damage is classed suspected malicious. Tracked apart
+/// from the repair and NEVER consulted by a repair guard.
+model SecurityInvestigation {
+  id             String    @id @default(cuid())
+  organisationId String    @map("organisation_id")
+  repairItemId   String    @unique @map("repair_item_id")
+  vehicleId      String    @map("vehicle_id")
+  /// open | investigating | closed_confirmed | closed_unfounded (CHECK)
+  status         String    @default("open")
+  openedAt       DateTime  @default(now()) @map("opened_at")
+  openedById     String?   @map("opened_by_id")
+  assignedToId   String?   @map("assigned_to_id")
+  findings       String?
+  closedAt       DateTime? @map("closed_at")
+  closedById     String?   @map("closed_by_id")
+  /// [{ status, at, by, byName?, note? }]
+  history        Json?
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  repairItem RepairReportItem @relation(fields: [repairItemId], references: [id], onDelete: Cascade)
+  vehicle    Vehicle          @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  assignedTo User?            @relation("SecurityInvestigationsAssigned", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  @@index([organisationId, status])
+  @@map("security_investigations")
+}
+
+/// The ticket's narrative: diagnosis, repair, test and notes. Append-only.
+model RepairWorkEntry {
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  repairItemId   String   @map("repair_item_id")
+  at             DateTime @default(now())
+  byId           String?  @map("by_id")
+  byName         String?  @map("by_name")
+  /// diagnosis | repair | test | note (CHECK)
+  kind           String
+  text           String
+  labourMinutes  Int?     @map("labour_minutes")
+
+  repairItem RepairReportItem @relation(fields: [repairItemId], references: [id], onDelete: Cascade)
+
+  @@index([repairItemId, at])
+  @@map("repair_work_entries")
 }
 
 /// Per-unit-per-day incident counts, so month-over-month survives the 90-day

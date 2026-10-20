@@ -209,6 +209,16 @@ const schema = z.object({
    */
   REPAIR_ESCALATION_EMAILS: z.string().optional().default(''),
   /**
+   * Repair Workflow: suspected malicious damage goes to every live holder of
+   * `head_of_security` in the organisation (operator, 2026-10-20). This list
+   * is ONLY the fallback for an organisation where nobody holds the role, and
+   * using it also writes a feed warning so the gap gets fixed in the role editor.
+   */
+  REPAIR_SECURITY_EMAILS: z.string().optional().default(''),
+  /** A completed repair nobody in the Control Room has verified after this
+   *  many hours is chased by the daily sweep. */
+  REPAIR_VERIFY_STALE_HOURS: z.coerce.number().int().positive().optional().default(24),
+  /**
    * When the sweep runs. 05:05 UTC is 08:05 in Nairobi — the escalations and
    * the day's open-job digest are on the feed as the operations room opens,
    * and clear of the 04:11/04:23 probe and sensor sweeps that share the box.
