@@ -69,6 +69,23 @@ export const flagUnitsSchema = z.object({
   forward:        z.boolean().default(true),
 })
 
+/**
+ * A technician on a round fixed the unit there and then: no triage, no
+ * assessment. Only when nothing was taken from stores; a store part is
+ * accounted for through the full flow, so the server refuses it here.
+ */
+export const spotFixSchema = z.object({
+  vehicleIds:     z.array(z.string().min(1)).min(1).max(50),
+  faultCategory:  z.enum(FAULT_CATEGORIES).default('fuel_probe'),
+  suspectedFault: required(1000, 'Say what was wrong'),
+  fixNote:        required(2000, 'Say what you did'),
+  testNote:       note(1000).optional(),
+  labourMinutes:  z.coerce.number().int().min(0).max(10_000).optional(),
+  storePartTaken: z.boolean(),
+}).refine((b) => !b.storePartTaken, {
+  path: ['storePartTaken'], message: 'A spare part taken from stores goes through the full flow: flag the unit instead',
+})
+
 export const pathSchema = z.object({
   path: z.enum(['remote', 'physical']),
   note: note(1000).optional(),
@@ -188,6 +205,7 @@ export const workshopUpdateSchema = z.object({
 })
 
 export type FlagUnits     = z.infer<typeof flagUnitsSchema>
+export type SpotFix       = z.infer<typeof spotFixSchema>
 export type PathBody      = z.infer<typeof pathSchema>
 export type Assessment    = z.infer<typeof assessmentSchema>
 export type Booking       = z.infer<typeof bookingSchema>

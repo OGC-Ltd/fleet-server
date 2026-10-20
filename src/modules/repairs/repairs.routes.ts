@@ -17,12 +17,13 @@
  * neighbours; they come in with everybody else's when the flag flips.
  */
 
-import { Router } from 'express'
+import { Router, type RequestHandler } from 'express'
+import { ConflictError, GoneError } from '../../core/errors/errors.js'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission, requirePermissionStrict } from '../../middleware/authorize.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
 import {
-  assignRepairItemSchema, createRepairReportSchema, resolveItemSchema, setStageSchema,
+  assignRepairItemSchema, resolveItemSchema,
   respondToAssignmentSchema,
   listReportsQuerySchema, listItemsQuerySchema,
   setInspectionSchema, addSparePartSchema, updateSparePartSchema,
@@ -30,7 +31,7 @@ import {
 import * as ctrl from './repairs.controller.js'
 import * as wf from './repairs.workflow.controller.js'
 import {
-  flagUnitsSchema, pathSchema, assessmentSchema, bookingSchema, cancelBookingSchema,
+  flagUnitsSchema, spotFixSchema, pathSchema, assessmentSchema, bookingSchema, cancelBookingSchema,
   workshopAssignSchema, damageSchema, warrantyVoidSchema, warrantyClearSchema, workEntrySchema,
   completeSchema, verifySchema, voidSchema, sourcePartSchema, issuePartSchema,
   investigationUpdateSchema, availabilityQuerySchema, dayQuerySchema, workshopUpdateSchema,
@@ -69,14 +70,18 @@ router.get('/items', requirePermission('repair:read'), validateQuery(listItemsQu
    backing list, and it is NOT group-scoped -- an assignee must share the
    ORGANISATION, not the group (see repairs.repository.findAssignees). */
 router.get('/assignees', requirePermission('repair:assign'), ctrl.listAssignees)
-router.post('/', requirePermissionStrict('repair:create'), validateBody(createRepairReportSchema), ctrl.createReport)
+/* RETIRED 2026-10-21: every repair runs through the Workshop workflow. The
+   outcome report and the stage buttons made jobs no ticket, damage check or
+   verification would see; the routes answer with where to go instead. */
+const retired = (err: () => Error): RequestHandler => (_req, _res, next) => next(err())
+router.post('/', retired(() => new GoneError('Repairs are reported through Workshop now: Flag for repair, or Fixed on the spot')))
 router.post('/items/:itemId/assign', requirePermissionStrict('repair:assign'), validateBody(assignRepairItemSchema), ctrl.assignItem)
 router.post('/items/:itemId/assignment-response', requirePermissionStrict('repair:read'), validateBody(respondToAssignmentSchema), ctrl.respondToAssignment)
 router.post('/items/:itemId/resolve', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(resolveItemSchema), ctrl.resolveItem)
 // Strict for the same reason resolve is, and it is the weaker claim of the two
 // — but it writes a line onto a durable trail under a named person, and the
 // stage is what the people ordering spares read to decide whether to order.
-router.post('/items/:itemId/stage', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(setStageSchema), ctrl.setStage)
+router.post('/items/:itemId/stage', retired(() => new ConflictError('This job moves through its steps in Workshop now')))
 // The overhaul audit: the checklist and the spares ordered for the fix (repairs.overhaul).
 // Whoever may work a job may record its overhaul, so the same slug as a stage move.
 router.get('/items/:itemId/overhaul', requirePermissionStrict('repair:read'), ctrl.getOverhaul)
@@ -104,6 +109,7 @@ router.post('/security-investigations/:investigationId', requirePermissionStrict
 
 router.get('/flaggable-units', requirePermissionStrict('repair:flag'), wf.flaggableUnits)
 router.post('/flags', requirePermissionStrict('repair:flag'), validateBody(flagUnitsSchema), wf.flagUnits)
+router.post('/spot-fixes', requirePermissionStrict('repair:resolve'), validateBody(spotFixSchema), wf.spotFix)
 router.post('/items/:itemId/forward', requirePermissionStrict('repair:flag'), validateBody(z.object({ queue: z.enum(['controltech', 'workshop']).optional() })), wf.forward)
 router.post('/items/:itemId/claim', requirePermissionStrict('repair:claim'), wf.claim)
 router.post('/items/:itemId/path', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(pathSchema), wf.path)

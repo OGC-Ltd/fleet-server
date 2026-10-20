@@ -2,16 +2,19 @@
 
 **Source**: *Vehicle Support and Repair Workflow* (manual booking), pasted by the
 operator 2026-10-20.
-**Status (2026-10-21)**: BUILT, NOT DEPLOYED, NOT COMMITTED. Server:
-migration `20261020180000_repair_workflow` (dry-run on Postgres via PGlite,
-not applied to any real database), `src/modules/repairs/repairs.workflow*.ts`,
+**Status (2026-10-21)**: LIVE (server f23aca3, new-ui a1dde54, migration applied
+2026-10-20 22:32 UTC). ONE ROAD (2026-10-21): the old outcome report and stage
+buttons are retired (410/409), `/resolve` refuses 'fixed', the sweep takes open
+legacy jobs into the workflow, and technicians have `POST /spot-fixes` (fixed on
+the spot, no store part: born completed, ticketed, verified). Server:
+migration `20261020180000_repair_workflow`, `src/modules/repairs/repairs.workflow*.ts`,
 routes in `repairs.routes.ts`, grants in `lib/permissions.ts`. new-ui: the
 Workshop screen (`WorkshopScreen.jsx`, nav key `workshop`, on `repair:read`),
 `RepairWorkflowJob.jsx`, `FlagRepairDialog.jsx`, `api/repairWorkflow.js`.
 Deviations from the plan below: a non-probe flag is `target_kind = 'unit'`
 (covers tracker and sensor flags too), not `'mechanical'`; verification is
-always on for flagged jobs (no `REPAIR_VERIFY_REQUIRED` flag; legacy jobs keep
-`/resolve`); stores issues are recorded by hand (option A) until the
+always on for flagged jobs (no `REPAIR_VERIFY_REQUIRED` flag; legacy jobs are
+adopted, and `/resolve` closes only as unsuccessful); stores issues are recorded by hand (option A) until the
 FactorySuite stores endpoint is confirmed (Q7b); the Flag action lives on the
 Workshop screen, not yet in VehicleDetailPanel. Open questions in §9 were built
 with their proposed defaults.

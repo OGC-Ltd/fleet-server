@@ -17,10 +17,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const tx = vi.hoisted(() => ({
-  repairReportItem:   { findFirst: vi.fn(), updateMany: vi.fn(), update: vi.fn() },
+  repairReportItem:   { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), update: vi.fn() },
   repairAssessment:   { findFirst: vi.fn(), create: vi.fn() },
   workshop:           { findFirst: vi.fn() },
-  workshopBooking:    { count: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
+  workshopBooking:    { count: vi.fn(), create: vi.fn(), updateMany: vi.fn(), findMany: vi.fn() },
+  securityInvestigation: { findMany: vi.fn() },
   repairSparePart:    { findMany: vi.fn() },
   repairWorkEntry:    { create: vi.fn() },
   user:               { findUnique: vi.fn() },
@@ -38,8 +39,8 @@ vi.mock('../../src/modules/repairs/repairs.workflow.notify.js', () => ({
   HEAD_OF_SECURITY_ROLE: 'head_of_security',
 }))
 
-import { assessmentSchema, checklistFor, queueFor, CHECKLISTS } from '../../src/modules/repairs/repairs.workflow.schema.js'
-import { book, complete, verify } from '../../src/modules/repairs/repairs.workflow.js'
+import { assessmentSchema, checklistFor, queueFor, spotFixSchema, CHECKLISTS } from '../../src/modules/repairs/repairs.workflow.schema.js'
+import { book, complete, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
 import { ROLE_DEFINITIONS } from '../../src/lib/permissions.js'
 import { ConflictError, ForbiddenError, UnprocessableError } from '../../src/core/errors/errors.js'
 
@@ -208,5 +209,37 @@ describe('the Control Room and the Head of Security', () => {
     expect(perms('technician').has('repair:claim' as never)).toBe(true)
     expect(perms('technician').has('repair:parts_source' as never)).toBe(true)
     expect(perms('technician').has('repair:verify' as never)).toBe(false)
+  })
+})
+
+describe('one road for every repair', () => {
+  const spot = { vehicleIds: ['v-1'], suspectedFault: 'Probe reading flat', fixNote: 'Re-seated the probe connector' }
+
+  it('lets a technician record an on-the-spot fix only when nothing came from stores', () => {
+    expect(spotFixSchema.safeParse({ ...spot, storePartTaken: false }).success).toBe(true)
+    const r = spotFixSchema.safeParse({ ...spot, storePartTaken: true })
+    expect(r.success).toBe(false)
+    expect(r.error?.issues[0]?.path).toEqual(['storePartTaken'])
+  })
+
+  it('takes old open jobs into the workflow where they stand', async () => {
+    tx.workshopBooking.findMany.mockResolvedValue([])
+    tx.securityInvestigation.findMany.mockResolvedValue([])
+    tx.repairReportItem.findMany
+      .mockResolvedValueOnce([
+        job({ id: 'old-pending', stage: 'pending', outcome: 'audit', queue: null, path: null, faultCategory: 'fuel_probe', targetKind: 'probe' }),
+        job({ id: 'old-fixing', stage: 'fixing', outcome: 'fixing', queue: null, path: null, faultCategory: null, targetKind: 'probe' }),
+      ])
+      .mockResolvedValue([])
+    tx.$queryRaw.mockResolvedValue([{ n: 7n }])
+    await workflowSweep(new Date('2026-10-21T08:00:00Z'))
+
+    const writes = tx.repairReportItem.updateMany.mock.calls.map(([a]) => a as { where: { id: string }; data: Record<string, unknown> })
+    const pending = writes.find((w) => w.where.id === 'old-pending')!
+    expect(pending.data).toMatchObject({ queue: 'controltech', stage: 'forwarded' })
+    expect(pending.data.ticketNo).toBeUndefined()
+    const fixing = writes.find((w) => w.where.id === 'old-fixing')!
+    expect(fixing.data).toMatchObject({ queue: 'controltech', path: 'physical', faultCategory: 'fuel_probe', ticketNo: 'RT-2026-00007' })
+    expect(fixing.data.stage).toBeUndefined()
   })
 })

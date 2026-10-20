@@ -4,7 +4,7 @@ import * as wf from './repairs.workflow.js'
 import * as overhaul from './repairs.overhaul.js'
 import type {
   Assessment, Booking, Complete, Damage, FlagUnits, InvestigationUpdate, IssuePart, PathBody,
-  SourcePart, Verify, VoidBody, WarrantyVoid, WorkEntry, WorkshopAssign,
+  SourcePart, SpotFix, Verify, VoidBody, WarrantyVoid, WorkEntry, WorkshopAssign,
 } from './repairs.workflow.schema.js'
 
 const p = (req: Request, key: string) => req.params[key] as string
@@ -18,6 +18,7 @@ const handle = (fn: (req: Request) => Promise<unknown>, status = 200): RequestHa
   }
 
 export const flagUnits = handle((req) => wf.flagUnits(p(req, 'orgId'), req.user!.id, req.body as FlagUnits, scope(req)), 201)
+export const spotFix = handle((req) => wf.spotFix(p(req, 'orgId'), req.user!.id, req.body as SpotFix, scope(req)), 201)
 export const forward = handle((req) => wf.forwardJob(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, (req.body as { queue?: 'controltech' | 'workshop' }).queue))
 export const queue = handle((req) => wf.queue(p(req, 'orgId')))
 export const claim = handle((req) => wf.claim(p(req, 'orgId'), p(req, 'itemId'), req.user!.id))

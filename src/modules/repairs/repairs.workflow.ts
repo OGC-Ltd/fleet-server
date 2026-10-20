@@ -33,7 +33,7 @@ import { humanKind, STAGE_LABEL } from './repairs.service.js'
 import { notifyWorkflow, roleHolderEmails, HEAD_OF_SECURITY_ROLE, type JobRef, type WorkflowEvent } from './repairs.workflow.notify.js'
 import {
   checklistFor, queueFor, type Assessment, type Booking, type Complete, type Damage,
-  type FaultCategory, type FlagUnits, type InvestigationUpdate, type PathBody, type Verify,
+  type FaultCategory, type FlagUnits, type InvestigationUpdate, type PathBody, type SpotFix, type Verify,
   type VoidBody, type WarrantyVoid, type WorkEntry, type WorkshopAssign,
 } from './repairs.workflow.schema.js'
 import type { Stage } from './repairs.schema.js'
@@ -257,6 +257,89 @@ export async function forwardJob(orgId: string, itemId: string, userId: string, 
     audience: job.queue === 'controltech' ? ['controltech'] : ['control_room'],
   })
   return findItemById(itemId, orgId)
+}
+
+/**
+ * Fixed on the spot (Maintenance > Probe health): a technician on a round
+ * fixed the unit there and then, with nothing from stores, so triage and
+ * assessment have nothing to decide. The job is born completed, ticketed and
+ * classified genuine, and waits for the Control Room's verification like any
+ * other: the shortcut skips the questions, never the second pair of eyes.
+ */
+export async function spotFix(orgId: string, userId: string, dto: SpotFix, scope: Scope) {
+  const ok = await canReceiveTriage(userId, orgId)
+  if (!ok.ok) throw new ForbiddenError('Only a technician of this organisation can record an on-the-spot fix')
+  const vehicleIds = [...new Set(dto.vehicleIds)]
+  const vehicles = await prisma.vehicle.findMany({
+    where: { id: { in: vehicleIds }, organisationId: orgId }, select: { id: true },
+  })
+  const stray = vehicleIds.find((id) => !vehicles.some((v) => v.id === id))
+  if (stray) throw new NotFoundError(`Vehicle ${stray} is not in this organisation`)
+  for (const v of vehicles) assertInScope(scope, v.id)
+
+  const targetKind = dto.faultCategory === 'fuel_probe' ? 'probe' : 'unit'
+  const open = await prisma.repairReportItem.findMany({
+    where: {
+      organisationId: orgId, vehicleId: { in: vehicleIds }, resolvedAt: null, targetKind,
+      ...(targetKind === 'unit' ? { faultCategory: dto.faultCategory } : {}),
+    },
+    select: { vehicle: { select: { registrationPlate: true } } },
+  })
+  if (open.length > 0) {
+    const plates = open.map((o) => o.vehicle.registrationPlate).join(', ')
+    throw new ConflictError(`A repair is already open for ${plates}: complete that job in Workshop`)
+  }
+
+  let items: Job[]
+  try {
+    items = await prisma.$transaction(async (tx) => {
+      const at = new Date()
+      const byName = await nameOf(tx, userId)
+      const tickets: string[] = []
+      for (let i = 0; i < vehicles.length; i++) tickets.push(await nextTicketNo(tx))
+      const report = await tx.repairReport.create({
+        data: {
+          organisationId: orgId, reportedById: userId, note: `Fixed on the spot: ${dto.suspectedFault}`,
+          items: {
+            create: vehicles.map((v, i) => ({
+              organisationId: orgId, targetKind, vehicleId: v.id, outcome: 'flagged',
+              faultCategory: dto.faultCategory, suspectedFault: dto.suspectedFault, problemNote: dto.suspectedFault,
+              ...(dto.faultCategory === 'fuel_probe' ? { faultKind: 'fuel_probe_dead' } : {}),
+              stage: 'completed', queue: queueFor(dto.faultCategory, undefined), path: 'physical', forwardedAt: at,
+              ticketNo: tickets[i], ticketIssuedAt: at,
+              assignedToId: userId, assignedById: userId, assignedAt: at, assignmentStatus: 'accepted',
+              damageClass: 'genuine', damageClassifiedById: userId, damageClassifiedAt: at, warrantyVoid: false,
+              completedAt: at, completedById: userId, testResult: 'pass', testNote: dto.testNote ?? null,
+              fixNote: dto.fixNote, stageChangedAt: at,
+              stageHistory: [{
+                stage: 'completed', at: at.toISOString(), by: userId, ...(byName ? { byName } : {}),
+                note: `Fixed on the spot, no spare from stores: ${dto.fixNote}`,
+              }] satisfies StageEvent[],
+            })),
+          },
+        },
+        include: { items: { select: jobSelect } },
+      })
+      for (const job of report.items) {
+        await workEntry(tx, job, userId, 'repair', dto.fixNote, dto.labourMinutes)
+        await workEntry(tx, job, userId, 'test', `Test passed${dto.testNote ? `: ${dto.testNote}` : ''}`)
+      }
+      return report.items
+    })
+  } catch (err) {
+    if ((err as { code?: string }).code === 'P2002') throw new ConflictError('A repair is already open for one of these units')
+    throw err
+  }
+
+  for (const job of items) {
+    await tell(refOf(job), {
+      key: 'completed', severity: 'warning', headline: 'Fixed on the spot: verify it',
+      text: `fixed on the spot, awaiting the Control Room: ${dto.fixNote}`,
+      lines: [{ label: 'What was wrong', value: dto.suspectedFault }, { label: 'What was done', value: dto.fixNote }],
+      audience: ['control_room', 'channel'],
+    })
+  }
+  return Promise.all(items.map((i) => findItemById(i.id, orgId)))
 }
 
 /** The units a caller may flag: the Flag dialog's picker, within their scope. */
@@ -904,6 +987,50 @@ export async function securityHolders(orgId: string) {
 
 // ── The daily chases (plan §6, sweep additions) ─────────────────────────────
 
+/**
+ * Every open job runs through the workflow. A job filed the old way (the
+ * Maintenance outcome buttons, a Fuel Audit escalation) has no queue yet; it
+ * is taken in where it stands. Not yet started: forwarded like a flag. Already
+ * being worked or waiting on a part: ticketed in place, so it is classified,
+ * completed and verified like the rest. The queue is the mark, so a job is
+ * taken in once.
+ */
+async function adoptLegacyJobs(): Promise<number> {
+  const legacy = await prisma.repairReportItem.findMany({
+    where: { resolvedAt: null, queue: null, outcome: { not: 'flagged' }, stage: { in: ['pending', 'fixing', 'spare_outsourced'] } },
+    select: jobSelect,
+  })
+  let n = 0
+  for (const job of legacy) {
+    try {
+      await prisma.$transaction(async (tx) => {
+        const category = (job.faultCategory ?? 'fuel_probe') as FaultCategory
+        const queue = queueFor(category, undefined)
+        const at = new Date()
+        const started = job.stage !== 'pending'
+        const to: Stage = started ? job.stage as Stage : queue === 'controltech' ? 'forwarded' : 'awaiting_assessment'
+        const ticketNo = started ? await nextTicketNo(tx) : null
+        const note = started ? 'Moved into the Workshop workflow and ticketed'
+          : `Moved into the Workshop workflow: ${queue === 'controltech' ? 'forwarded to ControlTech' : 'to the workshop for assessment'}`
+        const { count } = await tx.repairReportItem.updateMany({
+          where: { id: job.id, resolvedAt: null, stage: job.stage, queue: null },
+          data: {
+            queue, forwardedAt: at, faultCategory: category,
+            ...(started || queue === 'workshop' ? { path: 'physical' } : {}),
+            ...(ticketNo ? { ticketNo, ticketIssuedAt: at } : {}),
+            ...(to !== job.stage ? { stage: to, stageChangedAt: at } : {}),
+            stageHistory: appendStage(job.stageHistory, { stage: to, at: at.toISOString(), by: null, note }),
+          },
+        })
+        n += count
+      })
+    } catch (err) {
+      logger.warn({ err, itemId: job.id }, 'repair sweep: could not move a job into the workflow')
+    }
+  }
+  return n
+}
+
 /** Days an investigation may stay open before it is chased. */
 const INVESTIGATION_STALE_DAYS = 14
 
@@ -916,6 +1043,7 @@ const INVESTIGATION_STALE_DAYS = 14
 export async function workflowSweep(now = new Date()) {
   const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
   const stamp = day(today)
+  const adopted = await adoptLegacyJobs()
 
   const missed = await prisma.workshopBooking.findMany({
     where: { status: 'booked', bookingDate: { lt: today } },
@@ -989,7 +1117,7 @@ export async function workflowSweep(now = new Date()) {
     })
   }
 
-  logger.info({ noShows: missed.length, unverified: staleCompleted.length, unclaimed: unclaimed.length, investigations: oldCases.length }, 'repair sweep: workflow checks done')
+  logger.info({ adopted, noShows: missed.length, unverified: staleCompleted.length, unclaimed: unclaimed.length, investigations: oldCases.length }, 'repair sweep: workflow checks done')
 }
 
 export { roleHolderEmails }
