@@ -67,13 +67,38 @@ describe('unitClass from the FactorySuite machine register (KASULU)', () => {
 describe('unitClass from FactorySuite /vehicles (SUKARI = NDHIWA)', () => {
   // vehicleType is FactorySuite's own type, synced by plate; checked against
   // GET /vehicles 2026-10-20: all 594 tracked units agree.
-  it('keeps FactorySuite TRACTOR, TRUCK and COMPANY_VEHICLE', () => {
+  it('keeps FactorySuite TRACTOR and TRUCK', () => {
     expect(unitClass('TRACTOR', '125F Bell 38 KHMA 858U')).toBe('TRACTOR')
-    expect(unitClass('TRACTOR', 'KTCC 870B')).toBe('TRACTOR')
-    expect(unitClass('TRUCK', 'KDL 705E')).toBe('TRUCK')
-    expect(unitClass('COMPANY_VEHICLE', 'KBV 714U')).toBe('CAR')
-    expect(inArrivalClass(unitClass('COMPANY_VEHICLE', 'KBV 714U'), 'VEHICLE')).toBe(true)
-    expect(inArrivalClass(unitClass('TRACTOR', '125F Bell 38 KHMA 858U'), 'VEHICLE')).toBe(false)
+    expect(unitClass('TRACTOR', 'Mahindra 9200 4WD KTCC 787D')).toBe('TRACTOR')
+    expect(unitClass('TRUCK', 'Faw Prime Mover CA 4181 KDL 712E')).toBe('TRUCK')
+    expect(unitClass('TRUCK', 'Toyota  Hlux KCA 001A')).toBe('TRUCK')
+  })
+
+  // Every tracked COMPANY_VEHICLE on 2026-10-20, by FactorySuite make + model.
+  const COMPANY: [string, UnitClass][] = [
+    ['Toyota Double Cab GUN125R-DJFLXJ KDM 341M', 'CAR'], ['Toyota Landcruiser HZJ79 KBU 189W', 'CAR'],
+    ['Toyota  Landcruiser Van KCU 759H', 'CAR'], ['Toyota Hiace Van KCS 596A', 'CAR'],
+    ['Toyota Pick up GUN125R-BJFSXJ KDM 156W', 'CAR'], ['Toyota Hilux KUN25R KBN 201N', 'CAR'],
+    ['Faw Truck Buses CA1081 KBV 714U', 'TRUCK'], ['Faw Bus CA1081 KCR 118T', 'TRUCK'],
+    ['CATERPILLAR D8GC KHMA 449U', 'PLANT'], ['CATERPILLAR D8R KHMA 991H', 'PLANT'],
+    ['GRADER KOMATSU 6D125 KHMA 338K', 'PLANT'], ['KOMATSU EXCAVATOR PC200-8M0 KHMA 337K', 'PLANT'],
+    ['WOLWA EXCAVATOR WITH GRAPPLE DLS150-6A KHMA 007R', 'PLANT'], ['JCB BACKHOE LOADER 3DX KHMA 907H', 'PLANT'],
+    ['BOMAG COMPACTOR BW213PD-40 KHMA 635K', 'PLANT'], ['HYDRACRANE ESCORT KHMA 607A', 'PLANT'],
+    ['HYDRA CRANE ESCORT KHMA 800A', 'PLANT'], ['HYDRAUKLIC CRANE FX230 KHMA 686T', 'PLANT'],
+    ['WHEELBELL LOADER L1806E KHMA 001A', 'PLANT'], ['DOZER KOMATSU D65EX-16 KHMA 002A', 'PLANT'],
+  ]
+  it.each(COMPANY)('COMPANY_VEHICLE %s is %s', (name, want) => {
+    expect(unitClass('COMPANY_VEHICLE', name)).toBe(want)
+  })
+
+  it('lists each class on its own', () => {
+    const bus = unitClass('COMPANY_VEHICLE', 'Faw Truck Buses CA1081 KBV 714U')
+    const cab = unitClass('COMPANY_VEHICLE', 'Toyota Double Cab GUN125R-DJFLXJ KDM 341M')
+    const dozer = unitClass('COMPANY_VEHICLE', 'CATERPILLAR D8R KHMA 991H')
+    expect([inArrivalClass(bus, 'TRUCK'), inArrivalClass(bus, 'CAR')]).toEqual([true, false])
+    expect([inArrivalClass(cab, 'CAR'), inArrivalClass(cab, 'TRUCK')]).toEqual([true, false])
+    expect([inArrivalClass(dozer, 'PLANT'), inArrivalClass(dozer, 'CAR')]).toEqual([true, false])
+    expect(inArrivalClass(unitClass('TRACTOR', '125F Bell 38 KHMA 858U'), 'TRUCK')).toBe(false)
   })
 })
 
@@ -92,7 +117,7 @@ describe('inArrivalClass', () => {
       ({ vehicleId: equipmentType ?? vehicleType, name: null, vehicleType, equipmentType, lat: null, lng: null, speedKmh: null, capturedAt: null })
     expect(classCounts([row('PLANT', 'Excavator'), row('UNSPECIFIED', 'Diesel Generator'), row('SALOON', 'LMV'),
       row('TRACTOR', 'Hydra Crane'), row('TRACTOR', 'Mahindra Tractor'), row('LORRY', null)]))
-      .toEqual({ VEHICLE: 2, TRACTOR: 1, PLANT: 2 })
+      .toEqual({ TRACTOR: 1, TRUCK: 1, CAR: 1, PLANT: 2, VEHICLE: 2 })
   })
 })
 

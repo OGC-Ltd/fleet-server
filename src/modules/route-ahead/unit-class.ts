@@ -51,7 +51,7 @@ export interface RegisterKind {
 const REGISTER_RULES: [RegExp, UnitClass][] = [
   [/generator|hand compactor|^drums?$/i, 'FIXED'],
   [/tractor|^case (puma|steiger|magnum|maxxum|\d+)\b|challenger|fendt|massey|john deere|new holland|mahindra/i, 'TRACTOR'],
-  [/excavator|dozer|loader|grader|backhoe|compactor|crane|hydra|mixer|pump|drill|forklift|harvester|roller|^machines?$/i, 'PLANT'],
+  [/excavator|dozer|loader|grader|backhoe|compactor|crane|hydra|mixer|pump|drill|forklift|harvester|roller|caterpillar|^machines?$/i, 'PLANT'],
   [/truck|lorry|tipper|bus|bowser|tanker|trailer/i, 'TRUCK'],
   [/^(lmv|police|saloon|car|suv|pick-?up|station wagon)$/i, 'CAR'],
 ]
@@ -65,6 +65,21 @@ export function registerClass(reg: RegisterKind | null | undefined): UnitClass |
   return null
 }
 
+/**
+ * FactorySuite's /vehicles has three types (SUKARI): TRACTOR, TRUCK and
+ * COMPANY_VEHICLE, and COMPANY_VEHICLE is everything else the company owns.
+ * Of Sukari's 46 tracked on 2026-10-20: 28 pickups, Land Cruisers and a Hiace,
+ * 8 FAW staff buses, and 10 machines (Caterpillar D8 dozers, Komatsu grader and
+ * excavator, Hydra cranes, a JCB backhoe, a Bomag compactor). The unit's name
+ * is FactorySuite's make and model plus the plate, so the same rules read it;
+ * anything they do not name is a car.
+ */
+export function companyVehicleClass(name: string | null | undefined): UnitClass {
+  const n = name ?? ''
+  for (const [re, c] of REGISTER_RULES) if (re.test(n)) return c
+  return 'CAR'
+}
+
 export function unitClass(
   vehicleType: string | null | undefined, name: string | null | undefined, reg?: RegisterKind | null,
 ): UnitClass {
@@ -73,7 +88,8 @@ export function unitClass(
   const t = (vehicleType ?? '').toUpperCase()
   if (t === 'TRACTOR' || TRACTOR_PLATE.test(name ?? '')) return 'TRACTOR'
   if (t === 'PLANT') return 'PLANT'
-  if (['SALOON', 'COMPANY_VEHICLE', 'PICKUP', 'CAR', 'SUV'].includes(t)) return 'CAR'
+  if (t === 'COMPANY_VEHICLE') return companyVehicleClass(name)
+  if (['SALOON', 'PICKUP', 'CAR', 'SUV'].includes(t)) return 'CAR'
   return 'TRUCK'
 }
 
