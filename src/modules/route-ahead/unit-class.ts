@@ -11,21 +11,65 @@
  *
  * ## Classes
  *
- * From `vehicleType` where the register has one; most of Kabras, Menengai,
- * West Kenya and Nzoia say UNSPECIFIED, and there the plate decides: a Kenyan
- * tractor is registered KT…, so `KTCC 870B` is a tractor whatever the register
- * says, and any other registered unit is taken as a lorry.
+ * From RaiFactorySuite's machine register first, where it lists the unit
+ * (KASULU, synced hourly into `equipmentType` and the rated basis). The
+ * register says what the machine IS; Wialon's `vehicleType` for the same
+ * units disagrees on 1 in 20 (measured 2026-10-20, 183 linked units: six
+ * diesel generators and a wheel loader UNSPECIFIED, so timed as lorries; two
+ * Hydra Cranes TRACTOR; the Case spraying tractor TRUCK; a dump truck PLANT).
+ * A register type no rule names falls to its rated basis: km/L is a road
+ * vehicle, L/h is plant.
+ *
+ * Then `vehicleType`; most of Kabras, Menengai, West Kenya and Nzoia say
+ * UNSPECIFIED, and there the plate decides: a Kenyan tractor is registered
+ * KT…, so `KTCC 870B` is a tractor whatever the register says, and any other
+ * registered unit is taken as a lorry.
  *
  * The plate rule (operator, 2026-10-15): "WKS - Kabras KTCB 358X is a
  * tractor — KTCB followed by 3 numbers and a letter — unlike those with 3
  * letters like KDJ followed by 3 numbers and a letter". KT plus two letters,
  * three digits, one letter; the space is optional.
+ *
+ * FIXED is what never drives to a hub: generators, hand compactors, drums.
  */
 export const TRACTOR_PLATE = /\bKT[A-Z]{2}\s?\d{3}[A-Z]\b/i
 
-export type UnitClass = 'TRACTOR' | 'TRUCK' | 'CAR' | 'PLANT'
+export type UnitClass = 'TRACTOR' | 'TRUCK' | 'CAR' | 'PLANT' | 'FIXED'
 
-export function unitClass(vehicleType: string | null | undefined, name: string | null | undefined): UnitClass {
+/** What the register lists for a unit: its type (`equipmentTypeOf`) and rated basis. */
+export interface RegisterKind {
+  equipmentType?: string | null
+  ratedConsumptionBasis?: string | null
+}
+
+/**
+ * Every register type seen, 2026-10-20 (52 categories, 367 rows), by what it
+ * is on the road. Order matters: "Case Spraying Tractor" is a tractor before
+ * anything else, "Concrete Mixer" is plant (self-loading, rated L/h), not a
+ * truck.
+ */
+const REGISTER_RULES: [RegExp, UnitClass][] = [
+  [/generator|hand compactor|^drums?$/i, 'FIXED'],
+  [/tractor|^case (puma|steiger|magnum|maxxum|\d+)\b|challenger|fendt|massey|john deere|new holland|mahindra/i, 'TRACTOR'],
+  [/excavator|dozer|loader|grader|backhoe|compactor|crane|hydra|mixer|pump|drill|forklift|harvester|roller|^machines?$/i, 'PLANT'],
+  [/truck|lorry|tipper|bus|bowser|tanker|trailer/i, 'TRUCK'],
+  [/^(lmv|police|saloon|car|suv|pick-?up|station wagon)$/i, 'CAR'],
+]
+
+/** The register's say, or null where it does not list the unit. */
+export function registerClass(reg: RegisterKind | null | undefined): UnitClass | null {
+  const t = reg?.equipmentType?.trim()
+  if (t) for (const [re, c] of REGISTER_RULES) if (re.test(t)) return c
+  if (reg?.ratedConsumptionBasis === 'DISTANCE') return 'TRUCK'
+  if (reg?.ratedConsumptionBasis === 'HOURS') return 'PLANT'
+  return null
+}
+
+export function unitClass(
+  vehicleType: string | null | undefined, name: string | null | undefined, reg?: RegisterKind | null,
+): UnitClass {
+  const r = registerClass(reg)
+  if (r) return r
   const t = (vehicleType ?? '').toUpperCase()
   if (t === 'TRACTOR' || TRACTOR_PLATE.test(name ?? '')) return 'TRACTOR'
   if (t === 'PLANT') return 'PLANT'
@@ -55,6 +99,7 @@ export const ETA_FACTORS: Record<UnitClass, EtaFactor> = {
   TRUCK:   { factor: 1.29, runs: 913 },
   CAR:     { factor: 1, runs: 0 },
   PLANT:   { factor: 1, runs: 0 },
+  FIXED:   { factor: 1, runs: 0 },
 }
 
 export const etaFactor = (c: UnitClass): EtaFactor => ETA_FACTORS[c]

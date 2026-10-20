@@ -194,18 +194,50 @@ const googleError = (err: unknown) =>
  * What the drive times are for. A unit class times every unit in it by that
  * class's measured factor; `all` times each unit by its own class; VEHICLE is
  * every unit that is not a tractor (trucks and cars, each at its own factor),
- * the window's "Truck or car"; MOTORBIKE is Google's two-wheeler mode,
- * uncalibrated.
+ * the window's "Truck or car"; PLANT is the register's excavators, dozers,
+ * loaders, graders, cranes (KASULU); MOTORBIKE is Google's two-wheeler mode,
+ * uncalibrated. A FIXED unit (a generator) is in none of them.
  */
-export type ArrivalClass = 'all' | 'VEHICLE' | 'TRACTOR' | 'TRUCK' | 'CAR' | 'MOTORBIKE'
+export type ArrivalClass = 'all' | 'VEHICLE' | 'TRACTOR' | 'TRUCK' | 'CAR' | 'PLANT' | 'MOTORBIKE'
+
+/** Whether a unit of class `c` belongs in the list for `cls`. */
+export function inArrivalClass(c: UnitClass, cls: ArrivalClass): boolean {
+  if (c === 'FIXED') return false
+  if (cls === 'all' || cls === 'MOTORBIKE') return true
+  if (cls === 'VEHICLE') return c === 'TRUCK' || c === 'CAR'
+  return c === cls
+}
+
+/** The window's classes, and how many of the fleet's units each holds. */
+export const WINDOW_CLASSES = ['VEHICLE', 'TRACTOR', 'PLANT'] as const
+export type WindowClass = typeof WINDOW_CLASSES[number]
+
+export function classCounts(rows: SnapRow[]): Record<WindowClass, number> {
+  const out: Record<WindowClass, number> = { VEHICLE: 0, TRACTOR: 0, PLANT: 0 }
+  for (const r of rows) {
+    const c = snapClass(r)
+    for (const w of WINDOW_CLASSES) if (inArrivalClass(c, w)) out[w]++
+  }
+  return out
+}
+
+export async function getArrivalClasses(orgId: string): Promise<Record<WindowClass, number>> {
+  const snap = await getFleetSnapshotCached(orgId)
+  return classCounts((Array.isArray(snap) ? snap : []) as unknown as SnapRow[])
+}
 
 /** Past this, a drive time is given a band instead. */
 const BAND_FROM_MIN = 60
 
-interface SnapRow {
+export interface SnapRow {
   vehicleId: string; name: string | null; vehicleType: string | null
+  /** RaiFactorySuite's register (KASULU), null elsewhere. */
+  equipmentType?: string | null; ratedConsumptionBasis?: string | null
   lat: number | null; lng: number | null; speedKmh: number | null; capturedAt: string | null
 }
+
+const snapClass = (r: SnapRow): UnitClass =>
+  unitClass(r.vehicleType, r.name, { equipmentType: r.equipmentType, ratedConsumptionBasis: r.ratedConsumptionBasis })
 
 /** Over this, a unit's position is too old to dispatch it on. */
 const AVAILABLE_FIX_MS = 30 * 60_000
@@ -243,8 +275,8 @@ async function arrivals(
     if (r.lat == null || r.lng == null || !r.capturedAt) continue
     const fixMs = Date.parse(r.capturedAt)
     if (now - fixMs > FRESH_MS) continue
-    const c = unitClass(r.vehicleType, r.name)
-    if (cls === 'VEHICLE' ? c === 'TRACTOR' : cls !== 'all' && cls !== 'MOTORBIKE' && c !== cls) continue
+    const c = snapClass(r)
+    if (!inArrivalClass(c, cls)) continue
     const straightM = haversineM(hub, { lat: r.lat, lng: r.lng })
     if (straightM <= YARD_RADIUS_M) { atHub.push({ vehicleId: r.vehicleId, plate: r.name }); continue }
     const trip = open.byVehicle.get(r.vehicleId)
