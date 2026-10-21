@@ -51,6 +51,10 @@ function severityOf(name: string): 'info' | 'warning' | 'critical' {
   if (/fuel/.test(n) && /\b(theft|loss|drop|tamper)\b/.test(n)) return 'critical'
   if (/\b(fill|filling|filled|refuel|refill)\b/.test(n)) return 'info'
   if (/\b(sos|panic|emergency|crash|accident|theft|tow)\b/.test(n)) return 'critical'
+  // Harsh driving is a warning (operator, 2026-10-21), and ahead of the info
+  // line below: "Hard stop" or "Harsh start" is a harsh brake or acceleration,
+  // not a stop or an ignition.
+  if (/\b(harsh|hard)\b/.test(n) || /\b(brak|break|accel)/.test(n)) return 'warning'
   if (/\b(enter|entry|arriv|exit|left|depart|ignition|start|stop)\b/.test(n)) return 'info'
   return 'warning'
 }
