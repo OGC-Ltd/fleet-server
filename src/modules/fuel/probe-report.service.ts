@@ -152,19 +152,31 @@ export function classifyChannel(
  * stopped. That is how KBL 126W, with a faulty GPS, appeared nowhere on the
  * Maintenance page (2026-10-21).
  *
- * The provider keeps both clocks. A message inside the dead window with no
- * fix inside it is a GPS fault, whatever the rows say, and it does not need a
- * month of pings to be believed: it is the provider's own observation.
+ * The provider keeps both clocks. A tracker still sending messages with no
+ * fix for GPS_DEAD_HOURS is a GPS fault, whatever the rows say, and it does
+ * not need a month of pings to be believed: it is the provider's own
+ * observation.
+ *
+ * Its own, shorter window rather than the 24 h dead window, because the
+ * evidence is direct rather than an absence. KBL 126W on 2026-10-21 had been
+ * online without a fix for 7 h and would not have shown for another 17.
+ * Measured the same evening across all eight orgs: 15 online trackers with a
+ * fix older than 3 h, 7 of them older than 24 h — a short list, not noise.
  */
+export const GPS_DEAD_HOURS = 3
+
 export function classifyGps(
   windowFixAt: Date | null, clock: MessageClock | null, deadFrom: Date, enough: boolean,
+  gpsDeadFrom: Date = deadFrom,
 ): ChannelHealth {
-  if (windowFixAt != null) return { state: 'REPORTING', lastSeenAt: windowFixAt, lastValue: null }
-  const talking = clock?.lastMessageAt != null && clock.lastMessageAt >= deadFrom
-  const fixed   = clock?.lastFixAt != null && clock.lastFixAt >= deadFrom
-  if (talking && !fixed) {
-    return { state: 'NOT_REPORTING', lastSeenAt: clock?.lastFixAt ?? null, lastValue: null }
+  const talking = clock?.lastMessageAt != null && clock.lastMessageAt >= gpsDeadFrom
+  const lastFix = windowFixAt && clock?.lastFixAt
+    ? (windowFixAt > clock.lastFixAt ? windowFixAt : clock.lastFixAt)
+    : (windowFixAt ?? clock?.lastFixAt ?? null)
+  if (talking && (lastFix == null || lastFix < gpsDeadFrom)) {
+    return { state: 'NOT_REPORTING', lastSeenAt: lastFix, lastValue: null }
   }
+  if (windowFixAt != null) return { state: 'REPORTING', lastSeenAt: windowFixAt, lastValue: null }
   return classifyChannel(null, null, deadFrom, enough)
 }
 
@@ -225,6 +237,7 @@ interface MonthFigures {
 export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<ProbeReportRow[]> {
   const now       = opts.now ?? new Date()
   const deadFrom  = new Date(now.getTime() - DEAD_HOURS * 3_600_000)
+  const gpsDeadFrom = new Date(now.getTime() - GPS_DEAD_HOURS * 3_600_000)
   const orgFilter = opts.orgId ? Prisma.sql`AND v.organisation_id = ${opts.orgId}` : Prisma.empty
 
   // Per-stage timing. The build is six sequential round trips and we know only
@@ -505,7 +518,7 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
         : { state: 'REPORTING', lastSeenAt: rec.latest_at,          lastValue: value }
 
     const channels = {
-      gps:         classifyGps(rec?.gps_at ?? null, clock, deadFrom, enough),
+      gps:         classifyGps(rec?.gps_at ?? null, clock, deadFrom, enough, gpsDeadFrom),
       ignition:    classifyChannel(rec?.ign_at ?? null, null, deadFrom, enough),
       odometer:    counter(ctr?.odo_v),
       engineHours: counter(ctr?.eh_v),
