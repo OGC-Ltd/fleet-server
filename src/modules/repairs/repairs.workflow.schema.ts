@@ -10,8 +10,12 @@
 import { z } from 'zod'
 import { calendarDay } from './repairs.schema.js'
 
-/** Telematics faults go to the ControlTech queue; the rest to the workshop. */
-export const TELEMATICS = ['fuel_probe', 'tracker', 'sensor'] as const
+/**
+ * Telematics faults go to the ControlTech queue; the rest to the workshop.
+ * GPS and ignition joined on 2026-10-22 (operator): the two channels the
+ * probe report names when they stop, so a flag can say which one it is.
+ */
+export const TELEMATICS = ['fuel_probe', 'tracker', 'gps', 'ignition', 'sensor'] as const
 export const MECHANICAL = [
   'engine', 'transmission', 'brakes', 'suspension_steering', 'tyres',
   'electrical', 'hydraulics', 'body',
@@ -37,6 +41,8 @@ export function queueFor(category: FaultCategory, chosen?: Queue): Queue {
 export const CHECKLISTS: Record<FaultCategory, readonly string[]> = {
   fuel_probe:          ['probe', 'probe_cable', 'tank_bracket', 'tracker', 'calibration'],
   tracker:             ['tracker', 'antenna', 'power_feed', 'sim', 'wiring'],
+  gps:                 ['antenna', 'tracker', 'power_feed', 'wiring'],
+  ignition:            ['wiring', 'connector', 'tracker', 'sensor'],
   sensor:              ['sensor', 'wiring', 'connector', 'calibration'],
   engine:              ['engine', 'cooling', 'fuel_system', 'air_intake', 'exhaust'],
   transmission:        ['gearbox', 'clutch', 'driveshaft', 'differential'],
@@ -59,15 +65,27 @@ export function checklistFor(category: string | null | undefined): readonly stri
 const note = (max = 1000) => z.string().trim().max(max)
 const required = (max: number, message: string) => z.string().trim().min(1, message).max(max)
 
+/**
+ * One flag can name several faults, across Telematics and Mechanical
+ * (operator, 2026-10-22): each becomes its own job per unit, routed by its
+ * own category, since a GPS fault and a brake fault go to different people.
+ * `faultCategory` is still read so an older client keeps working.
+ */
 export const flagUnitsSchema = z.object({
-  vehicleIds:     z.array(z.string().min(1)).min(1).max(50),
-  faultCategory:  z.enum(FAULT_CATEGORIES),
-  suspectedFault: required(1000, 'Say what fault you suspect'),
+  vehicleIds:      z.array(z.string().min(1)).min(1).max(50),
+  faultCategories: z.array(z.enum(FAULT_CATEGORIES)).min(1).max(FAULT_CATEGORIES.length).optional(),
+  faultCategory:   z.enum(FAULT_CATEGORIES).optional(),
+  suspectedFault:  required(1000, 'Say what fault you suspect'),
   /** Only read for 'other'. */
-  queue:          z.enum(['controltech', 'workshop']).optional(),
+  queue:           z.enum(['controltech', 'workshop']).optional(),
   /** Off = record the flag and forward it later (it stays on 'pending'). */
-  forward:        z.boolean().default(true),
-})
+  forward:         z.boolean().default(true),
+}).refine((b) => (b.faultCategories?.length ?? 0) > 0 || b.faultCategory != null, {
+  path: ['faultCategories'], message: 'Pick at least one fault',
+}).transform(({ faultCategory, faultCategories, ...rest }) => ({
+  ...rest,
+  faultCategories: [...new Set(faultCategories?.length ? faultCategories : [faultCategory!])],
+}))
 
 /**
  * A technician on a round fixed the unit there and then: no triage, no

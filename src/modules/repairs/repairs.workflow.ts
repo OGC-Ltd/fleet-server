@@ -42,7 +42,7 @@ type Tx = Prisma.TransactionClient
 type Scope = Set<string> | null
 
 export const CATEGORY_LABEL: Record<FaultCategory, string> = {
-  fuel_probe: 'Fuel probe', tracker: 'Tracker', sensor: 'Sensor',
+  fuel_probe: 'Fuel probe', tracker: 'Tracker', gps: 'GPS', ignition: 'Ignition', sensor: 'Sensor',
   engine: 'Engine', transmission: 'Transmission', brakes: 'Brakes',
   suspension_steering: 'Suspension and steering', tyres: 'Tyres',
   electrical: 'Electrical', hydraulics: 'Hydraulics', body: 'Body', other: 'Other',
@@ -179,25 +179,33 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
   for (const v of vehicles) assertInScope(scope, v.id)
 
   // A probe flag is a probe job, so Fuel Audit and "Probe reported" see it.
-  // Everything else is a fault on the unit, keyed by its category.
-  const targetKind = dto.faultCategory === 'fuel_probe' ? 'probe' : 'unit'
+  // Everything else is a fault on the unit, keyed by its category. Several
+  // categories make one job each per unit, all refused if any is already open.
+  const categories = dto.faultCategories as FaultCategory[]
+  const kindOf = (c: FaultCategory) => (c === 'fuel_probe' ? 'probe' : 'unit') as 'probe' | 'unit'
+  const unitCats = categories.filter((c) => kindOf(c) === 'unit')
   const open = await prisma.repairReportItem.findMany({
     where: {
-      organisationId: orgId, vehicleId: { in: vehicleIds }, resolvedAt: null, targetKind,
-      ...(targetKind === 'unit' ? { faultCategory: dto.faultCategory } : {}),
+      organisationId: orgId, vehicleId: { in: vehicleIds }, resolvedAt: null,
+      OR: [
+        ...(categories.includes('fuel_probe') ? [{ targetKind: 'probe' }] : []),
+        ...(unitCats.length ? [{ targetKind: 'unit', faultCategory: { in: unitCats } }] : []),
+      ],
     },
-    select: { vehicle: { select: { registrationPlate: true } } },
+    select: { targetKind: true, faultCategory: true, vehicle: { select: { registrationPlate: true } } },
   })
   if (open.length > 0) {
-    const plates = open.map((o) => o.vehicle.registrationPlate).join(', ')
-    throw new ConflictError(`A ${CATEGORY_LABEL[dto.faultCategory].toLowerCase()} repair is already open for ${plates}`)
+    const what = [...new Set(open.map((o) =>
+      CATEGORY_LABEL[(o.targetKind === 'probe' ? 'fuel_probe' : o.faultCategory) as FaultCategory]?.toLowerCase() ?? 'repair'))]
+    const plates = [...new Set(open.map((o) => o.vehicle.registrationPlate))].join(', ')
+    throw new ConflictError(`A ${what.join(' and ')} repair is already open for ${plates}`)
   }
 
-  const land = landing(dto.faultCategory, dto.queue, dto.forward)
   const flaggedAt = new Date()
   const byName = await nameOf(prisma, userId)
-  const note = land.stage === 'forwarded' ? 'Flagged and forwarded to ControlTech'
-    : land.stage === 'awaiting_assessment' ? 'Flagged; mechanical fault, to the workshop for assessment'
+  const lands = new Map(categories.map((c) => [c, landing(c, dto.queue, dto.forward)]))
+  const noteOf = (stage: Stage) => stage === 'forwarded' ? 'Flagged and forwarded to ControlTech'
+    : stage === 'awaiting_assessment' ? 'Flagged; mechanical fault, to the workshop for assessment'
       : 'Flagged'
   let report
   try {
@@ -205,16 +213,20 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
       data: {
         organisationId: orgId, reportedById: userId, note: `Control Room flag: ${dto.suspectedFault}`,
         items: {
-          create: vehicles.map((v) => ({
-            organisationId: orgId, targetKind, vehicleId: v.id, outcome: 'flagged',
-            faultCategory: dto.faultCategory, suspectedFault: dto.suspectedFault,
-            problemNote: dto.suspectedFault,
-            ...(dto.faultCategory === 'fuel_probe' ? { faultKind: 'fuel_probe_dead' } : {}),
-            stage: land.stage, queue: land.queue, path: land.path, forwardedAt: land.forwardedAt,
-            stageChangedAt: flaggedAt,
-            stageHistory: [{
-              stage: land.stage, at: flaggedAt.toISOString(), by: userId, ...(byName ? { byName } : {}), note,
-            }] satisfies StageEvent[],
+          create: vehicles.flatMap((v) => categories.map((c) => {
+            const land = lands.get(c)!
+            return {
+              organisationId: orgId, targetKind: kindOf(c), vehicleId: v.id, outcome: 'flagged',
+              faultCategory: c, suspectedFault: dto.suspectedFault,
+              problemNote: dto.suspectedFault,
+              ...(c === 'fuel_probe' ? { faultKind: 'fuel_probe_dead' } : {}),
+              stage: land.stage, queue: land.queue, path: land.path, forwardedAt: land.forwardedAt,
+              stageChangedAt: flaggedAt,
+              stageHistory: [{
+                stage: land.stage, at: flaggedAt.toISOString(), by: userId, ...(byName ? { byName } : {}),
+                note: noteOf(land.stage),
+              }] satisfies StageEvent[],
+            }
           })),
         },
       },
@@ -229,10 +241,10 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
     const ref = refOf(job)
     await tell(ref, {
       key: 'flagged', severity: 'warning',
-      headline: land.queue === 'controltech' ? 'Unit flagged for ControlTech' : 'Unit flagged for repair',
+      headline: job.queue === 'controltech' ? 'Unit flagged for ControlTech' : 'Unit flagged for repair',
       text: `flagged by ${byName ?? 'the Control Room'}: ${dto.suspectedFault}`,
       lines: [{ label: 'Suspected fault', value: dto.suspectedFault }, { label: 'Flagged by', value: byName ?? 'Control Room' }],
-      audience: land.queue === 'controltech' ? ['control_room', 'controltech'] : ['control_room'],
+      audience: job.queue === 'controltech' ? ['control_room', 'controltech'] : ['control_room'],
     })
   }
   return Promise.all(report.items.map((i) => findItemById(i.id, orgId)))
