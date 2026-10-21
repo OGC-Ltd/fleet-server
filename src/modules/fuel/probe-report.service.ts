@@ -44,6 +44,7 @@ import {
   type ProbeState,
 } from './fuel-probe-health.js'
 import { FUEL_SENSOR_TYPE } from './sensor-inventory.service.js'
+import { messageClock, type MessageClock } from '../../lib/connection-state.js'
 
 /** A channel that is not fuel: no fault codes, so only two honest live states. */
 export type ChannelState = 'REPORTING' | 'NOT_REPORTING' | 'NOT_FITTED' | 'UNKNOWN'
@@ -103,7 +104,8 @@ export interface ProbeReportRow {
    */
   lastReportedAt: Date | null
   /**
-   * The TRACKER has been silent for the whole lookback.
+   * The TRACKER has been silent for the whole dead window — see isTrackerSilent.
+   * (Was the whole thirty-day lookback until 2026-10-21.)
    *
    * A category the telemetry-only version could not represent at all, because
    * it was built by grouping telemetry: a unit with none simply had no row.
@@ -139,6 +141,48 @@ export function classifyChannel(
   }
 }
 
+
+/**
+ * The GPS channel, which needs the provider's clocks as well as our rows.
+ *
+ * Every telemetry row carries a fix — a Wialon message without one makes no
+ * frame — so our own data cannot say "messages, but no position". Judged on
+ * rows alone, a unit whose GPS died read NOT_FITTED (no fix in the window, so
+ * "never seen") on a reporting unit, or dropped out entirely once its rows
+ * stopped. That is how KBL 126W, with a faulty GPS, appeared nowhere on the
+ * Maintenance page (2026-10-21).
+ *
+ * The provider keeps both clocks. A message inside the dead window with no
+ * fix inside it is a GPS fault, whatever the rows say, and it does not need a
+ * month of pings to be believed: it is the provider's own observation.
+ */
+export function classifyGps(
+  windowFixAt: Date | null, clock: MessageClock | null, deadFrom: Date, enough: boolean,
+): ChannelHealth {
+  if (windowFixAt != null) return { state: 'REPORTING', lastSeenAt: windowFixAt, lastValue: null }
+  const talking = clock?.lastMessageAt != null && clock.lastMessageAt >= deadFrom
+  const fixed   = clock?.lastFixAt != null && clock.lastFixAt >= deadFrom
+  if (talking && !fixed) {
+    return { state: 'NOT_REPORTING', lastSeenAt: clock?.lastFixAt ?? null, lastValue: null }
+  }
+  return classifyChannel(null, null, deadFrom, enough)
+}
+
+/**
+ * The tracker has said nothing for the whole dead window — no row, and no
+ * message the provider knows of either.
+ *
+ * Was "no row in thirty days", which left a unit that went quiet yesterday in
+ * a gap: not silent, every channel unjudgeable, so on no list at all. A day
+ * of silence on a tracker is the fault, and the dead window is where every
+ * other channel here draws that line.
+ */
+export function isTrackerSilent(
+  hasWindowRows: boolean, clock: MessageClock | null, deadFrom: Date,
+): boolean {
+  if (hasWindowRows) return false
+  return !(clock?.lastMessageAt != null && clock.lastMessageAt >= deadFrom)
+}
 
 /** A unit's thirty-day totals: rollup days summed, today added live. */
 interface MonthFigures {
@@ -383,7 +427,9 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
   // stopping. LEFT JOIN, not a plain one, so a unit that has never reported at
   // all still comes back — with a null, which is the honest answer and the one
   // the caller already handles.
-  const darkIds = vehicles.filter(v => !aggByVehicle.has(v.id)).map(v => v.id)
+  // Every unit with no row in the dead window, not only those with none in the
+  // month: one that went quiet yesterday needs its last report as much.
+  const darkIds = vehicles.filter(v => !recentByVehicle.has(v.id)).map(v => v.id)
   const lastSeen = darkIds.length === 0 ? [] : await prisma.$queryRaw<Array<{
     vehicle_id: string; last_at: Date | null
   }>>`
@@ -423,7 +469,8 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
   for (const v of vehicles) {
     const r   = aggByVehicle.get(v.id)
     const rec = recentByVehicle.get(v.id)
-    const trackerSilent = r == null
+    const clock = messageClock(v.deviceId)
+    const trackerSilent = isTrackerSilent(rec != null, clock, deadFrom)
 
     const pings  = r?.pings ?? 0
     const enough = pings >= MIN_PINGS
@@ -458,7 +505,7 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
         : { state: 'REPORTING', lastSeenAt: rec.latest_at,          lastValue: value }
 
     const channels = {
-      gps:         classifyChannel(rec?.gps_at ?? null, null, deadFrom, enough),
+      gps:         classifyGps(rec?.gps_at ?? null, clock, deadFrom, enough),
       ignition:    classifyChannel(rec?.ign_at ?? null, null, deadFrom, enough),
       odometer:    counter(ctr?.odo_v),
       engineHours: counter(ctr?.eh_v),
@@ -483,7 +530,7 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
       // For a reporting unit the newest frame in the dead window; for a silent
       // one the last time it EVER spoke, which is the number that says how long
       // this has been going on.
-      lastReportedAt: r ? (rec?.latest_at ?? null) : (lastSeenByVehicle.get(v.id) ?? null),
+      lastReportedAt: rec?.latest_at ?? lastSeenByVehicle.get(v.id) ?? null,
       trackerSilent,
       // A dead probe, a sensor nobody calibrated, or a channel that has gone
       // quiet on a unit still reporting. NOT_FITTED is not attention — nothing

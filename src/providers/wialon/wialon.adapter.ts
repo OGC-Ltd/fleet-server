@@ -54,7 +54,7 @@ import {
   type FuelProbeFault, type CameraState, type WialonSensor, readHarshDriving,
 } from './wialon.sensors.js'
 import { eventBus } from '../../lib/event-bus.js'
-import { noteConnection, connectionCounts } from '../../lib/connection-state.js'
+import { noteConnection, noteMessageClock, connectionCounts } from '../../lib/connection-state.js'
 
 /** Mirrors sync-wialon.ts — the device key a Wialon unit is registered under. */
 export const wialonDeviceId = (unitId: number): string => `wialon:${unitId}`
@@ -247,6 +247,13 @@ export class WialonLiveAdapter implements TelemetryProvider {
       if (typeof u.netconn === 'number') {
         noteConnection(wialonDeviceId(u.id), u.netconn === 1)
       }
+      // Both clocks, for the same reason: a unit whose GPS has died keeps
+      // sending messages without a fix, which emit no frame below.
+      noteMessageClock(
+        wialonDeviceId(u.id),
+        typeof u.lmsg?.t === 'number' ? u.lmsg.t * 1000 : null,
+        typeof u.pos?.t  === 'number' ? u.pos.t  * 1000 : null,
+      )
 
       // Wialon's own mileage counter — the vehicle's running total.
       if (typeof u.cnm_km === 'number' && u.cnm_km > 0) this.lastOdometerKm.set(u.id, u.cnm_km)

@@ -93,7 +93,51 @@ export function connectionCounts(): { online: number; offline: number; known: nu
   return { online, offline, known: online + offline }
 }
 
+/**
+ * When each tracker last sent ANY message, and when the last one with a
+ * position fix was — both as the provider holds them.
+ *
+ * The telemetry table cannot tell these apart: a message without a fix makes
+ * no frame and no row, so a unit whose GPS has died while its tracker keeps
+ * talking looks, in our data, exactly like a unit that has gone silent. The
+ * provider still has both clocks — Wialon's `lmsg.t` keeps moving while
+ * `pos.t` stands still — and the probe report reads them here to call that a
+ * GPS fault rather than a silent tracker. In-memory for the same reasons as
+ * the connection verdict above.
+ */
+interface Clock {
+  lastMessageMs: number | null
+  lastFixMs:     number | null
+  atMs:          number
+}
+const clocks = new Map<string, Clock>()
+
+export interface MessageClock {
+  lastMessageAt: Date | null
+  lastFixAt:     Date | null
+}
+
+/** Record one unit's two clocks, in ms. Safe to call every sweep. */
+export function noteMessageClock(
+  deviceId: string, lastMessageMs: number | null, lastFixMs: number | null, atMs: number = Date.now(),
+): void {
+  if (!deviceId) return
+  clocks.set(deviceId, { lastMessageMs, lastFixMs, atMs })
+}
+
+/** Null when the provider has not described this unit recently. */
+export function messageClock(deviceId: string | null | undefined): MessageClock | null {
+  if (!deviceId) return null
+  const c = clocks.get(deviceId)
+  if (!c || Date.now() - c.atMs > STALE_MS) return null
+  return {
+    lastMessageAt: c.lastMessageMs != null ? new Date(c.lastMessageMs) : null,
+    lastFixAt:     c.lastFixMs     != null ? new Date(c.lastFixMs)     : null,
+  }
+}
+
 /** Test seam. */
 export function resetConnectionState(): void {
   states.clear()
+  clocks.clear()
 }

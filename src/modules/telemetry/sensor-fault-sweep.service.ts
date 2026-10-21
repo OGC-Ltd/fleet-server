@@ -146,7 +146,9 @@ export async function sweepSensorFaults(orgId: string, now = new Date()): Promis
       // open an episode, and — more importantly — must not silently resolve one
       // that is already open.
       if (c?.state !== 'NOT_REPORTING') continue
-      const since = asDate(c.lastSeenAt)
+      // A GPS that has never fixed while its tracker talks has no "last seen";
+      // the unit's last report is the honest start we have.
+      const since = asDate(c.lastSeenAt) ?? lastReported
       if (!since) continue
       want(
         vehicleId, kind, since, 'warning',

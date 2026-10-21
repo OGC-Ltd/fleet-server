@@ -25,6 +25,9 @@ export const summaryQuerySchema = rangeBase.extend({
   /** Faults only — comma-separated `kind` values. */
   kind:     z.string().optional(),
   minCount: z.coerce.number().int().min(1).optional(),
+  /** Plate or name, matched anywhere — the tab's search box. Filtered here,
+   *  not on the page the client holds, so a unit past the first fifty is found. */
+  q:        z.string().trim().max(64).optional(),
   sort:     z.enum(['count', 'peak', 'duration', 'recent']).default('count'),
   /** Offset for the aggregate list — see the note in the repository. */
   cursor:   z.string().optional(),

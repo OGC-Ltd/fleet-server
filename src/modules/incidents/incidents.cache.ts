@@ -176,9 +176,10 @@ const faultInsightsCache = createWarmCache<Awaited<ReturnType<typeof service.fau
 // a list is rare, their key would be read once and then held for nothing, and
 // putting the cursor in the key would let one wanderer fill memory with pages
 // nobody reopens. `minCount` bypasses for the same reason — almost nothing
-// sends it. Both fall through to the service unchanged.
+// sends it — and so does a search, whose key space is whatever people type.
+// All three fall through to the service unchanged.
 
-const pageable = (q: SummaryQuery) => !q.cursor && !q.minCount
+const pageable = (q: SummaryQuery) => !q.cursor && !q.minCount && !q.q
 
 export const speedingSummary = (orgId: string, q: SummaryQuery) =>
   pageable(q) ? speedingSummaryCache.get(summaryKey(orgId, q)) : service.speedingSummary(orgId, q)

@@ -45,7 +45,7 @@ const kindsFrom = (kind?: string): string[] | undefined =>
 export async function speedingSummary(orgId: string, q: SummaryQuery) {
   const offset = offsetFrom(q.cursor)
   const { rows, hasNextPage } = await repo.speedingSummary(orgId, range(q.from, q.to), {
-    sort: q.sort, limit: q.limit, offset, minCount: q.minCount,
+    sort: q.sort, limit: q.limit, offset, minCount: q.minCount, search: q.q,
   })
   return {
     data:   rows,
@@ -90,7 +90,7 @@ export async function speedingInsights(orgId: string, q: InsightsQuery) {
 export async function faultSummary(orgId: string, q: SummaryQuery) {
   const offset = offsetFrom(q.cursor)
   const { rows, hasNextPage } = await repo.faultSummary(orgId, range(q.from, q.to), {
-    sort: q.sort, limit: q.limit, offset, kinds: kindsFrom(q.kind), minCount: q.minCount,
+    sort: q.sort, limit: q.limit, offset, kinds: kindsFrom(q.kind), minCount: q.minCount, search: q.q,
   })
   return {
     data:   rows,
