@@ -39,8 +39,8 @@ vi.mock('../../src/modules/repairs/repairs.workflow.notify.js', () => ({
   HEAD_OF_SECURITY_ROLE: 'head_of_security',
 }))
 
-import { assessmentSchema, checklistFor, queueFor, spotFixSchema, CHECKLISTS } from '../../src/modules/repairs/repairs.workflow.schema.js'
-import { book, complete, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
+import { assessmentSchema, checklistFor, flagUnitsSchema, queueFor, spotFixSchema, CHECKLISTS } from '../../src/modules/repairs/repairs.workflow.schema.js'
+import { book, complete, flagUnits, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
 import { ROLE_DEFINITIONS } from '../../src/lib/permissions.js'
 import { ConflictError, ForbiddenError, UnprocessableError } from '../../src/core/errors/errors.js'
 
@@ -68,7 +68,7 @@ beforeEach(() => {
 
 describe('routing by fault category', () => {
   it('sends telematics faults to the ControlTech queue', () => {
-    for (const c of ['fuel_probe', 'tracker', 'sensor'] as const) expect(queueFor(c)).toBe('controltech')
+    for (const c of ['fuel_probe', 'tracker', 'gps', 'ignition', 'sensor'] as const) expect(queueFor(c)).toBe('controltech')
   })
 
   it('sends mechanical faults to the workshop', () => {
@@ -84,6 +84,59 @@ describe('routing by fault category', () => {
     expect(CHECKLISTS.fuel_probe).toEqual(['probe', 'probe_cable', 'tank_bracket', 'tracker', 'calibration'])
     // A job from before the workflow has no category and is a probe job.
     expect(checklistFor(null)).toEqual(CHECKLISTS.fuel_probe)
+  })
+})
+
+describe('one flag, several faults (2026-10-22)', () => {
+  it('takes a list of categories across groups, deduplicated', () => {
+    const b = flagUnitsSchema.parse({ vehicleIds: ['v1'], faultCategories: ['gps', 'brakes', 'gps'], suspectedFault: 'x' })
+    expect(b.faultCategories).toEqual(['gps', 'brakes'])
+  })
+
+  it('still reads the single faultCategory an older client sends', () => {
+    expect(flagUnitsSchema.parse({ vehicleIds: ['v1'], faultCategory: 'ignition', suspectedFault: 'x' }).faultCategories).toEqual(['ignition'])
+  })
+
+  it('refuses a flag that names no fault', () => {
+    expect(() => flagUnitsSchema.parse({ vehicleIds: ['v1'], suspectedFault: 'x' })).toThrow()
+    expect(() => flagUnitsSchema.parse({ vehicleIds: ['v1'], faultCategories: [], suspectedFault: 'x' })).toThrow()
+  })
+
+  it('makes one job per unit per category, each routed by its own category', async () => {
+    const create = vi.fn(async ({ data }: { data: { items: { create: Array<Record<string, unknown>> } } }) => ({
+      items: data.items.create.map((it, i) => ({ id: `j${i}`, ...it })),
+    }))
+    const extra = prismaMock as unknown as Record<string, unknown>
+    extra.vehicle = { findMany: vi.fn(async () => [{ id: 'v1', registrationPlate: 'KBL 126W' }, { id: 'v2', registrationPlate: 'KDJ 820Z' }]) }
+    extra.repairReport = { create }
+    tx.repairReportItem.findMany.mockResolvedValueOnce([])
+    tx.repairReportItem.findFirst.mockResolvedValue(null)
+    tx.user.findUnique.mockResolvedValue({ name: 'Control Room' })
+
+    await flagUnits(ORG, 'u1', flagUnitsSchema.parse({
+      vehicleIds: ['v1', 'v2'], faultCategories: ['gps', 'ignition', 'brakes'], suspectedFault: 'No fix since 13:54',
+    }), null).catch(() => undefined)
+
+    const items = create.mock.calls[0][0].data.items.create
+    expect(items).toHaveLength(6)
+    const of = (v: string, c: string) => items.find((i) => i.vehicleId === v && i.faultCategory === c)
+    expect(of('v1', 'gps')).toMatchObject({ targetKind: 'unit', queue: 'controltech', stage: 'forwarded' })
+    expect(of('v2', 'ignition')).toMatchObject({ queue: 'controltech' })
+    expect(of('v1', 'brakes')).toMatchObject({ queue: 'workshop', stage: 'awaiting_assessment', path: 'physical' })
+  })
+
+  it('refuses the whole flag when any of its faults is already open, naming it', async () => {
+    const extra = prismaMock as unknown as Record<string, unknown>
+    extra.vehicle = { findMany: vi.fn(async () => [{ id: 'v1', registrationPlate: 'KBL 126W' }]) }
+    tx.repairReportItem.findMany.mockResolvedValueOnce([{ targetKind: 'unit', faultCategory: 'gps', vehicle: { registrationPlate: 'KBL 126W' } }])
+    await expect(flagUnits(ORG, 'u1', flagUnitsSchema.parse({
+      vehicleIds: ['v1'], faultCategories: ['gps', 'brakes'], suspectedFault: 'x',
+    }), null)).rejects.toThrow('A gps repair is already open for KBL 126W')
+  })
+
+  it('gives GPS and ignition their own checklists', () => {
+    expect(CHECKLISTS.gps.length).toBeGreaterThan(0)
+    expect(CHECKLISTS.ignition.length).toBeGreaterThan(0)
   })
 })
 
