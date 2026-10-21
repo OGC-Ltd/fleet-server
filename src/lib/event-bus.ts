@@ -126,6 +126,20 @@ export interface ProviderAlertEvent {
   persist?:  boolean
 }
 
+/** One Green Driving event as the tracker sent it (see wialon.sensors readHarshDriving). */
+export interface HarshDrivingEvent {
+  deviceId: string
+  unitName: string
+  /** The tracker's own time for the event. */
+  at:       Date
+  kind:     'ACCELERATION' | 'BRAKING' | 'CORNERING'
+  /** The force, m/s², where the tracker gave it. */
+  ms2:      number | null
+  lat:      number | null
+  lng:      number | null
+  speedKmh: number | null
+}
+
 type EventMap = {
   'telemetry:processed': TelemetryProcessedEvent
   'alert:triggered':     FleetAlert
@@ -140,6 +154,9 @@ type EventMap = {
   /** A tank that dropped while the machine stood still, seen live rather than
    *  waited for. Provisional — see lib/fuel-drop-watch. */
   'fuel:dropped':        LiveFuelDrop
+  /** A harsh acceleration, braking or cornering a tracker reported, from the
+   *  provider's message itself; harsh-driving.worker records it. */
+  'driving:harsh':       HarshDrivingEvent
   'sensorFault:open':    FaultObservation
   'sensorFault:close':   FaultResolution
 }

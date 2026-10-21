@@ -112,6 +112,14 @@ describe('severity from the rule name', () => {
   it('leaves unmatched rules as a warning rather than downgrading them', async () => {
     expect(await severityFor('Harsh cornering')).toBe('warning')
   })
+
+  it('keeps harsh braking and acceleration a warning, not a stop or a start', async () => {
+    expect(await severityFor('Hard stop')).toBe('warning')
+    expect(await severityFor('Harsh start')).toBe('warning')
+    expect(await severityFor('Hard break')).toBe('warning')
+    expect(await severityFor('Harsh acceleration')).toBe('warning')
+    expect(await severityFor('Ignition on')).toBe('info')
+  })
 })
 
 describe('the amount is what makes a fuel alert actionable', () => {

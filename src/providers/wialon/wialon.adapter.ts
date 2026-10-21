@@ -51,8 +51,9 @@ import type { AccelAxes, TelemetryProvider, VehicleTelemetryFrame } from '../tel
 import { WialonClient, type WialonPosition } from './wialon.client.js'
 import {
   readFuel, readIgnition, readFuelProbeFault, readCamera, readAccelerometer, readVoltages, type SupplyVolts, carriesFuelReading, hasFuelSensor,
-  type FuelProbeFault, type CameraState, type WialonSensor,
+  type FuelProbeFault, type CameraState, type WialonSensor, readHarshDriving,
 } from './wialon.sensors.js'
+import { eventBus } from '../../lib/event-bus.js'
 import { noteConnection, connectionCounts } from '../../lib/connection-state.js'
 
 /** Mirrors sync-wialon.ts — the device key a Wialon unit is registered under. */
@@ -272,7 +273,7 @@ export class WialonLiveAdapter implements TelemetryProvider {
     let unchanged = 0, neverReported = 0
     for (const u of units) {
       // The unit's last message — unless a delta already read it, or a newer one.
-      this.noteReadings(u.id, u.lmsg?.t, u.lmsg?.p)
+      this.noteReadings(u.id, u.lmsg?.t, u.lmsg?.p, u.lmsg?.t === u.pos?.t ? u.pos : null)
       // On-board recorder, where one is fitted. Held per unit like every other
       // sensor read, because a frame is only emitted when the unit MOVES and
       // the camera state must not be lost on the pings in between.
@@ -330,7 +331,7 @@ export class WialonLiveAdapter implements TelemetryProvider {
     for (const m of messages) {
       // The message's readings first, so the frame below carries its own fuel
       // and ignition. A message with no fix, or no row, still counts for them.
-      this.noteReadings(m.unitId, m.t, m.params)
+      this.noteReadings(m.unitId, m.t, m.params, m.pos)
       if (!m.pos) { noFix++; continue }
 
       const seen = this.lastFixAt.get(m.unitId)
@@ -375,11 +376,34 @@ export class WialonLiveAdapter implements TelemetryProvider {
    * the probe's fault, ignition. Skipped for a message no newer than the last
    * one read — see lastReadAt.
    */
-  private noteReadings(unitId: number, at: number | undefined, params: Record<string, unknown> | null | undefined): void {
+  private noteReadings(
+    unitId: number,
+    at: number | undefined,
+    params: Record<string, unknown> | null | undefined,
+    pos: WialonPosition | null = null,
+  ): void {
     const read = this.lastReadAt.get(unitId)
     if (at != null && read != null && at <= read) return
     if (at != null) this.lastReadAt.set(unitId, at)
     if (!params) return
+
+    // A harsh acceleration, braking or cornering the tracker reported. Read
+    // here, once per message, and not from the frames: the event record is one
+    // message, and the 15 s row spacing (MIN_ROW_GAP_S) would drop most of them
+    // before they became a row. Recorded by harsh-driving.worker.
+    const harsh = at != null ? readHarshDriving(params) : null
+    if (harsh && at != null) {
+      eventBus.publish('driving:harsh', {
+        deviceId: wialonDeviceId(unitId),
+        unitName: this.unitNames.get(unitId) ?? String(unitId),
+        at:       new Date(at * 1000),
+        kind:     harsh.kind,
+        ms2:      harsh.ms2,
+        lat:      pos && Number.isFinite(pos.y) ? pos.y : null,
+        lng:      pos && Number.isFinite(pos.x) ? pos.x : null,
+        speedKmh: pos?.s ?? null,
+      })
+    }
 
     const sensors = this.sensors.get(unitId)
     if (carriesFuelReading(sensors, params)) {

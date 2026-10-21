@@ -570,6 +570,39 @@ export function tankCapacityOf(sensors: Record<string, WialonSensor> | undefined
   return max
 }
 
+/* ─────────────────────────── harsh driving ──────────────────────────────── */
+
+/** What a Teltonika Green Driving event was. */
+export type HarshKind = 'ACCELERATION' | 'BRAKING' | 'CORNERING'
+
+/** A harsh-driving event one message carries: what kind, and how hard. */
+export interface HarshEvent {
+  kind: HarshKind
+  /** The force, m/s², where the message gives it. */
+  ms2:  number | null
+}
+
+/** Teltonika Green Driving type, AVL id 253, to what it means. */
+const GREEN_DRIVING: Record<number, HarshKind> = { 1: 'ACCELERATION', 2: 'BRAKING', 3: 'CORNERING' }
+
+/**
+ * The harsh-driving event one message reports, or null.
+ *
+ * Teltonika sends Green Driving as an EVENT record: `io_253` is the type (1
+ * harsh acceleration, 2 harsh braking, 3 harsh cornering) and `io_254` the
+ * force in hundredths — the account's own sensor divides it by 100 and names
+ * its threshold 2.7 m/s², so it is read as m/s². Only the record the tracker
+ * sent for the event carries `io_253`; any other value is no event.
+ */
+export function readHarshDriving(params: Record<string, unknown> | null | undefined): HarshEvent | null {
+  if (!params) return null
+  const type = asNumber(params['io_253'])
+  const kind = type == null ? undefined : GREEN_DRIVING[type]
+  if (!kind) return null
+  const force = asNumber(params['io_254'])
+  return { kind, ms2: force != null && force > 0 && force < 10_000 ? Math.round(force) / 100 : null }
+}
+
 /* ─────────────────────────── accelerometer ──────────────────────────────── */
 
 /** Teltonika's accelerometer axes, AVL ids 17/18/19, in X/Y/Z order. */

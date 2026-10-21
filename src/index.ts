@@ -11,6 +11,7 @@ import { startSpeedingWorker }      from './lib/workers/speeding.worker.js'
 import { startSensorFaultsWorker }  from './lib/workers/sensor-faults.worker.js'
 import { startFuelWatchWorker }     from './lib/workers/fuel-watch.worker.js'
 import { startSimEventsWorker }     from './lib/workers/sim-events.worker.js'
+import { startHarshDrivingWorker }  from './lib/workers/harsh-driving.worker.js'
 import { stopPushDispatcher }       from './lib/push-dispatcher.js'
 import { startCacheWarmer } from './lib/warm-cache.js'
 import { warmRoadRoutes } from './lib/road-routes.js'
@@ -54,6 +55,9 @@ async function main() {
   // provider's report — see lib/fuel-drop-watch.
   const stopFuelWatchWorker    = startFuelWatchWorker()
   const stopSimEventsWorker    = startSimEventsWorker()
+  // Harsh acceleration and braking the trackers report, as warnings — see
+  // lib/workers/harsh-driving.worker.
+  const stopHarshDrivingWorker = startHarshDrivingWorker()
   // Keep the analytics/maintenance read caches hot so those pages never wait
   // on the remote database (each pooler round trip costs ~1s) — see
   // lib/warm-cache.ts.
@@ -152,6 +156,7 @@ async function main() {
     stopSpeedingWorker()
     stopSensorFaultsWorker()
     stopFuelWatchWorker()
+    stopHarshDrivingWorker()
     stopSimEventsWorker()
     stopCacheWarmer()
     stopAiInsightWarmer()
