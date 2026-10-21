@@ -43,10 +43,24 @@ export interface SpeedingSummaryRow {
   driverName:     string | null
 }
 
+/**
+ * The summaries' search box: plate or name, anywhere in either, with spaces
+ * ignored on both sides so "KBL126W" finds "KBL 126W". Both summaries join
+ * `vehicles` as `v`. LIKE's own wildcards are escaped — this is a search
+ * string, not a pattern language.
+ */
+function unitSearch(search?: string): Prisma.Sql {
+  const needle = search?.replace(/\s+/g, '').toLowerCase()
+  if (!needle) return Prisma.empty
+  const like = `%${needle.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
+  return Prisma.sql`AND (replace(lower(v.registration_plate), ' ', '') LIKE ${like}
+                      OR replace(lower(coalesce(v.name, '')), ' ', '') LIKE ${like})`
+}
+
 export async function speedingSummary(
   orgId: string,
   r: Range,
-  opts: { sort: string; limit: number; offset: number; minCount?: number },
+  opts: { sort: string; limit: number; offset: number; minCount?: number; search?: string },
 ): Promise<{ rows: SpeedingSummaryRow[]; hasNextPage: boolean }> {
   // Ordering is applied in SQL, not in JS: a page sorted client-side would be
   // fifty of six hundred units presented as "the worst offenders".
@@ -86,6 +100,7 @@ export async function speedingSummary(
      WHERE s.organisation_id = ${orgId}
        AND s.started_at >= ${r.from}
        AND s.started_at <= ${r.to}
+       ${unitSearch(opts.search)}
      GROUP BY s.vehicle_id, v.registration_plate, v.name, v.vehicle_type
     ${opts.minCount ? Prisma.sql`HAVING COUNT(*) >= ${opts.minCount}` : Prisma.empty}
      ORDER BY ${orderBy}
@@ -365,7 +380,7 @@ async function fillMissingPositions(rows: Positionable[]): Promise<void> {
 export async function faultSummary(
   orgId: string,
   r: Range,
-  opts: { sort: string; limit: number; offset: number; kinds?: string[]; minCount?: number },
+  opts: { sort: string; limit: number; offset: number; kinds?: string[]; minCount?: number; search?: string },
 ): Promise<{ rows: FaultSummaryRow[]; hasNextPage: boolean }> {
   const orderBy = {
     count:    Prisma.sql`episodes DESC, total_seconds DESC`,
@@ -408,6 +423,7 @@ export async function faultSummary(
      WHERE e.organisation_id = ${orgId}
        ${faultOverlap(r)}
        ${kindFilter}
+       ${unitSearch(opts.search)}
      GROUP BY e.vehicle_id, v.registration_plate, v.name
     ${opts.minCount ? Prisma.sql`HAVING COUNT(*) >= ${opts.minCount}` : Prisma.empty}
      ORDER BY ${orderBy}

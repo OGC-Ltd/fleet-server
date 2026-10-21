@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { classifyChannel } from '../../src/modules/fuel/probe-report.service.js'
+import { classifyChannel, classifyGps, isTrackerSilent } from '../../src/modules/fuel/probe-report.service.js'
 
 const DEAD_FROM = new Date('2026-08-19T12:00:00Z')
 const INSIDE    = new Date('2026-08-20T09:00:00Z')
@@ -43,5 +43,47 @@ describe('channel states', () => {
 
   it('carries the last value through, so the report can show what it read', () => {
     expect(classifyChannel(INSIDE, 16678, DEAD_FROM, true).lastValue).toBe(16678)
+  })
+})
+
+describe("GPS, judged with the provider's clocks", () => {
+  // KBL 126W, 2026-10-21: a faulty GPS on a tracker still talking. A message
+  // without a fix makes no row, so our rows alone called it NOT_FITTED or
+  // nothing at all.
+  const talkingNoFix = { lastMessageAt: INSIDE, lastFixAt: BEFORE }
+
+  it('is REPORTING when a fix landed inside the window', () => {
+    expect(classifyGps(INSIDE, talkingNoFix, DEAD_FROM, true).state).toBe('REPORTING')
+  })
+
+  it('is NOT_REPORTING when the tracker talks but has not fixed in the window', () => {
+    const c = classifyGps(null, talkingNoFix, DEAD_FROM, true)
+    expect(c.state).toBe('NOT_REPORTING')
+    expect(c.lastSeenAt).toBe(BEFORE)
+  })
+
+  it('believes the provider even on a unit with too few rows to judge', () => {
+    // A dead GPS is exactly what starves the unit of rows.
+    expect(classifyGps(null, talkingNoFix, DEAD_FROM, false).state).toBe('NOT_REPORTING')
+    expect(classifyGps(null, { lastMessageAt: INSIDE, lastFixAt: null }, DEAD_FROM, false).state).toBe('NOT_REPORTING')
+  })
+
+  it('falls back to the rows when the provider has no clock for the unit', () => {
+    expect(classifyGps(null, null, DEAD_FROM, true).state).toBe('NOT_FITTED')
+  })
+})
+
+describe('tracker silence', () => {
+  it('is silent with no row and no message inside the window', () => {
+    expect(isTrackerSilent(false, { lastMessageAt: BEFORE, lastFixAt: BEFORE }, DEAD_FROM)).toBe(true)
+    expect(isTrackerSilent(false, null, DEAD_FROM)).toBe(true)
+  })
+
+  it('is not silent while the provider still hears messages', () => {
+    expect(isTrackerSilent(false, { lastMessageAt: INSIDE, lastFixAt: BEFORE }, DEAD_FROM)).toBe(false)
+  })
+
+  it('is not silent with rows inside the window', () => {
+    expect(isTrackerSilent(true, null, DEAD_FROM)).toBe(false)
   })
 })
