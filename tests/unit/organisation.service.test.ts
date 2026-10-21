@@ -3,8 +3,10 @@ import { NotFoundError } from '../../src/core/errors/errors.js'
 
 // Mock repository before importing service
 vi.mock('../../src/modules/organisations/organisation.repository.ts')
+vi.mock('../../src/modules/roles/role.catalogue.ts')
 
 import * as repo from '../../src/modules/organisations/organisation.repository.js'
+import { ensureCatalogueRoles } from '../../src/modules/roles/role.catalogue.js'
 import * as service from '../../src/modules/organisations/organisation.service.js'
 import { makeOrg } from '../helpers/factories.js'
 
@@ -54,6 +56,15 @@ describe('organisation.service', () => {
 
       expect(result).toEqual(org)
       expect(mockRepo.create).toHaveBeenCalledWith(dto)
+    })
+
+    it('gives the new org the standard roles', async () => {
+      const org = makeOrg({ id: 'org_new' })
+      mockRepo.create.mockResolvedValue(org)
+
+      await service.createOrganisation({ name: 'New Org', code: 'NEW' })
+
+      expect(vi.mocked(ensureCatalogueRoles)).toHaveBeenCalledWith(['org_new'])
     })
   })
 
