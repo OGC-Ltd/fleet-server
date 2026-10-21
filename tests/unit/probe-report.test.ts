@@ -68,6 +68,21 @@ describe("GPS, judged with the provider's clocks", () => {
     expect(classifyGps(null, { lastMessageAt: INSIDE, lastFixAt: null }, DEAD_FROM, false).state).toBe('NOT_REPORTING')
   })
 
+  it('flags a GPS silent for its own shorter window while rows still sit in the 24 h one', () => {
+    // KBL 126W: last fix 7 h ago, tracker online since. The 24 h window still
+    // holds that fix, so judged on it alone the GPS read REPORTING.
+    const now      = new Date('2026-10-21T21:00:00Z')
+    const lastFix  = new Date('2026-10-21T13:54:52Z')
+    const gpsFrom  = new Date(now.getTime() - 3 * 3_600_000)
+    const dayFrom  = new Date(now.getTime() - 24 * 3_600_000)
+    const clock    = { lastMessageAt: new Date('2026-10-21T20:58:00Z'), lastFixAt: lastFix }
+    const c = classifyGps(lastFix, clock, dayFrom, true, gpsFrom)
+    expect(c.state).toBe('NOT_REPORTING')
+    expect(c.lastSeenAt).toEqual(lastFix)
+    // A fix inside the short window is a working GPS.
+    expect(classifyGps(new Date('2026-10-21T20:30:00Z'), clock, dayFrom, true, gpsFrom).state).toBe('REPORTING')
+  })
+
   it('falls back to the rows when the provider has no clock for the unit', () => {
     expect(classifyGps(null, null, DEAD_FROM, true).state).toBe('NOT_FITTED')
   })
