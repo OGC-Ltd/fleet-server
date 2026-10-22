@@ -26,9 +26,12 @@
  * dormant no-op rather than a boot failure, exactly as before.
  */
 
+import fs from 'node:fs'
+import path from 'node:path'
 import nodemailer, { type Transporter } from 'nodemailer'
 import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
+import { LOGO_CID } from '../../lib/mailer/templates.js'
 
 /** Bounds a hung connection; SMTP has no equivalent of an AbortController. */
 const SMTP_TIMEOUT_MS = 15_000
@@ -97,6 +100,11 @@ export class MailtrapClient {
       // Mailtrap reads this header for the category shown in its UI; the HTTP
       // API took it as a body field.
       ...(msg.category ? { headers: { 'X-MT-Category': msg.category } } : {}),
+      // The letterhead logo travels inside the message (cid:) rather than as a
+      // link: clients that hold back remote images until asked show it anyway.
+      ...(msg.html.includes(`cid:${LOGO_CID}`) && logo() ? {
+        attachments: [{ filename: 'rai-group.jpeg', content: logo()!, cid: LOGO_CID, contentType: 'image/jpeg' }],
+      } : {}),
     })
 
     // A 2xx from the server is not proof of acceptance for every recipient:
@@ -111,6 +119,20 @@ export class MailtrapClient {
     this.transport?.close()
     this.transport = null
   }
+}
+
+/**
+ * The Rai Group logo, read once from <repo>/assets/report (where the PDF
+ * reports already find it). Null when absent: the mail still goes, and the
+ * letterhead shows the image's alt text.
+ */
+let logoBytes: Buffer | null | undefined
+function logo(): Buffer | null {
+  if (logoBytes === undefined) {
+    try { logoBytes = fs.readFileSync(path.resolve(process.cwd(), 'assets', 'report', 'rai-group-logo.jpeg')) }
+    catch { logoBytes = null; logger.warn('mail: assets/report/rai-group-logo.jpeg missing — letterhead goes without the logo') }
+  }
+  return logoBytes
 }
 
 export const mailtrapClient = new MailtrapClient()

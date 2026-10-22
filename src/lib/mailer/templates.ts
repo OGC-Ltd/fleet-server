@@ -27,13 +27,175 @@ export interface RenderedMail {
   category: string
 }
 
-const shell = (heading: string, body: string, action?: { href: string; label: string }): string => `
-<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#0f172a">
-  <h1 style="font-size:19px;margin:0 0 14px">${heading}</h1>
-  ${body}
-  ${action ? `<p style="margin:22px 0"><a href="${esc(action.href)}" style="display:inline-block;padding:11px 20px;background:#15803d;color:#ffffff;text-decoration:none;border-radius:999px;font-weight:600">${esc(action.label)}</a></p>
-  <p style="font-size:12px;color:#64748b;margin:0">If the button does not work, paste this into your browser:<br><span style="word-break:break-all">${esc(action.href)}</span></p>` : ''}
-</div>`.trim()
+/*
+ * Hallmark · macrostructure: Letter (memo slip) · tone: utilitarian · anchor hue: blue 221°
+ * theme: new-ui's own palette (src/index.css) · enrichment: none (typography only)
+ *
+ * ## The layout every mail shares
+ *
+ *   letterhead     [logo]  FLEET OPERATIONS  ·  <organisation>   (on the grey paper)
+ *   ┌ sheet ─────────────────────────────────────────────┐
+ *   │ status         only when the mail carries a verdict │
+ *   │ heading                                             │
+ *   │ body, then a docket of label / value rows           │
+ *   │ [ one button ]   and the same link written out      │
+ *   │ small print: how long the link lasts, and so on     │
+ *   └─────────────────────────────────────────────────────┘
+ *   footer         who sent it, the domain, why you got it
+ *
+ * Mail is not a browser. Gmail and Outlook drop custom properties, OKLCH and
+ * most of <style>, and many clients block images until asked, so the tokens
+ * below are hex, every style is inline, and the layout is tables. The Rai
+ * Group logo is ATTACHED to the message and referenced by cid:, not linked,
+ * because a linked image is exactly what those clients hold back; its alt
+ * text reads "RAI GROUP" for the ones that still do.
+ *
+ * The footer names the domain as TEXT, never a link. A reader checking that a
+ * mail is genuine should compare it with the address bar, and the password-
+ * changed notice must carry no link at all.
+ */
+
+/** The address people know the dashboard by. APP_BASE_URL should be this. */
+export const OFFICIAL_SITE = 'https://logistics.raioperations.com'
+const SENDER = 'Rai Group Fleet'
+/** Content-ID of the Rai Group logo the mail client attaches (mailtrap.client). */
+export const LOGO_CID = 'rai-group-logo'
+
+const T = {
+  paper:  '#f1f5f9',
+  sheet:  '#ffffff',
+  rule:   '#e2e8f0',
+  ink:    '#0f172a',
+  ink2:   '#334155',
+  muted:  '#5f6e83',
+  accent: '#2563eb',
+  onAccent: '#ffffff',
+  ok:     '#15803d',
+  warn:   '#b45309',
+  crit:   '#b91c1c',
+  font:   "Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif",
+  mono:   "'JetBrains Mono','SF Mono',Menlo,Consolas,monospace",
+} as const
+
+type Tone = 'ok' | 'warn' | 'crit'
+
+/** Body copy. */
+const para = (html: string): string =>
+  `<p style="margin:0 0 14px;font-size:15px;line-height:1.6;color:${T.ink2}">${html}</p>`
+/** Small print: link lifetimes, "if this was not you". */
+const note = (html: string, colour: string = T.muted): string =>
+  `<p style="margin:0 0 6px;font-size:13px;line-height:1.5;color:${colour}">${html}</p>`
+/** A section title inside the sheet. */
+const h2 = (s: string, colour: string = T.ink): string =>
+  `<h2 style="margin:26px 0 8px;font-size:14px;line-height:1.4;font-weight:600;color:${colour}">${esc(s)}</h2>`
+/** Plates and ticket numbers read as codes, so they are set as codes. */
+const code = (s: string): string =>
+  `<span style="font-family:${T.mono};font-size:13px;color:${T.ink}">${esc(s)}</span>`
+const strong = (s: string): string => `<strong style="color:${T.ink};font-weight:600">${esc(s)}</strong>`
+
+/**
+ * Label / value rows with hairlines between them. Values are HTML (a plate set
+ * in mono); `kv` escapes a plain string into one.
+ */
+function docket(rows: Array<[label: string, valueHtml: string] | null | false | undefined | ''>): string {
+  const live = rows.filter((r): r is [string, string] => Boolean(r))
+  if (live.length === 0) return ''
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:2px 0 8px">${
+    live.map(([k, v], i) => {
+      const line = i ? `border-top:1px solid ${T.rule};` : ''
+      return `<tr>
+      <td style="padding:8px 14px 8px 0;width:34%;vertical-align:top;font-size:13px;line-height:1.5;color:${T.muted};${line}">${esc(k)}</td>
+      <td style="padding:8px 0;vertical-align:top;font-size:14px;line-height:1.5;color:${T.ink};${line}">${v}</td>
+    </tr>`
+    }).join('')
+  }</table>`
+}
+const kv = (k: string, v: string): [string, string] => [k, esc(v)]
+
+/** A list with room between the items; `items` are HTML. */
+const list = (items: string[], ordered = false): string => {
+  const tag = ordered ? 'ol' : 'ul'
+  return `<${tag} style="margin:0 0 6px;padding-left:20px;font-size:14px;line-height:1.55;color:${T.ink2}">${
+    items.map((i) => `<li style="margin:0 0 8px">${i}</li>`).join('')
+  }</${tag}>`
+}
+/** A muted second line inside a list item or table cell. */
+const sub = (html: string, colour: string = T.muted): string =>
+  `<br><span style="font-size:13px;color:${colour}">${html}</span>`
+
+/** The domain without its scheme, for the footer. */
+const siteName = (): string => OFFICIAL_SITE.replace(/^https?:\/\//, '')
+
+function shell(opts: {
+  /** Already escaped. */
+  heading:   string
+  body:      string
+  action?:   { href: string; label: string } | undefined
+  /** Small print under the button (or under the body when there is none). */
+  after?:    string | undefined
+  /** The line a mail client shows beside the subject. Plain text. */
+  preheader: string
+  /** A verdict worth seeing before the heading: "Needs attention". */
+  status?:   { tone: Tone; label: string } | undefined
+  /** The organisation the mail is about, beside the letterhead. */
+  org?:      string | undefined
+  /** Why this person got it, for the footer. Plain text. */
+  reason:    string
+}): string {
+  const status = opts.status
+    ? `<p style="margin:0 0 10px;font-size:13px;line-height:1.4;font-weight:600;color:${T[opts.status.tone]}">&#9679;&nbsp;${esc(opts.status.label)}</p>`
+    : ''
+  const action = opts.action
+    ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 14px"><tr>
+        <td style="border-radius:6px;background:${T.accent}">
+          <a href="${esc(opts.action.href)}" style="display:inline-block;padding:12px 22px;font-family:${T.font};font-size:15px;font-weight:600;line-height:1.2;color:${T.onAccent};text-decoration:none;border-radius:6px;white-space:nowrap">${esc(opts.action.label)}</a>
+        </td></tr></table>
+      ${note(`Button not working? Paste this into your browser:<br><span style="word-break:break-all;color:${T.ink2}">${esc(opts.action.href)}</span>`)}`
+    : ''
+  const after = opts.after
+    ? `<div style="margin-top:${opts.action ? 4 : 10}px">${opts.after}</div>`
+    : ''
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light">
+<title>${opts.heading}</title>
+<style>@media (max-width:480px){.sheet{padding:24px 20px !important}.wrap{padding:16px 8px !important}}</style>
+</head>
+<body style="margin:0;padding:0;background:${T.paper};-webkit-text-size-adjust:100%">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:${T.paper}">${esc(opts.preheader)}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${T.paper}">
+<tr><td class="wrap" align="center" style="padding:32px 16px">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;font-family:${T.font}">
+    <tr><td style="padding:0 0 16px">
+      <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+        <td style="vertical-align:middle;padding-right:14px">
+          <img src="cid:${LOGO_CID}" width="56" height="63" alt="RAI GROUP" style="display:block;width:56px;height:63px;border:0;border-radius:6px;background:${T.ink};color:${T.sheet};font-size:9px;font-weight:700;text-align:center">
+        </td>
+        <td style="vertical-align:middle;font-size:12px;line-height:1.4;letter-spacing:.08em;text-transform:uppercase;color:${T.muted}">
+          <strong style="color:${T.ink};font-weight:700">Fleet operations</strong>${opts.org ? `&nbsp;&nbsp;&middot;&nbsp;&nbsp;${esc(opts.org)}` : ''}
+        </td>
+      </tr></table>
+    </td></tr>
+    <tr><td class="sheet" style="background:${T.sheet};border:1px solid ${T.rule};border-radius:8px;padding:32px 36px">
+      ${status}
+      <h1 style="margin:0 0 18px;font-size:22px;line-height:1.3;font-weight:600;letter-spacing:-.01em;color:${T.ink}">${opts.heading}</h1>
+      ${opts.body}
+      ${action}
+      ${after}
+    </td></tr>
+    <tr><td style="padding:18px 4px 0;font-size:12px;line-height:1.6;color:${T.muted}">
+      Sent by ${SENDER} from <strong style="color:${T.ink2};font-weight:600">${siteName()}</strong>.<br>
+      ${esc(opts.reason)}
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body></html>`
+}
+
+/** The footer of every plain-text part. */
+const textFooter = (reason: string): string => `\n--\n${SENDER} · ${siteName()}\n${reason}\n`
 
 /** How long a link lasts, in words rather than a timestamp in another timezone. */
 function validFor(expiresAt: Date, now: Date = new Date()): string {
@@ -41,6 +203,12 @@ function validFor(expiresAt: Date, now: Date = new Date()): string {
   if (hours < 48) return `${hours} hour${hours === 1 ? '' : 's'}`
   return `${Math.round(hours / 24)} days`
 }
+
+const INVITE_REASON  = 'You are getting this because an administrator added you. If you were not expecting it, ignore it: the account cannot be used until a password is set.'
+const RESET_REASON   = 'You are getting this because a password reset was asked for on this address.'
+const CHANGED_REASON = 'You are getting this because the password on your account changed. This notice goes out on every change.'
+const REPAIR_REASON  = 'You are getting this because you handle repairs for this organisation.'
+const AUDIT_REASON   = 'You are getting this because you handle fuel audits for this organisation.'
 
 export function inviteEmail(opts: {
   fullName: string
@@ -59,14 +227,19 @@ export function inviteEmail(opts: {
       `An account has been created for you at ${opts.orgName}${role}.\n\n` +
       `Choose a password to finish setting it up:\n${opts.link}\n\n` +
       `This link works once and expires in ${window}.\n\n` +
-      `If you were not expecting this, you can ignore this message — the account cannot be used until a password is set.\n`,
-    html: shell(
-      `Set up your ${esc(opts.orgName)} account`,
-      `<p style="margin:0 0 10px">Hello ${esc(opts.fullName)},</p>
-       <p style="margin:0 0 10px">An account has been created for you at <strong>${esc(opts.orgName)}</strong>${role ? ` as <strong>${esc(opts.roleName!)}</strong>` : ''}. Choose a password to finish setting it up.</p>
-       <p style="margin:0;font-size:13px;color:#475569">This link works once and expires in ${window}.</p>`,
-      { href: opts.link, label: 'Set your password' },
-    ),
+      `If you were not expecting this, you can ignore this message — the account cannot be used until a password is set.\n` +
+      textFooter(INVITE_REASON),
+    html: shell({
+      heading: `Set up your ${esc(opts.orgName)} account`,
+      preheader: `Choose a password to start using the ${opts.orgName} fleet dashboard.`,
+      org: opts.orgName,
+      body:
+        para(`Hello ${esc(opts.fullName)},`) +
+        para(`An account has been created for you at ${strong(opts.orgName)}${opts.roleName ? ` as ${strong(opts.roleName)}` : ''}. Choose a password to finish setting it up.`),
+      action: { href: opts.link, label: 'Set your password' },
+      after: note(`This link works once and expires in ${window}.`),
+      reason: INVITE_REASON,
+    }),
   }
 }
 
@@ -79,15 +252,20 @@ export function resetEmail(opts: { fullName: string; link: string; expiresAt: Da
       `Hello ${opts.fullName},\n\n` +
       `Someone asked to reset the password on this account. To choose a new one:\n${opts.link}\n\n` +
       `This link works once and expires in ${window}.\n\n` +
-      `If this was not you, ignore this message. Nothing has changed and your current password still works.\n`,
-    html: shell(
-      'Reset your password',
-      `<p style="margin:0 0 10px">Hello ${esc(opts.fullName)},</p>
-       <p style="margin:0 0 10px">Someone asked to reset the password on this account. Choose a new one below.</p>
-       <p style="margin:0 0 4px;font-size:13px;color:#475569">This link works once and expires in ${window}.</p>
-       <p style="margin:0;font-size:13px;color:#475569">If this was not you, ignore this message — nothing has changed.</p>`,
-      { href: opts.link, label: 'Choose a new password' },
-    ),
+      `If this was not you, ignore this message. Nothing has changed and your current password still works.\n` +
+      textFooter(RESET_REASON),
+    html: shell({
+      heading: 'Reset your password',
+      preheader: `Choose a new password. The link expires in ${window}.`,
+      body:
+        para(`Hello ${esc(opts.fullName)},`) +
+        para('Someone asked to reset the password on this account. Choose a new one below.'),
+      action: { href: opts.link, label: 'Choose a new password' },
+      after:
+        note(`This link works once and expires in ${window}.`) +
+        note('If this was not you, ignore this message. Nothing has changed and your current password still works.'),
+      reason: RESET_REASON,
+    }),
   }
 }
 
@@ -106,13 +284,24 @@ export function passwordChangedEmail(opts: { fullName: string; when: Date; ip?: 
       `Hello ${opts.fullName},\n\n` +
       `The password on your account was changed on ${stamp}${from}.\n\n` +
       `You were signed out everywhere else as part of the change.\n\n` +
-      `If this was not you, contact your organisation's administrator immediately — whoever made the change can currently sign in as you.\n`,
-    html: shell(
-      'Your password was changed',
-      `<p style="margin:0 0 10px">Hello ${esc(opts.fullName)},</p>
-       <p style="margin:0 0 10px">The password on your account was changed on <strong>${esc(stamp)}</strong>${from ? ` from ${esc(opts.ip!)}` : ''}. You were signed out everywhere else as part of the change.</p>
-       <p style="margin:0;font-size:13px;color:#b91c1c">If this was not you, contact your organisation's administrator immediately.</p>`,
-    ),
+      `If this was not you, contact your organisation's administrator immediately — whoever made the change can currently sign in as you.\n` +
+      textFooter(CHANGED_REASON),
+    html: shell({
+      heading: 'Your password was changed',
+      preheader: `Changed on ${stamp}. If this was not you, tell your administrator now.`,
+      body:
+        para(`Hello ${esc(opts.fullName)},`) +
+        para('The password on your account was changed. You were signed out everywhere else as part of the change.') +
+        docket([
+          ['When', code(stamp)],
+          opts.ip ? ['From', code(opts.ip)] : null,
+        ]),
+      after: note(
+        `<strong style="font-weight:600">If this was not you,</strong> contact your organisation's administrator immediately. Whoever made the change can sign in as you.`,
+        T.crit,
+      ),
+      reason: CHANGED_REASON,
+    }),
   }
 }
 /**
@@ -141,20 +330,29 @@ export function repairAssignmentEmail(opts: {
   link?: string | undefined
 }): RenderedMail {
   const reasonLine = opts.reason ? `\nReason: ${opts.reason}\n` : ''
+  const why = 'You are getting this because a repair task was assigned to you.'
   return {
     category: 'repair-assignment',
     subject: `Repair task assigned: ${opts.plate} — ${opts.label}`,
     text:
       `Hello ${opts.assigneeName},\n\n` +
       `${opts.assignerName} has assigned you a repair task for ${opts.plate} (${opts.label}).${reasonLine}\n` +
-      (opts.link ? `Open the task here: ${opts.link}\n` : ''),
-    html: shell(
-      'Repair task assigned',
-      `<p style="margin:0 0 10px">Hello ${esc(opts.assigneeName)},</p>
-       <p style="margin:0 0 10px"><strong>${esc(opts.assignerName)}</strong> has assigned you a repair task for <strong>${esc(opts.plate)}</strong> (${esc(opts.label)}).</p>
-       ${opts.reason ? `<p style="margin:0 0 10px">Reason: ${esc(opts.reason)}</p>` : ''}`,
-      opts.link ? { href: opts.link, label: 'Open the task' } : undefined,
-    ),
+      (opts.link ? `Open the task here: ${opts.link}\n` : '') +
+      textFooter(why),
+    html: shell({
+      heading: 'Repair task assigned',
+      preheader: `${opts.plate} · ${opts.label}, from ${opts.assignerName}.`,
+      body:
+        para(`Hello ${esc(opts.assigneeName)},`) +
+        para(`${strong(opts.assignerName)} has assigned you a repair task.`) +
+        docket([
+          ['Unit', code(opts.plate)],
+          kv('Fault', opts.label),
+          opts.reason ? kv('Reason', opts.reason) : null,
+        ]),
+      action: opts.link ? { href: opts.link, label: 'Open the task' } : undefined,
+      reason: why,
+    }),
   }
 }
 
@@ -221,18 +419,18 @@ export function repairReportEmail(opts: {
 
   const htmlGroup = (title: string, colour: string, rows: Item[]): string => {
     if (rows.length === 0) return ''
-    const body = rows.map((i) => `
-      <li style="margin:0 0 9px">
-        <strong>${esc(i.plate)}</strong> — ${esc(i.label)}
-        ${i.sparePart ? `<br><span style="color:#b45309">Part: ${esc(i.sparePart)}</span>` : ''}
-        ${due(i) ? `<br><span style="color:#b45309">Fix date: ${esc(due(i)!)}</span>` : ''}
-        ${i.problemNote ? `<br><span style="color:#475569;font-size:13px">${esc(i.problemNote)}</span>` : ''}
-      </li>`).join('')
-    return `<h2 style="font-size:14px;margin:18px 0 8px;color:${colour}">${esc(title)} (${rows.length})</h2>
-       <ul style="margin:0;padding-left:18px">${body}</ul>`
+    return h2(`${title} (${rows.length})`, colour) + list(rows.map((i) =>
+      `${code(i.plate)}&nbsp;&nbsp;${esc(i.label)}` +
+      (i.sparePart ? sub(`Part: ${esc(i.sparePart)}`, T.warn) : '') +
+      (due(i) ? sub(`Fix date: ${esc(due(i)!)}`, T.warn) : '') +
+      (i.problemNote ? sub(esc(i.problemNote)) : '')))
   }
 
   const fixingPlates = fixing.map((i) => i.plate).join(' · ')
+  const status: { tone: Tone; label: string } =
+    blocked.length ? { tone: 'crit', label: clauses.join(' · ') }
+      : spares.length ? { tone: 'warn', label: clauses.join(' · ') }
+        : { tone: 'ok', label: 'All in hand' }
 
   return {
     category: 'repair-report',
@@ -243,19 +441,27 @@ export function repairReportEmail(opts: {
       textGroup('Spare parts needed', spares) +
       textGroup('Cannot be fixed', blocked) +
       (fixing.length ? `\nBeing fixed (${fixing.length})\n  ${fixingPlates}\n` : '') +
-      (opts.link ? `\nOpen the Maintenance screen: ${opts.link}\n` : ''),
-    html: shell(
-      'Repair report',
-      `<p style="margin:0 0 10px">${esc(head)}</p>
-       ${opts.note ? `<p style="margin:0 0 10px;color:#475569">${esc(opts.note)}</p>` : ''}
-       ${htmlGroup('Spare parts needed', '#b45309', spares)}
-       ${htmlGroup('Cannot be fixed', '#b91c1c', blocked)}
-       ${fixing.length ? `<h2 style="font-size:14px;margin:18px 0 8px;color:#15803d">Being fixed (${fixing.length})</h2>
-       <p style="margin:0;color:#475569">${esc(fixingPlates)}</p>` : ''}`,
+      (opts.link ? `\nOpen the Maintenance screen: ${opts.link}\n` : '') +
+      textFooter(REPAIR_REASON),
+    html: shell({
+      heading: 'Repair report',
+      preheader: `${opts.items.length} unit${opts.items.length === 1 ? '' : 's'}${tail}`,
+      org: opts.orgName,
+      status,
+      body:
+        para(esc(head)) +
+        (opts.note ? para(`<span style="color:${T.muted}">${esc(opts.note)}</span>`) : '') +
+        htmlGroup('Spare parts needed', T.warn, spares) +
+        htmlGroup('Cannot be fixed', T.crit, blocked) +
+        (fixing.length
+          ? h2(`Being fixed (${fixing.length})`, T.ok) +
+            `<p style="margin:0 0 6px;font-family:${T.mono};font-size:13px;line-height:1.7;color:${T.ink2}">${esc(fixingPlates)}</p>`
+          : ''),
       // Only when the origin is configured — the env header is explicit that a
       // mail with a broken link is worse than a mail without one.
-      opts.link ? { href: opts.link, label: 'Open the Maintenance screen' } : undefined,
-    ),
+      action: opts.link ? { href: opts.link, label: 'Open the Maintenance screen' } : undefined,
+      reason: REPAIR_REASON,
+    }),
   }
 }
 
@@ -359,72 +565,73 @@ export function fuelAuditReportEmail(r: FuelAuditReport): RenderedMail {
     t.push(`     ordered ${isoDay(p.orderedAt)}${p.receivedAt ? `, received ${isoDay(p.receivedAt)}` : ''}${p.fixPlannedAt ? `, fix planned ${isoDay(p.fixPlannedAt)}` : ''}${p.fittedAt ? `, fitted ${isoDay(p.fittedAt)}` : ''}`)
   }
   if (r.link) t.push('', `Open the Fuel Audit: ${r.link}`)
+  t.push(textFooter(AUDIT_REASON))
 
   // ── html ──
-  const h2 = (s: string): string =>
-    `<h2 style="font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:#475569;margin:20px 0 8px">${esc(s)}</h2>`
-  const row = (k: string, v: string): string =>
-    `<tr><td style="padding:3px 12px 3px 0;color:#64748b;white-space:nowrap;vertical-align:top">${esc(k)}</td><td style="padding:3px 0">${esc(v)}</td></tr>`
-  const tone = r.verdict === 'fixed' ? '#15803d' : '#b91c1c'
+  const nothing = (s: string): string => `<p style="margin:0 0 6px;font-size:14px;color:${T.muted}">${esc(s)}</p>`
 
-  const alerts = r.alerts.map((a) => {
-    const trail = a.trail.map((x) =>
-      `<li>${esc(eat(x.at))} — ${esc(AUDIT_ACTION[x.kind] ?? x.kind)}${x.by ? ` by ${esc(x.by)}` : ''}${x.note ? `: ${esc(x.note)}` : ''}</li>`).join('')
-    return `<li style="margin:0 0 10px"><strong>${esc(eat(a.beganAt))}</strong> · ${esc(a.litres.toFixed(1))} L${a.cause ? ` · ${esc(a.cause)}` : ''}
-      <ul style="margin:4px 0 0;padding-left:16px;color:#475569;font-size:13px">${trail}</ul></li>`
-  }).join('')
+  const alerts = r.alerts.length
+    ? list(r.alerts.map((a) =>
+        `${strong(eat(a.beganAt))} · ${esc(a.litres.toFixed(1))} L${a.cause ? ` · ${esc(a.cause)}` : ''}` +
+        a.trail.map((x) =>
+          sub(`${esc(eat(x.at))} · ${esc(AUDIT_ACTION[x.kind] ?? x.kind)}${x.by ? ` by ${esc(x.by)}` : ''}${x.note ? `: ${esc(x.note)}` : ''}`)).join('')), true)
+    : nothing('None.')
 
-  const stages = r.job.stages.map((s) =>
-    `<li>${esc(AUDIT_STAGE[s.stage] ?? s.stage)} · ${esc(eat(s.at))}${s.by ? ` · ${esc(s.by)}` : ''}${s.note ? `<br><span style="color:#64748b">${esc(s.note)}</span>` : ''}</li>`).join('')
+  const stages = r.job.stages.length
+    ? list(r.job.stages.map((s) =>
+        `${esc(AUDIT_STAGE[s.stage] ?? s.stage)} · ${esc(eat(s.at))}${s.by ? ` · ${esc(s.by)}` : ''}${s.note ? sub(esc(s.note)) : ''}`))
+    : ''
 
   const insp = r.inspections.length
-    ? `<table style="border-collapse:collapse;font-size:13px">${r.inspections.map((i) =>
-        row(COMPONENT[i.component] ?? i.component, `${i.verdict}${i.note ? ` · ${i.note}` : ''}${i.by ? ` (${i.by})` : ''}`)).join('')}</table>`
-    : '<p style="margin:0;color:#64748b">Nothing recorded.</p>'
+    ? docket(r.inspections.map((i) =>
+        kv(COMPONENT[i.component] ?? i.component, `${i.verdict}${i.note ? ` · ${i.note}` : ''}${i.by ? ` (${i.by})` : ''}`)))
+    : nothing('Nothing recorded.')
 
+  const cell = (html: string, extra = ''): string =>
+    `<td style="padding:8px 8px 8px 0;vertical-align:top;font-size:13px;line-height:1.5;color:${T.ink};border-top:1px solid ${T.rule};${extra}">${html}</td>`
+  const right = 'text-align:right;padding-right:0;white-space:nowrap'
   const partRows = r.parts.map((p) => {
     const dates = `ordered ${isoDay(p.orderedAt)}${p.receivedAt ? `, received ${isoDay(p.receivedAt)}` : ''}${p.fittedAt ? `, fitted ${isoDay(p.fittedAt)}` : ''}`
-    return `<tr style="border-top:1px solid #e2e8f0">
-      <td style="padding:4px 8px 4px 0">${esc(`${p.quantity > 1 ? `${p.quantity} × ` : ''}${p.name}`)}<br><span style="color:#64748b;font-size:12px">${esc(dates)}</span></td>
-      <td style="padding:4px 8px">${esc(p.status)}</td>
-      <td style="padding:4px 8px">${esc(p.supplier ?? '—')}</td>
-      <td style="padding:4px 0;text-align:right">${p.costKes != null ? esc(kes(p.costKes)) : '—'}</td></tr>`
+    return `<tr>${cell(`${esc(`${p.quantity > 1 ? `${p.quantity} × ` : ''}${p.name}`)}${sub(esc(dates))}`)}${cell(esc(p.status))}${cell(esc(p.supplier ?? '—'))}${cell(p.costKes != null ? esc(kes(p.costKes)) : '—', right)}</tr>`
   }).join('')
   const total = cost
-    ? `<tr style="border-top:1px solid #e2e8f0"><td colspan="3" style="padding:4px 0;font-weight:600">Total (not cancelled)</td><td style="padding:4px 0;text-align:right;font-weight:600">${esc(kes(cost))}</td></tr>`
+    ? `<tr>${cell('<strong style="font-weight:600">Total (not cancelled)</strong>')}${cell('')}${cell('')}${cell(`<strong style="font-weight:600">${esc(kes(cost))}</strong>`, right)}</tr>`
     : ''
+  const th = (s: string, extra = ''): string =>
+    `<th align="left" style="padding:0 8px 6px 0;font-size:12px;font-weight:600;color:${T.muted};${extra}">${s}</th>`
   const parts = r.parts.length
-    ? `<table style="border-collapse:collapse;font-size:13px;width:100%">
-        <tr style="text-align:left;color:#64748b"><th style="padding:4px 8px 4px 0">Part</th><th style="padding:4px 8px">Status</th><th style="padding:4px 8px">Supplier</th><th style="padding:4px 0;text-align:right">Cost</th></tr>
+    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:2px 0 8px">
+        <tr>${th('Part')}${th('Status')}${th('Supplier')}${th('Cost', right)}</tr>
         ${partRows}${total}</table>`
-    : '<p style="margin:0;color:#64748b">None ordered.</p>'
+    : nothing('None ordered.')
 
-  const summary = [
-    row('Unit', r.plate),
-    row('Fuel alerts', `${r.alerts.length} · ${litres.toFixed(1)} L reported lost, found to be a faulty probe (not a theft)`),
-    live.length ? row('Spare parts', `${live.length}${cost ? ` · ${kes(cost)}` : ''}`) : '',
-    r.fixNote ? row('What was done', r.fixNote) : '',
-    r.recommendation ? row('Recommendation', r.recommendation) : '',
-  ].join('')
-  const job = [
-    row('Raised', `${eat(r.job.raisedAt)}${r.job.raisedBy ? ` by ${r.job.raisedBy}` : ''}`),
-    row('Technician', r.job.technician ?? 'Not assigned'),
-    r.job.problemNote ? row('Problem', r.job.problemNote) : '',
-    r.job.fixDate ? row('Fix date', isoDay(r.job.fixDate)) : '',
-  ].join('')
-
-  const html = shell(
-    `Fuel Audit done — ${esc(r.plate)}`,
-    `<p style="margin:0 0 12px"><span style="display:inline-block;padding:3px 10px;border-radius:999px;background:${tone};color:#fff;font-weight:600;font-size:13px">${esc(outcome)}</span></p>
-     <p style="margin:0 0 12px">${esc(head)}</p>
-     <table style="border-collapse:collapse;font-size:14px">${summary}</table>
-     ${h2('Fuel alerts')}<ol style="margin:0;padding-left:18px">${alerts}</ol>
-     ${h2('Repair job')}<table style="border-collapse:collapse;font-size:14px">${job}</table>
-     <ul style="margin:8px 0 0;padding-left:18px;font-size:13px">${stages}</ul>
-     ${h2('Probe inspection')}${insp}
-     ${h2('Spare parts')}${parts}`,
-    r.link ? { href: r.link, label: 'Open the Fuel Audit' } : undefined,
-  )
+  const html = shell({
+    heading: `Fuel Audit done: ${esc(r.plate)}`,
+    preheader: `${outcome} · ${r.alerts.length} alert${r.alerts.length === 1 ? ' was' : 's were'} a faulty probe, not a theft.`,
+    org: r.orgName,
+    status: { tone: r.verdict === 'fixed' ? 'ok' : 'crit', label: outcome },
+    body:
+      para(esc(head)) +
+      docket([
+        ['Unit', code(r.plate)],
+        kv('Fuel alerts', `${r.alerts.length} · ${litres.toFixed(1)} L reported lost, found to be a faulty probe (not a theft)`),
+        live.length ? kv('Spare parts', `${live.length}${cost ? ` · ${kes(cost)}` : ''}`) : null,
+        r.fixNote ? kv('What was done', r.fixNote) : null,
+        r.recommendation ? kv('Recommendation', r.recommendation) : null,
+      ]) +
+      h2('Fuel alerts') + alerts +
+      h2('Repair job') +
+      docket([
+        kv('Raised', `${eat(r.job.raisedAt)}${r.job.raisedBy ? ` by ${r.job.raisedBy}` : ''}`),
+        kv('Technician', r.job.technician ?? 'Not assigned'),
+        r.job.problemNote ? kv('Problem', r.job.problemNote) : null,
+        r.job.fixDate ? kv('Fix date', isoDay(r.job.fixDate)) : null,
+      ]) + stages +
+      h2('Probe inspection') + insp +
+      h2('Spare parts') + parts,
+    action: r.link ? { href: r.link, label: 'Open the Fuel Audit' } : undefined,
+    reason: AUDIT_REASON,
+  })
 
   return { category: 'fuel-audit-report', subject, text: t.join('\n'), html }
 }
@@ -456,22 +663,20 @@ export function repairWorkflowEmail(opts: {
     '',
     `${opts.orgName}`,
     ...(opts.link ? [`Open the job: ${opts.link}`] : []),
-  ].join('\n')
-  const row = (k: string, v: string) =>
-    `<tr><td style="padding:3px 14px 3px 0;color:#64748b;vertical-align:top">${esc(k)}</td><td style="padding:3px 0">${esc(v)}</td></tr>`
-  const badge = opts.critical
-    ? '<p style="margin:0 0 12px"><span style="display:inline-block;padding:3px 10px;border-radius:999px;background:#b91c1c;color:#fff;font-weight:600;font-size:13px">Needs attention</span></p>'
-    : ''
-  const html = shell(
-    esc(opts.headline),
-    `${badge}<table style="border-collapse:collapse;font-size:14px">
-       ${row('Unit', opts.plate)}
-       ${opts.ticketNo ? row('Ticket', opts.ticketNo) : ''}
-       ${row('Stage', opts.stage)}
-       ${opts.lines.map((l) => row(l.label, l.value)).join('')}
-     </table>
-     <p style="margin:14px 0 0;font-size:12px;color:#64748b">${esc(opts.orgName)}</p>`,
-    opts.link ? { href: opts.link, label: 'Open the job' } : undefined,
-  )
+  ].join('\n') + '\n' + textFooter(REPAIR_REASON)
+  const html = shell({
+    heading: esc(opts.headline),
+    preheader: `${ref} · ${opts.stage}`,
+    org: opts.orgName,
+    status: opts.critical ? { tone: 'crit', label: 'Needs attention' } : undefined,
+    body: docket([
+      ['Unit', code(opts.plate)],
+      opts.ticketNo ? ['Ticket', code(opts.ticketNo)] : null,
+      kv('Stage', opts.stage),
+      ...opts.lines.map((l) => kv(l.label, l.value)),
+    ]),
+    action: opts.link ? { href: opts.link, label: 'Open the job' } : undefined,
+    reason: REPAIR_REASON,
+  })
   return { category: 'repair-workflow', subject: `${opts.headline} — ${ref}`, text, html }
 }

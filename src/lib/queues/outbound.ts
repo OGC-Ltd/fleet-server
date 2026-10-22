@@ -57,7 +57,7 @@
  * enumerates the places where a person is told something about their mail.
  */
 
-import { Queue, Worker, type Job } from 'bullmq'
+import { DelayedError, Queue, UnrecoverableError, Worker, type Job } from 'bullmq'
 import { getQueueRedis } from '../redis.js'
 import { logger } from '../logger.js'
 import { sendMail, type MailResult } from '../mailer/mailer.js'
@@ -134,6 +134,21 @@ const JOB_OPTIONS = {
 }
 
 /**
+ * Mail a person needs in order to get in, or to know their account changed.
+ * These go first whenever the queue has more mail than the provider will take
+ * (BullMQ: a lower number is a higher priority).
+ */
+const ACCOUNT_MAIL = new Set(['invite', 'password-reset', 'password-changed'])
+const mailPriority = (category: string) => (ACCOUNT_MAIL.has(category) ? 1 : 10)
+
+/**
+ * How long a mail may wait out a provider quota before it is given up on.
+ * An invite link lasts longer than this; a repair notice two days late is
+ * noise.
+ */
+const MAX_DEFER_MS = 48 * 3_600_000
+
+/**
  * Hand a rendered mail to the queue, or send it inline if there is none.
  *
  * The mail is rendered by the CALLER and travels whole. Everything that could
@@ -153,7 +168,7 @@ export async function enqueueMail(
 
   const payload: MailPayload = { to, toName: toName ?? null, mail }
   try {
-    await q.add(MAIL_JOB, payload, JOB_OPTIONS)
+    await q.add(MAIL_JOB, payload, { ...JOB_OPTIONS, priority: mailPriority(mail.category) })
     logger.debug({ template: mail.category, to }, 'mail: queued')
     return { queued: true }
   } catch (err) {
@@ -190,7 +205,9 @@ export async function enqueueNotification(input: PublishNotificationInput): Prom
     // The feed id is already the unique key in Postgres and the dedupe key in
     // the store. Reusing it as the job id makes a double publish collapse in
     // Redis too, rather than being written twice and deduped twice.
-    await q.add(NOTIFICATION_JOB, payload, { ...JOB_OPTIONS, jobId: `n:${input.id}` })
+    // BullMQ refuses a custom id containing ':' (its own key separator), and
+    // every refusal fell through to the inline write.
+    await q.add(NOTIFICATION_JOB, payload, { ...JOB_OPTIONS, jobId: `n-${input.id.replaceAll(':', '-')}` })
     return { queued: true }
   } catch (err) {
     logger.warn({ err, feedId: input.id }, 'notification: queue unavailable — writing inline')
@@ -204,6 +221,28 @@ export async function enqueueNotification(input: PublishNotificationInput): Prom
 // ---------------------------------------------------------------------------
 
 let worker: Worker | null = null
+
+/**
+ * Until when the provider has said it will take no mail (its daily quota).
+ * Every mail job that comes up before then waits without trying: each try is
+ * another refused login, and three of them used to drop the mail for good.
+ */
+let throttledUntil = 0
+
+/**
+ * Put a mail job back until the provider will take it, WITHOUT spending one of
+ * its attempts. Account mail comes due a minute ahead of everything else, so
+ * when the quota returns the invites are the first through it.
+ */
+async function deferMail(job: Job, token: string | undefined, until: number): Promise<never> {
+  if (Date.now() - job.timestamp > MAX_DEFER_MS) {
+    throw new UnrecoverableError(`mail held past ${MAX_DEFER_MS / 3_600_000} h by the provider's quota`)
+  }
+  const { mail } = job.data as MailPayload
+  const at = until + (ACCOUNT_MAIL.has(mail.category) ? 0 : 60_000)
+  await job.moveToDelayed(at, token)
+  throw new DelayedError()
+}
 
 export interface OutboundHandle { stop: () => Promise<void> }
 
@@ -223,10 +262,18 @@ export async function startOutboundWorker(): Promise<OutboundHandle> {
     return { stop: async () => {} }
   }
 
-  worker = new Worker(OUTBOUND_QUEUE, async (job: Job) => {
+  worker = new Worker(OUTBOUND_QUEUE, async (job: Job, token?: string) => {
     if (job.name === MAIL_JOB) {
       const { to, toName, mail } = job.data as MailPayload
+      if (Date.now() < throttledUntil) return deferMail(job, token, throttledUntil)
       const result = await sendMail(to, toName, mail)
+      // The provider said "not now" (quota spent): wait it out, all mail with it.
+      if (!result.sent && result.retryAfterMs != null) {
+        throttledUntil = Math.max(throttledUntil, Date.now() + result.retryAfterMs)
+        logger.warn({ until: new Date(throttledUntil).toISOString(), template: mail.category, to },
+          'mail: provider quota reached — holding mail until it resets')
+        return deferMail(job, token, throttledUntil)
+      }
       // sendMail cannot reject, so a failure has to be re-raised to reach
       // BullMQ's retry. `unconfigured` is NOT re-raised: no token is
       // configured, retrying changes nothing, and three attempts apiece would
@@ -252,7 +299,7 @@ export async function startOutboundWorker(): Promise<OutboundHandle> {
   })
 
   worker.on('failed', (job, err) => {
-    const final = (job?.attemptsMade ?? 0) >= (job?.opts.attempts ?? 1)
+    const final = err instanceof UnrecoverableError || (job?.attemptsMade ?? 0) >= (job?.opts.attempts ?? 1)
     const log = final ? logger.error.bind(logger) : logger.warn.bind(logger)
     log({ err, jobId: job?.id, name: job?.name, attempt: job?.attemptsMade, final },
       final ? 'Outbound job failed - giving up' : 'Outbound job failed - will retry')

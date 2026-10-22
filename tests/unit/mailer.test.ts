@@ -120,6 +120,16 @@ describe('sendMail — happy path', () => {
     expect(String(sent['html'])).toContain('https://fleet.example/#setup=abc')
   })
 
+  it('carries the Rai Group logo inside the message, where the letterhead points', async () => {
+    // Tests run from the repo root, where assets/report holds the logo.
+    await sendMail('a@b.test', 'A', MAIL, configured())
+    const sent = sendMailSpy.mock.calls[0]![0]
+    const [att] = sent['attachments'] as Array<{ cid: string; content: Buffer }>
+    expect(att!.cid).toBe('rai-group-logo')
+    expect(att!.content.length).toBeGreaterThan(1000)
+    expect(String(sent['html'])).toContain('src="cid:rai-group-logo"')
+  })
+
   it('uses implicit TLS on 465', async () => {
     await sendMail('a@b.test', 'A', MAIL, configured(465))
     expect(createTransport.mock.calls[0]![0]).toMatchObject({ port: 465, secure: true, requireTLS: false })
@@ -158,5 +168,26 @@ describe('templates', () => {
     const m = passwordChangedEmail({ fullName: 'Sam Tan', when: new Date() })
     expect(m.html).not.toContain('<a ')
     expect(m.text).not.toContain('http')
+  })
+})
+
+describe('throttleDelayMs', () => {
+  it("reads Mailtrap's daily-limit refusal as a wait, with its own time", async () => {
+    const { throttleDelayMs } = await import('../../src/lib/mailer/mailer.js')
+    const err = Object.assign(new Error('Invalid login'), {
+      responseCode: 535,
+      response: '535 5.7.8 Your account has reached its daily sending limit. Please upgrade your plan or retry in 1h11m12s.',
+    })
+    expect(throttleDelayMs(err)).toBe((71 * 60 + 12) * 1000)
+  })
+
+  it('treats a wrong password as a failure, not a wait', async () => {
+    const { throttleDelayMs } = await import('../../src/lib/mailer/mailer.js')
+    expect(throttleDelayMs(Object.assign(new Error('x'), { responseCode: 535, response: '535 Authentication failed' }))).toBeNull()
+  })
+
+  it("waits on SMTP's own try-later codes", async () => {
+    const { throttleDelayMs } = await import('../../src/lib/mailer/mailer.js')
+    expect(throttleDelayMs(Object.assign(new Error('x'), { responseCode: 421, response: '421 busy' }))).toBe(15 * 60_000)
   })
 })
