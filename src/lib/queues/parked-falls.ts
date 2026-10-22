@@ -6,7 +6,7 @@
  * as a critical possible theft, and wrote a PENDING row in `parked_fuel_falls`.
  * This pass reads the machine's readings since, and the fillings ledger, through
  * `judgeNextStart`; the moment that answers anything but PENDING, the row is
- * decided and what became of the call goes on the feed beside it.
+ * decided and what became of the call replaces the call's own feed line.
  *
  * TOPPED_UP escalates (fuel went back in while it stood — check for water) and
  * CONFIRMED stands the call up, both critical; CLEARED retracts it, only where
@@ -27,6 +27,7 @@ import { env } from '../../config/env.js'
 import { logger } from '../logger.js'
 import { prisma } from '../prisma.js'
 import { publishNotification } from '../notifications/notification.store.js'
+import { parkedFallFeedId } from '../workers/fuel-watch.worker.js'
 import {
   judgeNextStart, NEXT_START_HORIZON_MS, WORK_WINDOW_MS, GIVE_UP_MS,
   type EngineEvidence, type NextStartJudgement,
@@ -156,14 +157,21 @@ export async function runParkedFallVerdicts(now = new Date()): Promise<ParkedFal
     const notice = verdictNotice(f.vehicle.registrationPlate ?? 'a vehicle', f, j)
     if (!notice) continue
     try {
+      // Written ONTO stage one's line, not beside it. As a line of its own
+      // (`fuel-parked-<id>`, stamped at the next start) a CONFIRMED came out
+      // as a second critical for a fall already called, and since it waits
+      // WORK_WINDOW_MS past the start it read as two hours late: measured on
+      // prod over 8–22 Oct, p50 122 min between its timestamp and its arrival.
+      // Same id and the fall's own time, so the feed, the cache and the row
+      // all replace the call in place.
       publishNotification({
         orgId:     f.organisationId,
-        id:        `fuel-parked-${f.id}`,
+        id:        parkedFallFeedId(f.vehicleId, f.settledAt),
         source:    'live',
         alertType: 'fuelInconsistency',
         severity:  notice.severity,
         text:      notice.text,
-        at:        new Date(j.nextStartAt ?? j.backAt ?? now.getTime()),
+        at:        f.settledAt,
         plate:     f.vehicle.registrationPlate,
         vehicleId: f.vehicleId,
       })

@@ -50,6 +50,14 @@ const mins = (ms: number): string => {
   return m < 1 ? 'under a minute' : m === 1 ? '1 minute' : `${m} minutes`
 }
 
+/**
+ * The feed line of one parked fall. Stage two's verdict is written onto this
+ * same line (lib/queues/parked-falls), so the call and what became of it are
+ * one item rather than a second critical two hours later.
+ */
+export const parkedFallFeedId = (vehicleId: string, settledAt: Date): string =>
+  `fuel-watch-${vehicleId}-${settledAt.getTime()}`
+
 /** How much of a unit's history decides whether its engine-hours counter tracks the engine. */
 const COUNTER_HISTORY_MS = 72 * 3_600_000
 /** How far back a frozen probe is looked for before a fall. MTR 18's froze for six hours. */
@@ -140,7 +148,7 @@ export async function recordParkedFall(d: LiveFuelDrop, now = new Date()): Promi
   const plate = d.plate ?? 'a vehicle'
   publishNotification({
     orgId:     d.orgId,
-    id:        `fuel-watch-${d.vehicleId}-${d.settledAt.getTime()}`,
+    id:        parkedFallFeedId(d.vehicleId, d.settledAt),
     source:    'live',
     alertType: 'fuelInconsistency',
     // The verdict itself — see the note above. The follow-up may retract it.
