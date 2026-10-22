@@ -22,7 +22,7 @@ type Roster = Awaited<ReturnType<typeof repo.findAll>>
  * as the database one. Nothing between here and the wire does date arithmetic.
  */
 export async function listUsers(orgId: string, query: ListUserQuery, actorUserId?: string) {
-  const scope = await groupScopeFor(actorUserId)
+  const scope = await groupScopeFor(actorUserId, orgId)
 
   /**
    * The group belongs in the KEY, not merely in the query.
@@ -68,7 +68,7 @@ async function reportShadow(
   total: number,
 ): Promise<void> {
   try {
-    const would = await prospectiveScope(actorUserId)
+    const would = await prospectiveScope(actorUserId, orgId)
     if (would.unscoped) return
     const visible = await repo.countForScope(orgId, query, would)
     logShadowHidden(actorUserId, orgId, total - visible, total)
@@ -78,7 +78,7 @@ async function reportShadow(
 }
 
 export async function getUser(orgId: string, userId: string, actorUserId?: string) {
-  const user = await repo.findById(orgId, userId, await groupScopeFor(actorUserId))
+  const user = await repo.findById(orgId, userId, await groupScopeFor(actorUserId, orgId))
   if (!user) throw new NotFoundError('User')
   return user
 }
@@ -128,7 +128,7 @@ export async function updateUser(orgId: string, userId: string, dto: UpdateUserD
  * into a sentence naming the right button.
  */
 export async function deleteUser(orgId: string, userId: string, actorUserId?: string) {
-  const user = await repo.findReachable(orgId, userId, await groupScopeFor(actorUserId))
+  const user = await repo.findReachable(orgId, userId, await groupScopeFor(actorUserId, orgId))
   if (!user) throw new NotFoundError('User')
 
   if (user.organisationId !== orgId) {
@@ -189,7 +189,7 @@ export async function purgeUser(orgId: string, userId: string, actorId?: string)
    * The narrow lookup is used here rather than widening findById for
    * everything: see the note on findReachable.
    */
-  const user = await repo.findReachable(orgId, userId, await groupScopeFor(actorId))
+  const user = await repo.findReachable(orgId, userId, await groupScopeFor(actorId, orgId))
   if (!user) throw new NotFoundError('User')
 
   if (actorId && actorId === userId) {

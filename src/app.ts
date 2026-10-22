@@ -15,6 +15,7 @@ import authRoutes from './modules/auth/auth.routes.js'
 import accountRoutes from './modules/account/account.routes.js'
 import orgRoutes from './modules/organisations/organisation.routes.js'
 import userRoutes from './modules/users/user.routes.js'
+import userGroupRoutes from './modules/users/user-groups.routes.js'
 import roleRoutes from './modules/roles/role.routes.js'
 import vehicleRoutes from './modules/vehicles/vehicle.routes.js'
 import routeAheadRoutes from './modules/route-ahead/route-ahead.routes.js'
@@ -209,6 +210,9 @@ export function createApp() {
   // account.routes.ts about the dashboard's refresh-and-replay.
   app.use(`${v1}/account`, accountRoutes)
   app.use(`${v1}/organisations`, orgRoutes)
+  // The global routes are for super admins; org admins use the org-scoped
+  // routes mounted below.
+  app.use(`${v1}/user-groups`, userGroupRoutes)
   app.get(`${v1}/permissions`, authenticate, validateQuery(listQuerySchema), roleCtrl.listPermissions)
 
   // Platform user provisioning — one person, several organisations, a different
@@ -256,6 +260,7 @@ export function createApp() {
   app.use('/webhook', webhookRoutes)
 
   app.use(`${orgBase}/users`, userRoutes)
+  app.use(`${orgBase}/user-groups`, userGroupRoutes)
   app.use(`${orgBase}/roles`, roleRoutes)
   // Telemetry MUST mount before vehicleRoutes: its literal `/vehicles/snapshot`
   // and `/vehicles/:vehicleId/telemetry` paths would otherwise be shadowed by

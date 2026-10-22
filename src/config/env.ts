@@ -42,10 +42,8 @@ const schema = z.object({
   // whether a roster may HIDE a row - so they want to be turned on separately
   // and rolled back separately.
   //
-  // Group scoping fails CLOSED: an administrator whose own address matches no
-  // rule sees nobody. That is the intended reading, and it is exactly why this
-  // ships off. Run prisma/backfill-user-groups.ts first and confirm its
-  // lockout list is empty before turning it on.
+  // Group scoping fails CLOSED: an administrator with no group sees no
+  // accounts. Create groups and assign administrators before turning this on.
   USER_GROUP_ENFORCE: z.string().optional().default('false').transform(v => v === 'true'),
 
   // `Secure` on the auth cookies. False only because the box serves plain HTTP
