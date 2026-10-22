@@ -16,23 +16,20 @@
  *     comes from lib/authz/subject, so this cannot drift from the definition
  *     the rest of authorization uses.
  *
- *   - Everyone else is scoped to the group on their own row.
+ *   - Everyone else is scoped to people sharing at least one of their groups
+ *     in the current organisation.
  *
  *   - An account with NO group reaches nobody, and is reached by nobody but
- *     the platform administrator. Fail closed, chosen deliberately: a domain
- *     rule that was never written, or was written with a typo, then shows up
- *     as somebody seeing an empty roster rather than as silent org-wide
- *     visibility. The first is a phone call; the second is a breach nobody
- *     reports.
+ *     the platform administrator. This is fail-closed by design.
  *
  * ## Why it ships disabled
  *
- * That third rule has a sharp edge. An administrator whose own address matches
- * no rule sees NOBODY, and a lockout found by an operator is worse than one
- * found in a log. So `USER_GROUP_ENFORCE` gates it the way `AUTHZ_ENFORCE`
+ * That third rule has a sharp edge. An administrator with no group sees
+ * NOBODY, and a lockout found by an operator is worse than one found in a log.
+ * So `USER_GROUP_ENFORCE` gates it the way `AUTHZ_ENFORCE`
  * gates permissions: off means compute the scope, log what it would have
- * hidden, and hide nothing. See prisma/backfill-user-groups.ts, whose dry run
- * prints the accounts that would be locked out.
+ * hidden, and hide nothing. Create and assign administrator groups before
+ * enabling enforcement.
  */
 
 import { prisma } from '../../lib/prisma.js'
@@ -43,12 +40,12 @@ import { resolveSubject } from '../../lib/authz/subject.js'
 /**
  * `unscoped` — every group, which is the platform administrator, and also
  * what everybody gets while the flag is off.
- * `groupId` — that group only. `null` means the caller has no group, which
- * under enforcement matches nothing at all.
+ * `groupIds` — groups in the current organisation. An empty list matches only
+ * ungrouped accounts, preserving the existing fail-closed behavior.
  */
 export type GroupScope =
-  | { unscoped: true; groupId?: undefined }
-  | { unscoped: false; groupId: string | null }
+  | { unscoped: true; groupIds?: undefined }
+  | { unscoped: false; groupIds: string[] }
 
 /** Nothing is narrowed. The shape callers get in shadow mode and for platform. */
 export const UNSCOPED: GroupScope = { unscoped: true }
@@ -56,24 +53,24 @@ export const UNSCOPED: GroupScope = { unscoped: true }
 /**
  * The group scope for this caller — the rule below, plus the flag.
  */
-export async function groupScopeFor(actorUserId: string | undefined): Promise<GroupScope> {
+export async function groupScopeFor(actorUserId: string | undefined, orgId: string): Promise<GroupScope> {
   // Shadow mode returns before touching the database, so an unreleased
   // feature costs a comparison rather than two queries per request.
   if (!env.USER_GROUP_ENFORCE) return UNSCOPED
-  return prospectiveScope(actorUserId)
+  return prospectiveScope(actorUserId, orgId)
 }
 
 /**
  * The `where` fragment for this scope — spread into a Prisma filter.
  *
- * `{}` when unscoped, so the caller's query is untouched. Otherwise an exact
- * match on the column, INCLUDING `groupId: null`: an ungrouped administrator
- * matching only other ungrouped rows is the fail-closed rule stated as a
- * query, and it means the platform administrator's own ungrouped accounts stay
- * findable by the one caller who is unscoped anyway.
+ * `{}` when unscoped. Otherwise the user must share at least one group with
+ * the caller; an empty caller group list matches only ungrouped users.
  */
-export function groupWhere(scope: GroupScope): { groupId?: string | null } {
-  return scope.unscoped ? {} : { groupId: scope.groupId }
+export function groupWhere(scope: GroupScope) {
+  if (scope.unscoped) return {}
+  return scope.groupIds.length > 0
+    ? { groups: { some: { groupId: { in: scope.groupIds } } } }
+    : { groups: { none: {} } }
 }
 
 /**
@@ -97,27 +94,32 @@ export function logShadowHidden(
 }
 
 /**
- * The scope that WOULD apply if the flag were on.
+ * The scope that WOULD apply if the flag were on, within this organisation.
  *
  * This is the whole of the rule. `groupScopeFor` is this plus the flag, and
  * the two are separate because shadow reporting needs to know what the scope
  * WOULD have been while the live path stays unnarrowed — the point of shadow
  * mode is that nothing is hidden yet.
  */
-export async function prospectiveScope(actorUserId: string | undefined): Promise<GroupScope> {
+export async function prospectiveScope(actorUserId: string | undefined, orgId: string): Promise<GroupScope> {
   // No identified caller cannot mean "see everything". Every route that
   // reaches here is behind requirePermissionStrict, so this guards a future
   // caller rather than a live path — but it must fail closed regardless.
-  if (!actorUserId) return { unscoped: false, groupId: null }
+  if (!actorUserId) return { unscoped: false, groupIds: [] }
 
   const subject = await resolveSubject(actorUserId)
   if (subject.isPlatform) return UNSCOPED
 
   const actor = await prisma.user.findUnique({
     where: { id: actorUserId },
-    select: { groupId: true },
+    select: {
+      groups: {
+        where: { group: { organisationId: orgId } },
+        select: { groupId: true },
+      },
+    },
   })
-  return { unscoped: false, groupId: actor?.groupId ?? null }
+  return { unscoped: false, groupIds: [...new Set(actor?.groups.map(({ groupId }) => groupId) ?? [])].sort() }
 }
 
 /**
@@ -137,5 +139,5 @@ export function groupCacheKey(scope: GroupScope): string {
   // be that word, so it would have been safe by luck, and a key scheme that
   // is safe by luck is one nobody can change with confidence.
   if (scope.unscoped) return 'all'
-  return scope.groupId === null ? 'none' : `g:${scope.groupId}`
+  return scope.groupIds.length === 0 ? 'none' : `g:${[...scope.groupIds].sort().join(',')}`
 }

@@ -216,19 +216,6 @@ enum AlertSeverity {
 // IAM — identity & access control
 // ---------------------------------------------------------------------------
 
-/// How a `GroupEmailDomain` rule is matched against an address's domain.
-enum DomainMatch {
-  /// The domain itself, or any subdomain of it, ON A DOT BOUNDARY:
-  /// `kasulu.co.ke` matches `kasulu.co.ke` and `admin.kasulu.co.ke`, and must
-  /// NOT match `notkasulu.co.ke`. A plain `endsWith` would match all three,
-  /// which is a cross-group leak spelled as a convenience.
-  SUFFIX
-  /// Any one dot-separated label of the domain: `ogc-monitoring` matches
-  /// `ogc-monitoring.com` and `mail.ogc-monitoring.co.ke`. Exists because a
-  /// group can be named by a label whose TLD nobody has settled on.
-  LABEL
-}
-
 /// A grouping of PEOPLE, and the third axis of who may administer whom.
 ///
 /// Distinct from the two that already exist, and easy to confuse with either:
@@ -237,50 +224,37 @@ enum DomainMatch {
 ///   OrgMembership   which tenants an account may READ
 ///   UserGroup       which people an administrator may ADMINISTER
 ///
-/// The need is that the first two are not enough. Offgrid Consulting staff and
-/// Kasulu staff can both be reachable from one organisation, and an
-/// administrator on one side has no business administering the other's
-/// accounts. Organisation cannot express that — they share one — and a
-/// membership cannot either, because it is about reading a fleet rather than
-/// about people.
+/// The organisation owns its groups, which lets its administrators separate
+/// teams of people who all have access to the same tenant.
 model UserGroup {
-  id          String   @id @default(cuid())
-  /// Stable machine name — "offgrid", "kasulu". What seeds and rules refer to.
-  slug        String   @unique
-  name        String
-  description String?
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  slug           String
+  name           String
+  description    String?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
-  domains GroupEmailDomain[]
-  users   User[]
+  organisation Organisation          @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  users        UserGroupMembership[]
 
+  @@unique([organisationId, slug])
+  @@index([organisationId])
   @@map("user_groups")
 }
 
-/// How an address is ROUTED to a group when an account is created or its email
-/// changes.
-///
-/// These rules auto-fill `User.groupId`; they are never consulted at read
-/// time. That separation is the point. If access were derived from the address
-/// on every query, then an account's reach would be a function of a field that
-/// can be edited — including, on some paths, by its own owner — and there
-/// would be no record of how anybody came to be where they are. Here the
-/// stored `groupId` is the authority and the rule is merely how it got its
-/// value, so an exception placed by hand will survive.
-model GroupEmailDomain {
-  id        String      @id @default(cuid())
-  groupId   String      @map("group_id")
-  /// Stored LOWERCASED. Domains are case-insensitive and two rules differing
-  /// only in case would both be live and disagree.
-  pattern   String      @unique
-  kind      DomainMatch @default(SUFFIX)
-  createdAt DateTime    @default(now()) @map("created_at")
+/// A user may belong to multiple administration groups.
+model UserGroupMembership {
+  userId    String   @map("user_id")
+  groupId   String   @map("group_id")
+  createdAt DateTime @default(now()) @map("created_at")
 
+  user  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   group UserGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
-  @@index([groupId])
-  @@map("group_email_domains")
+  @@id([userId, groupId])
+  @@index([groupId, userId])
+  @@map("user_group_memberships")
 }
 
 /// Top-level tenant. All entities are scoped to an organisation.
@@ -315,6 +289,7 @@ model Organisation {
   roles                Role[]
   memberships          OrgMembership[]
   users                User[]
+  userGroups           UserGroup[]
   vehicleGroups        VehicleGroup[]
   vehicles             Vehicle[]
   reportingPeriods     ReportingPeriod[]
@@ -414,14 +389,6 @@ model User {
   // Provider's driver class (TRACTOR / TRUCK / COMPANY_VEHICLE) — the vehicle
   // type this driver is licensed to operate.
   driverType          String?    @map("driver_type")
-  /// Which group administers this account. See UserGroup.
-  ///
-  /// NULLABLE, and it has to be: the accounts synced from the RaiFactorySuite
-  /// driver registry carry no email (see `email` above), so no rule can ever
-  /// place them. "No group" therefore has to be a state the column can hold
-  /// rather than an error, and the read path treats such a row as reachable
-  /// by the platform administrator only.
-  groupId             String?    @map("group_id")
   status              UserStatus @default(ACTIVE)
   // bcrypt hash for local auth (scripts/set-password.ts sets it).
   // NULL = account cannot log in (all pre-2026-07 accounts start this way —
@@ -457,7 +424,7 @@ model User {
   driverRatingScore Float @default(5.0) @map("driver_rating_score")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
-  group        UserGroup?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  groups       UserGroupMembership[]
 
   // IAM
   userRoles             UserRole[]
@@ -508,7 +475,6 @@ model User {
   @@index([organisationId])
   @@index([email])
   @@index([organisationId, status])
-  @@index([groupId])
   @@map("users")
 }
 

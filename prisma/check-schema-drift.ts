@@ -35,7 +35,9 @@ async function main() {
             rolled_back_at IS NOT NULL AS rolled_back
        FROM _prisma_migrations
       WHERE migration_name IN ('20260922060000_user_groups',
-                               '20260924120000_drain_peak_interval_lph')`)
+                               '20260924120000_drain_peak_interval_lph',
+                               '20261022230000_user_group_memberships',
+                               '20261022233000_user_groups_organisation_scoped')`)
   if (recorded.length === 0) console.log('    neither is recorded')
   for (const r of recorded) {
     console.log(`    ${pad(r.migration_name, 44)}${r.finished ?? 'UNFINISHED'}` +
@@ -45,10 +47,11 @@ async function main() {
   // What each migration would actually create.
   const checks: Array<[string, string, string]> = [
     ['user_groups',        'table',  `SELECT to_regclass('public.user_groups') IS NOT NULL AS ok`],
-    ['group_email_domains','table',  `SELECT to_regclass('public.group_email_domains') IS NOT NULL AS ok`],
-    ['DomainMatch',        'enum',   `SELECT EXISTS(SELECT 1 FROM pg_type WHERE typname='DomainMatch') AS ok`],
-    ['users.group_id',     'column', `SELECT EXISTS(SELECT 1 FROM information_schema.columns
-                                        WHERE table_name='users' AND column_name='group_id') AS ok`],
+    ['user_group_memberships', 'table',
+                                     `SELECT to_regclass('public.user_group_memberships') IS NOT NULL AS ok`],
+    ['user_groups.organisation_id', 'column',
+                                     `SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                                        WHERE table_name='user_groups' AND column_name='organisation_id') AS ok`],
     ['fuel_thefts.peak_interval_lph', 'column',
                                      `SELECT EXISTS(SELECT 1 FROM information_schema.columns
                                         WHERE table_name='fuel_thefts' AND column_name='peak_interval_lph') AS ok`],
@@ -71,7 +74,7 @@ async function main() {
   if (!anyPresent && recordedOk === 0) {
     console.log('    Nothing is there and nothing is recorded. Genuinely unapplied —')
     console.log('    `prisma migrate deploy` is safe and is the right command.')
-  } else if (!anyMissing && recordedOk === 2) {
+  } else if (!anyMissing && recordedOk === 4) {
     console.log('    Schema and migration table agree. Nothing to do.')
   } else if (!anyMissing && recordedOk === 0) {
     console.log('    Everything is there but NOTHING is recorded: do not deploy —')

@@ -55,8 +55,32 @@ Ingest API (devices) ──────────────┘         │  
 - **Queues and workers** (`src/lib/queues`, `src/lib/workers`): fuel events,
   parked-fall and theft rules, trips, alerts, notifications, push, retention.
 - **API:** `/api/v1/auth`, `/api/v1/account`, `/api/v1/organisations`, and
-  per-organisation routes under `/api/v1/organisations/:orgId/…`. Webhooks are
+  per-organisation routes under `/api/v1/organisations/:orgId/…`; admins manage
+  organisation-specific groups there, and super admins can manage across
+  organisations at `/api/v1/user-groups`. Webhooks are
   mounted at `/webhook` (root, not under `/api/v1`). Health check: `GET /health`.
+
+### User groups
+
+Admins manage organisation-specific groups through
+`/api/v1/organisations/:orgId/user-groups`. Super admins can manage groups
+across organisations through `/api/v1/user-groups`:
+
+- `GET /` lists groups and their member counts; `POST /` creates a group in
+  the route organisation.
+- `PATCH /:groupId` renames or edits a description; `DELETE /:groupId` removes
+  a group without deleting its users.
+- `PUT /:groupId/users/:userId` adds a user; `DELETE` on the same path removes
+  that membership.
+- `PUT /users/:userId` with `{ "groupIds": [...] }` atomically replaces all of
+  a user's group memberships in the current organisation. An empty array
+  leaves them ungrouped there. A super admin must pass `organisationId` when
+  creating a group through the global route.
+
+Admins create groups at runtime; group names and memberships are not seeded
+or inferred from email domains. Users can belong to multiple groups per
+organisation. An administrator's management roster includes users sharing any
+of their groups in that organisation.
 
 ## Configuration
 
@@ -97,7 +121,7 @@ Operational scripts live in `prisma/*.ts` and run through `npm run <name>`:
   `sync:aquamist`, `sync:sukari-gps`, `sync:geofences`, `sync:machines`,
   `sync:drivers`, `sync:dispatches`, `sync:fuel`, `sync:alerts`
 - **Seeding and access:** `seed:orgs`, `seed:org`, `seed:rbac`,
-  `seed:superadmin`, `seed:admins`, `seed:user-groups`
+  `seed:superadmin`, `seed:admins`
 - **Backfills and repairs:** `backfill:*`, `fix:*`, `repair:home-orgs`,
   `build:trips`, `fuel:adjudicate`
 - **Fuel and sensor analysis:** `fuel:health`, `accel:*`, `sim:fuel`

@@ -1,12 +1,9 @@
 /**
  * Additive seed — the ControlTech technician account.
  *
- * ControlTech East Africa fit and service the trackers and probes. They are not
- * staff of any of the four sites, which is exactly what the group axis is for:
- * a ControlTech technician reachable from Sukari must not be administered by
- * Sukari's own administrator, and vice versa. `prisma/seed-user-groups.ts`
- * carries the `controltech` group and the two rules that route the address into
- * it; this creates the person.
+ * ControlTech East Africa fit and service the trackers and probes. This script
+ * creates the technician account; assign organisation-specific groups from the
+ * User accounts administration page when needed.
  *
  * ## It goes through provisionUser, not prisma.user.create
  *
@@ -92,12 +89,17 @@ async function main(): Promise<void> {
 
   const row = await prisma.user.findUnique({
     where:  { id: user!.id },
-    select: { id: true, email: true, organisationId: true, group: { select: { slug: true } } },
+    select: {
+      id: true,
+      email: true,
+      organisationId: true,
+      groups: { select: { group: { select: { slug: true } } } },
+    },
   })
 
   console.log(`${created ? 'Created' : 'Updated'} ${row?.email}`)
   console.log(`  id            ${row?.id}`)
-  console.log(`  group         ${row?.group?.slug ?? '(ungrouped — has seed-user-groups been run?)'}`)
+  console.log(`  groups        ${row?.groups.map(({ group }) => group.slug).join(', ') || '(assign from User accounts)'}`)
   console.log(`  home org      ${orgs.find(o => o.id === row?.organisationId)?.name ?? row?.organisationId}`)
   console.log(`  memberships   ${orgs.map(o => o.code).join(', ')}`)
   console.log('  roles         none — assign one from User accounts before they can see anything')

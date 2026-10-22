@@ -28,7 +28,6 @@ import { repairRecipients } from './repairs.service.js'
 
 export const CONTROL_ROOM_ROLES = ['supervisor', 'fleet_analyst', 'operator'] as const
 export const HEAD_OF_SECURITY_ROLE = 'head_of_security'
-const CONTROLTECH_GROUP = 'controltech'
 
 export type Audience =
   | 'control_room' | 'controltech' | 'assignee' | 'head_of_security' | 'stores' | 'channel'
@@ -97,13 +96,12 @@ export async function roleHolderEmails(orgId: string, slugs: readonly string[], 
   }).map((u) => u.email))
 }
 
-/** ControlTech: technicians of this organisation in the `controltech` group. */
+/** Technicians assigned to this organisation. */
 export async function controltechEmails(orgId: string): Promise<string[]> {
   const users = await prisma.user.findMany({
     where: {
       ...live,
       email: { not: null },
-      group: { slug: CONTROLTECH_GROUP },
       OR: [
         { organisationId: orgId },
         { memberships: { some: { organisationId: orgId, revokedAt: null } } },
