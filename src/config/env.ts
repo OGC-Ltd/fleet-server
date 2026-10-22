@@ -1,4 +1,7 @@
 import 'dotenv/config'
+import fs from 'node:fs'
+import path from 'node:path'
+import dotenv from 'dotenv'
 import { z } from 'zod'
 
 const schema = z.object({
@@ -582,7 +585,36 @@ const schema = z.object({
   // (telemetry day-series-cache): in memory, and on disk below this cap.
   FUEL_DAY_CACHE_MB: z.coerce.number().int().min(8).optional().default(128),
   FUEL_DAY_DISK_MB: z.coerce.number().int().min(50).optional().default(1024),
+
+  // ── VSS dashcam platform (providers/vss) ─────────────────────────────────
+  // Control Tech's VSS server, its account, and the plain password (the client
+  // sends the MD5 the API asks for). All three unset = no camera feeds, and the
+  // camera window says the service is not configured. Never in .env.example:
+  // see loadVssFromDotEnv below for how dev reads them from .env.
+  VSS_BASE_URL: z.string().optional().default(''),
+  VSS_USERNAME: z.string().optional().default(''),
+  VSS_PASSWORD: z.string().optional().default(''),
+  // The media server's secure WebSocket port, which the dashboard's player
+  // connects to directly (VSS's own pages use 36301 behind https).
+  VSS_STREAM_PORT: z.coerce.number().int().positive().optional().default(36301),
 })
+
+/**
+ * `npm run dev` loads .env.example, which is committed with live secrets, so
+ * the VSS password cannot go there. When the loaded file is not .env, take the
+ * VSS_* keys (and only those) from .env, which git ignores. Nothing already set
+ * is overwritten, and no other key is read: .env still holds old database URLs.
+ */
+function loadVssFromDotEnv(): void {
+  const loaded = process.env['DOTENV_CONFIG_PATH']
+  if (!loaded || path.basename(loaded) === '.env') return
+  let text: string
+  try { text = fs.readFileSync(path.resolve('.env'), 'utf8') } catch { return }
+  for (const [key, value] of Object.entries(dotenv.parse(text))) {
+    if (key.startsWith('VSS_') && process.env[key] === undefined) process.env[key] = value
+  }
+}
+loadVssFromDotEnv()
 
 // Production must talk to the real (remote) database endpoint. localhost URLs
 // are the SSH-tunnel entrance used from dev machines outside the VPC — booting
