@@ -21,6 +21,9 @@
  */
 
 import crypto from 'node:crypto'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import https from 'node:https'
 import http from 'node:http'
 import tls from 'node:tls'
@@ -73,6 +76,9 @@ const DEVICE_TTL_MS = 10 * 60_000
 const OK = 10000
 const NOT_LOGGED_IN = 10004
 const TOKEN_ERROR = 10023
+
+/** VSS's answer when it is rate-limiting this account's logins. */
+export const VSS_LOGIN_LIMITED = 10082
 
 export class VssError extends Error {
   constructor(message: string, readonly status: number | null = null) { super(message) }
@@ -130,16 +136,48 @@ function post<T>(path: string, body: Record<string, unknown>): Promise<Envelope<
   })
 }
 
-let session: { token: string } | null = null
+/**
+ * VSS rate-limits logins per account and answers 10082 "Login too frequently"
+ * (met 2026-10-22, after a handful of logins within minutes). Every refused
+ * attempt seemed to extend the lockout, so after one the server stops asking
+ * for LOGIN_BACKOFF_MS, and the session token is kept on disk so a restart or
+ * a deploy reuses it instead of logging in again.
+ */
+const LOGIN_TOO_FREQUENT = VSS_LOGIN_LIMITED
+const LOGIN_BACKOFF_MS = 5 * 60_000
+const SESSION_FILE = path.join(os.tmpdir(), 'fleet-server-vss-session.json')
+
+let session: { token: string } | null = readSession()
 let loggingIn: Promise<string> | null = null
+let loginBlockedUntil = 0
+
+function readSession(): { token: string } | null {
+  try {
+    const saved = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')) as { base?: string; user?: string; token?: string }
+    // Only a token for THIS server and account: the file outlives config changes.
+    return saved.token && saved.base === env.VSS_BASE_URL && saved.user === env.VSS_USERNAME ? { token: saved.token } : null
+  } catch { return null }
+}
+
+function saveSession(token: string | null): void {
+  try {
+    if (token) fs.writeFileSync(SESSION_FILE, JSON.stringify({ base: env.VSS_BASE_URL, user: env.VSS_USERNAME, token }), { mode: 0o600 })
+    else fs.rmSync(SESSION_FILE, { force: true })
+  } catch { /* the in-memory session still works */ }
+}
 
 async function login(): Promise<string> {
+  if (Date.now() < loginBlockedUntil) {
+    throw new VssError('VSS is refusing sign-ins for a few minutes (too many recent logins)', LOGIN_TOO_FREQUENT)
+  }
   const password = crypto.createHash('md5').update(env.VSS_PASSWORD).digest('hex')
   const res = await post<{ token: string }>('/vss/user/apiLogin.action', { username: env.VSS_USERNAME, password })
   if (res.status !== OK || !res.data?.token) {
+    if (res.status === LOGIN_TOO_FREQUENT) loginBlockedUntil = Date.now() + LOGIN_BACKOFF_MS
     throw new VssError(`VSS login refused: ${res.msg ?? res.status}`, res.status)
   }
   session = { token: res.data.token }
+  saveSession(res.data.token)
   return res.data.token
 }
 
@@ -157,6 +195,7 @@ async function call<T>(path: string, body: Record<string, unknown>): Promise<{ d
     if (res.status === OK) return { data: res.data, token }
     if ((res.status === NOT_LOGGED_IN || res.status === TOKEN_ERROR) && attempt === 0) {
       session = null
+      saveSession(null)
       continue
     }
     throw new VssError(`VSS ${path}: ${res.msg ?? res.status}`, res.status)

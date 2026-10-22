@@ -21,7 +21,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { NotFoundError } from '../../core/errors/errors.js'
-import { listDevices, liveStatus, streamUrl, vssAvailable, type VssDevice } from '../../providers/vss/index.js'
+import { listDevices, liveStatus, streamUrl, vssAvailable, VssError, VSS_LOGIN_LIMITED, type VssDevice } from '../../providers/vss/index.js'
 
 export type CameraState =
   /** VSS credentials are not set on this server. */
@@ -62,6 +62,11 @@ export function matchDevice(devices: VssDevice[], labels: (string | null | undef
   return hits.find(d => d.accessMode >= 1) ?? hits[0] ?? null
 }
 
+const NOT_ANSWERING = 'The camera service is not answering. Try again in a minute.'
+const LOGIN_LIMITED = 'The video server is limiting sign-ins. Try again in about five minutes.'
+const failure = (err: unknown) =>
+  err instanceof VssError && err.status === VSS_LOGIN_LIMITED ? LOGIN_LIMITED : NOT_ANSWERING
+
 const empty = (state: CameraState, message: string | null): VehicleCamera =>
   ({ state, deviceId: null, deviceName: null, channels: [], streamUrl: null, message })
 
@@ -83,7 +88,7 @@ export async function cameraFor(labels: (string | null)[], vehicleId: string): P
     device = matchDevice(await listDevices(), labels)
   } catch (err) {
     logger.warn({ err, vehicleId }, 'vss: device list failed')
-    return empty('unavailable', 'The camera service is not answering. Try again in a minute.')
+    return empty('unavailable', failure(err))
   }
   if (!device) return empty('no_camera', null)
 
@@ -93,7 +98,7 @@ export async function cameraFor(labels: (string | null)[], vehicleId: string): P
     accessMode = await liveStatus(device.deviceId)
   } catch (err) {
     logger.warn({ err, vehicleId, deviceId: device.deviceId }, 'vss: status failed')
-    return { ...base, state: 'unavailable', streamUrl: null, message: 'The camera service is not answering. Try again in a minute.' }
+    return { ...base, state: 'unavailable', streamUrl: null, message: failure(err) }
   }
 
   if (accessMode < 1) {
