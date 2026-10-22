@@ -121,7 +121,7 @@ async function assertMayDelete(req: Parameters<RequestHandler>[0]): Promise<void
     throw new ForbiddenError('You can only delete accounts in an organisation you belong to')
   }
   if (verdict.reason === 'other_group') {
-    throw new ForbiddenError('You can only delete accounts in your own group')
+    throw new ForbiddenError('You can only delete accounts in your group')
   }
   throw new ForbiddenError('Only an administrator of this organisation can delete accounts')
 }
@@ -447,21 +447,30 @@ export const listAssignableRoles: RequestHandler = async (req, res, next) => {
  * inert, until USER_GROUP_ENFORCE is on.
  */
 async function sameGroupOrThrow(req: Parameters<RequestHandler>[0], userId: string): Promise<void> {
-  const scope = await groupScopeFor(req.user?.id)
+  const scope = await groupScopeFor(req.user?.id, p(req, 'orgId'))
   if (scope.unscoped) return
   const target = await prisma.user.findFirst({
     where:  { id: userId, deletedAt: null },
-    select: { groupId: true },
+    select: {
+      groups: {
+        where: { group: { organisationId: p(req, 'orgId') } },
+        select: { groupId: true },
+      },
+    },
   })
   // A target that does not exist is the route's own 404 to raise, not this
   // gate's — it knows what it was looking for and this does not.
-  if (target && target.groupId !== scope.groupId) {
-    throw new ForbiddenError('You can only manage accounts in your own group')
+  if (target && !(
+    scope.groupIds.length === 0
+      ? target.groups.length === 0
+      : target.groups.some(({ groupId }) => scope.groupIds.includes(groupId))
+  )) {
+    throw new ForbiddenError('You can only manage accounts in your group')
   }
 }
 
 async function reachableOrThrow(req: Parameters<RequestHandler>[0], orgId: string, userId: string) {
-  const found = await repo.findReachable(orgId, userId, await groupScopeFor(req.user?.id))
+  const found = await repo.findReachable(orgId, userId, await groupScopeFor(req.user?.id, orgId))
   if (!found) throw new NotFoundError('User')
   return found
 }

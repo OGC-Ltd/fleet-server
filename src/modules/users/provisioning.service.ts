@@ -28,7 +28,6 @@ import { NotFoundError, ValidationError, ConflictError } from '../../core/errors
 import { invalidateSubject } from '../../lib/authz/subject.js'
 import { invalidateRosterForUser } from './roster.cache.js'
 import type { MembershipInput, ProvisionUserDto } from './user.schema.js'
-import { resolveGroupId } from './user-group.assign.js'
 
 const BCRYPT_ROUNDS = 12
 
@@ -233,9 +232,6 @@ export async function provisionUser(
         phone:          dto.phone ?? null,
         employeeId:     dto.employeeId ?? null,
         organisationId: homeOrgId,
-        // Which administrators may reach this account, from the address the
-        // invitation is going to. See users/user-group.assign.
-        groupId:        await resolveGroupId(dto.email),
         status:         'ACTIVE',
         passwordHash:   dto.password ? await bcrypt.hash(dto.password, BCRYPT_ROUNDS) : null,
       },

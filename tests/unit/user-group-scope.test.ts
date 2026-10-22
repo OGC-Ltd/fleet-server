@@ -1,18 +1,6 @@
-/**
- * Who a group scope lets an administrator reach — and the cache key that keeps
- * two administrators apart.
- *
- * The cache test is the important one. The roster is cached in Redis under a
- * key with no caller dimension at all, so the moment the roster differs per
- * group, two admins in different groups share one entry and whichever asks
- * first serves the other their people. It is a 60-second window, it logs
- * nothing, and the wrong answer looks exactly like the right one. `groupWhere`
- * without `groupCacheKey` is that bug.
- */
-
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const enforce   = { on: false }
+const enforce = { on: false }
 const findUnique = vi.fn()
 const resolveSubject = vi.fn()
 
@@ -32,58 +20,67 @@ vi.mock('../../src/lib/logger.js', () => ({
 const { groupScopeFor, prospectiveScope, groupWhere, groupCacheKey, UNSCOPED } =
   await import('../../src/modules/users/user-group.scope.js')
 
-const ADMIN    = 'user-admin'
+const ADMIN = 'user-admin'
 const PLATFORM = 'user-sadmin'
+const ORG = 'org-test'
 
 beforeEach(() => {
   enforce.on = false
   findUnique.mockReset()
   resolveSubject.mockReset()
   resolveSubject.mockImplementation(async (id: string) => ({ isPlatform: id === PLATFORM }))
-  findUnique.mockResolvedValue({ groupId: 'g-offgrid' })
+  findUnique.mockResolvedValue({ groups: [{ groupId: 'g-offgrid' }] })
 })
 
 describe('groupScopeFor — the flag', () => {
-  it('narrows nothing while USER_GROUP_ENFORCE is off', async () => {
-    expect(await groupScopeFor(ADMIN)).toEqual(UNSCOPED)
-  })
-
-  it('does not even query while the flag is off', async () => {
-    await groupScopeFor(ADMIN)
+  it('does not narrow while USER_GROUP_ENFORCE is off', async () => {
+    expect(await groupScopeFor(ADMIN, ORG)).toEqual(UNSCOPED)
     expect(findUnique).not.toHaveBeenCalled()
     expect(resolveSubject).not.toHaveBeenCalled()
   })
 
-  it('narrows to the caller\'s own group once it is on', async () => {
+  it('narrows to all groups held by the caller once enforcement is on', async () => {
     enforce.on = true
-    expect(await groupScopeFor(ADMIN)).toEqual({ unscoped: false, groupId: 'g-offgrid' })
+    expect(await groupScopeFor(ADMIN, ORG)).toEqual({ unscoped: false, groupIds: ['g-offgrid'] })
+    expect(findUnique).toHaveBeenCalledWith(expect.objectContaining({
+      select: {
+        groups: {
+          where: { group: { organisationId: ORG } },
+          select: { groupId: true },
+        },
+      },
+    }))
   })
 })
 
 describe('prospectiveScope — the rule itself', () => {
   it('leaves the platform administrator unscoped', async () => {
-    expect(await prospectiveScope(PLATFORM)).toEqual(UNSCOPED)
-    // Their own group is never even read: the platform role reaches every
-    // tenant, and scoping it is how an operator locks themselves out.
+    expect(await prospectiveScope(PLATFORM, ORG)).toEqual(UNSCOPED)
     expect(findUnique).not.toHaveBeenCalled()
   })
 
-  it('scopes an ordinary admin to their group', async () => {
-    expect(await prospectiveScope(ADMIN)).toEqual({ unscoped: false, groupId: 'g-offgrid' })
+  it('scopes an ordinary admin to all their groups in stable order', async () => {
+    findUnique.mockResolvedValue({
+      groups: [{ groupId: 'g-kasulu' }, { groupId: 'g-offgrid' }, { groupId: 'g-kasulu' }],
+    })
+    expect(await prospectiveScope(ADMIN, ORG)).toEqual({
+      unscoped: false,
+      groupIds: ['g-kasulu', 'g-offgrid'],
+    })
   })
 
   it('fails CLOSED for an admin with no group', async () => {
-    findUnique.mockResolvedValue({ groupId: null })
-    expect(await prospectiveScope(ADMIN)).toEqual({ unscoped: false, groupId: null })
+    findUnique.mockResolvedValue({ groups: [] })
+    expect(await prospectiveScope(ADMIN, ORG)).toEqual({ unscoped: false, groupIds: [] })
   })
 
-  it('fails CLOSED for an unidentified caller, rather than seeing everything', async () => {
-    expect(await prospectiveScope(undefined)).toEqual({ unscoped: false, groupId: null })
+  it('fails CLOSED for an unidentified caller', async () => {
+    expect(await prospectiveScope(undefined, ORG)).toEqual({ unscoped: false, groupIds: [] })
   })
 
-  it('fails CLOSED when the caller\'s own row has gone', async () => {
+  it('fails CLOSED when the caller row has gone', async () => {
     findUnique.mockResolvedValue(null)
-    expect(await prospectiveScope(ADMIN)).toEqual({ unscoped: false, groupId: null })
+    expect(await prospectiveScope(ADMIN, ORG)).toEqual({ unscoped: false, groupIds: [] })
   })
 })
 
@@ -92,40 +89,37 @@ describe('groupWhere', () => {
     expect(groupWhere(UNSCOPED)).toEqual({})
   })
 
-  it('matches the group exactly', () => {
-    expect(groupWhere({ unscoped: false, groupId: 'g-kasulu' })).toEqual({ groupId: 'g-kasulu' })
+  it('matches users sharing any group with the caller', () => {
+    expect(groupWhere({ unscoped: false, groupIds: ['g-kasulu', 'g-offgrid'] })).toEqual({
+      groups: { some: { groupId: { in: ['g-kasulu', 'g-offgrid'] } } },
+    })
   })
 
-  it('matches only OTHER ungrouped rows when the caller has no group', () => {
-    // Not `{}` — that would be "see everything", which is the fail-OPEN bug.
-    expect(groupWhere({ unscoped: false, groupId: null })).toEqual({ groupId: null })
+  it('matches only other ungrouped users when the caller has no group', () => {
+    expect(groupWhere({ unscoped: false, groupIds: [] })).toEqual({ groups: { none: {} } })
   })
 })
 
-describe('groupCacheKey — two groups must never share a roster entry', () => {
-  it('gives different keys to different groups', () => {
-    const a = groupCacheKey({ unscoped: false, groupId: 'g-offgrid' })
-    const b = groupCacheKey({ unscoped: false, groupId: 'g-kasulu' })
-    expect(a).not.toBe(b)
+describe('groupCacheKey', () => {
+  it('keeps distinct scopes separate and independent of group ordering', () => {
+    const multi = groupCacheKey({ unscoped: false, groupIds: ['g-offgrid', 'g-kasulu'] })
+    expect(multi).toBe(groupCacheKey({ unscoped: false, groupIds: ['g-kasulu', 'g-offgrid'] }))
+    expect(multi).not.toBe(groupCacheKey({ unscoped: false, groupIds: ['g-offgrid'] }))
   })
 
-  it('separates unscoped, grouped and ungrouped from each other', () => {
+  it('separates unscoped, grouped and ungrouped scopes', () => {
     const keys = [
       groupCacheKey(UNSCOPED),
-      groupCacheKey({ unscoped: false, groupId: 'g-offgrid' }),
-      groupCacheKey({ unscoped: false, groupId: null }),
+      groupCacheKey({ unscoped: false, groupIds: ['g-offgrid'] }),
+      groupCacheKey({ unscoped: false, groupIds: [] }),
     ]
     expect(new Set(keys).size).toBe(3)
   })
 
-  it('never lets a group id collide with the unscoped or ungrouped sentinels', () => {
+  it('prefixes group IDs so they cannot collide with sentinel keys', () => {
     expect(groupCacheKey(UNSCOPED)).toBe('all')
-    expect(groupCacheKey({ unscoped: false, groupId: null })).toBe('none')
-    // A group whose id was literally "all" must NOT be handed the platform
-    // administrator's roster. cuids cannot be that word, so a bare key would
-    // have been safe by luck; the prefix makes it safe by construction.
-    expect(groupCacheKey({ unscoped: false, groupId: 'all'  })).not.toBe(groupCacheKey(UNSCOPED))
-    expect(groupCacheKey({ unscoped: false, groupId: 'none' }))
-      .not.toBe(groupCacheKey({ unscoped: false, groupId: null }))
+    expect(groupCacheKey({ unscoped: false, groupIds: [] })).toBe('none')
+    expect(groupCacheKey({ unscoped: false, groupIds: ['all'] })).not.toBe('all')
+    expect(groupCacheKey({ unscoped: false, groupIds: ['none'] })).not.toBe('none')
   })
 })
