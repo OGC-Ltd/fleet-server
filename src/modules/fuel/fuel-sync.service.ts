@@ -630,6 +630,34 @@ export async function findFuelCandidates(
 }
 
 /**
+ * Units whose parked fall stage one called since `since` and stage two has not
+ * yet decided — re-asked every cycle, whatever their spread.
+ *
+ * Stage one calls a fall within minutes from our own readings; Wialon's drain,
+ * which is what the adjudicator judges and what the ledger keeps, often matures
+ * later. Once the tank has settled at its new level the spread over the short
+ * candidate window is zero, so the unit stopped being asked and its drain
+ * reached the ledger only on the settle pass, six to thirty hours on (measured
+ * 8–22 Oct: 17 SIPHON announced 6.6–20 h late, 14 never).
+ */
+export async function findOpenFallVehicles(orgId: string, since: Date): Promise<SyncVehicle[]> {
+  const falls = await prisma.parkedFuelFall.findMany({
+    where:    { organisationId: orgId, verdict: 'PENDING', settledAt: { gte: since },
+                vehicle: { deviceId: { startsWith: 'wialon:' } } },
+    select:   { vehicle: { select: { id: true, deviceId: true, registrationPlate: true } } },
+    distinct: ['vehicleId'],
+  })
+  return falls.map(f => f.vehicle)
+}
+
+/** Two candidate lists as one, each unit once, in plate order like findFuelCandidates. */
+export function mergeCandidates(...lists: SyncVehicle[][]): SyncVehicle[] {
+  const byId = new Map<string, SyncVehicle>()
+  for (const list of lists) for (const v of list) if (!byId.has(v.id)) byId.set(v.id, v)
+  return [...byId.values()].sort((a, b) => a.registrationPlate.localeCompare(b.registrationPlate))
+}
+
+/**
  * A deterministic slice of the org's instrumented vehicles, for the settle pass.
  *
  * The movement trigger above is a good filter and a poor guarantee: it can only

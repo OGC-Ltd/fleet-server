@@ -114,6 +114,18 @@ describe('stage one — record and announce', () => {
     expect(publishedCalls()).toHaveLength(0)
   })
 
+  it('says nothing about lateness when the call goes out on time', async () => {
+    await recordParkedFall(DROP, NOW)
+    expect(String(publishedCalls()[0]![0].text)).not.toMatch(/Reported/)
+  })
+
+  it('says how late a call is when the tracker uploaded its readings hours on (KDL 714E)', async () => {
+    await recordParkedFall(DROP, new Date(DROP.confirmedAt.getTime() + 13 * 3_600_000))
+    const [item] = publishedCalls()[0]!
+    expect(String(item.text)).toMatch(/Reported 13 hours after it happened: the tracker sent these readings late\.$/)
+    expect(item.at).toEqual(SETTLED)
+  })
+
   it('says the machine did not tilt, where its tracker has an accelerometer', async () => {
     await recordParkedFall({ ...DROP, attitudeShiftG: 0.004 }, NOW)
     expect(String(publishedCalls()[0]![0].text)).toMatch(/without tilting, by its accelerometer/)
