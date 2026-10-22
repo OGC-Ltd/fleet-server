@@ -27,6 +27,8 @@ const addMock = vi.hoisted(() => vi.fn())
 /** The processor the worker was constructed with, so it can be driven here. */
 const processorRef = vi.hoisted(() => ({ current: null as ((job: unknown) => Promise<unknown>) | null }))
 vi.mock('bullmq', () => ({
+  DelayedError: class DelayedError extends Error {},
+  UnrecoverableError: class UnrecoverableError extends Error {},
   Queue: class { add = addMock; close = vi.fn() },
   Worker: class {
     constructor(_name: string, processor: (job: unknown) => Promise<unknown>) {
@@ -116,7 +118,7 @@ describe('with Redis', () => {
       orgId: 'o', id: 'repair-digest-o-2026-09-21', source: 'repair', severity: 'info',
       text: 't', at: new Date('2026-09-21T08:00:00Z'),
     })
-    expect(addMock.mock.calls[0]![2].jobId).toBe('n:repair-digest-o-2026-09-21')
+    expect(addMock.mock.calls[0]![2].jobId).toBe('n-repair-digest-o-2026-09-21')
   })
 
   it('crosses the date as an ISO string, because Redis holds JSON', async () => {
@@ -206,5 +208,54 @@ describe('the worker, once a job reaches it', () => {
     const { startOutboundWorker } = await load()
     await startOutboundWorker()
     expect(processorRef.current).toBeNull()
+  })
+})
+
+describe("when the provider's quota is spent", () => {
+  beforeEach(() => redisMock.getQueueRedis.mockReturnValue({}))
+
+  const job = (category: string, timestamp = Date.now()) => ({
+    name: 'outbound:mail', timestamp, moveToDelayed: vi.fn(),
+    data: { to: 'a@b.c', toName: null, mail: { ...MAIL, category } },
+  })
+
+  async function worker() {
+    const m = await load()
+    await m.startOutboundWorker()
+    return processorRef.current! as (job: unknown, token?: string) => Promise<unknown>
+  }
+
+  it('puts account mail ahead of notices', async () => {
+    const { enqueueMail } = await load()
+    await enqueueMail('a@b.c', null, { ...MAIL, category: 'invite' })
+    await enqueueMail('a@b.c', null, { ...MAIL, category: 'repair-workflow' })
+    expect(addMock.mock.calls[0]![2].priority).toBeLessThan(addMock.mock.calls[1]![2].priority)
+  })
+
+  it('holds the mail until the quota resets instead of spending its attempts', async () => {
+    sendMailMock.mockResolvedValue({ sent: false, reason: 'send-failed', retryAfterMs: 3_600_000 })
+    const run = await worker()
+    const invite = job('invite')
+    const before = Date.now()
+    await expect(run(invite, 'tok')).rejects.toThrow()
+    expect(invite.moveToDelayed).toHaveBeenCalledOnce()
+    const [at, token] = invite.moveToDelayed.mock.calls[0]!
+    expect(at).toBeGreaterThanOrEqual(before + 3_600_000)
+    expect(token).toBe('tok')
+
+    // The next job waits too, without another refused login, and comes due
+    // after the invite.
+    const notice = job('repair-workflow')
+    await expect(run(notice, 'tok')).rejects.toThrow()
+    expect(sendMailMock).toHaveBeenCalledOnce()
+    expect(notice.moveToDelayed.mock.calls[0]![0]).toBeGreaterThan(at)
+  })
+
+  it('gives up on a mail held for more than two days', async () => {
+    sendMailMock.mockResolvedValue({ sent: false, reason: 'send-failed', retryAfterMs: 60_000 })
+    const run = await worker()
+    const old = job('repair-workflow', Date.now() - 49 * 3_600_000)
+    await expect(run(old)).rejects.toThrow(/quota/)
+    expect(old.moveToDelayed).not.toHaveBeenCalled()
   })
 })

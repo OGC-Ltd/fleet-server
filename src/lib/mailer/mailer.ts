@@ -48,7 +48,33 @@ import type { RenderedMail } from './templates.js'
 
 export type MailResult =
   | { sent: true }
-  | { sent: false; reason: 'unconfigured' | 'send-failed' }
+  /** `retryAfterMs` is set only when the provider said "not now" rather than "no". */
+  | { sent: false; reason: 'unconfigured' | 'send-failed'; retryAfterMs?: number }
+
+/** When the provider names no time, ask again after this long. */
+const THROTTLE_DEFAULT_MS = 15 * 60_000
+
+/**
+ * How long until the provider will take mail again, or null for a failure a
+ * wait will not fix.
+ *
+ * Mailtrap refuses the SMTP login once the account's daily quota is spent,
+ * with "535 5.7.8 Your account has reached its daily sending limit ... retry
+ * in 1h11m12s". A 535 is normally a wrong password, so the wording is what
+ * tells the two apart. 421 and 450-452 are SMTP's own "try later" codes.
+ */
+export function throttleDelayMs(err: unknown): number | null {
+  const e = err as { responseCode?: number; response?: string; message?: string } | null
+  const text = `${e?.response ?? ''} ${e?.message ?? ''}`
+  const code = e?.responseCode
+  const limited = /sending limit|rate limit|too many/i.test(text)
+  if (!limited && code !== 421 && code !== 450 && code !== 451 && code !== 452) return null
+  const m = /retry in\s*(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?/i.exec(text)
+  if (m && (m[1] || m[2] || m[3])) {
+    return ((Number(m[1] ?? 0) * 60 + Number(m[2] ?? 0)) * 60 + Number(m[3] ?? 0)) * 1000
+  }
+  return THROTTLE_DEFAULT_MS
+}
 
 export async function sendMail(
   to: string,
@@ -74,6 +100,11 @@ export async function sendMail(
     return { sent: true }
   } catch (err) {
     // Swallowed on purpose — see the header. The log is the record.
+    const retryAfterMs = throttleDelayMs(err)
+    if (retryAfterMs != null) {
+      logger.warn({ err, template: mail.category, to, retryAfterMs }, 'mail: provider is throttling — will wait')
+      return { sent: false, reason: 'send-failed', retryAfterMs }
+    }
     logger.error({ err, template: mail.category, to }, 'mail: send failed')
     return { sent: false, reason: 'send-failed' }
   }
