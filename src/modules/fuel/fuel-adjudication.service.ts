@@ -25,6 +25,7 @@ import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { env } from '../../config/env.js'
 import { publishNotificationDurable } from '../../lib/notifications/notification.store.js'
+import { lateNote } from '../../lib/notifications/late-note.js'
 import {
   adjudicateDrain, applyProbeTrustGate, smoothLevels, SETTLE_MINUTES, SWING_ML,
   type Adjudication, type DrainClaim, type LevelSample, type ProbeProfile, type Verdict,
@@ -47,6 +48,22 @@ export const LOOKBEHIND_MS = 30 * 60_000
 
 /** How far past detection to look for the level returning. */
 export const LOOKAHEAD_MS = 3 * 60 * 60_000
+
+/**
+ * An announced drain is normally on the feed within the hour of beginning —
+ * SETTLE_MINUTES plus a cycle or two (p50 28.5 min, 8–22 Oct). Past this the
+ * line says how late it is; see lib/notifications/late-note.
+ */
+export const DRAIN_ON_TIME_MS = 60 * 60_000
+
+/**
+ * A drain announced this long after it began comes as a warning, whatever its
+ * cause. These are the ones only the settle pass found (6–20 h, 8–22 Oct): the
+ * fuel went hours ago, so a critical line sounds an alarm nobody can act on,
+ * above the calls that are still news. Still on the feed, still saying what it
+ * is, and still on the ledger for the Fuel pages.
+ */
+export const LATE_DRAIN_WARNING_MS = 6 * 60 * 60_000
 
 export interface AdjudicateOptions {
   /** Restrict to one organisation. Omitted = every org. */
@@ -724,8 +741,13 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
       // that themselves by scrolling the feed. Third and beyond, because a
       // second event is a coincidence often enough to be worth staying quiet
       // about — of the five repeat vehicles measured, two stopped at two.
-      severity:  cause.cause === 'SIPHON' || history.totalCount >= 3 ? 'critical' : 'warning',
-      text:      `${headline}${repeat}${probeReported ? ` ${PROBE_REPORTED_NOTE}` : ''}`,
+      //
+      // Neither applies to a drain found hours after the fact — see
+      // LATE_DRAIN_WARNING_MS.
+      severity:  now.getTime() - t.beganAt.getTime() > LATE_DRAIN_WARNING_MS ? 'warning'
+               : cause.cause === 'SIPHON' || history.totalCount >= 3 ? 'critical' : 'warning',
+      text:      `${headline}${repeat}${probeReported ? ` ${PROBE_REPORTED_NOTE}` : ''}` +
+                 lateNote(t.beganAt, now, DRAIN_ON_TIME_MS, `found on a later read of the tracker's data`),
       at:        t.beganAt,
       plate,
       vehicleId: t.vehicleId,

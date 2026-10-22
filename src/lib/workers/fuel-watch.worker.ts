@@ -21,12 +21,13 @@
  * the engine at all. A fall they refuse is still recorded, as WITHHELD, so the
  * gates can be audited against what they hid.
  *
- * ## Two items per event, deliberately
+ * ## One line per fall
  *
- * The follow-up carries `fuel-parked-<fallId>`, from `lib/queues/parked-falls`:
- * poured back (escalated), still gone after the next start (confirmed), or the
- * gauge coming back (retracted). Rather than overwrite this item with it, the
- * operator sees the sequence — the call, then what became of it.
+ * The follow-up from `lib/queues/parked-falls` — poured back (escalated), still
+ * gone after the next start (confirmed), or the gauge coming back (retracted) —
+ * is written onto this same line (`parkedFallFeedId`). It used to be a line of
+ * its own, which read as a second critical two hours late for a fall already
+ * called (measured 8–22 Oct, p50 122 min).
  *
  * The id is keyed on the SETTLED time rather than on now, so the same fall
  * re-offered by a replay updates one row instead of duplicating the feed.
@@ -36,6 +37,7 @@ import { eventBus } from '../event-bus.js'
 import { logger } from '../logger.js'
 import { prisma } from '../prisma.js'
 import { publishNotification } from '../notifications/notification.store.js'
+import { lateNote } from '../notifications/late-note.js'
 import { getProbeProfile } from '../../modules/fuel/fuel-adjudication.service.js'
 import { probeOverreads, probeSwings } from '../../modules/fuel/fuel-adjudication.js'
 import { counterTracksEngine, probeFrozeWhileRunning, probeReadsEmpty } from '../../modules/fuel/parked-fall.js'
@@ -57,6 +59,12 @@ const mins = (ms: number): string => {
  */
 export const parkedFallFeedId = (vehicleId: string, settledAt: Date): string =>
   `fuel-watch-${vehicleId}-${settledAt.getTime()}`
+
+/**
+ * A call normally goes out a few minutes after its confirming reading is taken
+ * (p50 6.5 min, 8–22 Oct). Beyond this the reading itself reached us late.
+ */
+const CALL_ON_TIME_MS = 30 * 60_000
 
 /** How much of a unit's history decides whether its engine-hours counter tracks the engine. */
 const COUNTER_HISTORY_MS = 72 * 3_600_000
@@ -161,7 +169,12 @@ export async function recordParkedFall(d: LiveFuelDrop, now = new Date()): Promi
       (d.attitudeShiftG != null ? ' and without tilting, by its accelerometer' : '') +
       (d.engineEvidence === 'counter' ? ', going by its engine-hours counter' : '') +
       `, and was still down ${mins(d.confirmedAt.getTime() - d.settledAt.getTime())} later. ` +
-      `This is updated if the fuel comes back.`,
+      `This is updated if the fuel comes back.` +
+      // The rule fires the moment the reading arrives; a tracker that was
+      // offline uploads hours of readings at once (KDL 714E: 48 h).
+      // Counted from the fall, the time the line is stamped with.
+      lateNote(d.settledAt, now, d.confirmedAt.getTime() - d.settledAt.getTime() + CALL_ON_TIME_MS,
+        'the tracker sent these readings late'),
     at:        d.settledAt,
     plate:     d.plate,
     vehicleId: d.vehicleId,
