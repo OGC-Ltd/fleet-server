@@ -162,7 +162,10 @@ describe('stage two — the verdict pass', () => {
     expect(update.where).toEqual({ id: 'pf_1', verdict: 'PENDING' })
     expect(update.data).toMatchObject({ verdict: 'CONFIRMED', nextStartBy: 'engine' })
     const [item] = publishedCalls()[0]!
-    expect(item.id).toBe('fuel-parked-pf_1')
+    // Onto stage one's own line, at the fall's time — not a second critical
+    // stamped at the next start.
+    expect(item.id).toBe(`fuel-watch-veh_1-${S}`)
+    expect(item.at).toEqual(SETTLED)
     expect(item.severity).toBe('critical')
     expect(String(item.text)).toMatch(/^POSSIBLE THEFT — FUEL STILL MISSING: MUFINDI: CTR 19 lost 20\.0 L while parked with the engine off, and the level had not come back as fuel/)
   })

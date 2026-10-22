@@ -189,6 +189,8 @@ export interface FuelSyncResult {
   settled:    number
   /** Ledger rows deleted because the provider has retracted them. */
   removed:    number
+  /** Drains cut by the report window's edge and not stored — see fuel-sync startsAtWindowEdge. */
+  clamped:    number
   // (The verdict counters lived here until 2026-09-24. They moved to
   // FuelAdjudicationResult with the pass itself — a field this cycle can no
   // longer compute must not stay on its result reading zero.)
@@ -223,7 +225,7 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   const startedAt = Date.now()
   const result: FuelSyncResult = {
     candidates: 0, fillings: 0, thefts: 0, published: 0, deduped: 0,
-    corrected: 0, settled: 0, removed: 0,
+    corrected: 0, settled: 0, removed: 0, clamped: 0,
     failed: 0, ms: 0,
   }
 
@@ -267,6 +269,7 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
           result.published += out.published
           result.deduped   += out.deduped
           result.corrected += out.corrected
+          result.clamped   += out.clamped
         } catch (err) {
           // One unit's report failing must not abandon the rest of the cycle.
           result.failed++
@@ -302,6 +305,7 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
             result.thefts    += out.thefts
             result.corrected += out.corrected
             result.removed   += out.removed
+            result.clamped   += out.clamped
           } catch (err) {
             result.failed++
             logger.warn({ err, plate: vehicle.registrationPlate }, 'Fuel settle: report failed for vehicle')
@@ -324,7 +328,7 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   // equivalent guard for a DEAD detector now lives on the adjudication pass,
   // which owns that failure since the split.
   const log = result.published > 0 || result.fillings > 0 || result.thefts > 0
-           || result.corrected > 0 || result.removed > 0
+           || result.corrected > 0 || result.removed > 0 || result.clamped > 0
     ? logger.info.bind(logger)
     : logger.debug.bind(logger)
   log(result, 'Fuel sync cycle complete')
