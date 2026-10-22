@@ -39,7 +39,8 @@ import { env } from '../../config/env.js'
 import { logger } from '../logger.js'
 import { WialonClient } from '../../providers/wialon/wialon.client.js'
 import {
-  resolveOrgFuelSources, findFuelCandidates, listVehicleSlice, syncVehicleFuelEvents,
+  resolveOrgFuelSources, findFuelCandidates, findOpenFallVehicles, mergeCandidates,
+  listVehicleSlice, syncVehicleFuelEvents,
 } from '../../modules/fuel/fuel-sync.service.js'
 import { adjudicatePendingDrains } from '../../modules/fuel/fuel-adjudication.service.js'
 import { adjudicateFillings } from '../../modules/fuel/fuel-filling-adjudication.service.js'
@@ -82,6 +83,24 @@ const WINDOW_MS = 3 * 60 * 60_000
  * Three cycles' worth, so a vehicle is still caught if one cycle is missed.
  */
 const CANDIDATE_WINDOW_MS = 45 * 60_000
+
+/**
+ * Every this many cycles — hourly at the quarter-hourly default — the candidate
+ * check looks back over the whole report window instead.
+ *
+ * A drain Wialon has not yet recognised is not lost when the unit drops out of
+ * the 45-minute check; it is only asked about again on the settle pass, six to
+ * thirty hours later. Measured 8–22 Oct: 17 SIPHON announced 6.6–20 h late and
+ * 14 never announced, and 27 of those 31 had a ≥ 15 L spread in our own
+ * readings — candidates once, then dropped while Wialon was still maturing the
+ * event. Hourly rather than every cycle keeps the cost the note above measured
+ * (47 units over 3 h, re-asked twelve times) to three re-asks per event.
+ */
+const LINGER_EVERY_CYCLES = 4
+
+/** Whether this cycle's candidate check reaches back over the whole window — see LINGER_EVERY_CYCLES. */
+export const lingersThisCycle = (startedAt: number): boolean =>
+  Math.floor(startedAt / 60_000 / 15) % LINGER_EVERY_CYCLES === 0
 
 /**
  * Feed items are published for events inside this age. Slightly tighter than
@@ -189,6 +208,8 @@ export interface FuelSyncResult {
   settled:    number
   /** Ledger rows deleted because the provider has retracted them. */
   removed:    number
+  /** Drains cut by the report window's edge and not stored — see fuel-sync startsAtWindowEdge. */
+  clamped:    number
   // (The verdict counters lived here until 2026-09-24. They moved to
   // FuelAdjudicationResult with the pass itself — a field this cycle can no
   // longer compute must not stay on its result reading zero.)
@@ -223,7 +244,7 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   const startedAt = Date.now()
   const result: FuelSyncResult = {
     candidates: 0, fillings: 0, thefts: 0, published: 0, deduped: 0,
-    corrected: 0, settled: 0, removed: 0,
+    corrected: 0, settled: 0, removed: 0, clamped: 0,
     failed: 0, ms: 0,
   }
 
@@ -243,10 +264,12 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
     const sources = await resolveOrgFuelSources(client)
 
     for (const source of sources) {
-      const candidates = await findFuelCandidates(
-        source.orgId,
-        new Date(to.getTime() - CANDIDATE_WINDOW_MS),
-        CANDIDATE_THRESHOLD_ML,
+      // Plus, every cycle, units with a parked fall still open from inside the
+      // window — stage one has called it; the ledger still needs Wialon's drain.
+      const reach = lingersThisCycle(startedAt) ? WINDOW_MS : CANDIDATE_WINDOW_MS
+      const candidates = mergeCandidates(
+        await findFuelCandidates(source.orgId, new Date(to.getTime() - reach), CANDIDATE_THRESHOLD_ML),
+        await findOpenFallVehicles(source.orgId, from),
       )
       result.candidates += candidates.length
 
@@ -267,6 +290,7 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
           result.published += out.published
           result.deduped   += out.deduped
           result.corrected += out.corrected
+          result.clamped   += out.clamped
         } catch (err) {
           // One unit's report failing must not abandon the rest of the cycle.
           result.failed++
@@ -302,6 +326,7 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
             result.thefts    += out.thefts
             result.corrected += out.corrected
             result.removed   += out.removed
+            result.clamped   += out.clamped
           } catch (err) {
             result.failed++
             logger.warn({ err, plate: vehicle.registrationPlate }, 'Fuel settle: report failed for vehicle')
@@ -324,7 +349,7 @@ export async function runFuelSync(): Promise<FuelSyncResult> {
   // equivalent guard for a DEAD detector now lives on the adjudication pass,
   // which owns that failure since the split.
   const log = result.published > 0 || result.fillings > 0 || result.thefts > 0
-           || result.corrected > 0 || result.removed > 0
+           || result.corrected > 0 || result.removed > 0 || result.clamped > 0
     ? logger.info.bind(logger)
     : logger.debug.bind(logger)
   log(result, 'Fuel sync cycle complete')

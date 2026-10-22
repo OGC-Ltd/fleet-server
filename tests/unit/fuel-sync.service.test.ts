@@ -310,6 +310,9 @@ describe('feed publication is decided by AGE, not by ledger novelty', () => {
 })
 
 describe('reconcile — the provider retracts an event', () => {
+  // A settled window, reaching back over OLD — the real query only returns rows
+  // inside the window it reads.
+  const SETTLE_FROM = new Date('2026-08-02T05:00:00Z')
   const stale = { id: 'ft_stale', beganAt: OLD, detectedAt: OLD, stolenMl: 90_000, finalFuelLevelMl: 1_000 }
 
   it('deletes ledger rows the provider no longer reports', async () => {
@@ -321,7 +324,7 @@ describe('reconcile — the provider retracts an event', () => {
     ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([stale])
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
 
-    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ reconcile: true }))
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ from: SETTLE_FROM, reconcile: true }))
 
     expect(out.removed).toBe(1)
     expect(prismaMock.fuelTheft.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['ft_stale'] } } })
@@ -348,7 +351,7 @@ describe('reconcile — the provider retracts an event', () => {
     ])
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [drain(RECENT)] })
 
-    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ reconcile: true }))
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ from: SETTLE_FROM, reconcile: true }))
 
     expect(out.removed).toBe(0)
     expect(prismaMock.fuelTheft.deleteMany).not.toHaveBeenCalled()
@@ -361,7 +364,7 @@ describe('reconcile — the provider retracts an event', () => {
     ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([{ ...stale, dismissedAt: OLD }])
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
 
-    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ reconcile: true }))
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ from: SETTLE_FROM, reconcile: true }))
 
     expect(out.removed).toBe(0)
     expect(prismaMock.fuelTheft.deleteMany).not.toHaveBeenCalled()
@@ -374,7 +377,7 @@ describe('reconcile — the provider retracts an event', () => {
     ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([stale])
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
 
-    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ reconcile: true, apply: false }))
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ from: SETTLE_FROM, reconcile: true, apply: false }))
 
     expect(out.removed).toBe(1)
     expect(prismaMock.fuelTheft.deleteMany).not.toHaveBeenCalled()
@@ -451,5 +454,60 @@ describe('what the feed item says', () => {
 
     // No notify/escalate mechanism exists, so the wording must not imply one.
     expect(String(published()[0]![0]['text'])).not.toMatch(/security|alerted|notified|dispatched/i)
+  })
+})
+
+describe('the window edge — a drain the report cut, not one that happened', () => {
+  // The live window opened at 09:00; Wialon puts a "drain" at its first message.
+  const FROM = new Date('2026-08-02T09:00:00Z')
+  const EDGE = new Date('2026-08-02T09:00:03Z')
+
+  it('does not store a new drain started at the window\'s first message', async () => {
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [drain(EDGE)] })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.vehicleTelemetry.findFirst as any).mockResolvedValue(null)
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ from: FROM }))
+    expect(out).toMatchObject({ thefts: 0, clamped: 1 })
+    expect(prismaMock.fuelTheft.create).not.toHaveBeenCalled()
+  })
+
+  it('stores a drain near the edge when we hold readings before it — it is not the first message', async () => {
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [drain(new Date('2026-08-02T09:12:00Z'))] })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.vehicleTelemetry.findFirst as any).mockResolvedValue({ capturedAt: new Date('2026-08-02T09:01:00Z') })
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ from: FROM }))
+    expect(out).toMatchObject({ thefts: 1, clamped: 0 })
+    expect(prismaMock.fuelTheft.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('finds the older row a clamped re-report belongs to, and leaves it as it is', async () => {
+    // The fall began 08:40, before the window, and ran to 09:00:30.
+    const older = {
+      id: 'ft_older', beganAt: new Date('2026-08-02T08:40:00Z'), detectedAt: new Date('2026-08-02T09:00:30Z'),
+      stolenMl: 120_000, finalFuelLevelMl: 600_000, dismissedAt: null,
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([older])
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [drain(EDGE)] })
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ from: FROM, reconcile: true }))
+    // Loaded by overlap, so the row is visible to the match at all.
+    const where = (prismaMock.fuelTheft.findMany.mock.calls[0]![0] as { where: Record<string, unknown> }).where
+    expect(where).toEqual({ vehicleId: 'veh_1', beganAt: { lte: NOW }, detectedAt: { gte: FROM } })
+    expect(out).toMatchObject({ thefts: 0, dupTheft: 1, corrected: 0, removed: 0 })
+    expect(prismaMock.fuelTheft.create).not.toHaveBeenCalled()
+    expect(prismaMock.fuelTheft.update).not.toHaveBeenCalled()
+  })
+
+  it('never reconciles away a row that began before the window', async () => {
+    const older = {
+      id: 'ft_older', beganAt: new Date('2026-08-02T08:40:00Z'), detectedAt: new Date('2026-08-02T09:10:00Z'),
+      stolenMl: 120_000, finalFuelLevelMl: 600_000, dismissedAt: null,
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([older])
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ from: FROM, reconcile: true }))
+    expect(out.removed).toBe(0)
+    expect(prismaMock.fuelTheft.deleteMany).not.toHaveBeenCalled()
   })
 })

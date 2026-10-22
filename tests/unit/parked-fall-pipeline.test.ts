@@ -114,6 +114,18 @@ describe('stage one — record and announce', () => {
     expect(publishedCalls()).toHaveLength(0)
   })
 
+  it('says nothing about lateness when the call goes out on time', async () => {
+    await recordParkedFall(DROP, NOW)
+    expect(String(publishedCalls()[0]![0].text)).not.toMatch(/Reported/)
+  })
+
+  it('says how late a call is when the tracker uploaded its readings hours on (KDL 714E)', async () => {
+    await recordParkedFall(DROP, new Date(DROP.confirmedAt.getTime() + 13 * 3_600_000))
+    const [item] = publishedCalls()[0]!
+    expect(String(item.text)).toMatch(/Reported 13 hours after it happened: the tracker sent these readings late\.$/)
+    expect(item.at).toEqual(SETTLED)
+  })
+
   it('says the machine did not tilt, where its tracker has an accelerometer', async () => {
     await recordParkedFall({ ...DROP, attitudeShiftG: 0.004 }, NOW)
     expect(String(publishedCalls()[0]![0].text)).toMatch(/without tilting, by its accelerometer/)
@@ -162,7 +174,10 @@ describe('stage two — the verdict pass', () => {
     expect(update.where).toEqual({ id: 'pf_1', verdict: 'PENDING' })
     expect(update.data).toMatchObject({ verdict: 'CONFIRMED', nextStartBy: 'engine' })
     const [item] = publishedCalls()[0]!
-    expect(item.id).toBe('fuel-parked-pf_1')
+    // Onto stage one's own line, at the fall's time — not a second critical
+    // stamped at the next start.
+    expect(item.id).toBe(`fuel-watch-veh_1-${S}`)
+    expect(item.at).toEqual(SETTLED)
     expect(item.severity).toBe('critical')
     expect(String(item.text)).toMatch(/^POSSIBLE THEFT — FUEL STILL MISSING: MUFINDI: CTR 19 lost 20\.0 L while parked with the engine off, and the level had not come back as fuel/)
   })

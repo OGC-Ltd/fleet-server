@@ -209,9 +209,55 @@ export interface SyncOutcome {
    * unless `reconcile` was asked for.
    */
   removed:    number
+  /**
+   * Drains the provider started at the window's first message and that match
+   * nothing in the ledger — cut by the window edge, so not stored. See
+   * `startsAtWindowEdge`.
+   */
+  clamped:    number
 }
 
-const EMPTY: SyncOutcome = { fillings: 0, thefts: 0, dupFill: 0, dupTheft: 0, published: 0, deduped: 0, corrected: 0, removed: 0 }
+const EMPTY: SyncOutcome = { fillings: 0, thefts: 0, dupFill: 0, dupTheft: 0, published: 0, deduped: 0, corrected: 0, removed: 0, clamped: 0 }
+
+/**
+ * How far into the window a drain's start is checked for being the edge. Wider
+ * than any report gap on a parked unit (15 min measured), and far short of the
+ * live window, so an event first seen on time is never near it.
+ */
+const WINDOW_EDGE_MS = 20 * 60_000
+
+/**
+ * Did the provider start this drain at the window's first message — the edge
+ * of the report, not the start of a fall?
+ *
+ * Wialon judges a drain against the level before it, and at `from` there is no
+ * before: the first message of the window can open a "drain" that is either
+ * the tail of a fall already in the ledger (whose start lies before `from`, so
+ * the window's row query never saw it) or nothing at all. Stored, either one
+ * became a new row whose detection was already hours old, judged the next
+ * minute and announced as a theft three hours after its "start". Measured on
+ * prod over 8–22 Oct: 11 SIPHON lines posted at 3.0 h, began_at at the live
+ * window's start (13:00:03, 07:30:32, 03:30:11 …), 5 of them overlapping an
+ * older row for the same fall.
+ *
+ * No fuel reading of ours between `from` and the drain's start means it is the
+ * first message. Replayed over the same fortnight, this and the overlap match
+ * below drop 345 of 516 rows that were stored late at a window edge (333 of them
+ * at the settle pass's), 7 of them announced as SIPHON. A genuine drain that starts there is not lost: every earlier
+ * cycle read the same moment away from its edge, and the settle pass reads it
+ * again from a different one.
+ */
+async function startsAtWindowEdge(vehicleId: string, from: Date, beganAt: Date): Promise<boolean> {
+  const into = beganAt.getTime() - from.getTime()
+  if (into < 0 || into > WINDOW_EDGE_MS) return false
+  const before = await prisma.vehicleTelemetry.findFirst({
+    // A FUEL reading: the provider judges a drain on its fuel sensor, so its
+    // first message with one is the edge it measures from.
+    where:  { vehicleId, capturedAt: { gte: from, lt: beganAt }, fuelLevelMl: { not: null } },
+    select: { capturedAt: true },
+  })
+  return before == null
+}
 
 /** litres, without the false precision of "40.0" for a whole number. */
 const L = (ml: number): string => {
@@ -265,8 +311,11 @@ export async function syncVehicleFuelEvents(
       where:  { vehicleId: vehicle.id, filledAt: { gte: opts.from, lte: opts.to } },
       select: { id: true, filledAt: true, filledMl: true, initialFuelLevelMl: true, finalFuelLevelMl: true },
     }),
+    // By OVERLAP, not by start: a fall that began before `from` and runs into
+    // the window is the row a clamped re-report belongs to. Keyed on `beganAt`
+    // alone it was invisible here, and the re-report became a second row.
     prisma.fuelTheft.findMany({
-      where:  { vehicleId: vehicle.id, beganAt: { gte: opts.from, lte: opts.to } },
+      where:  { vehicleId: vehicle.id, beganAt: { lte: opts.to }, detectedAt: { gte: opts.from } },
       select: { id: true, beganAt: true, detectedAt: true, stolenMl: true, finalFuelLevelMl: true, dismissedAt: true },
     }),
   ])
@@ -397,6 +446,20 @@ export async function syncVehicleFuelEvents(
     )
     let ledgerId: string | null = knownTheft?.id ?? null
 
+    // A row that began before the window is seen here only clamped: this
+    // report's start, volume and levels are the part inside the window, never
+    // the fall. Claimed, so it is not taken for retracted, and left as it is.
+    if (knownTheft && knownTheft.beganAt < opts.from) {
+      claimedThefts.add(knownTheft.id)
+      out.dupTheft++
+      continue
+    }
+
+    if (!knownTheft && await startsAtWindowEdge(vehicle.id, opts.from, t.beganAt)) {
+      out.clamped++
+      continue
+    }
+
     if (knownTheft) {
       claimedThefts.add(knownTheft.id)
       out.dupTheft++
@@ -497,8 +560,10 @@ export async function syncVehicleFuelEvents(
     // Never a drain an operator deleted: that row carries who deleted it and
     // its follow-up, and deleting it here is how a retracted-then-re-reported
     // drain used to return as a fresh alert with no memory of the deletion.
+    // Nor one that began before the window: this read saw only its tail, so
+    // its silence about it says nothing.
     const staleThefts = knownThefts
-      .filter(r => !claimedThefts.has(r.id) && r.dismissedAt == null)
+      .filter(r => !claimedThefts.has(r.id) && r.dismissedAt == null && r.beganAt >= opts.from)
       .map(r => r.id)
     // Counted even in a dry run. This is the one branch that DELETES, so
     // "--reconcile without --apply" has to be able to answer "how much?"
@@ -562,6 +627,34 @@ export async function findFuelCandidates(
       AND s.spread >= ${thresholdMl}
     ORDER BY v.registration_plate
   `
+}
+
+/**
+ * Units whose parked fall stage one called since `since` and stage two has not
+ * yet decided — re-asked every cycle, whatever their spread.
+ *
+ * Stage one calls a fall within minutes from our own readings; Wialon's drain,
+ * which is what the adjudicator judges and what the ledger keeps, often matures
+ * later. Once the tank has settled at its new level the spread over the short
+ * candidate window is zero, so the unit stopped being asked and its drain
+ * reached the ledger only on the settle pass, six to thirty hours on (measured
+ * 8–22 Oct: 17 SIPHON announced 6.6–20 h late, 14 never).
+ */
+export async function findOpenFallVehicles(orgId: string, since: Date): Promise<SyncVehicle[]> {
+  const falls = await prisma.parkedFuelFall.findMany({
+    where:    { organisationId: orgId, verdict: 'PENDING', settledAt: { gte: since },
+                vehicle: { deviceId: { startsWith: 'wialon:' } } },
+    select:   { vehicle: { select: { id: true, deviceId: true, registrationPlate: true } } },
+    distinct: ['vehicleId'],
+  })
+  return falls.map(f => f.vehicle)
+}
+
+/** Two candidate lists as one, each unit once, in plate order like findFuelCandidates. */
+export function mergeCandidates(...lists: SyncVehicle[][]): SyncVehicle[] {
+  const byId = new Map<string, SyncVehicle>()
+  for (const list of lists) for (const v of list) if (!byId.has(v.id)) byId.set(v.id, v)
+  return [...byId.values()].sort((a, b) => a.registrationPlate.localeCompare(b.registrationPlate))
 }
 
 /**
