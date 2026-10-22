@@ -372,6 +372,32 @@ describe('adjudicatePendingDrains — FUEL RATE / FUEL DOWN as a daily summary',
     expect(item['text']).toContain('POSSIBLE THEFT: KDL 182X')
   })
 
+  it('says nothing about lateness on a SIPHON judged on time', async () => {
+    setLevelsParked([...STEADY, ...SIPHONING])
+    await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+    expect(published()[0]![0]['text']).not.toContain('Reported')
+  })
+
+  it('says how late a SIPHON is when it is judged hours on', async () => {
+    // Found by the settle pass, as 17 were on 8–22 Oct: still critical
+    // inside six hours, and the line says when it was found.
+    setLevelsParked([...STEADY, ...SIPHONING])
+    await adjudicatePendingDrains({ apply: true, notify: true, now: new Date(BEGAN.getTime() + 2.5 * 3_600_000) })
+    const item = published()[0]![0]
+    expect(item['severity']).toBe('critical')
+    expect(item['text']).toContain("Reported 2.5 hours after it happened: found on a later read of the tracker's data.")
+    expect(item['at']).toEqual(BEGAN)
+  })
+
+  it('posts a SIPHON found more than six hours on as a warning', async () => {
+    setLevelsParked([...STEADY, ...SIPHONING])
+    await adjudicatePendingDrains({ apply: true, notify: true, now: new Date(BEGAN.getTime() + 10 * 3_600_000) })
+    const item = published()[0]![0]
+    expect(item['severity']).toBe('warning')
+    expect(item['text']).toContain('POSSIBLE THEFT: KDL 182X')
+    expect(item['text']).toContain('Reported 10 hours after it happened')
+  })
+
   /**
    * KDE 585S's shape (27 Sep), on the fixture clock: refuelled from 20 L to
    * 200 L at the pump by 12:48 UTC, standing with the engine off; 30 L gone by
