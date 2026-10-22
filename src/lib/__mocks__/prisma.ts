@@ -32,11 +32,4 @@ export function resetPrismaMock() {
   ;(prismaMock.$queryRaw as any).mockResolvedValue([])
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(prismaMock.$queryRawUnsafe as any).mockResolvedValue([])
-  // Group routing rules, for the same reason as the raw queries above: every
-  // user CREATE now resolves a group from the address (users/user-group.assign),
-  // so a suite that never heard of groups would otherwise fail inside a
-  // `.map` on undefined. No rules is the honest default — it means nothing is
-  // placed in a group, which is what an unseeded database actually holds.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ;(prismaMock.groupEmailDomain.findMany as any).mockResolvedValue([])
 }

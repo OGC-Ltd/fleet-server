@@ -118,13 +118,23 @@ export async function canDeleteUser(
    * so this is inert until the flag is turned on, and the roster's shadow
    * logging is what reports the effect in the meantime.
    */
-  const scope = await groupScopeFor(actorId)
+  const scope = await groupScopeFor(actorId, orgId)
   if (!scope.unscoped) {
     const target = await prisma.user.findUnique({
       where: { id: targetId },
-      select: { groupId: true },
+      select: {
+        groups: {
+          where: { group: { organisationId: orgId } },
+          select: { groupId: true },
+        },
+      },
     })
-    if ((target?.groupId ?? null) !== scope.groupId) {
+    const sharesGroup = target && (
+      scope.groupIds.length === 0
+        ? target.groups.length === 0
+        : target.groups.some(({ groupId }) => scope.groupIds.includes(groupId))
+    )
+    if (!sharesGroup) {
       return { ok: false, reason: 'other_group' }
     }
   }

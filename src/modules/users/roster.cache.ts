@@ -158,3 +158,27 @@ export async function invalidateRosterForUser(
   }
   await invalidateRoster(...owned, ...extraOrgIds)
 }
+
+/** Retire rosters for many affected users with one membership lookup. */
+export async function invalidateRostersForUsers(userIds: string[]): Promise<void> {
+  const ids = [...new Set(userIds)]
+  if (ids.length === 0) return
+
+  let orgIds: string[] = []
+  try {
+    const users = await prisma.user.findMany({
+      where: { id: { in: ids } },
+      select: {
+        organisationId: true,
+        memberships: { where: { revokedAt: null }, select: { organisationId: true } },
+      },
+    })
+    orgIds = users.flatMap((user) => [
+      user.organisationId,
+      ...user.memberships.map((membership) => membership.organisationId),
+    ])
+  } catch (err) {
+    logger.warn({ err, userIds: ids }, 'roster cache: could not resolve organisations for group update')
+  }
+  await invalidateRoster(...orgIds)
+}

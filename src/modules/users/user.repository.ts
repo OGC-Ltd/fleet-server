@@ -1,9 +1,8 @@
 import { prisma } from '../../lib/prisma.js'
 import type { CreateUserDto, UpdateUserDto, ListUserQuery } from './user.schema.js'
 import { UNSCOPED, groupWhere, type GroupScope } from './user-group.scope.js'
-import { resolveGroupId } from './user-group.assign.js'
 
-const SELECT_USER = {
+const selectUser = (orgId: string) => ({
   id: true,
   organisationId: true,
   fullName: true,
@@ -14,10 +13,12 @@ const SELECT_USER = {
   status: true,
   createdAt: true,
   updatedAt: true,
-  // Which group administers this person. On the roster because the roster is
-  // now narrowed by it: a reader who cannot see the axis cannot tell a short
-  // list from a broken one.
-  group: { select: { id: true, slug: true, name: true } },
+  // Group memberships are part of the roster so administrators can see and
+  // manage the same access boundary used to narrow it.
+  groups: {
+    where: { group: { organisationId: orgId } },
+    select: { group: { select: { id: true, slug: true, name: true } } },
+  },
   // The password history the account page and the admin roster both show.
   // `passwordChangedAt: null` on an account that has one means it was set
   // before this was recorded — distinct from an account that has no password
@@ -46,6 +47,13 @@ const SELECT_USER = {
     orderBy: { createdAt: 'desc' as const },
     take:    1,
   },
+})
+
+function withGroupAliases<T extends { groups: { group: { id: string; slug: string; name: string } }[] }>(user: T) {
+  const groups = user.groups
+    .map(({ group }) => group)
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+  return { ...user, groups, group: groups[0] ?? null }
 }
 
 /**
@@ -137,10 +145,10 @@ export async function findAll(
   const where = rosterWhere(orgId, query, scope)
 
   const [data, total] = await prisma.$transaction([
-    prisma.user.findMany({ where, skip, take: limit, select: SELECT_USER, orderBy: { createdAt: 'desc' } }),
+    prisma.user.findMany({ where, skip, take: limit, select: selectUser(orgId), orderBy: { createdAt: 'desc' } }),
     prisma.user.count({ where }),
   ])
-  return { data, total }
+  return { data: data.map(withGroupAliases), total }
 }
 
 /**
@@ -174,42 +182,47 @@ export async function findReachable(orgId: string, userId: string, scope: GroupS
         { memberships: { some: { organisationId: orgId, revokedAt: null } } },
       ],
     },
-    select: { id: true, fullName: true, email: true, organisationId: true, groupId: true },
+    select: {
+      id: true,
+      fullName: true,
+      email: true,
+      organisationId: true,
+      groups: {
+        where: { group: { organisationId: orgId } },
+        select: { groupId: true },
+      },
+    },
   })
 }
 
 export async function findById(orgId: string, userId: string, scope: GroupScope = UNSCOPED) {
-  return prisma.user.findFirst({
+  const user = await prisma.user.findFirst({
     where: { id: userId, organisationId: orgId, deletedAt: null, ...groupWhere(scope) },
     select: {
-      ...SELECT_USER,
+      ...selectUser(orgId),
       userRoles: {
         where: { revokedAt: null },
         select: { id: true, assignedAt: true, role: { select: { id: true, name: true, slug: true } } },
       },
     },
   })
+  return user ? withGroupAliases(user) : null
 }
 
 export async function create(orgId: string, dto: CreateUserDto) {
   return prisma.user.create({
-    // Placed by the domain rules at creation. A registry driver has no email
-    // and resolves to null, which is the correct answer for them.
-    data: { ...dto, organisationId: orgId, groupId: await resolveGroupId(dto.email) },
-    select: SELECT_USER,
-  })
+    data: { ...dto, organisationId: orgId },
+    select: selectUser(orgId),
+  }).then(withGroupAliases)
 }
 
 export async function update(orgId: string, userId: string, dto: UpdateUserDto) {
-  // No group handling here on purpose: `updateUserSchema` omits `email`, and
-  // self-service changes only the name, so no route in this app can move an
-  // address between groups. Should one ever be added, it has to place the
-  // account again — see users/user-group.assign.
+  // Group membership is managed through the dedicated user-groups routes.
   return prisma.user.update({
     where: { id: userId, organisationId: orgId },
     data: dto,
-    select: SELECT_USER,
-  })
+    select: selectUser(orgId),
+  }).then(withGroupAliases)
 }
 
 export async function softDelete(orgId: string, userId: string) {
