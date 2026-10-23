@@ -13,8 +13,9 @@
  * Harsh cornering is reported by the same trackers but is not recorded: it was
  * not asked for, and it is the noisiest of the three on rough estate roads.
  *
- * Idempotent: one row per unit, kind and second, keyed by `externalId`, so the
- * sweep re-reading a unit's last message after a restart writes nothing twice.
+ * Idempotent: repeated reports of one kind from one unit within a minute share
+ * one `externalId`. Trackers can repeat the event across several messages, so
+ * second-level identity turned one manoeuvre into a burst of feed alerts.
  */
 
 import { prisma }        from '../prisma.js'
@@ -30,6 +31,13 @@ export const HARSH_ALERTS = {
   ACCELERATION: { type: 'HARSH_ACCELERATION', words: 'Harsh acceleration' },
   BRAKING:      { type: 'HARSH_BRAKING',      words: 'Harsh braking' },
 } as const
+
+/** One event per unit and kind per minute, even if Wialon repeats its message. */
+export function harshEventExternalId(e: HarshDrivingEvent): string | null {
+  const what = e.kind === 'CORNERING' ? null : HARSH_ALERTS[e.kind]
+  if (!what) return null
+  return `harsh:${e.deviceId}:${what.type}:${Math.floor(e.at.getTime() / 60_000)}`
+}
 
 /** The sentence the feed shows: what, which unit, where, how fast, how hard. */
 export function harshMessage(
@@ -51,7 +59,8 @@ export async function recordHarshEvent(e: HarshDrivingEvent): Promise<void> {
   const what = e.kind === 'CORNERING' ? null : HARSH_ALERTS[e.kind]
   if (!what) return
 
-  const externalId = `harsh:${e.deviceId}:${what.type}:${Math.floor(e.at.getTime() / 1000)}`
+  const externalId = harshEventExternalId(e)
+  if (!externalId) return
   const existing = await prisma.providerAlert.findUnique({ where: { externalId }, select: { id: true } })
   if (existing) return
 
@@ -61,6 +70,22 @@ export async function recordHarshEvent(e: HarshDrivingEvent): Promise<void> {
   })
   // A unit we do not hold has no organisation to tell.
   if (!vehicle) return
+  // Minute bucket IDs handle the common case and the database uniqueness race.
+  // This indexed time-range check also catches reports that straddle a minute
+  // boundary, and older second-keyed rows already in the database.
+  const recent = await prisma.providerAlert.findFirst({
+    where: {
+      vehicleId: vehicle.id,
+      type: what.type,
+      source: 'wialon',
+      createdAt: {
+        gte: new Date(e.at.getTime() - 60_000),
+        lte: new Date(e.at.getTime() + 60_000),
+      },
+    },
+    select: { id: true },
+  })
+  if (recent) return
 
   const places = e.lat != null && e.lng != null
     ? await resolveEstatePlaces(vehicle.organisationId, e.lat, e.lng).catch(() => [])
