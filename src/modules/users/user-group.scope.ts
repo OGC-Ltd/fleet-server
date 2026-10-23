@@ -114,7 +114,7 @@ export async function prospectiveScope(actorUserId: string | undefined, orgId: s
     where: { id: actorUserId },
     select: {
       groups: {
-        where: { group: { organisationId: orgId } },
+        where: { group: { organisations: { some: { organisationId: orgId } } } },
         select: { groupId: true },
       },
     },

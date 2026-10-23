@@ -453,7 +453,7 @@ async function sameGroupOrThrow(req: Parameters<RequestHandler>[0], userId: stri
     where:  { id: userId, deletedAt: null },
     select: {
       groups: {
-        where: { group: { organisationId: p(req, 'orgId') } },
+        where: { group: { organisations: { some: { organisationId: p(req, 'orgId') } } } },
         select: { groupId: true },
       },
     },

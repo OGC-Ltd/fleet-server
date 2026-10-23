@@ -124,7 +124,7 @@ export async function canDeleteUser(
       where: { id: targetId },
       select: {
         groups: {
-          where: { group: { organisationId: orgId } },
+          where: { group: { organisations: { some: { organisationId: orgId } } } },
           select: { groupId: true },
         },
       },

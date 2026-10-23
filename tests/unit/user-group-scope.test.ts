@@ -45,7 +45,7 @@ describe('groupScopeFor — the flag', () => {
     expect(findUnique).toHaveBeenCalledWith(expect.objectContaining({
       select: {
         groups: {
-          where: { group: { organisationId: ORG } },
+          where: { group: { organisations: { some: { organisationId: ORG } } } },
           select: { groupId: true },
         },
       },

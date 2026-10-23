@@ -224,8 +224,8 @@ enum AlertSeverity {
 ///   OrgMembership   which tenants an account may READ
 ///   UserGroup       which people an administrator may ADMINISTER
 ///
-/// The organisation owns its groups, which lets its administrators separate
-/// teams of people who all have access to the same tenant.
+/// The creator organisation owns the group record; UserGroupOrganisation
+/// defines every organisation where the shared group is available.
 model UserGroup {
   id             String   @id @default(cuid())
   organisationId String   @map("organisation_id")
@@ -236,11 +236,26 @@ model UserGroup {
   updatedAt      DateTime @updatedAt @map("updated_at")
 
   organisation Organisation          @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  organisations UserGroupOrganisation[]
   users        UserGroupMembership[]
 
   @@unique([organisationId, slug])
   @@index([organisationId])
   @@map("user_groups")
+}
+
+/// The organisations in which a user group is available.
+model UserGroupOrganisation {
+  groupId        String   @map("group_id")
+  organisationId String   @map("organisation_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  group        UserGroup    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, organisationId])
+  @@index([organisationId, groupId])
+  @@map("user_group_organisations")
 }
 
 /// A user may belong to multiple administration groups.
@@ -290,6 +305,7 @@ model Organisation {
   memberships          OrgMembership[]
   users                User[]
   userGroups           UserGroup[]
+  groupOrganisations   UserGroupOrganisation[]
   vehicleGroups        VehicleGroup[]
   vehicles             Vehicle[]
   reportingPeriods     ReportingPeriod[]
