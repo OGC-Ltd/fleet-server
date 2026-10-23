@@ -7,7 +7,7 @@ import { env } from './config/env.js'
 import { logger } from './lib/logger.js'
 import { globalLimiter } from './middleware/rateLimiter.js'
 import { errorHandler } from './middleware/errorHandler.js'
-import { requirePermission } from './middleware/authorize.js'
+import { requirePermission, requirePermissionStrict } from './middleware/authorize.js'
 import { resolveSubject, canReachOrg } from './lib/authz/subject.js'
 import { sendError, sendSuccess } from './core/response/response.js'
 
@@ -16,6 +16,7 @@ import accountRoutes from './modules/account/account.routes.js'
 import orgRoutes from './modules/organisations/organisation.routes.js'
 import userRoutes from './modules/users/user.routes.js'
 import userGroupRoutes from './modules/users/user-groups.routes.js'
+import { requireUserAdministrator } from './modules/users/user.authz.js'
 import roleRoutes from './modules/roles/role.routes.js'
 import vehicleRoutes from './modules/vehicles/vehicle.routes.js'
 import routeAheadRoutes from './modules/route-ahead/route-ahead.routes.js'
@@ -222,7 +223,8 @@ export function createApp() {
   app.post(
     `${v1}/users`,
     authenticate,
-    requirePermission('user:create'),
+    requirePermissionStrict('user:create'),
+    requireUserAdministrator,
     validateBody(provisionUserSchema),
     userCtrl.provisionAcrossOrgs,
   )

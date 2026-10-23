@@ -27,6 +27,7 @@ import { logger } from '../../lib/logger.js'
 import { NotFoundError, ValidationError, ConflictError } from '../../core/errors/errors.js'
 import { invalidateSubject } from '../../lib/authz/subject.js'
 import { invalidateRosterForUser } from './roster.cache.js'
+import { VEHICLE_SCOPABLE_ROLE_SLUGS } from '../../lib/permissions.js'
 import type { MembershipInput, ProvisionUserDto } from './user.schema.js'
 
 const BCRYPT_ROUNDS = 12
@@ -115,6 +116,12 @@ async function applyMembership(
     throw new NotFoundError(`Role(s) ${missing.join(', ')} in this organisation`)
   }
 
+  if (!allVehicles && roles.some((role) => !VEHICLE_SCOPABLE_ROLE_SLUGS.includes(role.slug))) {
+    throw new ValidationError({
+      memberships: [`${input.organisationId}: one or more assigned roles require access to the whole organisation`],
+    })
+  }
+
   // A platform role reaches every tenant, so granting one is not an
   // organisation-level act and an org admin must not be able to do it.
   //
@@ -181,7 +188,12 @@ async function applyMembership(
  */
 export async function provisionUser(
   dto: ProvisionUserDto,
-  opts: { restrictToOrgId?: string; grantedById?: string; allowPlatformRoles?: boolean } = {},
+  opts: {
+    restrictToOrgId?: string
+    grantedById?: string
+    allowPlatformRoles?: boolean
+    existingUserGuard?: (userId: string) => Promise<void>
+  } = {},
 ) {
   if (dto.memberships.length === 0) {
     throw new ValidationError({
@@ -210,6 +222,7 @@ export async function provisionUser(
   let hadPassword = false
   if (existing) {
     userId = existing.id
+    await opts.existingUserGuard?.(userId)
     const before = await prisma.user.findUnique({
       where: { id: userId }, select: { passwordHash: true },
     })
