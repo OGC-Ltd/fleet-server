@@ -223,6 +223,59 @@ export function probeReadsEmpty(troughMl: number, tankCapacityL: number | null):
   return troughMl <= Math.max(5_000, 0.03 * (tankCapacityL ?? 0) * 1000)
 }
 
+/** Readings of the machine running on an "empty" probe before it is blamed. */
+export const RAN_EMPTY_MIN_READINGS = 3
+/** The fall must reach empty this soon after it was detected to be this fall. */
+export const REACH_EMPTY_WITHIN_MS = 60 * 60_000
+
+/**
+ * Did the machine RUN while its probe still read empty — the proof that a fall
+ * to empty was the probe dropping out, not the tank being emptied?
+ *
+ * A fall that ends reading empty cannot be told from a real drain at the time:
+ * a thief who empties the tank leaves exactly that series, and the adjudicator
+ * rightly confirms it (fuel-adjudication's "does NOT excuse a tank genuinely
+ * drained to empty"). What separates them comes later: an emptied tank stops
+ * the engine, a dead probe does not. `KTCC 872B` fell 15.2 L -> 0.1 L parked at
+ * 22:14 on 30 Sep, was announced as possible theft, and at 05:44 the next
+ * morning started and drove at 7-14 km/h for twenty minutes still "reading"
+ * 0.1 L.
+ *
+ * Read from `fromMs` (when the drain was detected — which the ledger stamps at
+ * the START of the fall as often as at its end, so the readings first still
+ * show the level coming down): the first reading at empty must come within
+ * REACH_EMPTY_WITHIN_MS. From there, true once RAN_EMPTY_MIN_READINGS readings
+ * show the engine running (a MEASURED ignition, never the adapter's speed
+ * fallback) or the machine moving, all while the level reads empty. False the
+ * moment a reading is back above empty first — a refuel or a return before
+ * any running says nothing either way, and the call stands.
+ */
+export function ranOnEmpty(
+  rows: readonly Pick<FallReading, 't' | 'fuelMl' | 'speedKmh' | 'engineOn' | 'ignitionKnown'>[],
+  fromMs: number,
+  tankCapacityL: number | null,
+): boolean {
+  let running = 0
+  let reached = false
+  for (const r of rows) {
+    if (r.t < fromMs || r.fuelMl == null) continue
+    const empty = probeReadsEmpty(r.fuelMl, tankCapacityL)
+    if (!reached) {
+      if (!empty) {
+        if (r.t - fromMs > REACH_EMPTY_WITHIN_MS) return false
+        continue          // still the fall coming down
+      }
+      reached = true
+    }
+    if (!empty) return false
+    if ((r.engineOn && r.ignitionKnown) || (r.speedKmh ?? 0) >= MOVE_KMH) {
+      running += 1
+      if (running >= RAN_EMPTY_MIN_READINGS) return true
+    }
+  }
+  return false
+}
+
 /**
  * Does this unit's engine-hours counter track its ENGINE?
  *
