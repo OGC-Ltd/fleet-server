@@ -21,7 +21,8 @@
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { NotFoundError } from '../../core/errors/errors.js'
-import { listDevices, liveStatus, streamUrl, vssAvailable, VssError, VSS_LOGIN_LIMITED, type VssDevice } from '../../providers/vss/index.js'
+import { listDevices, liveStatus, streamUrl, vssAvailable, VssError, VSS_LOGIN_LIMITED, VSS_TOO_FREQUENT, type VssDevice } from '../../providers/vss/index.js'
+import { matchDevice } from '../dashcam/vss-match.js'
 
 export type CameraState =
   /** VSS credentials are not set on this server. */
@@ -46,26 +47,16 @@ export interface VehicleCamera {
   message:  string | null
 }
 
-/** "MUFINDI: FT 13" → "MUFINDIFT13". */
-export function cameraKey(s: string | null | undefined): string {
-  return (s ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '')
-}
-
-/**
- * The device for a unit known by these labels. More than one match (a box
- * swapped and the old record left behind) prefers the one that is online.
- */
-export function matchDevice(devices: VssDevice[], labels: (string | null | undefined)[]): VssDevice | null {
-  const keys = new Set(labels.map(cameraKey).filter(k => k.length >= 4))
-  if (keys.size === 0) return null
-  const hits = devices.filter(d => keys.has(cameraKey(d.name)) || keys.has(cameraKey(d.plate)))
-  return hits.find(d => d.accessMode >= 1) ?? hits[0] ?? null
-}
+// Matching lives in modules/dashcam/vss-match, shared with the dashcam alarms:
+// it also pairs "SUKARI - KDR 430Q" in VSS with our plate "KDR 430Q".
+export { cameraKey, matchDevice } from '../dashcam/vss-match.js'
 
 const NOT_ANSWERING = 'The camera service is not answering. Try again in a minute.'
 const LOGIN_LIMITED = 'The video server is limiting sign-ins. Try again in about five minutes.'
+const BUSY = 'The video server asked us to slow down. Try again in a minute or two.'
 const failure = (err: unknown) =>
-  err instanceof VssError && err.status === VSS_LOGIN_LIMITED ? LOGIN_LIMITED : NOT_ANSWERING
+  err instanceof VssError && err.status === VSS_LOGIN_LIMITED ? LOGIN_LIMITED
+    : err instanceof VssError && err.status === VSS_TOO_FREQUENT ? BUSY : NOT_ANSWERING
 
 const empty = (state: CameraState, message: string | null): VehicleCamera =>
   ({ state, deviceId: null, deviceName: null, channels: [], streamUrl: null, message })

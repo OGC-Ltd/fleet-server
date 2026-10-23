@@ -20,6 +20,7 @@ import roleRoutes from './modules/roles/role.routes.js'
 import vehicleRoutes from './modules/vehicles/vehicle.routes.js'
 import routeAheadRoutes from './modules/route-ahead/route-ahead.routes.js'
 import cameraRoutes from './modules/camera/camera.routes.js'
+import dashcamRoutes from './modules/dashcam/dashcam.routes.js'
 import { lookup as vehicleLookup } from './modules/vehicles/vehicle-lookup.js'
 import tripRoutes from './modules/trips/trip.routes.js'
 import fuelRoutes from './modules/fuel/fuel.routes.js'
@@ -270,6 +271,10 @@ export function createApp() {
   app.use(orgBase, usageReviewRoutes)
   app.use(orgBase, routeAheadRoutes)
   app.use(orgBase, cameraRoutes)
+  // Dashcam alarms (Control Tech VSS) for the dashboard's Alarms tab. The
+  // organisation travels as ?org= (the dashboard's contract); the routes put it
+  // where the access checks look — see modules/dashcam/dashcam.routes.
+  app.use(`${v1}/vss`, dashcamRoutes)
   app.use(orgBase, vehicleRoutes)
   app.use(`${orgBase}/trips`, tripRoutes)
   app.use(`${orgBase}/trips`, cargoRoutes)
