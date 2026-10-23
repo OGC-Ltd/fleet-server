@@ -10,9 +10,9 @@ import { can, vehicleScopeIn, type Subject } from '../../lib/authz/subject.js'
 import { ALERT_KINDS, type AlertKindSlug } from './alerts.rules.js'
 
 /**
- * What reading each kind takes in an organisation: the slugs that already
- * guard the same data elsewhere (the fuel incident list, the Speed tab), so
- * the page shows nobody anything a screen of theirs does not already show.
+ * What reading each kind takes in an organisation. Existing readers retain
+ * access through the fuel incident list and Speed tab permissions; `alerts:read`
+ * grants the dedicated Alerts page without opening those broader resources.
  */
 export const READ_PERMISSION: Record<AlertKindSlug, string> = {
   fuel: 'fuel_theft:read',
@@ -39,7 +39,8 @@ export interface OrgScope {
 export function alertScopes(subject: Subject, orgIds: string[]): OrgScope[] {
   const out: OrgScope[] = []
   for (const orgId of orgIds) {
-    const kinds = ALERT_KINDS.filter((k) => can(subject, orgId, READ_PERMISSION[k]))
+    const canReadAllAlerts = can(subject, orgId, 'alerts:read')
+    const kinds = ALERT_KINDS.filter((k) => canReadAllAlerts || can(subject, orgId, READ_PERMISSION[k]))
     if (kinds.length === 0) continue
     const scope = vehicleScopeIn(subject, orgId)
     if (scope && scope.size === 0) continue

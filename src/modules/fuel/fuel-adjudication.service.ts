@@ -2,17 +2,17 @@
  * The sweep that turns Wialon's drain claims into verdicts.
  *
  * Reads PENDING rows that have had their settle window, asks our own telemetry
- * whether the fuel came back, writes the verdict, and — for the ones that
- * survive — puts the drain on the Live Feed. The judgement itself lives in
- * `fuel-adjudication.ts` and is pure; this file is the plumbing round it.
+ * whether the fuel came back, writes the verdict, and updates the provisional
+ * Live Feed item created when Wialon first reported the drain. The judgement
+ * itself lives in `fuel-adjudication.ts` and is pure; this file is the plumbing
+ * round it.
  *
  * ## Why the notification moved here
  *
- * It used to fire in `fuel-sync.service` the moment a drain was written, which
- * is what makes the false flags reach the operator at all. Measured, that is
- * roughly half of them. Announcing on the VERDICT costs the settle window —
- * 20 minutes, agreed with the operator — and stops the feed asserting a theft
- * that the next twenty minutes will contradict.
+ * A provisional warning is now emitted by `fuel-sync.service` immediately
+ * after the report is received. This pass replaces it with the adjudicated
+ * finding, or a clear status if the report does not qualify as an alert.
+ * Provisional wording never calls the report a theft or a confirmed loss.
  *
  * Only a DRAIN is announced. A REDISTRIBUTION means the fuel came back and a
  * REFILL means it went in, so neither is news. An UNCONFIRMED drain still is —
@@ -584,6 +584,17 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
   })
   if (pending.length === 0) return { ...EMPTY, causes: {} }
 
+  const provisionalFeedIds = opts.apply && opts.notify
+    ? new Set((await prisma.notification.findMany({
+      where: {
+        feedId: {
+          in: pending.map(t => `fuel-drain-${t.vehicleId}-${t.id}`),
+        },
+      },
+      select: { feedId: true },
+    })).map(n => n.feedId))
+    : new Set<string>()
+
   const out: AdjudicateOutcome = { ...EMPTY, causes: {} }
 
   for (const t of pending) {
@@ -652,23 +663,62 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     //   SIPHON            the engine was provably off, the fall was sustained,
     //                     and it was neither settling nor a probe step
     //
-    // Everything else lands on the ledger and the dashboard tables silently.
-    // ENGINE_BURN and HIGH_BURN are a machine doing its job; SLOSH and
-    // SETTLING are the instrument or the liquid; INDETERMINATE is us admitting
-    // we cannot say, which is 60% of the ledger and is not something to
-    // announce. A REDISTRIBUTION or SENSOR_FAULT never even reaches a cause.
+    // Everything else stays off the alert path. ENGINE_BURN and HIGH_BURN are
+    // a machine doing its job; SLOSH and SETTLING are the instrument or the
+    // liquid; INDETERMINATE is us admitting we cannot say. If one of these had
+    // a provisional feed item, it is replaced with a review status above.
     //
     // Measured over 30 days of real drains: 90 announcements against 1,407,
     // spread across 31 vehicles. Reversible in one line if it proves wrong.
-    if (!opts.notify || verdict.cause == null || !announces(verdict.cause)) continue
-    if (opts.notifyCutoff && t.beganAt < opts.notifyCutoff) continue
+    if (!opts.notify) continue
+    const feedId = `fuel-drain-${t.vehicleId}-${t.id}`
+    const existing = provisionalFeedIds.has(feedId)
+    const inNotifyWindow = !opts.notifyCutoff || t.beganAt >= opts.notifyCutoff
+
+    if (verdict.cause == null || !announces(verdict.cause)) {
+      if (!existing) continue
+      const resolution = verdict.verdict === 'REDISTRIBUTION'
+        ? 'the level recovered and the drop was not confirmed as fuel loss'
+        : verdict.verdict === 'SENSOR_FAULT'
+        ? 'the review identified a sensor fault, not a confirmed fuel loss'
+        : 'the review did not meet the criteria for a fuel-loss alert'
+      const { published } = await publishNotificationDurable({
+        orgId:     t.vehicle.organisationId,
+        id:        feedId,
+        source:    'wialon',
+        alertType: 'fuelInconsistency',
+        severity:  'info',
+        text:      `FUEL DROP REVIEWED: ${t.vehicle.registrationPlate}; ${resolution}.`,
+        at:        t.beganAt,
+        plate:     t.vehicle.registrationPlate,
+        vehicleId: t.vehicleId,
+      })
+      if (published) out.published++
+      continue
+    }
+    if (!inNotifyWindow && !existing) continue
     // FUEL RATE and FUEL DOWN reach the feed once a day as a summary, not one
     // by one (FUEL_RATE_ALERTS, lib/queues/fuel-rate-digest). Only a SIPHON is
     // still posted as it happens — which by now includes a FUEL RATE / FUEL
     // DOWN whose fuel went while the vehicle stood (standing-theft), so the
     // summary keeps only what nobody can call a theft. The ledger row above is
     // written either way.
-    if (!mayUseTheftWording(verdict.cause.cause) && env.FUEL_RATE_ALERTS !== 'live') continue
+    if (!mayUseTheftWording(verdict.cause.cause) && env.FUEL_RATE_ALERTS !== 'live') {
+      if (!existing) continue
+      const { published } = await publishNotificationDurable({
+        orgId:     t.vehicle.organisationId,
+        id:        feedId,
+        source:    'wialon',
+        alertType: 'fuelInconsistency',
+        severity:  'info',
+        text:      `FUEL DROP REVIEWED: ${t.vehicle.registrationPlate}; it will be included in the fuel summary rather than sent as a separate alert.`,
+        at:        t.beganAt,
+        plate:     t.vehicle.registrationPlate,
+        vehicleId: t.vehicleId,
+      })
+      if (published) out.published++
+      continue
+    }
     // A unit already reported for a fuel probe repair is announced like any
     // other, and the message says it was reported (operator, 2026-10-13: "do
     // not put a unit on hold, but we can highlight it was reported"). It used
@@ -729,7 +779,7 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
 
     const { published } = await publishNotificationDurable({
       orgId:     t.vehicle.organisationId,
-      id:        `fuel-drain-${t.vehicleId}-${t.id}`,
+      id:        feedId,
       source:    'wialon',
       alertType: 'fuelInconsistency',
       // A siphon is the only one we are prepared to call theft, so it is the

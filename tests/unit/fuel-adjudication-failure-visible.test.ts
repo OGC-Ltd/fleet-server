@@ -28,7 +28,7 @@ import type { FuelAdjudicationResult } from '../../src/lib/queues/fuel-events.js
 
 const clean = (): FuelAdjudicationResult => ({
   fillingsJudged: 0, fillingsPhantom: 0,
-  adjudicated: 0, redistributed: 0, published: 0,
+  adjudicated: 0, redistributed: 0, published: 0, deadProbeRetracted: 0,
   adjudicationFailed: false, adjudicationFailStreak: 0, ms: 12,
 })
 

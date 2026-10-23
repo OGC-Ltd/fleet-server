@@ -39,6 +39,13 @@ describe('alertScopes', () => {
     ])
   })
 
+  it('grants the dedicated alerts permission access to both alert kinds', () => {
+    const s = subject({ a: { perms: ['alerts:read'] } })
+    expect(alertScopes(s, ['a'])).toEqual([
+      { orgId: 'a', vehicleIds: null, kinds: ['fuel', 'speeding'] },
+    ])
+  })
+
   it('drops an organisation with neither permission, or one the subject is not in', () => {
     const s = subject({ a: { perms: ['map:read'] }, b: { perms: ['fuel_theft:read'] } })
     expect(alertScopes(s, ['a', 'b', 'elsewhere']).map((x) => x.orgId)).toEqual(['b'])

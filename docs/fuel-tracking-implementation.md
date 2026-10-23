@@ -97,8 +97,15 @@ Wialon probe (raw ADC)
              ├─ no  → no provider call
              └─ yes → Wialon report over a 3 h window
                         ├─ fuel_fillings / fuel_thefts        (ledger)
-                        └─ publishNotification → SSE + Redis + Postgres  (feed)
+                        ├─ filling → publish feed item
+                        └─ drain → provisional warning; adjudication updates same item
 ```
+
+The warning is emitted as soon as a Wialon drain report is received, with
+explicit pending-verification wording. The adjudication pass later replaces it
+with its final finding or a review status. Wialon sync still runs every 15
+minutes by default, so this is immediate after ingestion, not a two-minute
+guarantee from when the tank physically dropped.
 
 **Why in-process.** The CLI writes identical rows and its feed items were *invisible in production*.
 `notification.reader` serves the first page from the Redis cache whenever the cache holds enough
@@ -127,8 +134,10 @@ different questions: "whose tank moved recently" wants a short one, "what exactl
 long one so Wialon has settled readings either side of the event. Sharing a single 3-hour window
 returns 47 candidates and re-executes each report ~12 times for the same event; split, it is 8.
 
-**Feed publication is decided by an event's AGE**, never by whether the ledger row was new. Tying
-them together let the nightly backfill swallow an event before any cycle could surface it.
+**Filling publication is decided by an event's AGE**, never by whether the ledger row was new.
+Drain reports instead publish provisionally on first sync and are updated by adjudication. Tying
+filling publication to new ledger rows let the nightly backfill swallow an event before any cycle
+could surface it.
 
 That means one event is re-offered on every cycle inside the 2-hour notify window — up to eight
 times. Republishing is now genuinely harmless, which it was not when this was written: see §8.
