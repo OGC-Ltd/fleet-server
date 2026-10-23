@@ -129,6 +129,8 @@ beforeEach(() => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(prismaMock.fuelTheft.update as any).mockResolvedValue({})
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(prismaMock.notification.findMany as any).mockResolvedValue([])
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(prismaMock.fuelFilling.findFirst as any).mockResolvedValue(null)   // no refuel unless a case sets one
   setProbeProfile(200, 0)
 })
@@ -147,6 +149,21 @@ describe('adjudicatePendingDrains', () => {
       where: { id: 'ft_1' },
       data:  expect.objectContaining({ verdict: 'REDISTRIBUTION', verdictReason: 'level-recovered' }),
     }))
+  })
+
+  it('replaces an existing provisional alert when adjudication clears the report', async () => {
+    setLevels([...STEADY, ...DRAINING, 190_000, 198_000, 200_000, 200_000])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.notification.findMany as any).mockResolvedValue([{ feedId: 'fuel-drain-veh_1-ft_1' }])
+
+    const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    expect(out).toMatchObject({ redistribution: 1, published: 1 })
+    expect(published()[0]![0]).toMatchObject({
+      id: 'fuel-drain-veh_1-ft_1',
+      severity: 'info',
+    })
+    expect(String(published()[0]![0]['text'])).toContain('level recovered')
   })
 
   it('reports a burn far above the machine’s measured rate, without calling it theft', async () => {

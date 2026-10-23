@@ -335,11 +335,16 @@ cadence that is **1–3 minutes**. That is the limit, not ten.
 
 - **Live (~1–3 min)** — the telemetry worker watches each vehicle's level and
   sets `flags.fuelInconsistency`; the map marker turns red immediately.
-  Provisional and retractable, no notification. The dashboard path for this is
-  **already built and currently dead** — `deriveStatus()` keys on that flag and
-  `wialon.adapter.ts:334` hardcodes it `false`.
-- **Settle (10–20 min)** — the existing adjudication confirms or clears. Only a
-  confirmed siphon reaches the feed as a critical item.
+  Provisional and retractable, but this telemetry-only path does not create a
+  feed item. The dashboard path for the marker is **already built and currently
+  dead** — `deriveStatus()` keys on that flag and `wialon.adapter.ts:334`
+  hardcodes it `false`. The separate Wialon report path emits the provisional
+  feed warning described below.
+- **Settle (10–20 min after the provider report is received)** — the
+  adjudication confirms or clears the same feed item. A confirmed siphon may
+  become critical; a cleared report is replaced with an informational review
+  result. Wialon's quarter-hourly polling still limits how quickly its report
+  can first reach the server.
 
 ### The six gates a fast alert must clear
 
@@ -592,6 +597,13 @@ job on that queue would wait behind every slow sweep.
 Worst case for a ripe drain: **35 minutes → 21**. The remaining twenty are
 `SETTLE_MINUTES`, which the live watcher does not wait for at all because it is
 not deciding — it is reporting that a tank dropped.
+
+When the sync first receives a Wialon drain report, it now publishes a warning
+marked as pending verification. The adjudication pass updates that same feed
+entry with the finding, or with a review status if the report does not qualify
+for an alert. This removes the extra settle-window delay from first visibility;
+it does not change Wialon's report-maturation time or the 15-minute sync
+schedule.
 
 ### The filling/drain ordering
 

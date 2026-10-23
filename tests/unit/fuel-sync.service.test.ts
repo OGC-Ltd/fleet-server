@@ -60,6 +60,8 @@ beforeEach(() => {
   ;(prismaMock.fuelFilling.findMany as any).mockResolvedValue([])
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([])
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ;(prismaMock.notification.findMany as any).mockResolvedValue([])
   // Prisma returns the created row, and the feed id is keyed on it — see the
   // stable-feed-id case.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -125,6 +127,7 @@ describe('ledger writes', () => {
 
     const theft = (prismaMock.fuelTheft.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data
     expect(theft).toMatchObject({ dismissedAt: deletedAt, dismissedById: 'u1', reviewStatus: 'DISMISSED' })
+    expect(publishNotificationDurable).not.toHaveBeenCalled()
   })
 
   it('does not re-store an event already in the ledger', async () => {
@@ -251,9 +254,9 @@ describe('feed publication is decided by AGE, not by ledger novelty', () => {
 
     const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
 
-    // One, not two: the drain is no longer announced here at all — it waits
-    // for adjudication. See fuel-adjudication.service.
-    expect(out).toMatchObject({ published: 0, deduped: 1 })
+    // Both the filling and provisional drain warning are re-offered; the
+    // store suppresses both exact repeats.
+    expect(out).toMatchObject({ published: 0, deduped: 2 })
   })
 
   it('stays silent about events older than the cutoff', async () => {
@@ -281,9 +284,11 @@ describe('feed publication is decided by AGE, not by ledger novelty', () => {
 
     const ids = published().map(c => c[0]['id'])
     // Keyed on the LEDGER ROW, not the event's clock — see the drift case below.
-    // Only the filling reaches the feed from here; the drain is adjudicated
-    // first and announced by that pass.
-    expect(ids).toEqual(['fuel-fill-veh_1-ff_new', 'fuel-fill-veh_1-ff_new'])
+    // The drain uses its ledger row id before and after adjudication.
+    expect(ids).toEqual([
+      'fuel-fill-veh_1-ff_new', 'fuel-drain-veh_1-ft_new',
+      'fuel-fill-veh_1-ff_new', 'fuel-drain-veh_1-ft_new',
+    ])
   })
 
   it('keeps one feed item when the provider moves the event clock', async () => {
@@ -294,7 +299,10 @@ describe('feed publication is decided by AGE, not by ledger novelty', () => {
     const later = new Date(RECENT.getTime() + 15 * 60_000)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([
-      { id: 'ft_1', beganAt: RECENT, detectedAt: later, stolenMl: 60_000, finalFuelLevelMl: 700_000 },
+      {
+        id: 'ft_1', beganAt: RECENT, detectedAt: later, stolenMl: 60_000,
+        finalFuelLevelMl: 700_000, dismissedAt: null, verdict: 'PENDING',
+      },
     ])
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({
       fillings: [], thefts: [{ ...drain(later), detectedAt: later }],
@@ -302,10 +310,11 @@ describe('feed publication is decided by AGE, not by ledger novelty', () => {
 
     await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
 
-    // The matcher still collapses the re-clamped report onto the one row —
-    // which is the point of this case. Nothing is announced from here now.
+    // The matcher still collapses the re-clamped report onto the one row, and
+    // its provisional feed item keeps the same stable id.
     expect(prismaMock.fuelTheft.create).not.toHaveBeenCalled()
-    expect(published()).toHaveLength(0)
+    expect(published()).toHaveLength(1)
+    expect(published()[0]![0]['id']).toBe('fuel-drain-veh_1-ft_1')
   })
 })
 
@@ -328,6 +337,25 @@ describe('reconcile — the provider retracts an event', () => {
 
     expect(out.removed).toBe(1)
     expect(prismaMock.fuelTheft.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['ft_stale'] } } })
+  })
+
+  it('updates a provisional alert when the provider retracts its settled report', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([stale])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.notification.findMany as any).mockResolvedValue([
+      { feedId: 'fuel-drain-veh_1-ft_stale' },
+    ])
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ from: SETTLE_FROM, reconcile: true }))
+
+    expect(out.removed).toBe(1)
+    expect(published()[0]![0]).toMatchObject({
+      id: 'fuel-drain-veh_1-ft_stale',
+      severity: 'info',
+    })
+    expect(String(published()[0]![0]['text'])).toContain('alert has been withdrawn')
   })
 
   it('deletes nothing without the flag', async () => {
@@ -422,18 +450,21 @@ describe('one physical event, many reports', () => {
 })
 
 describe('what the feed item says', () => {
-  it('does NOT announce a drain — the claim is adjudicated first', async () => {
-    // Measured over the 250 most recent drains per org, 40% (KASULU) and 50%
-    // (SUKARI) of decidable loss volume came back with no filling to explain
-    // it. Announcing on the provider's claim is what put those in front of the
-    // operator. The row is still written; only the feed item waits.
+  it('publishes a provisional warning as soon as Wialon reports a drain', async () => {
     vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [drain(RECENT)] })
 
     const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts())
 
-    expect(out.thefts).toBe(1)
+    expect(out).toMatchObject({ thefts: 1, published: 1 })
     expect(prismaMock.fuelTheft.create).toHaveBeenCalled()
-    expect(publishNotificationDurable).not.toHaveBeenCalled()
+    const item = published()[0]![0]
+    expect(item).toMatchObject({
+      id: 'fuel-drain-veh_1-ft_new',
+      severity: 'warning',
+      at: RECENT,
+    })
+    expect(item['text']).toContain('Verification is pending')
+    expect(item['text']).not.toMatch(/possible theft|confirmed fuel loss/i)
   })
 
   it('renders a filling as info, without false precision on a whole number', async () => {

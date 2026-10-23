@@ -316,7 +316,10 @@ export async function syncVehicleFuelEvents(
     // alone it was invisible here, and the re-report became a second row.
     prisma.fuelTheft.findMany({
       where:  { vehicleId: vehicle.id, beganAt: { lte: opts.to }, detectedAt: { gte: opts.from } },
-      select: { id: true, beganAt: true, detectedAt: true, stolenMl: true, finalFuelLevelMl: true, dismissedAt: true },
+      select: {
+        id: true, beganAt: true, detectedAt: true, stolenMl: true,
+        finalFuelLevelMl: true, dismissedAt: true, verdict: true,
+      },
     }),
   ])
   // Rows this pass has already bound to a reported event. Two distinct drains
@@ -445,6 +448,7 @@ export async function syncVehicleFuelEvents(
       row => Math.abs(row.beganAt.getTime() - t.beganAt.getTime()),
     )
     let ledgerId: string | null = knownTheft?.id ?? null
+    let dismissed = knownTheft?.dismissedAt != null
 
     // A row that began before the window is seen here only clamped: this
     // report's start, volume and levels are the part inside the window, never
@@ -504,6 +508,7 @@ export async function syncVehicleFuelEvents(
           },
           select: { dismissedAt: true, dismissedById: true, reviewedAt: true, reviewedById: true },
         })
+        dismissed = deleted != null
         const created = await prisma.fuelTheft.create({
           data: {
             ...(deleted ? {
@@ -535,20 +540,34 @@ export async function syncVehicleFuelEvents(
             id: created.id, beganAt: t.beganAt, detectedAt: t.detectedAt,
             stolenMl: t.stolenMl, finalFuelLevelMl: t.finalFuelLevelMl,
             dismissedAt: created.dismissedAt ?? null,
+            verdict: 'PENDING',
           })
           claimedThefts.add(created.id)
         }
       }
     }
 
-    // NOT announced here. A drain reaches the feed only once it has survived
-    // adjudication — see modules/fuel/fuel-adjudication.service. Announcing on
-    // the provider's claim is what put the false flags in front of the
-    // operator: measured over the 250 most recent drains per org, 40% (KASULU)
-    // and 50% (SUKARI) of decidable loss volume came back with no filling to
-    // explain it. The 20-minute settle window is the agreed cost of not
-    // asserting a theft the next twenty minutes will contradict.
-    void ledgerId
+    // Publish the provider's report as a provisional warning; adjudication
+    // updates this same feed item once the settle window has passed. Do not
+    // resurrect a dismissed event or regress a completed verdict to pending.
+    if (opts.apply && opts.notify && ledgerId && !dismissed
+      && (!knownTheft || knownTheft.verdict === 'PENDING')
+      && (!cutoff || t.detectedAt >= cutoff)) {
+      const where = t.initialLocation ? ` at ${shortPlaceLabel(t.initialLocation)}` : ''
+      const { published } = await publishNotificationDurable({
+        orgId:     source.orgId,
+        id:        `fuel-drain-${vehicle.id}-${ledgerId}`,
+        source:    'wialon',
+        alertType: 'fuelInconsistency',
+        severity:  'warning',
+        text:      `FUEL DROP REPORTED: ${vehicle.registrationPlate} reported a drop of ${L(t.stolenMl)}${where}. Verification is pending; this is not yet confirmed as fuel loss.`,
+        at:        t.beganAt,
+        plate:     vehicle.registrationPlate,
+        vehicleId: vehicle.id,
+      })
+      if (published) out.published++
+      else           out.deduped++
+    }
   }
 
   // Anything in the window the provider did NOT report this time is something
@@ -562,9 +581,9 @@ export async function syncVehicleFuelEvents(
     // drain used to return as a fresh alert with no memory of the deletion.
     // Nor one that began before the window: this read saw only its tail, so
     // its silence about it says nothing.
-    const staleThefts = knownThefts
+    const staleTheftRows = knownThefts
       .filter(r => !claimedThefts.has(r.id) && r.dismissedAt == null && r.beganAt >= opts.from)
-      .map(r => r.id)
+    const staleThefts = staleTheftRows.map(r => r.id)
     // Counted even in a dry run. This is the one branch that DELETES, so
     // "--reconcile without --apply" has to be able to answer "how much?"
     // before anyone runs it for real.
@@ -574,6 +593,26 @@ export async function syncVehicleFuelEvents(
         await prisma.fuelFilling.deleteMany({ where: { id: { in: staleFills } } })
       }
       if (staleThefts.length > 0) {
+        const existingFeedIds = new Set((await prisma.notification.findMany({
+          where: { feedId: { in: staleThefts.map(id => `fuel-drain-${vehicle.id}-${id}`) } },
+          select: { feedId: true },
+        })).map(row => row.feedId))
+        for (const row of staleTheftRows) {
+          const feedId = `fuel-drain-${vehicle.id}-${row.id}`
+          if (!existingFeedIds.has(feedId)) continue
+          const { published } = await publishNotificationDurable({
+            orgId:     source.orgId,
+            id:        feedId,
+            source:    'wialon',
+            alertType: 'fuelInconsistency',
+            severity:  'info',
+            text:      `FUEL DROP REVIEWED: ${vehicle.registrationPlate}; Wialon no longer reports this event in its settled data, so the alert has been withdrawn.`,
+            at:        row.beganAt,
+            plate:     vehicle.registrationPlate,
+            vehicleId: vehicle.id,
+          })
+          if (published) out.published++
+        }
         await prisma.fuelTheft.deleteMany({ where: { id: { in: staleThefts } } })
       }
     }
