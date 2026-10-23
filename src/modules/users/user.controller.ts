@@ -11,7 +11,13 @@ import type { CreateUserDto, UpdateUserDto, ListUserQuery, AssignRoleDto,
 import { ASSIGNABLE_ROLE_SLUGS, WILDCARD } from '../../lib/permissions.js'
 import { NotFoundError, BadRequestError, ForbiddenError } from '../../core/errors/errors.js'
 import { resolveSubject, can, canReachOrg } from '../../lib/authz/subject.js'
-import { canDeleteUser } from './user.authz.js'
+import {
+  canDeleteUser,
+  canEditUser,
+  canViewUser,
+  canManageRoleSlugs,
+  roleSlugsFor,
+} from './user.authz.js'
 import { groupScopeFor } from './user-group.scope.js'
 import { forgetUser } from '../../middleware/auth.js'
 import * as authService from '../auth/auth.service.js'
@@ -39,6 +45,39 @@ async function assertCanGrantOrgs(userId: string, orgIds: string[]): Promise<voi
     throw new ForbiddenError(
       `Missing permission: user:create in ${refused.join(', ')}`,
     )
+  }
+}
+
+async function assertCanManageRoleSlugs(
+  userId: string,
+  orgId: string,
+  roleSlugs: string[],
+): Promise<void> {
+  if (!(await canManageRoleSlugs(userId, orgId, roleSlugs))) {
+    throw new ForbiddenError('Administrators may assign only roles below admin')
+  }
+}
+
+async function assertCanManageRoleId(userId: string, orgId: string, roleId: string): Promise<void> {
+  const role = await prisma.role.findUnique({
+    where: { id: roleId },
+    select: { slug: true, organisationId: true },
+  })
+  if (!role) throw new NotFoundError('Role')
+
+  const actorRoles = await roleSlugsFor(userId, orgId)
+  if (actorRoles.has('super_admin')) {
+    if (role.organisationId !== null && role.organisationId !== orgId) {
+      throw new ForbiddenError('The role does not belong to this organisation')
+    }
+    return
+  }
+  if (
+    !actorRoles.has('admin')
+    || role.organisationId !== orgId
+    || !ASSIGNABLE_ROLE_SLUGS.includes(role.slug)
+  ) {
+    throw new ForbiddenError('Administrators may assign only roles below admin')
   }
 }
 
@@ -85,6 +124,7 @@ export const create: RequestHandler = async (req, res, next) => {
 
 export const update: RequestHandler = async (req, res, next) => {
   try {
+    await assertMayEdit(req, p(req, 'userId'))
     sendSuccess(res, await service.updateUser(p(req, 'orgId'), p(req, 'userId'), req.body as UpdateUserDto, req.user?.id))
   } catch (err) { next(err) }
 }
@@ -94,22 +134,22 @@ export const update: RequestHandler = async (req, res, next) => {
  *
  * `user:delete` answers "may this person remove people". It cannot answer "may
  * they remove THIS person", which is the half the operator specified: an admin
- * may not delete a system administrator, the platform administrator, a
- * director or a manager. See users/user.authz for why that is a rule about
+ * may not delete a system administrator, the platform administrator or a
+ * director. See users/user.authz for why that is a rule about
  * auditors rather than about rank.
  *
  * In the controller rather than the service because BOTH deletes need it and
  * they are two different services apart — soft and permanent — with
  * different refusals of their own underneath.
  */
-async function assertMayDelete(req: Parameters<RequestHandler>[0]): Promise<void> {
+async function assertMayDelete(req: Parameters<RequestHandler>[0]): Promise<boolean> {
   const orgId = p(req, 'orgId')
   const targetId = p(req, 'userId')
   const actorId = req.user?.id
   if (!actorId) throw new ForbiddenError('Not signed in')
 
   const verdict = await canDeleteUser(actorId, targetId, orgId)
-  if (verdict.ok) return
+  if (verdict.ok) return verdict.platformAdmin
 
   if (verdict.reason === 'protected') {
     throw new ForbiddenError(
@@ -126,19 +166,31 @@ async function assertMayDelete(req: Parameters<RequestHandler>[0]): Promise<void
   throw new ForbiddenError('Only an administrator of this organisation can delete accounts')
 }
 
+async function assertMayEdit(
+  req: Parameters<RequestHandler>[0],
+  targetId: string,
+  organisationId = p(req, 'orgId'),
+): Promise<void> {
+  const actorId = req.user?.id
+  if (!actorId) throw new ForbiddenError('Not signed in')
+  const verdict = await canEditUser(actorId, targetId, organisationId)
+  if (!verdict.ok) {
+    throw new ForbiddenError(`You cannot edit a ${ROLE_WORD[verdict.blockedBy] ?? 'protected'} account`)
+  }
+}
+
 /** For the refusal sentence. The two System Administrator slugs share a name. */
 const ROLE_WORD: Record<string, string> = {
   super_admin:  'platform administrator',
   system_admin: 'system administrator',
   admin:        'system administrator',
   director:     'director',
-  manager:      'manager',
 }
 
 export const remove: RequestHandler = async (req, res, next) => {
   try {
-    await assertMayDelete(req)
-    await service.deleteUser(p(req, 'orgId'), p(req, 'userId'), req.user?.id)
+    const platformAdmin = await assertMayDelete(req)
+    await service.deleteUser(p(req, 'orgId'), p(req, 'userId'), req.user?.id, platformAdmin)
     sendSuccess(res, null, 204)
   } catch (err) { next(err) }
 }
@@ -153,13 +205,15 @@ export const remove: RequestHandler = async (req, res, next) => {
  */
 export const purge: RequestHandler = async (req, res, next) => {
   try {
-    await assertMayDelete(req)
-    sendSuccess(res, await service.purgeUser(p(req, 'orgId'), p(req, 'userId'), req.user?.id))
+    const platformAdmin = await assertMayDelete(req)
+    sendSuccess(res, await service.purgeUser(p(req, 'orgId'), p(req, 'userId'), req.user?.id, platformAdmin))
   } catch (err) { next(err) }
 }
 
 export const assignRole: RequestHandler = async (req, res, next) => {
   try {
+    await assertMayEdit(req, p(req, 'userId'))
+    await assertCanManageRoleId(req.user!.id, p(req, 'orgId'), (req.body as AssignRoleDto).roleId)
     const result = await service.assignRoleToUser(p(req, 'orgId'), p(req, 'userId'), req.body as AssignRoleDto, req.user?.id)
     sendSuccess(res, result, 201)
   } catch (err) { next(err) }
@@ -167,6 +221,8 @@ export const assignRole: RequestHandler = async (req, res, next) => {
 
 export const revokeRole: RequestHandler = async (req, res, next) => {
   try {
+    await assertMayEdit(req, p(req, 'userId'))
+    await assertCanManageRoleId(req.user!.id, p(req, 'orgId'), p(req, 'roleId'))
     const result = await service.revokeRoleFromUser(p(req, 'orgId'), p(req, 'userId'), p(req, 'roleId'), req.user?.id)
     sendSuccess(res, result)
   } catch (err) { next(err) }
@@ -226,6 +282,9 @@ export const provisionInOrg: RequestHandler = async (req, res, next) => {
         vehicleGroupIds: [] as string[],
       })),
     ]
+    for (const membership of requested) {
+      await assertCanManageRoleSlugs(req.user!.id, membership.organisationId, membership.roleSlugs)
+    }
 
     // requirePermissionStrict only graded the PATH organisation. Every extra
     // one has to be checked too, or user:create at a site the caller does
@@ -233,6 +292,13 @@ export const provisionInOrg: RequestHandler = async (req, res, next) => {
     if (extras.length) await assertCanGrantOrgs(req.user!.id, extras.map((m) => m.organisationId))
 
     const allowPlatformRoles = await callerMayGrantPlatformRoles(req.user?.id, orgId)
+
+    const existingUserGuard = async (userId: string) => {
+      for (const membership of requested) {
+        await sameGroupOrThrow(req, userId, membership.organisationId)
+        await assertMayEdit(req, userId, membership.organisationId)
+      }
+    }
 
     // No `password` — an org admin invites rather than setting a password for
     // somebody else. See orgProvisionUserSchema for why that field is gone.
@@ -252,8 +318,8 @@ export const provisionInOrg: RequestHandler = async (req, res, next) => {
       // already holds platform:admin, so a System Administrator can appoint
       // another and an organisation administrator cannot.
       extras.length
-        ? { grantedById: req.user?.id, allowPlatformRoles }
-        : { restrictToOrgId: orgId, grantedById: req.user?.id, allowPlatformRoles },
+        ? { grantedById: req.user?.id, allowPlatformRoles, existingUserGuard }
+        : { restrictToOrgId: orgId, grantedById: req.user?.id, allowPlatformRoles, existingUserGuard },
     )
     const memberships = await provisioning.listMemberships(user!.id)
 
@@ -284,7 +350,12 @@ export const listUserMemberships: RequestHandler = async (req, res, next) => {
     // The answer spans every organisation this person reaches, which is the
     // point of it — but WHO may ask is still this organisation's question,
     // and it was not being asked at all. Same gate as the roster.
-    await reachableOrThrow(req, p(req, 'orgId'), p(req, 'userId'))
+    const orgId = p(req, 'orgId')
+    const userId = p(req, 'userId')
+    if (req.user?.id && !(await canViewUser(req.user.id, userId, orgId))) {
+      throw new NotFoundError('User')
+    }
+    await reachableOrThrow(req, orgId, userId)
     sendSuccess(res, await provisioning.listMemberships(p(req, 'userId')))
   } catch (err) { next(err) }
 }
@@ -294,9 +365,11 @@ export const putMembership: RequestHandler = async (req, res, next) => {
   try {
     const orgId = p(req, 'orgId')
     const b = req.body as SetMembershipDto
+    await assertCanManageRoleSlugs(req.user!.id, orgId, b.roleSlugs)
     // Group only — see sameGroupOrThrow. This route ADDS an organisation to
     // somebody who may not be in it yet, so it cannot require reachability.
     await sameGroupOrThrow(req, p(req, 'userId'))
+    await assertMayEdit(req, p(req, 'userId'))
     const result = await provisioning.setMembership(
       p(req, 'userId'),
       { organisationId: orgId, ...b },
@@ -318,6 +391,7 @@ export const deleteMembership: RequestHandler = async (req, res, next) => {
     // Same gate as setUserRole above: revoking a membership takes access
     // away, and a bare user id must not reach outside the caller's group.
     await reachableOrThrow(req, orgId, p(req, 'userId'))
+    await assertMayEdit(req, p(req, 'userId'))
     const result = await provisioning.revokeMembership(p(req, 'userId'), orgId, { restrictToOrgId: orgId })
     sendSuccess(res, result)
   } catch (err) { next(err) }
@@ -375,19 +449,23 @@ export const listAssignableRoles: RequestHandler = async (req, res, next) => {
 
     const [catalogue, inUse, platform] = await Promise.all([
       prisma.role.findMany({
-        where:  { organisationId: orgId, slug: { in: ASSIGNABLE_ROLE_SLUGS } },
+        where: {
+          organisationId: orgId,
+          ...(!mayGrantPlatform ? { slug: { in: ASSIGNABLE_ROLE_SLUGS } } : {}),
+        },
         select: { id: true, slug: true, name: true },
       }),
       prisma.role.findMany({
         where: {
           organisationId: orgId,
+          ...(!mayGrantPlatform ? { slug: { in: ASSIGNABLE_ROLE_SLUGS } } : {}),
           userRoles: { some: { revokedAt: null, user: { deletedAt: null } } },
         },
         select: { id: true, slug: true, name: true },
       }),
       mayGrantPlatform
         ? prisma.role.findMany({
-            where:  { organisationId: null, slug: { in: ASSIGNABLE_ROLE_SLUGS } },
+            where:  { organisationId: null },
             select: { id: true, slug: true, name: true },
           })
         : Promise.resolve([]),
@@ -428,7 +506,7 @@ export const listAssignableRoles: RequestHandler = async (req, res, next) => {
  *
  * `findReachable` is the roster's own reachability test (home organisation or
  * a live membership), so this cannot drift from what the list shows. The
- * group scope is unscoped until USER_GROUP_ENFORCE is on.
+ * group scope is enforced for every non-platform caller.
  */
 /**
  * The group gate ALONE, for the two routes that may legitimately name
@@ -444,26 +522,29 @@ export const listAssignableRoles: RequestHandler = async (req, res, next) => {
  *
  * The group is a different question and does apply: an administrator must not
  * pull somebody out of another group into their own. Unscoped, and therefore
- * inert, until USER_GROUP_ENFORCE is on.
+ * enforced for every non-platform caller.
  */
-async function sameGroupOrThrow(req: Parameters<RequestHandler>[0], userId: string): Promise<void> {
-  const scope = await groupScopeFor(req.user?.id, p(req, 'orgId'))
+async function sameGroupOrThrow(
+  req: Parameters<RequestHandler>[0],
+  userId: string,
+  organisationId = p(req, 'orgId'),
+): Promise<void> {
+  const scope = await groupScopeFor(req.user?.id, organisationId)
   if (scope.unscoped) return
   const target = await prisma.user.findFirst({
     where:  { id: userId, deletedAt: null },
     select: {
       groups: {
-        where: { group: { organisations: { some: { organisationId: p(req, 'orgId') } } } },
+        where: { group: { organisations: { some: { organisationId } } } },
         select: { groupId: true },
       },
     },
   })
   // A target that does not exist is the route's own 404 to raise, not this
   // gate's — it knows what it was looking for and this does not.
-  if (target && !(
+  if (target && (
     scope.groupIds.length === 0
-      ? target.groups.length === 0
-      : target.groups.some(({ groupId }) => scope.groupIds.includes(groupId))
+    || !target.groups.some(({ groupId }) => scope.groupIds.includes(groupId))
   )) {
     throw new ForbiddenError('You can only manage accounts in your group')
   }
@@ -481,6 +562,7 @@ export const resendInvite: RequestHandler = async (req, res, next) => {
     const userId = p(req, 'userId')
 
     await reachableOrThrow(req, orgId, userId)
+    await assertMayEdit(req, userId)
     const user = await prisma.user.findFirst({
       where:  { id: userId, deletedAt: null },
       select: { id: true, email: true, fullName: true, passwordHash: true },
@@ -518,6 +600,7 @@ export const setUserStatus: RequestHandler = async (req, res, next) => {
     const { status } = req.body as SetUserStatusDto
 
     const existing = await reachableOrThrow(req, orgId, userId)
+    await assertMayEdit(req, userId)
 
     // Suspending yourself locks you out of the tab you are standing in, with
     // no way back that does not need another admin.
@@ -558,6 +641,7 @@ export const setUserRole: RequestHandler = async (req, res, next) => {
     const orgId  = p(req, 'orgId')
     const userId = p(req, 'userId')
     const { roleSlugs } = req.body as SetUserRoleDto
+    await assertCanManageRoleSlugs(req.user!.id, orgId, roleSlugs)
 
     if (userId === req.user?.id) {
       throw new BadRequestError('You cannot change your own roles')
@@ -568,6 +652,7 @@ export const setUserRole: RequestHandler = async (req, res, next) => {
     // putMembership: this goes through `setMembership`, which adds the
     // organisation when it is missing.
     await sameGroupOrThrow(req, userId)
+    await assertMayEdit(req, userId)
 
     const memberships = await provisioning.setMembership(
       userId,

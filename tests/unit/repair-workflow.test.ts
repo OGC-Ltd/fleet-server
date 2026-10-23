@@ -236,9 +236,12 @@ describe('completing and verifying', () => {
 describe('the Control Room and the Head of Security', () => {
   const perms = (slug: string) => new Set(ROLE_DEFINITIONS.find((r) => r.slug === slug)!.permissions)
 
-  it('lets supervisor, fleet analyst and operator flag and book', () => {
-    for (const slug of ['supervisor', 'fleet_analyst', 'operator']) {
+  it('lets supervisor and fleet analyst flag and book', () => {
+    for (const slug of ['supervisor', 'fleet_analyst']) {
       for (const p of ['repair:read', 'repair:flag', 'repair:book']) expect(perms(slug).has(p as never), `${slug} ${p}`).toBe(true)
+    }
+    for (const p of ['repair:read', 'repair:flag', 'repair:book']) {
+      expect(perms('operator').has(p as never), `operator ${p}`).toBe(false)
     }
   })
 

@@ -1,22 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const enforce = { on: false }
 const findUnique = vi.fn()
 const resolveSubject = vi.fn()
 
-vi.mock('../../src/config/env.js', () => ({
-  env: { get USER_GROUP_ENFORCE() { return enforce.on } },
-}))
 vi.mock('../../src/lib/prisma.js', () => ({
   prisma: { user: { findUnique: (...a: unknown[]) => findUnique(...a) } },
 }))
 vi.mock('../../src/lib/authz/subject.js', () => ({
   resolveSubject: (...a: unknown[]) => resolveSubject(...a),
 }))
-vi.mock('../../src/lib/logger.js', () => ({
-  logger: { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() },
-}))
-
 const { groupScopeFor, prospectiveScope, groupWhere, groupCacheKey, UNSCOPED } =
   await import('../../src/modules/users/user-group.scope.js')
 
@@ -25,23 +17,16 @@ const PLATFORM = 'user-sadmin'
 const ORG = 'org-test'
 
 beforeEach(() => {
-  enforce.on = false
   findUnique.mockReset()
   resolveSubject.mockReset()
   resolveSubject.mockImplementation(async (id: string) => ({ isPlatform: id === PLATFORM }))
   findUnique.mockResolvedValue({ groups: [{ groupId: 'g-offgrid' }] })
 })
 
-describe('groupScopeFor — the flag', () => {
-  it('does not narrow while USER_GROUP_ENFORCE is off', async () => {
-    expect(await groupScopeFor(ADMIN, ORG)).toEqual(UNSCOPED)
-    expect(findUnique).not.toHaveBeenCalled()
-    expect(resolveSubject).not.toHaveBeenCalled()
-  })
-
-  it('narrows to all groups held by the caller once enforcement is on', async () => {
-    enforce.on = true
+describe('groupScopeFor — enforced group boundary', () => {
+  it('always narrows to groups held by the caller', async () => {
     expect(await groupScopeFor(ADMIN, ORG)).toEqual({ unscoped: false, groupIds: ['g-offgrid'] })
+    expect(resolveSubject).toHaveBeenCalledWith(ADMIN)
     expect(findUnique).toHaveBeenCalledWith(expect.objectContaining({
       select: {
         groups: {
@@ -95,8 +80,8 @@ describe('groupWhere', () => {
     })
   })
 
-  it('matches only other ungrouped users when the caller has no group', () => {
-    expect(groupWhere({ unscoped: false, groupIds: [] })).toEqual({ groups: { none: {} } })
+  it('matches no users when the caller has no group', () => {
+    expect(groupWhere({ unscoped: false, groupIds: [] })).toEqual({ id: { in: [] } })
   })
 })
 

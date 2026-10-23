@@ -59,12 +59,14 @@ function withGroupAliases<T extends { groups: { group: { id: string; slug: strin
 /**
  * The roster's filter, built once and used by both the page and the count.
  *
- * Extracted rather than duplicated because `countForScope` below has to ask
- * the SAME question under a different group scope, and a shadow report
- * measured against a subtly different filter would report a number nobody
- * could act on.
+ * Extracted so the page and total use the same access filters.
  */
-function rosterWhere(orgId: string, { status, access }: ListUserQuery, scope: GroupScope) {
+function rosterWhere(
+  orgId: string,
+  { status, access }: ListUserQuery,
+  scope: GroupScope,
+  visibleRoleSlug?: string,
+) {
   /**
    * "Invited to access the system" — either an invitation was issued for them,
    * or they can already sign in.
@@ -108,41 +110,36 @@ function rosterWhere(orgId: string, { status, access }: ListUserQuery, scope: Gr
     ],
   }
 
-  /**
-   * The GROUP narrowing, and why it rides with `access === 'system'`.
-   *
-   * It applies to the administration roster and to nothing else. That roster
-   * is already the invited/can-sign-in set, which is the handful of real
-   * logins; the unfiltered roster is overwhelmingly accounts synced from the
-   * driver registry, who carry no email and so can never be placed in a
-   * group. Narrowing that list by group would empty it, and would take the
-   * drivers page, the PDF export and the live map's driver name with it.
-   *
-   * So the rule is stated where it is true: an administrator administers
-   * their own group's PEOPLE WHO CAN LOG IN. See user-group.scope.
-   */
   return {
     deletedAt: null,
     ...(status ? { status } : {}),
-    ...(access === 'system'
-      ? { AND: [reachable, invited], ...groupWhere(scope) }
-      : reachable),
+    AND: [
+      reachable,
+      ...(access === 'system' ? [invited] : []),
+      groupWhere(scope),
+      ...(visibleRoleSlug
+        ? [{
+            userRoles: {
+              some: {
+                revokedAt: null,
+                role: { slug: visibleRoleSlug, organisationId: orgId },
+              },
+            },
+          }]
+        : []),
+    ],
   }
-}
-
-/** How many rows this roster holds under a DIFFERENT scope — the shadow report. */
-export async function countForScope(orgId: string, query: ListUserQuery, scope: GroupScope) {
-  return prisma.user.count({ where: rosterWhere(orgId, query, scope) })
 }
 
 export async function findAll(
   orgId: string,
   query: ListUserQuery,
   scope: GroupScope = UNSCOPED,
+  visibleRoleSlug?: string,
 ) {
   const { page, limit } = query
   const skip  = (page - 1) * limit
-  const where = rosterWhere(orgId, query, scope)
+  const where = rosterWhere(orgId, query, scope, visibleRoleSlug)
 
   const [data, total] = await prisma.$transaction([
     prisma.user.findMany({ where, skip, take: limit, select: selectUser(orgId), orderBy: { createdAt: 'desc' } }),
@@ -195,9 +192,32 @@ export async function findReachable(orgId: string, userId: string, scope: GroupS
   })
 }
 
-export async function findById(orgId: string, userId: string, scope: GroupScope = UNSCOPED) {
+export async function findById(
+  orgId: string,
+  userId: string,
+  scope: GroupScope = UNSCOPED,
+  visibleRoleSlug?: string,
+) {
   const user = await prisma.user.findFirst({
-    where: { id: userId, organisationId: orgId, deletedAt: null, ...groupWhere(scope) },
+    where: {
+      id: userId,
+      deletedAt: null,
+      OR: [
+        { organisationId: orgId },
+        { memberships: { some: { organisationId: orgId, revokedAt: null } } },
+      ],
+      ...groupWhere(scope),
+      ...(visibleRoleSlug
+        ? {
+            userRoles: {
+              some: {
+                revokedAt: null,
+                role: { slug: visibleRoleSlug, organisationId: orgId },
+              },
+            },
+          }
+        : {}),
+    },
     select: {
       ...selectUser(orgId),
       userRoles: {
@@ -217,17 +237,19 @@ export async function create(orgId: string, dto: CreateUserDto) {
 }
 
 export async function update(orgId: string, userId: string, dto: UpdateUserDto) {
-  // Group membership is managed through the dedicated user-groups routes.
+  // The service has already checked organisation reach and group visibility.
+  // Profile fields belong to the account, even when the caller reaches it
+  // through a live organisation membership rather than its home organisation.
   return prisma.user.update({
-    where: { id: userId, organisationId: orgId },
+    where: { id: userId },
     data: dto,
     select: selectUser(orgId),
   }).then(withGroupAliases)
 }
 
-export async function softDelete(orgId: string, userId: string) {
+export async function softDelete(orgId: string, userId: string, platformAdmin = false) {
   return prisma.user.update({
-    where: { id: userId, organisationId: orgId },
+    where:  platformAdmin ? { id: userId } : { id: userId, organisationId: orgId },
     data: { deletedAt: new Date() },
   })
 }
@@ -320,11 +342,13 @@ export async function countBelongings(userId: string) {
  * they are merely a guest of would be deleting them everywhere from a page
  * that says one site's name at the top.
  */
-export async function purge(orgId: string, userId: string) {
+export async function purge(orgId: string, userId: string, platformAdmin = false) {
   return prisma.$transaction(async (tx) => {
     await tx.userRole.deleteMany({ where: { userId } })
     await tx.orgMembership.deleteMany({ where: { userId } })
     await tx.authSession.deleteMany({ where: { userId } })
-    return tx.user.delete({ where: { id: userId, organisationId: orgId } })
+    return tx.user.delete({
+      where: platformAdmin ? { id: userId } : { id: userId, organisationId: orgId },
+    })
   })
 }
