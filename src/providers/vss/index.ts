@@ -79,6 +79,39 @@ const TOKEN_ERROR = 10023
 
 /** VSS's answer when it is rate-limiting this account's logins. */
 export const VSS_LOGIN_LIMITED = 10082
+/** "Requests too frequent" (§8.1) — met on the evidence search, 2026-10-23. */
+export const VSS_TOO_FREQUENT = 10129
+
+// ── Pacing ─────────────────────────────────────────────────────────────────
+//
+// VSS limits how often one account may call it, and how often it may run its
+// heavy searches (seen live: a second §3.24 page 2 s after the first answered
+// 10129). Every request therefore goes through one queue with a minimum gap,
+// and after a 10129 nothing is sent for BUSY_BACKOFF_MS — asking again only
+// extends the refusal. One process holds this state; a second instance of the
+// server would pace on its own.
+const MIN_GAP_MS = 2_000
+const BUSY_BACKOFF_MS = 90_000
+let lastSentAt = 0
+let queue: Promise<unknown> = Promise.resolve()
+let busyUntil = 0
+
+/** Run `fn` after every earlier VSS request, at least MIN_GAP_MS after the last. */
+function paced<T>(fn: () => Promise<T>): Promise<T> {
+  const run = queue.then(async () => {
+    const wait = lastSentAt + MIN_GAP_MS - Date.now()
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait))
+    lastSentAt = Date.now()
+    return fn()
+  })
+  queue = run.catch(() => undefined)
+  return run
+}
+
+/** True while VSS has asked us to slow down. */
+export function vssBusy(): boolean {
+  return Date.now() < busyUntil
+}
 
 export class VssError extends Error {
   constructor(message: string, readonly status: number | null = null) { super(message) }
@@ -111,6 +144,10 @@ function base(): URL {
 interface Envelope<T> { status: number; msg?: string; data: T }
 
 function post<T>(path: string, body: Record<string, unknown>): Promise<Envelope<T>> {
+  return paced(() => postNow<T>(path, body))
+}
+
+function postNow<T>(path: string, body: Record<string, unknown>): Promise<Envelope<T>> {
   const url = new URL(path.replace(/^\//, ''), base())
   const payload = JSON.stringify(body)
   const lib = url.protocol === 'https:' ? https : http
@@ -189,6 +226,7 @@ function freshToken(): Promise<string> {
 
 /** Calls `path` with the session token, logging in again once if VSS has dropped it. */
 async function call<T>(path: string, body: Record<string, unknown>): Promise<{ data: T; token: string }> {
+  if (vssBusy()) throw new VssError('VSS asked us to slow down; waiting before asking again', VSS_TOO_FREQUENT)
   for (let attempt = 0; attempt < 2; attempt++) {
     const token = session?.token ?? await freshToken()
     const res = await post<T>(path, { ...body, token })
@@ -197,6 +235,10 @@ async function call<T>(path: string, body: Record<string, unknown>): Promise<{ d
       session = null
       saveSession(null)
       continue
+    }
+    if (res.status === VSS_TOO_FREQUENT || /too\s*frequent/i.test(res.msg ?? '')) {
+      busyUntil = Date.now() + BUSY_BACKOFF_MS
+      throw new VssError(`VSS ${path}: ${res.msg ?? res.status}`, VSS_TOO_FREQUENT)
     }
     throw new VssError(`VSS ${path}: ${res.msg ?? res.status}`, res.status)
   }
@@ -252,4 +294,42 @@ export async function liveStatus(deviceId: string): Promise<number> {
  */
 export function streamUrl(): string {
   return `wss://${base().hostname}:${env.VSS_STREAM_PORT}/stream?ipaddr=127.0.0.1`
+}
+
+/**
+ * Any VSS API call, signed in, paced and backed off like the rest (see above).
+ * For the dashcam alarms module (modules/dashcam).
+ */
+export async function vssCall<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  return (await call<T>(path, body)).data
+}
+
+/** Is this URL on the VSS host (any port)? Nothing else may be fetched through here. */
+export function isVssFileUrl(u: string): boolean {
+  try {
+    const url = new URL(u)
+    return (url.protocol === 'https:' || url.protocol === 'http:') && url.hostname.toLowerCase() === base().hostname.toLowerCase()
+  } catch { return false }
+}
+
+/**
+ * GET an evidence file (clip or snapshot) from VSS's file server, passing a
+ * browser's Range through. Resolves with the live response for the caller to
+ * pipe; the caller checks the status.
+ */
+export function fetchVssFile(u: string, range?: string): Promise<http.IncomingMessage> {
+  if (!isVssFileUrl(u)) return Promise.reject(new VssError('Not a VSS file'))
+  const url = new URL(u)
+  const lib = url.protocol === 'https:' ? https : http
+  return new Promise((resolve, reject) => {
+    const req = lib.request(url, {
+      method: 'GET',
+      headers: { Accept: '*/*', 'Accept-Encoding': 'identity', ...(range ? { Range: range } : {}) },
+      timeout: 30_000,
+      ...(url.protocol === 'https:' ? { ca: CA } : {}),
+    }, resolve)
+    req.on('timeout', () => req.destroy(new VssError('VSS file server did not answer in time')))
+    req.on('error', (err) => reject(err instanceof VssError ? err : new VssError(`VSS file server unreachable: ${err.message}`)))
+    req.end()
+  })
 }
