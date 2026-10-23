@@ -90,6 +90,7 @@ export const PERMISSION_CATALOGUE = {
   // technician), and Head of Section is not among them. Granted to existing
   // roles by migration 20260925090000_fuel_theft_followups.
   'fuel_theft:triage':     'Take on and decide fuel alert follow-ups',
+  'alerts:read':           'View fleet alerts',
   // Open the Fuel Audit page. NOT in ORG_EVERYTHING: the operator named its
   // readers one by one (2026-10-01) — platform administrator (wildcard),
   // director, system administrator, manager, fleet manager, fleet analyst,
@@ -408,13 +409,13 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
   {
     slug: 'supervisor', name: 'Supervisor', platform: false, vehicleScopable: false,
     description: 'All resources within the organisations they belong to; no user administration.',
-    permissions: [...ORG_EVERYTHING, 'fuel_audit:read'],
+    permissions: [...ORG_EVERYTHING, 'alerts:read', 'fuel_audit:read'],
   },
   {
     slug: 'operator', name: 'Operator', platform: false, vehicleScopable: true,
-    description: 'Map, drivers, units, reports and weighbridge for assigned units.',
+    description: 'Map, alerts, drivers, units, reports and weighbridge for assigned units.',
     /*
-     * Access includes the map, drivers, units, reports and weighbridge.
+     * Access includes the map, alerts, drivers, units, reports and weighbridge.
      *
      * `map:read`, `driver:read`, and the report permissions open those named
      * sidebar resources. `weighbridge:read` opens the weighbridge feeds.
@@ -430,6 +431,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     permissions: [
       ...TRACKING,
       ...MAP_TOOLS,
+      'alerts:read',
       'map:playback',
       'driver:read',
       'report:read', 'report:export', 'report:operations',
