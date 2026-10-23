@@ -43,6 +43,7 @@ import {
   listVehicleSlice, syncVehicleFuelEvents,
 } from '../../modules/fuel/fuel-sync.service.js'
 import { adjudicatePendingDrains } from '../../modules/fuel/fuel-adjudication.service.js'
+import { retractDeadProbeDrains } from '../../modules/fuel/dead-probe-retraction.js'
 import { adjudicateFillings } from '../../modules/fuel/fuel-filling-adjudication.service.js'
 
 export const FUEL_QUEUE = 'fuel'
@@ -107,9 +108,10 @@ export const lingersThisCycle = (startedAt: number): boolean =>
  * the window: the extra window depth exists to catch late-maturing events, not
  * to re-announce old ones on every cycle.
  *
- * This is the SYNC path's cutoff — refuellings, which are published from a
- * window the poller has just read. Two hours is right for them and wrong for
- * an adjudicated drain: see ADJUDICATION_NOTIFY_AGE_MS.
+ * This is the SYNC path's cutoff: refuellings use their event time, and
+ * provisional drain warnings use the provider's detectedAt time. Two hours is
+ * right for both and wrong for a final adjudicated drain: see
+ * ADJUDICATION_NOTIFY_AGE_MS.
  */
 const NOTIFY_AGE_MS = 2 * 60 * 60_000
 
@@ -401,6 +403,8 @@ export interface FuelAdjudicationResult {
   adjudicated:     number
   redistributed:   number
   published:       number
+  /** Announced drains withdrawn as a probe dropout this cycle. */
+  deadProbeRetracted: number
   adjudicationFailed: boolean
   adjudicationFailStreak: number
   ms: number
@@ -410,7 +414,7 @@ export async function runAdjudication(): Promise<FuelAdjudicationResult> {
   const startedAt = Date.now()
   const out: FuelAdjudicationResult = {
     fillingsJudged: 0, fillingsPhantom: 0,
-    adjudicated: 0, redistributed: 0, published: 0,
+    adjudicated: 0, redistributed: 0, published: 0, deadProbeRetracted: 0,
     adjudicationFailed: false, adjudicationFailStreak: 0, ms: 0,
   }
   const to = new Date()
@@ -499,8 +503,18 @@ export async function runAdjudication(): Promise<FuelAdjudicationResult> {
     }
   }
 
+  // The second look the adjudicator cannot take: a drain to empty whose
+  // machine has since run on the "empty" probe was the probe, not a thief.
+  // See modules/fuel/dead-probe-retraction.
+  try {
+    const r = await retractDeadProbeDrains({ apply: true, notify: true })
+    out.deadProbeRetracted = r.retracted
+  } catch (err) {
+    logger.error({ err }, 'Dead-probe retraction pass failed')
+  }
+
   out.ms = Date.now() - startedAt
-  const log = out.adjudicationFailed || out.published > 0 || out.adjudicated > 0 || out.fillingsJudged > 0
+  const log = out.adjudicationFailed || out.published > 0 || out.deadProbeRetracted > 0 || out.adjudicated > 0 || out.fillingsJudged > 0
     ? logger.info.bind(logger) : logger.debug.bind(logger)
   log(out, 'Fuel adjudication cycle complete')
   return out
