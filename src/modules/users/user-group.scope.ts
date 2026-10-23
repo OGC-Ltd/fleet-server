@@ -22,41 +22,32 @@
  *   - An account with NO group reaches nobody, and is reached by nobody but
  *     the platform administrator. This is fail-closed by design.
  *
- * ## Why it ships disabled
+ * ## Operational consequence
  *
- * That third rule has a sharp edge. An administrator with no group sees
- * NOBODY, and a lockout found by an operator is worse than one found in a log.
- * So `USER_GROUP_ENFORCE` gates it the way `AUTHZ_ENFORCE`
- * gates permissions: off means compute the scope, log what it would have
- * hidden, and hide nothing. Create and assign administrator groups before
- * enabling enforcement.
+ * Group boundaries are always enforced. Assign administrators and managers to
+ * their groups before granting them user-management access; an account with no
+ * group cannot see or administer grouped users.
  */
 
 import { prisma } from '../../lib/prisma.js'
-import { env } from '../../config/env.js'
-import { logger } from '../../lib/logger.js'
 import { resolveSubject } from '../../lib/authz/subject.js'
 
 /**
- * `unscoped` — every group, which is the platform administrator, and also
- * what everybody gets while the flag is off.
- * `groupIds` — groups in the current organisation. An empty list matches only
- * ungrouped accounts, preserving the existing fail-closed behavior.
+ * `unscoped` — every group, which is the platform administrator.
+ * `groupIds` — groups in the current organisation. An empty list reaches no
+ * accounts because an administrator with no group shares no group.
  */
 export type GroupScope =
   | { unscoped: true; groupIds?: undefined }
   | { unscoped: false; groupIds: string[] }
 
-/** Nothing is narrowed. The shape callers get in shadow mode and for platform. */
+/** Nothing is narrowed. */
 export const UNSCOPED: GroupScope = { unscoped: true }
 
 /**
- * The group scope for this caller — the rule below, plus the flag.
+ * The group scope for this caller.
  */
 export async function groupScopeFor(actorUserId: string | undefined, orgId: string): Promise<GroupScope> {
-  // Shadow mode returns before touching the database, so an unreleased
-  // feature costs a comparison rather than two queries per request.
-  if (!env.USER_GROUP_ENFORCE) return UNSCOPED
   return prospectiveScope(actorUserId, orgId)
 }
 
@@ -64,42 +55,17 @@ export async function groupScopeFor(actorUserId: string | undefined, orgId: stri
  * The `where` fragment for this scope — spread into a Prisma filter.
  *
  * `{}` when unscoped. Otherwise the user must share at least one group with
- * the caller; an empty caller group list matches only ungrouped users.
+ * the caller.
  */
 export function groupWhere(scope: GroupScope) {
   if (scope.unscoped) return {}
   return scope.groupIds.length > 0
     ? { groups: { some: { groupId: { in: scope.groupIds } } } }
-    : { groups: { none: {} } }
+    : { id: { in: [] } }
 }
 
 /**
- * Would this scope have hidden that row?
- *
- * For shadow mode only. The scope is UNSCOPED while the flag is off, so the
- * caller works out separately what it would have been and reports the
- * difference here rather than acting on it.
- */
-export function logShadowHidden(
-  actorUserId: string | undefined,
-  orgId: string,
-  wouldHide: number,
-  total: number,
-): void {
-  if (env.USER_GROUP_ENFORCE || wouldHide === 0) return
-  logger.warn(
-    { actorUserId, orgId, wouldHide, total },
-    'user-group: WOULD HIDE rows from this roster (shadow mode) — showing all of them',
-  )
-}
-
-/**
- * The scope that WOULD apply if the flag were on, within this organisation.
- *
- * This is the whole of the rule. `groupScopeFor` is this plus the flag, and
- * the two are separate because shadow reporting needs to know what the scope
- * WOULD have been while the live path stays unnarrowed — the point of shadow
- * mode is that nothing is hidden yet.
+ * The groups this caller belongs to within this organisation.
  */
 export async function prospectiveScope(actorUserId: string | undefined, orgId: string): Promise<GroupScope> {
   // No identified caller cannot mean "see everything". Every route that

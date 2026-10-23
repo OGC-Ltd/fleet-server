@@ -9,9 +9,8 @@
  * user roster, which IS group-scoped, because group exists to stop one
  * company's administrators administering another's people. Assignment is not
  * administration. ControlTech are contractors in a group of their own who
- * service all four tenants, so under the roster's rule the first administrator
- * to turn USER_GROUP_ENFORCE on would have watched the only technicians they
- * have disappear from the control -- no error, nothing logged.
+ * service all four tenants, so applying the roster's group restriction to
+ * assignment would hide the only technicians they have from the control.
  *
  * These assert the QUERY, not a result set, because the absence of a clause is
  * what is being checked and an absent clause returns rows that look fine.

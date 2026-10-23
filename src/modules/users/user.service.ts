@@ -4,8 +4,9 @@ import { readRoster, writeRoster, invalidateRoster, invalidateRosterForUser } fr
 import { invalidateSubject } from '../../lib/authz/subject.js'
 import type { CreateUserDto, UpdateUserDto, ListUserQuery, AssignRoleDto } from './user.schema.js'
 import {
-  groupScopeFor, prospectiveScope, groupCacheKey, logShadowHidden,
+  groupScopeFor, groupCacheKey,
 } from './user-group.scope.js'
+import { visibleRoleSlugFor } from './user.authz.js'
 
 type Roster = Awaited<ReturnType<typeof repo.findAll>>
 
@@ -23,6 +24,9 @@ type Roster = Awaited<ReturnType<typeof repo.findAll>>
  */
 export async function listUsers(orgId: string, query: ListUserQuery, actorUserId?: string) {
   const scope = await groupScopeFor(actorUserId, orgId)
+  const visibleRoleSlug = actorUserId
+    ? await visibleRoleSlugFor(actorUserId, orgId)
+    : null
 
   /**
    * The group belongs in the KEY, not merely in the query.
@@ -36,49 +40,27 @@ export async function listUsers(orgId: string, query: ListUserQuery, actorUserId
    */
   const variant =
     `${query.page}:${query.limit}:${query.status ?? 'all'}:${query.access ?? 'all'}` +
-    `:g:${groupCacheKey(scope)}`
+    `:g:${groupCacheKey(scope)}:r:${visibleRoleSlug ?? 'all'}`
 
   const cached = await readRoster<Roster>(orgId, variant)
   if (cached) return cached
 
-  const fresh = await repo.findAll(orgId, query, scope)
+  const fresh = await repo.findAll(orgId, query, scope, visibleRoleSlug ?? undefined)
   await writeRoster(orgId, variant, fresh)
 
-  // Shadow mode: say what enforcement WOULD have removed, having removed
-  // nothing. Only for the roster that the rule actually applies to.
-  if (scope.unscoped && query.access === 'system') {
-    await reportShadow(orgId, query, actorUserId, fresh.total)
-  }
   return fresh
 }
 
-/**
- * How much of this roster the group rule would take away.
- *
- * Costs a COUNT on a page the caller already fetched, and only while the
- * feature is off — `prospectiveScope` short-circuits to unscoped for the
- * platform administrator, and `logShadowHidden` returns immediately once
- * enforcement is on. A failure here must never fail the roster: the operator
- * asked for a list of people, not for a rehearsal of a feature flag.
- */
-async function reportShadow(
-  orgId: string,
-  query: ListUserQuery,
-  actorUserId: string | undefined,
-  total: number,
-): Promise<void> {
-  try {
-    const would = await prospectiveScope(actorUserId, orgId)
-    if (would.unscoped) return
-    const visible = await repo.countForScope(orgId, query, would)
-    logShadowHidden(actorUserId, orgId, total - visible, total)
-  } catch {
-    /* a rehearsal that fails is still only a rehearsal */
-  }
-}
-
 export async function getUser(orgId: string, userId: string, actorUserId?: string) {
-  const user = await repo.findById(orgId, userId, await groupScopeFor(actorUserId, orgId))
+  const visibleRoleSlug = actorUserId
+    ? await visibleRoleSlugFor(actorUserId, orgId)
+    : null
+  const user = await repo.findById(
+    orgId,
+    userId,
+    await groupScopeFor(actorUserId, orgId),
+    visibleRoleSlug ?? undefined,
+  )
   if (!user) throw new NotFoundError('User')
   return user
 }
@@ -127,20 +109,25 @@ export async function updateUser(orgId: string, userId: string, dto: UpdateUserD
  * It is that the answer changed from a 404 about a person who is visibly there
  * into a sentence naming the right button.
  */
-export async function deleteUser(orgId: string, userId: string, actorUserId?: string) {
+export async function deleteUser(
+  orgId: string,
+  userId: string,
+  actorUserId?: string,
+  platformAdmin = false,
+) {
   const user = await repo.findReachable(orgId, userId, await groupScopeFor(actorUserId, orgId))
   if (!user) throw new NotFoundError('User')
 
-  if (user.organisationId !== orgId) {
+  if (!platformAdmin && user.organisationId !== orgId) {
     throw new ConflictError(
       'This person belongs to another organisation. Remove their access to this one instead '
       + '— deleting the account would remove them everywhere.',
     )
   }
-  // Read their organisations BEFORE the delete: afterwards the row is gone
-  // from the roster's point of view and there is nothing left to resolve.
   await invalidateRosterForUser(userId, orgId)
-  return repo.softDelete(orgId, userId)
+  const deleted = await repo.softDelete(orgId, userId, platformAdmin)
+  await invalidateRosterForUser(userId, orgId)
+  return deleted
 }
 
 /**
@@ -175,7 +162,12 @@ export async function deleteUser(orgId: string, userId: string, actorUserId?: st
  * sequence an administrator actually performs, and making the first step block
  * the second would be a trap.
  */
-export async function purgeUser(orgId: string, userId: string, actorId?: string) {
+export async function purgeUser(
+  orgId: string,
+  userId: string,
+  actorId?: string,
+  platformAdmin = false,
+) {
   /*
    * `findReachable`, not `getUser`.
    *
@@ -196,7 +188,7 @@ export async function purgeUser(orgId: string, userId: string, actorId?: string)
     throw new ConflictError('You cannot permanently delete the account you are signed in as.')
   }
 
-  if (user.organisationId !== orgId) {
+  if (!platformAdmin && user.organisationId !== orgId) {
     throw new ConflictError(
       'This person belongs to another organisation. Remove their access to this one instead — '
       + 'a permanent delete would remove them everywhere.',
@@ -232,7 +224,7 @@ export async function purgeUser(orgId: string, userId: string, actorId?: string)
   // query: it re-uses the ids captured before.
   await invalidateRoster(...held.organisationIds, orgId)
 
-  const deleted = await repo.purge(orgId, userId)
+  const deleted = await repo.purge(orgId, userId, platformAdmin)
 
   await invalidateRoster(...held.organisationIds, orgId)
 

@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { NotFoundError, ConflictError } from '../../src/core/errors/errors.js'
 
 vi.mock('../../src/modules/users/user.repository.ts')
+vi.mock('../../src/modules/users/user-group.scope.js', () => ({
+  groupScopeFor: vi.fn(async () => ({ unscoped: true })),
+  groupCacheKey: vi.fn(() => 'all'),
+}))
 
 import * as repo from '../../src/modules/users/user.repository.js'
 import * as service from '../../src/modules/users/user.service.js'
@@ -85,7 +89,7 @@ describe('user.service', () => {
       mockRepo.purge.mockResolvedValue(local as never)
 
       const out = await service.purgeUser(ORG, 'u3')
-      expect(mockRepo.purge).toHaveBeenCalledWith(ORG, 'u3')
+      expect(mockRepo.purge).toHaveBeenCalledWith(ORG, 'u3', false)
       expect(out.id).toBe('u3')
     })
   })
@@ -126,7 +130,7 @@ describe('user.service', () => {
       mockRepo.softDelete.mockResolvedValue(user)
 
       await service.deleteUser(ORG, 'u1')
-      expect(mockRepo.softDelete).toHaveBeenCalledWith(ORG, 'u1')
+      expect(mockRepo.softDelete).toHaveBeenCalledWith(ORG, 'u1', false)
     })
   })
 

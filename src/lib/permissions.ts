@@ -253,7 +253,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     description: 'Every organisation. All data, no administration.',
     permissions: [
       'platform:read_all',
-      ...ORG_EVERYTHING.filter((p) => !p.startsWith('user:') && !p.startsWith('role:')),
+      ...ORG_EVERYTHING,
       'organisation:read',
       'fuel_theft:triage',
       'fuel_audit:read',
@@ -406,35 +406,18 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
   // NOT SPECIFIED by the operator: seeded as operator plus the map tools and
   // analytics, and expected to be corrected in the role editor.
   {
-    slug: 'supervisor', name: 'Supervisor', platform: false, vehicleScopable: true,
-    description: 'Tracking and map tools for the units assigned to them.',
-    // NO analytics. Not a judgement about the role - a consequence of the
-    // analytics endpoints computing ORG-WIDE aggregates that are not vehicle
-    // scoped. Granting `analytics:read` to a role whose whole point is being
-    // narrowed to a subset of the fleet would hand that subset's holder figures
-    // for every vehicle in the organisation, quietly, through a screen that
-    // looks like it is showing them their own units.
-    //
-    // Restore it when analytics learns the scope; the invariant is pinned in
-    // tests/unit/permissions-matrix.
-    //
-    // The Control Room (Repair Workflow, operator 2026-10-20): flag and book
-    // like the analyst and the operator, and the two accountable calls,
-    // assessing whether a unit can reach the workshop and verifying a repair.
-    permissions: [
-      ...TRACKING, ...MAP_TOOLS, 'dashboard:read', 'trip:read',
-      'repair:read', 'repair:flag', 'repair:book', 'repair:assess', 'repair:verify',
-    ],
+    slug: 'supervisor', name: 'Supervisor', platform: false, vehicleScopable: false,
+    description: 'All resources within the organisations they belong to; no user administration.',
+    permissions: [...ORG_EVERYTHING, 'fuel_audit:read'],
   },
   {
     slug: 'operator', name: 'Operator', platform: false, vehicleScopable: true,
-    description: 'The weighbridge, and the units assigned to them. No map, no reports.',
+    description: 'Map, drivers, units, reports and weighbridge for assigned units.',
     /*
-     * Changed 2026-09-14: the fleet off, the weighbridge on.
+     * Access includes the map, drivers, units, reports and weighbridge.
      *
-     * `map:read` is gone, which is what closes the Fleet tab — the dash grades
-     * that button and the screen behind it on exactly this slug. `weighbridge:read`
-     * is in, which opens the Weighbridges tab and the /weighments feeds behind it.
+     * `map:read`, `driver:read`, and the report permissions open those named
+     * sidebar resources. `weighbridge:read` opens the weighbridge feeds.
      *
      * TELEMETRY:READ AND VEHICLE:READ STAY, and not as leftovers. The weighbridge
      * screen reads the live snapshot (`telemetry:read`) to turn a ticket's plate
@@ -442,14 +425,15 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
      * That is the whole of what those two grant this role now: there is no map to
      * put a position on.
      *
-     * Still the narrowest role in the system otherwise — no dashboard, no
-     * analytics, no report of any kind, no map tools.
+     * No dashboard, analytics, or unrelated operational administration.
      */
     permissions: [
-      ...TRACKING.filter((pm) => pm !== 'map:read'),
+      ...TRACKING,
+      ...MAP_TOOLS,
+      'map:playback',
+      'driver:read',
+      'report:read', 'report:export', 'report:operations',
       'weighbridge:read',
-      // Control Room (Repair Workflow): flag a faulty unit and book it in.
-      'repair:read', 'repair:flag', 'repair:book',
     ],
   },
 
@@ -517,7 +501,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'dashboard:read',
       'driver:read', 'driver:export',
       'report:read', 'report:export',
-      'user:read', 'user:create', 'user:update', 'user:delete',
+      'user:read',
     ],
   },
   {
@@ -549,46 +533,13 @@ export const PLATFORM_ROLE_SLUGS: string[] =
 export const ORG_ROLE_SLUGS: string[] =
   ROLE_DEFINITIONS.filter((r) => !r.platform).map((r) => r.slug)
 
-/**
- * The roles an administrator is offered, in the order they are offered.
- *
- * Named explicitly by the operator, so this is a list rather than a filter,
- * and the order is theirs rather than alphabetical.
- *
- * It is deliberately NARROWER than ROLE_DEFINITIONS: `hos` and
- * `logistics_manager` are still seeded and still work for the people who hold
- * them, but they are not on the operator's list and are not offered for new
- * grants. Nothing is deleted — revoking a role people hold is a decision for
- * the role editor, not a side effect of renaming a picker.
- *
- * Presentation only. What actually stops a grant is applyMembership refusing
- * platform roles on an organisation-scoped call.
- */
+/** Roles an organisation admin may grant; admin and platform roles are excluded. */
 export const ASSIGNABLE_ROLE_SLUGS: string[] = [
   'hr',
-  'admin',
-  /* `super_admin` was here, and being here is what put "System Administrator ·
-   * all orgs" in EVERY organisation's picker: the platform arm of
-   * listAssignableRoles queries `organisationId: null` filtered by this same
-   * list. Removing it from the list removes the option from every organisation
-   * at once, which is exactly the scope of the change asked for.
-   *
-   * The role DEFINITION stays, and so does every grant of it. That is
-   * deliberate and it is not a half-measure — platform-only surface exists and
-   * needs somebody: `requirePermission` on a route with no :orgId is satisfied
-   * ONLY by `subject.isPlatform`, so with nobody holding a platform role the
-   * organisation list itself becomes unadministrable. What changes here is that
-   * a cross-tenant grant can no longer be made from inside one tenant's user
-   * page, which is where it never belonged.
-   *
-   * `director` is still offered and carries the same "all orgs" badge for the
-   * same reason. It was not part of the request, so it is left alone rather
-   * than swept up — say the word and it goes the same way. */
   'fleet_manager',
   'fleet_analyst',
   'dispatcher',
   'manager',
-  'director',
   'accountant',
   'head_of_security',
   'asst_head_of_security',
