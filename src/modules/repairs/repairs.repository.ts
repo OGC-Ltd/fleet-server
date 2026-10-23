@@ -566,9 +566,8 @@ export async function itemExists(itemId: string, orgId: string): Promise<boolean
  *
  *      That disagreement is not hypothetical. ControlTech are contractors --
  *      their own group -- who service units across all four tenants. They are
- *      the assignees this feature exists for, and the first administrator to
- *      turn `USER_GROUP_ENFORCE` on would have watched them vanish from the
- *      picker with no error and nothing logged.
+ *      the assignees this feature exists for, so assignment intentionally
+ *      remains organisation-scoped rather than inheriting roster group scope.
  *
  *   2. Deciding a rule in the browser is not deciding it. The old client held
  *      its own copy of the role list, which is how it came to offer names the

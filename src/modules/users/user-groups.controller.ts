@@ -4,7 +4,8 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '../../core/error
 import { sendSuccess } from '../../core/response/response.js'
 import { prisma } from '../../lib/prisma.js'
 import { can, canReachOrg, invalidateSubject, resolveSubject } from '../../lib/authz/subject.js'
-import { groupScopeFor } from './user-group.scope.js'
+import { canEditUser } from './user.authz.js'
+import { groupScopeFor, prospectiveScope } from './user-group.scope.js'
 import { invalidateRosterForUser, invalidateRostersForUsers } from './roster.cache.js'
 import type {
   CreateUserGroupDto,
@@ -70,10 +71,22 @@ async function userInOrganisation(userId: string, organisationId: string) {
   if (!user) throw new NotFoundError('User')
 }
 
+async function assertGroupInScope(
+  req: Parameters<RequestHandler>[0],
+  groupId: string,
+  organisationId: string,
+): Promise<void> {
+  const scope = await groupScopeFor(req.user?.id, organisationId)
+  if (!scope.unscoped && !scope.groupIds.includes(groupId)) {
+    throw new ForbiddenError('You can only manage groups you belong to')
+  }
+}
+
 async function assertUserInGroupScope(
   req: Parameters<RequestHandler>[0],
   userId: string,
   organisationId: string,
+  allowUngrouped = false,
 ): Promise<void> {
   const scope = await groupScopeFor(req.user?.id, organisationId)
   if (scope.unscoped) return
@@ -95,8 +108,31 @@ async function assertUserInGroupScope(
     },
   })
   if (!user) throw new NotFoundError('User')
+  if (allowUngrouped && user.groups.length === 0) return
   if (!user.groups.some(({ groupId }) => scope.groupIds.includes(groupId))) {
     throw new ForbiddenError('You can only change group memberships for users in your groups')
+  }
+}
+
+async function assertGroupsInScope(
+  req: Parameters<RequestHandler>[0],
+  groupIds: string[],
+  organisationId: string,
+): Promise<void> {
+  const scope = await groupScopeFor(req.user?.id, organisationId)
+  if (!scope.unscoped && groupIds.some((id) => !scope.groupIds.includes(id))) {
+    throw new ForbiddenError('You can only assign users to groups you belong to')
+  }
+}
+
+async function assertUserEditable(
+  req: Parameters<RequestHandler>[0],
+  userId: string,
+  organisationId: string,
+): Promise<void> {
+  const verdict = await canEditUser(req.user!.id, userId, organisationId)
+  if (!verdict.ok) {
+    throw new ForbiddenError(`You cannot edit a ${verdict.blockedBy} account`)
   }
 }
 
@@ -118,9 +154,16 @@ async function refreshUsers(userIds: string[]): Promise<void> {
 export const list: RequestHandler = async (req, res, next) => {
   try {
     const organisationId = orgIdFor(req)
+    // Group visibility is access control, so it must not follow roster shadow mode.
+    const scope = organisationId
+      ? await prospectiveScope(req.user?.id, organisationId)
+      : null
     const groups = await prisma.userGroup.findMany({
       where: organisationId
-        ? { organisations: { some: { organisationId } } }
+        ? {
+            organisations: { some: { organisationId } },
+            ...(scope && !scope.unscoped ? { id: { in: scope.groupIds } } : {}),
+          }
         : {},
       orderBy: { name: 'asc' },
       select: {
@@ -174,6 +217,7 @@ export const update: RequestHandler = async (req, res, next) => {
   try {
     const dto = req.body as UpdateUserGroupDto
     const group = await groupFor(param(req, 'groupId'), orgIdFor(req))
+    await assertGroupInScope(req, group.id, orgIdFor(req) ?? group.organisationId)
     const { organisationIds: requestedIds, ...fields } = dto
     let organisationIds = group.organisationIds
     let ownerOrganisationId = group.organisationId
@@ -222,6 +266,7 @@ export const update: RequestHandler = async (req, res, next) => {
 export const remove: RequestHandler = async (req, res, next) => {
   try {
     const group = await groupFor(param(req, 'groupId'), orgIdFor(req))
+    await assertGroupInScope(req, group.id, orgIdFor(req) ?? group.organisationId)
     await prisma.userGroup.delete({ where: { id: group.id } })
     await refreshUsers(group.users.map(({ userId }) => userId))
     sendSuccess(res, { id: group.id, removed: true })
@@ -233,8 +278,10 @@ export const addUser: RequestHandler = async (req, res, next) => {
     const group = await groupFor(param(req, 'groupId'), orgIdFor(req))
     const userId = param(req, 'userId')
     const organisationId = orgIdFor(req) ?? group.organisationId
+    await assertGroupInScope(req, group.id, organisationId)
     await userInOrganisation(userId, organisationId)
-    await assertUserInGroupScope(req, userId, organisationId)
+    await assertUserInGroupScope(req, userId, organisationId, true)
+    await assertUserEditable(req, userId, organisationId)
 
     await prisma.userGroupMembership.createMany({
       data: [{ userId, groupId: group.id }],
@@ -250,8 +297,10 @@ export const removeUser: RequestHandler = async (req, res, next) => {
     const group = await groupFor(param(req, 'groupId'), orgIdFor(req))
     const userId = param(req, 'userId')
     const organisationId = orgIdFor(req) ?? group.organisationId
+    await assertGroupInScope(req, group.id, organisationId)
     await userInOrganisation(userId, organisationId)
     await assertUserInGroupScope(req, userId, organisationId)
+    await assertUserEditable(req, userId, organisationId)
 
     const result = await prisma.userGroupMembership.deleteMany({
       where: { userId, groupId: group.id },
@@ -267,7 +316,14 @@ export const setUserGroups: RequestHandler = async (req, res, next) => {
     const userId = param(req, 'userId')
     const organisationId = orgIdFor(req)
     const { groupIds } = req.body as SetUserGroupsDto
-    if (organisationId) await assertUserInGroupScope(req, userId, organisationId)
+    const scope = organisationId
+      ? await groupScopeFor(req.user?.id, organisationId)
+      : null
+    if (organisationId) {
+      await assertUserInGroupScope(req, userId, organisationId, groupIds.length > 0)
+      await assertGroupsInScope(req, groupIds, organisationId)
+      await assertUserEditable(req, userId, organisationId)
+    }
 
     const result = await prisma.$transaction(async (tx) => {
       const user = await tx.user.findFirst({
@@ -307,7 +363,10 @@ export const setUserGroups: RequestHandler = async (req, res, next) => {
         where: {
           userId,
           ...(organisationId
-            ? { group: { organisations: { some: { organisationId } } } }
+            ? {
+                group: { organisations: { some: { organisationId } } },
+                ...(scope && !scope.unscoped ? { groupId: { in: scope.groupIds } } : {}),
+              }
             : {}),
         },
       })
