@@ -3,7 +3,7 @@ import type { RequestHandler } from 'express'
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../core/errors/errors.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { prisma } from '../../lib/prisma.js'
-import { invalidateSubject } from '../../lib/authz/subject.js'
+import { can, canReachOrg, invalidateSubject, resolveSubject } from '../../lib/authz/subject.js'
 import { groupScopeFor } from './user-group.scope.js'
 import { invalidateRosterForUser, invalidateRostersForUsers } from './roster.cache.js'
 import type {
@@ -26,11 +26,33 @@ function slugFromName(name: string): string {
 
 async function groupFor(groupId: string, organisationId?: string) {
   const group = await prisma.userGroup.findFirst({
-    where: { id: groupId, ...(organisationId ? { organisationId } : {}) },
-    select: { id: true, organisationId: true, users: { select: { userId: true } } },
+    where: {
+      id: groupId,
+      ...(organisationId ? { organisations: { some: { organisationId } } } : {}),
+    },
+    select: {
+      id: true,
+      organisationId: true,
+      slug: true,
+      organisations: { select: { organisationId: true } },
+      users: { select: { userId: true } },
+    },
   })
   if (!group) throw new NotFoundError('User group')
-  return group
+  return { ...group, organisationIds: group.organisations.map(({ organisationId: id }) => id) }
+}
+
+async function assertManageOrganisations(userId: string, organisationIds: string[]): Promise<void> {
+  const subject = await resolveSubject(userId)
+  const forbidden = organisationIds.filter((id) =>
+    !canReachOrg(subject, id) || !can(subject, id, 'user:assign_role'));
+  if (forbidden.length > 0) throw new ForbiddenError('Missing permission: user:assign_role')
+
+  const existing = await prisma.organisation.findMany({
+    where: { id: { in: organisationIds } },
+    select: { id: true },
+  })
+  if (existing.length !== organisationIds.length) throw new NotFoundError('Organisation')
 }
 
 async function userInOrganisation(userId: string, organisationId: string) {
@@ -67,7 +89,7 @@ async function assertUserInGroupScope(
     },
     select: {
       groups: {
-        where: { group: { organisationId } },
+        where: { group: { organisations: { some: { organisationId } } } },
         select: { groupId: true },
       },
     },
@@ -97,11 +119,14 @@ export const list: RequestHandler = async (req, res, next) => {
   try {
     const organisationId = orgIdFor(req)
     const groups = await prisma.userGroup.findMany({
-      where: organisationId ? { organisationId } : {},
+      where: organisationId
+        ? { organisations: { some: { organisationId } } }
+        : {},
       orderBy: { name: 'asc' },
       select: {
         id: true,
         organisationId: true,
+        organisations: { select: { organisationId: true } },
         slug: true,
         name: true,
         description: true,
@@ -110,7 +135,10 @@ export const list: RequestHandler = async (req, res, next) => {
         _count: { select: { users: true } },
       },
     })
-    sendSuccess(res, groups)
+    sendSuccess(res, groups.map((group) => ({
+      ...group,
+      organisationIds: group.organisations.map(({ organisationId: id }) => id),
+    })))
   } catch (err) { next(err) }
 }
 
@@ -118,17 +146,14 @@ export const create: RequestHandler = async (req, res, next) => {
   try {
     const dto = req.body as CreateUserGroupDto
     const pathOrgId = orgIdFor(req)
-    if (pathOrgId && dto.organisationId && dto.organisationId !== pathOrgId) {
-      throw new BadRequestError('Organisation in the request must match the route')
+    const organisationIds = dto.organisationIds
+      ?? [dto.organisationId ?? pathOrgId].filter((id): id is string => !!id)
+    if (organisationIds.length === 0) throw new BadRequestError('At least one organisation is required')
+    if (pathOrgId && !organisationIds.includes(pathOrgId)) {
+      throw new BadRequestError('The route organisation must be included in organisationIds')
     }
-    const organisationId = pathOrgId ?? dto.organisationId
-    if (!organisationId) throw new BadRequestError('organisationId is required')
-
-    const organisation = await prisma.organisation.findUnique({
-      where: { id: organisationId },
-      select: { id: true },
-    })
-    if (!organisation) throw new NotFoundError('Organisation')
+    await assertManageOrganisations(req.user!.id, organisationIds)
+    const organisationId = pathOrgId ?? organisationIds[0]
 
     const group = await prisma.userGroup.create({
       data: {
@@ -136,9 +161,12 @@ export const create: RequestHandler = async (req, res, next) => {
         slug: slugFromName(dto.name),
         name: dto.name,
         description: dto.description ?? null,
+        organisations: {
+          create: organisationIds.map((id) => ({ organisationId: id })),
+        },
       },
     })
-    sendSuccess(res, group, 201)
+    sendSuccess(res, { ...group, organisationIds }, 201)
   } catch (err) { next(err) }
 }
 
@@ -146,12 +174,48 @@ export const update: RequestHandler = async (req, res, next) => {
   try {
     const dto = req.body as UpdateUserGroupDto
     const group = await groupFor(param(req, 'groupId'), orgIdFor(req))
-    const updated = await prisma.userGroup.update({
-      where: { id: group.id },
-      data: dto,
+    const { organisationIds: requestedIds, ...fields } = dto
+    let organisationIds = group.organisationIds
+    let ownerOrganisationId = group.organisationId
+    if (requestedIds) {
+      await assertManageOrganisations(req.user!.id, requestedIds)
+      const subject = await resolveSubject(req.user!.id)
+      const retained = group.organisationIds.filter((id) =>
+        !canReachOrg(subject, id) || !can(subject, id, 'user:assign_role'));
+      organisationIds = [...new Set([...requestedIds, ...retained])]
+      if (!organisationIds.includes(group.organisationId)) {
+        const nextOwner = requestedIds[0]
+        const slugConflict = await prisma.userGroup.findFirst({
+          where: { organisationId: nextOwner, slug: group.slug, id: { not: group.id } },
+          select: { id: true },
+        })
+        if (slugConflict) throw new BadRequestError('A group with this name already exists in the selected organisation')
+        ownerOrganisationId = nextOwner
+      }
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const result = await tx.userGroup.update({
+        where: { id: group.id },
+        data: { ...fields, organisationId: ownerOrganisationId },
+      })
+      if (requestedIds) {
+        const keep = new Set(organisationIds)
+        const removeIds = group.organisationIds.filter((id) => !keep.has(id))
+        if (removeIds.length > 0) {
+          await tx.userGroupOrganisation.deleteMany({
+            where: { groupId: group.id, organisationId: { in: removeIds } },
+          })
+        }
+        await tx.userGroupOrganisation.createMany({
+          data: organisationIds.map((id) => ({ groupId: group.id, organisationId: id })),
+          skipDuplicates: true,
+        })
+      }
+      return result
     })
     await invalidateRostersForUsers(group.users.map(({ userId }) => userId))
-    sendSuccess(res, updated)
+    sendSuccess(res, { ...updated, organisationIds })
   } catch (err) { next(err) }
 }
 
@@ -168,8 +232,9 @@ export const addUser: RequestHandler = async (req, res, next) => {
   try {
     const group = await groupFor(param(req, 'groupId'), orgIdFor(req))
     const userId = param(req, 'userId')
-    await userInOrganisation(userId, group.organisationId)
-    await assertUserInGroupScope(req, userId, group.organisationId)
+    const organisationId = orgIdFor(req) ?? group.organisationId
+    await userInOrganisation(userId, organisationId)
+    await assertUserInGroupScope(req, userId, organisationId)
 
     await prisma.userGroupMembership.createMany({
       data: [{ userId, groupId: group.id }],
@@ -184,8 +249,9 @@ export const removeUser: RequestHandler = async (req, res, next) => {
   try {
     const group = await groupFor(param(req, 'groupId'), orgIdFor(req))
     const userId = param(req, 'userId')
-    await userInOrganisation(userId, group.organisationId)
-    await assertUserInGroupScope(req, userId, group.organisationId)
+    const organisationId = orgIdFor(req) ?? group.organisationId
+    await userInOrganisation(userId, organisationId)
+    await assertUserInGroupScope(req, userId, organisationId)
 
     const result = await prisma.userGroupMembership.deleteMany({
       where: { userId, groupId: group.id },
@@ -231,7 +297,7 @@ export const setUserGroups: RequestHandler = async (req, res, next) => {
       const groups = await tx.userGroup.findMany({
         where: {
           id: { in: groupIds },
-          organisationId: { in: allowedOrganisationIds },
+          organisations: { some: { organisationId: { in: allowedOrganisationIds } } },
         },
         select: { id: true, organisationId: true, slug: true, name: true },
       })
@@ -240,7 +306,9 @@ export const setUserGroups: RequestHandler = async (req, res, next) => {
       await tx.userGroupMembership.deleteMany({
         where: {
           userId,
-          ...(organisationId ? { group: { organisationId } } : {}),
+          ...(organisationId
+            ? { group: { organisations: { some: { organisationId } } } }
+            : {}),
         },
       })
       if (groupIds.length > 0) {

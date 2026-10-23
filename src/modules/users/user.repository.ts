@@ -16,7 +16,7 @@ const selectUser = (orgId: string) => ({
   // Group memberships are part of the roster so administrators can see and
   // manage the same access boundary used to narrow it.
   groups: {
-    where: { group: { organisationId: orgId } },
+    where: { group: { organisations: { some: { organisationId: orgId } } } },
     select: { group: { select: { id: true, slug: true, name: true } } },
   },
   // The password history the account page and the admin roster both show.
@@ -188,7 +188,7 @@ export async function findReachable(orgId: string, userId: string, scope: GroupS
       email: true,
       organisationId: true,
       groups: {
-        where: { group: { organisationId: orgId } },
+        where: { group: { organisations: { some: { organisationId: orgId } } } },
         select: { groupId: true },
       },
     },

@@ -37,7 +37,8 @@ async function main() {
       WHERE migration_name IN ('20260922060000_user_groups',
                                '20260924120000_drain_peak_interval_lph',
                                '20261022230000_user_group_memberships',
-                               '20261022233000_user_groups_organisation_scoped')`)
+                               '20261022233000_user_groups_organisation_scoped',
+                               '20261023050000_user_group_organisations')`)
   if (recorded.length === 0) console.log('    neither is recorded')
   for (const r of recorded) {
     console.log(`    ${pad(r.migration_name, 44)}${r.finished ?? 'UNFINISHED'}` +
@@ -52,6 +53,8 @@ async function main() {
     ['user_groups.organisation_id', 'column',
                                      `SELECT EXISTS(SELECT 1 FROM information_schema.columns
                                         WHERE table_name='user_groups' AND column_name='organisation_id') AS ok`],
+    ['user_group_organisations', 'table',
+                                     `SELECT to_regclass('public.user_group_organisations') IS NOT NULL AS ok`],
     ['fuel_thefts.peak_interval_lph', 'column',
                                      `SELECT EXISTS(SELECT 1 FROM information_schema.columns
                                         WHERE table_name='fuel_thefts' AND column_name='peak_interval_lph') AS ok`],
