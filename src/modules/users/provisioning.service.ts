@@ -287,6 +287,101 @@ export async function setMembership(
 }
 
 /**
+ * Set somebody's role EVERYWHERE they belong.
+ *
+ * A person holds one role, not one per organisation (operator, 2026-10-27:
+ * "roles are organisation independent"). Changing it from any organisation's
+ * roster therefore replaces the roles in every organisation they are a member
+ * of, and their platform roles too. Before this a Platform Administrator moved
+ * to Operator at Kasulu kept the platform grant, and with it every permission.
+ *
+ * `fromOrgId` is the organisation the change was made from; it is added as a
+ * membership when missing, as setMembership did. Vehicle scope is kept where
+ * the new role allows one and widened to the whole fleet where it does not.
+ *
+ * Every organisation is checked to hold the named roles before anything is
+ * written, so a custom role missing in one of them refuses the whole change
+ * rather than leaving it half applied.
+ */
+export async function setRolesEverywhere(
+  userId: string,
+  roleSlugs: string[],
+  opts: { fromOrgId: string; grantedById?: string; allowPlatformRoles?: boolean },
+) {
+  const user = await prisma.user.findFirst({ where: { id: userId, deletedAt: null }, select: { id: true } })
+  if (!user) throw new NotFoundError('User')
+
+  const platformRoles = roleSlugs.length
+    ? await prisma.role.findMany({
+        where:  { slug: { in: roleSlugs }, organisationId: null },
+        select: { id: true, slug: true },
+      })
+    : []
+  if (platformRoles.length && !opts.allowPlatformRoles) {
+    throw new ValidationError({
+      memberships: [`${platformRoles.map((r) => r.slug).join(', ')} are platform roles and cannot be granted through an organisation`],
+    })
+  }
+  const orgSlugs = roleSlugs.filter((s) => !platformRoles.some((r) => r.slug === s))
+  const scopable = orgSlugs.every((s) => VEHICLE_SCOPABLE_ROLE_SLUGS.includes(s))
+
+  const held = await prisma.orgMembership.findMany({
+    where:  { userId, revokedAt: null },
+    select: {
+      organisationId: true,
+      allVehicles:    true,
+      vehicleScopes:  { select: { vehicleId: true, vehicleGroupId: true } },
+    },
+  })
+  const inputs: MembershipInput[] = held.map((m) => {
+    const keep = scopable && !m.allVehicles
+    return {
+      organisationId:  m.organisationId,
+      roleSlugs:       orgSlugs,
+      allVehicles:     !keep,
+      vehicleIds:      keep ? m.vehicleScopes.flatMap((s) => (s.vehicleId ? [s.vehicleId] : [])) : [],
+      vehicleGroupIds: keep ? m.vehicleScopes.flatMap((s) => (s.vehicleGroupId ? [s.vehicleGroupId] : [])) : [],
+    }
+  })
+  if (!inputs.some((m) => m.organisationId === opts.fromOrgId)) {
+    inputs.push({ organisationId: opts.fromOrgId, roleSlugs: orgSlugs, allVehicles: true, vehicleIds: [], vehicleGroupIds: [] })
+  }
+
+  if (orgSlugs.length) {
+    const rows = await prisma.role.findMany({
+      where:  { slug: { in: orgSlugs }, organisationId: { in: inputs.map((m) => m.organisationId) } },
+      select: { slug: true, organisationId: true },
+    })
+    const gaps = inputs.flatMap((m) => orgSlugs
+      .filter((s) => !rows.some((r) => r.slug === s && r.organisationId === m.organisationId))
+      .map((s) => `${s} in ${m.organisationId}`))
+    if (gaps.length) throw new NotFoundError(`Role(s) ${gaps.join(', ')}`)
+  }
+
+  for (const input of inputs) {
+    await applyMembership(userId, input, opts.grantedById, false)
+  }
+
+  // Platform roles: exactly the ones named, and none other.
+  const livePlatform = await prisma.userRole.findMany({
+    where:  { userId, revokedAt: null, role: { organisationId: null } },
+    select: { id: true, roleId: true },
+  })
+  const keepIds = platformRoles.map((r) => r.id)
+  const toRevoke = livePlatform.filter((g) => !keepIds.includes(g.roleId)).map((g) => g.id)
+  if (toRevoke.length) {
+    await prisma.userRole.updateMany({ where: { id: { in: toRevoke } }, data: { revokedAt: new Date() } })
+  }
+  for (const roleId of keepIds.filter((id) => !livePlatform.some((g) => g.roleId === id))) {
+    await prisma.userRole.create({ data: { userId, roleId, assignedById: opts.grantedById ?? null } })
+  }
+
+  await invalidateSubject(userId)
+  await invalidateRosterForUser(userId, ...inputs.map((m) => m.organisationId))
+  return listMemberships(userId)
+}
+
+/**
  * Withdraw access to one organisation.
  *
  * Soft: the membership is stamped revoked and the roles held there are revoked
@@ -404,8 +499,11 @@ export async function listMemberships(userId: string) {
     allVehicles:    m.allVehicles,
     vehicleIds:      m.vehicleScopes.map((s) => s.vehicleId).filter(Boolean),
     vehicleGroupIds: m.vehicleScopes.map((s) => s.vehicleGroupId).filter(Boolean),
+    // Platform roles are listed in EVERY organisation, flagged: they apply in
+    // each one, and an editor that did not show them could not take them
+    // away (how a Platform Administrator "made Operator" kept everything).
     roles: grants
-      .filter((g) => g.role.organisationId === m.organisationId)
-      .map((g) => ({ slug: g.role.slug, name: g.role.name })),
+      .filter((g) => g.role.organisationId === m.organisationId || g.role.organisationId === null)
+      .map((g) => ({ slug: g.role.slug, name: g.role.name, platform: g.role.organisationId === null })),
   }))
 }
