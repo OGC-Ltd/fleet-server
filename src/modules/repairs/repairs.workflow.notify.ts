@@ -56,6 +56,9 @@ export interface WorkflowEvent {
   lines?:    { label: string; value: string }[]
   audience:  Audience[]
   at?:       Date
+  /** The feed source; 'repair' unless the notice is for technicians only
+   *  ('repair_flag', see notifications/technician-sources). */
+  source?:   'repair' | 'repair_flag'
 }
 
 const live = {
@@ -175,7 +178,7 @@ export async function notifyWorkflow(ref: JobRef, ev: WorkflowEvent): Promise<{ 
   const plateRef = ref.ticketNo ? `${ref.plate} · ${ref.ticketNo}` : ref.plate
   try {
     await enqueueNotification({
-      orgId: ref.orgId, id: `repair-wf-${ref.itemId}-${ev.key}`, source: 'repair', alertType: 'repair_workflow',
+      orgId: ref.orgId, id: `repair-wf-${ref.itemId}-${ev.key}`, source: ev.source ?? 'repair', alertType: 'repair_workflow',
       severity: ev.severity, text: `${plateRef} · ${ref.label}: ${ev.text}`, at,
       plate: ref.plate, vehicleId: ref.vehicleId,
     })
