@@ -254,10 +254,24 @@ export async function softDelete(orgId: string, userId: string, platformAdmin = 
   })
 }
 
+/**
+ * Grant a role. A person holds one role per organisation (operator,
+ * 2026-10-27), so an organisation role REPLACES whichever role they held in
+ * that organisation; a platform role sits beside them.
+ */
 export async function assignRole(userId: string, roleId: string, assignedById?: string) {
-  return prisma.userRole.create({
-    data: { userId, roleId, assignedById },
-    select: { id: true, assignedAt: true, role: { select: { id: true, name: true, slug: true } } },
+  const role = await prisma.role.findUnique({ where: { id: roleId }, select: { organisationId: true } })
+  return prisma.$transaction(async (tx) => {
+    if (role?.organisationId) {
+      await tx.userRole.updateMany({
+        where: { userId, revokedAt: null, roleId: { not: roleId }, role: { organisationId: role.organisationId } },
+        data:  { revokedAt: new Date() },
+      })
+    }
+    return tx.userRole.create({
+      data: { userId, roleId, assignedById },
+      select: { id: true, assignedAt: true, role: { select: { id: true, name: true, slug: true } } },
+    })
   })
 }
 

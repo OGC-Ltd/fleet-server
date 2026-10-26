@@ -67,6 +67,7 @@ export async function listNotifications(req: Request, res: Response) {
       // first and ignore the rest rather than silently unioning them.
       vehicleId:  vehicleId ? String(Array.isArray(vehicleId) ? vehicleId[0] : vehicleId) : undefined,
       day:        dayStr,
+      vehicleIds: req.authz?.vehicleIds ?? null,
     })
     return sendSuccess(res, {
       notifications: page.items,

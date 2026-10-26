@@ -65,6 +65,13 @@ export interface NotificationQuery {
    * per-vehicle cache below possible at all. An arbitrary range is neither.
    */
   day?: string
+  /**
+   * The caller's vehicle scope (req.authz.vehicleIds): null for the whole
+   * fleet. A scoped caller, such as a technician limited to flagged units, is
+   * shown only notifications naming a unit in it; one naming no unit is
+   * withheld, the same fail-closed rule as the live stream (lib/sse).
+   */
+  vehicleIds?: Set<string> | null
 }
 
 /** DB row → the same shape the SSE feed and the cache use. */
@@ -95,8 +102,10 @@ function toItem(row: {
  */
 export async function getNotifications(
   orgId: string,
-  { limit = 50, before, alertTypes, severities, vehicleId, day }: NotificationQuery = {},
+  { limit = 50, before, alertTypes, severities, vehicleId, day, vehicleIds = null }: NotificationQuery = {},
 ): Promise<NotificationPage> {
+  if (vehicleIds && vehicleId && !vehicleIds.has(vehicleId)) return { items: [], source: 'database' }
+
   /**
    * A whole vehicle-day is allowed past the paging cap.
    *
@@ -136,7 +145,7 @@ export async function getNotifications(
   // with the day's cursor pointing before the day began. It also primed the
   // cache from a day-bounded page, which for a past day is old history
   // shadowing everything newer.
-  const filtered = Boolean(alertTypes?.length || severities?.length || vehicleId || dayRange)
+  const filtered = Boolean(alertTypes?.length || severities?.length || vehicleId || dayRange || vehicleIds)
 
   if (!before && !filtered) {
     const cached = await readCachedNotifications(orgId, capped)
@@ -156,7 +165,7 @@ export async function getNotifications(
       ...(dayRange
         ? { occurredAt: { gte: dayRange.from, lt: before && before < dayRange.to ? before : dayRange.to } }
         : before ? { occurredAt: { lt: before } } : {}),
-      ...(vehicleId ? { vehicleId } : {}),
+      ...(vehicleId ? { vehicleId } : vehicleIds ? { vehicleId: { in: [...vehicleIds] } } : {}),
       ...(alertTypes?.length ? { alertType: { in: alertTypes } } : {}),
       ...(severities?.length ? { severity:  { in: severities } } : {}),
     },
