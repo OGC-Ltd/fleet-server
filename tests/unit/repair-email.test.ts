@@ -24,6 +24,7 @@ vi.mock('../../src/config/env.js', () => ({ env: envMock }))
 
 const prismaMock = vi.hoisted(() => ({
   user: { findUnique: vi.fn() },
+  userRole: { findFirst: vi.fn() },
   repairReportItem: { findUnique: vi.fn() },
 }))
 
@@ -66,6 +67,7 @@ beforeEach(() => {
   envMock.APP_BASE_URL = ''
   sendMailMock.mockResolvedValue({ sent: true })
   prismaMock.user.findUnique.mockReset()
+  prismaMock.userRole.findFirst.mockReset().mockResolvedValue(null)
   prismaMock.repairReportItem.findUnique.mockReset()
 })
 
@@ -138,6 +140,17 @@ describe('triage assignment notifications', () => {
 
     expect(sendMailMock).toHaveBeenCalledTimes(1)
     expect(sendMailMock.mock.calls[0]?.[0]).toBe('b@x.com')
+  })
+
+  it('does not email a technician: they are told in the app', async () => {
+    prismaMock.userRole.findFirst.mockResolvedValue({ id: 'ur1', user: { fullName: 'Benson Otieno' } })
+
+    const result = await notifyRepairAssignment({
+      itemId: 'r1', orgId: 'org-1', assignedById: 'u1', assignedToId: 'u2',
+    })
+
+    expect(result).toEqual({ sent: false, reason: 'in-app', assigneeName: 'Benson Otieno' })
+    expect(sendMailMock).not.toHaveBeenCalled()
   })
 
   it('does not email the assigner when they triage the task to themselves', async () => {
