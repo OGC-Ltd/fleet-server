@@ -141,6 +141,36 @@ async function nextTicketNo(tx: Tx): Promise<string> {
   return `RT-${new Date().getUTCFullYear()}-${String(row!.n).padStart(5, '0')}`
 }
 
+/**
+ * The job's ticket, issued the moment its path is set: remote or physical,
+ * every fix carries a ticket number (operator, 2026-10-27). Before, only a
+ * workshop arrival or a field inspection issued one, and a remote fix closed
+ * with none. Returns the update fields, empty when the job already has one.
+ */
+async function ticketFields(tx: Tx, job: { ticketNo: string | null }, at = new Date()) {
+  return job.ticketNo ? {} : { ticketNo: await nextTicketNo(tx), ticketIssuedAt: at }
+}
+
+/**
+ * Tell the operator, supervisor, Head of Security and Assistant Head of
+ * Security the ticket numbers just issued: one notice per unit, naming every
+ * ticket it got (operator, 2026-10-27).
+ */
+async function tellTickets(jobs: Job[], how: string) {
+  const byUnit = new Map<string, Job[]>()
+  for (const j of jobs) if (j.ticketNo) byUnit.set(j.vehicleId, [...(byUnit.get(j.vehicleId) ?? []), j])
+  for (const group of byUnit.values()) {
+    const nos = group.map((j) => j.ticketNo!).join(', ')
+    const tickets = group.map((j) => `${j.ticketNo} (${labelOf(j)})`).join(', ')
+    await tell({ ...refOf(group[0]!), label: group.map(labelOf).join(', '), ticketNo: nos }, {
+      key: 'ticket', severity: 'info', headline: 'Repair ticket issued',
+      text: `ticket ${nos} issued: ${how}`,
+      lines: [{ label: group.length > 1 ? 'Tickets' : 'Ticket', value: tickets }, { label: 'Path', value: how }],
+      audience: ['ticket_desk'],
+    })
+  }
+}
+
 const day = (d: Date) => d.toISOString().slice(0, 10)
 const utcDay = (iso: string) => new Date(`${iso}T00:00:00.000Z`)
 function addDays(d: Date, n: number) { return new Date(d.getTime() + n * 86_400_000) }
@@ -207,15 +237,25 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
   const noteOf = (stage: Stage) => stage === 'forwarded' ? 'Flagged and forwarded to ControlTech'
     : stage === 'awaiting_assessment' ? 'Flagged; mechanical fault, to the workshop for assessment'
       : 'Flagged'
+  // A mechanical fault lands on the physical path at once, so it is ticketed now.
+  const ticketsFor = new Map<FaultCategory, string[]>()
+  for (const c of categories) {
+    if (lands.get(c)!.path !== 'physical') continue
+    const nos: string[] = []
+    for (let i = 0; i < vehicles.length; i++) nos.push(await nextTicketNo(prisma))
+    ticketsFor.set(c, nos)
+  }
   let report
   try {
     report = await prisma.repairReport.create({
       data: {
         organisationId: orgId, reportedById: userId, note: `Control Room flag: ${dto.suspectedFault}`,
         items: {
-          create: vehicles.flatMap((v) => categories.map((c) => {
+          create: vehicles.flatMap((v, vi) => categories.map((c) => {
             const land = lands.get(c)!
+            const ticketNo = ticketsFor.get(c)?.[vi]
             return {
+              ...(ticketNo ? { ticketNo, ticketIssuedAt: flaggedAt } : {}),
               organisationId: orgId, targetKind: kindOf(c), vehicleId: v.id, outcome: 'flagged',
               faultCategory: c, suspectedFault: dto.suspectedFault,
               problemNote: dto.suspectedFault,
@@ -260,6 +300,7 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
       audience: [], source: 'repair_flag',
     })
   }
+  await tellTickets(report.items, 'physical: to the workshop for assessment')
   return Promise.all(report.items.map((i) => findItemById(i.id, orgId)))
 }
 
@@ -270,17 +311,19 @@ export async function forwardJob(orgId: string, itemId: string, userId: string, 
     assertStage(job, ['pending'], 'forwarded')
     const category = (job.faultCategory ?? 'fuel_probe') as FaultCategory
     const land = landing(category, chosen, true)
+    const ticket = land.path === 'physical' ? await ticketFields(tx, job) : {}
     await move(tx, job, land.stage, userId, land.queue === 'controltech' ? 'Forwarded to ControlTech' : 'Forwarded to the workshop for assessment', {
       queue: land.queue, path: land.path, forwardedAt: land.forwardedAt,
-      ...(job.faultCategory ? {} : { faultCategory: category }),
+      ...(job.faultCategory ? {} : { faultCategory: category }), ...ticket,
     })
-    return { ...job, stage: land.stage, queue: land.queue }
+    return { ...job, stage: land.stage, queue: land.queue, ticketNo: ticket.ticketNo ?? job.ticketNo, issued: !!ticket.ticketNo }
   })
   await tell(refOf(job), {
     key: 'forwarded', severity: 'info', headline: 'Repair forwarded',
     text: job.queue === 'controltech' ? 'forwarded to ControlTech' : 'forwarded to the workshop for assessment',
     audience: job.queue === 'controltech' ? ['controltech'] : ['control_room'],
   })
+  if (job.issued) await tellTickets([job], 'physical: to the workshop for assessment')
   return findItemById(itemId, orgId)
 }
 
@@ -430,10 +473,11 @@ export async function decidePath(orgId: string, itemId: string, userId: string, 
     const note = dto.path === 'remote'
       ? `Fixing remotely${dto.note ? `: ${dto.note}` : ''}`
       : `${job.stage === 'remote_fix' ? 'Remote fix not possible' : 'Physical inspection needed'}${dto.note ? `: ${dto.note}` : ''}`
+    const ticket = await ticketFields(tx, job)
     await move(tx, job, to, userId, note, {
-      path: dto.path, pathNote: dto.note ?? null, pathDecidedById: userId, pathDecidedAt: new Date(),
+      path: dto.path, pathNote: dto.note ?? null, pathDecidedById: userId, pathDecidedAt: new Date(), ...ticket,
     })
-    return { ...job, to, note }
+    return { ...job, to, note, ticketNo: ticket.ticketNo ?? job.ticketNo, issued: !!ticket.ticketNo }
   })
   await tell(refOf(job, job.to), job.to === 'remote_fix'
     ? { key: 'path-remote', severity: 'info', headline: 'Fixing remotely', text: job.note, audience: ['control_room'] }
@@ -441,6 +485,7 @@ export async function decidePath(orgId: string, itemId: string, userId: string, 
       key: 'path-physical', severity: 'warning', headline: 'Physical inspection needed: assess the unit',
       text: `${job.note}. Book a physical inspection`, audience: ['control_room'],
     })
+  if (job.issued) await tellTickets([job], job.to === 'remote_fix' ? 'fixing remotely' : 'physical inspection')
   return findItemById(itemId, orgId)
 }
 
@@ -478,7 +523,7 @@ export async function assess(orgId: string, itemId: string, userId: string, dto:
         data: { stageHistory: appendStage(job.stageHistory, { stage: to, at: at.toISOString(), by: userId, ...(byName ? { byName } : {}), note }) },
       })
     }
-    return { ...job, to, note, ticketNo, intervention: dto.intervention, reason: dto.reason }
+    return { ...job, to, note, ticketNo, intervention: dto.intervention, reason: dto.reason, issued: ticketNo !== job.ticketNo }
   })
   const ref = refOf(job, job.to, job.ticketNo)
   await tell(ref, job.intervention === 'workshop'
@@ -489,6 +534,7 @@ export async function assess(orgId: string, itemId: string, userId: string, dto:
       text: job.note, lines: [{ label: 'Reason', value: job.reason ?? '' }],
       audience: ['control_room', 'controltech', 'channel'],
     })
+  if (job.issued) await tellTickets([job], 'physical: field inspection')
   return findItemById(itemId, orgId)
 }
 
@@ -547,6 +593,19 @@ export async function availability(orgId: string, workshopId: string, days: numb
 }
 
 /** One workshop day: the booked units, and units that arrived without a booking (tows). */
+/** Did the trail record an arrival at the workshop on this UTC day? */
+function arrivedOn(history: Prisma.JsonValue, date: Date): boolean {
+  if (!Array.isArray(history)) return false
+  const from = date.getTime()
+  const to = addDays(date, 1).getTime()
+  return history.some((e) => {
+    const ev = e as { stage?: unknown; at?: unknown } | null
+    if (ev?.stage !== 'in_workshop' || typeof ev.at !== 'string') return false
+    const t = Date.parse(ev.at)
+    return t >= from && t < to
+  })
+}
+
 export async function workshopDay(orgId: string, workshopId: string, iso: string) {
   const w = await workshopIn(orgId, workshopId)
   const date = utcDay(iso)
@@ -560,13 +619,16 @@ export async function workshopDay(orgId: string, workshopId: string, iso: string
       include: { repairItem: { include: itemInclude } },
       orderBy: { bookedAt: 'asc' },
     }),
+    // An arrival is the in_workshop step on the trail. The ticket's date no
+    // longer says it: a job is ticketed when its path is set, days earlier.
     prisma.repairReportItem.findMany({
       where: {
-        organisationId: orgId, ticketIssuedAt: { gte: date, lt: addDays(date, 1) },
+        organisationId: orgId, stageChangedAt: { gte: date },
+        stageHistory: { array_contains: [{ stage: 'in_workshop' }] },
         bookings: { none: { status: { in: LIVE_BOOKING } } },
       },
       include: itemInclude,
-    }),
+    }).then((rows) => rows.filter((r) => arrivedOn(r.stageHistory, date))),
   ])
   const booked = bookings.filter((b) => LIVE_BOOKING.includes(b.status)).length
   return { workshop: w, date: iso, capacity: w.dailyCapacity, booked, bookings, unbookedArrivals: arrivals }
@@ -649,13 +711,14 @@ export async function arrive(orgId: string, itemId: string, userId: string, scop
     await move(tx, job, 'in_workshop', userId, `Arrived at the workshop; ticket ${ticketNo}`, {
       ticketNo, ...(job.ticketNo ? {} : { ticketIssuedAt: new Date() }),
     })
-    return { job, ticketNo, already: false }
+    return { job: { ...job, ticketNo }, ticketNo, already: false, issued: !job.ticketNo }
   })
   if (!result.already) {
     await tell(refOf(result.job, 'in_workshop', result.ticketNo), {
       key: 'arrived', severity: 'info', headline: 'Unit arrived at the workshop',
       text: `arrived; repair ticket ${result.ticketNo}`, audience: ['control_room', 'assignee', 'channel'],
     })
+    if (result.issued) await tellTickets([result.job], 'physical: arrived at the workshop')
   }
   return findItemById(itemId, orgId)
 }
@@ -800,7 +863,7 @@ export async function complete(orgId: string, itemId: string, userId: string, dt
   if (pre.stage === 'spare_outsourced') throw new ConflictError('This job is still waiting on spare parts')
   assertStage(pre, COMPLETABLE, 'completed')
   // A workshop or field job is classified before it is closed (rule 4); a remote fix has nothing to classify.
-  if (pre.ticketNo && !pre.damageClass) throw new UnprocessableError('Classify the damage (genuine or suspected malicious) before completing')
+  if (pre.stage !== 'remote_fix' && pre.ticketNo && !pre.damageClass) throw new UnprocessableError('Classify the damage (genuine or suspected malicious) before completing')
   await assertNoOutstandingParts(itemId, orgId)
 
   const result = await prisma.$transaction(async (tx) => {
@@ -1065,10 +1128,37 @@ const INVESTIGATION_STALE_DAYS = 14
  * and queue jobs nobody claimed are chased once a day (the feed id carries the
  * day). Investigations are chased but never touch the job.
  */
+/** Open jobs whose path is set but which carry no ticket: those from before
+ *  tickets were issued at the path decision. */
+async function ticketPathedJobs(): Promise<number> {
+  const jobs = await prisma.repairReportItem.findMany({
+    where: { resolvedAt: null, ticketNo: null, path: { not: null }, queue: { not: null } },
+    select: jobSelect,
+  })
+  let n = 0
+  for (const job of jobs) {
+    try {
+      const issued = await prisma.$transaction(async (tx) => {
+        const data = await ticketFields(tx, job)
+        const { count } = await tx.repairReportItem.updateMany({ where: { id: job.id, resolvedAt: null, ticketNo: null }, data })
+        return count ? data.ticketNo ?? null : null
+      })
+      if (issued) {
+        n++
+        await tellTickets([{ ...job, ticketNo: issued }], job.path === 'remote' ? 'fixing remotely' : 'physical')
+      }
+    } catch (err) {
+      logger.error({ err, itemId: job.id }, 'repair sweep: could not ticket a job')
+    }
+  }
+  return n
+}
+
 export async function workflowSweep(now = new Date()) {
   const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
   const stamp = day(today)
   const adopted = await adoptLegacyJobs()
+  const ticketed = await ticketPathedJobs()
 
   const missed = await prisma.workshopBooking.findMany({
     where: { status: 'booked', bookingDate: { lt: today } },
@@ -1142,7 +1232,7 @@ export async function workflowSweep(now = new Date()) {
     })
   }
 
-  logger.info({ adopted, noShows: missed.length, unverified: staleCompleted.length, unclaimed: unclaimed.length, investigations: oldCases.length }, 'repair sweep: workflow checks done')
+  logger.info({ adopted, ticketed, noShows: missed.length, unverified: staleCompleted.length, unclaimed: unclaimed.length, investigations: oldCases.length }, 'repair sweep: workflow checks done')
 }
 
 export { roleHolderEmails }
