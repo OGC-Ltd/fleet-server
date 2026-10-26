@@ -7,6 +7,7 @@
  * that simply wanted yesterday, had nothing.
  */
 
+import { TECHNICIAN_ONLY_SOURCES, withoutTechnicianOnly } from './technician-sources.js'
 import { prisma } from '../prisma.js'
 import { readCachedNotifications, primeCache, readCachedVehicleDay, cacheVehicleDay, type NotificationItem } from './notification-cache.js'
 import { env } from '../../config/env.js'
@@ -107,6 +108,8 @@ export async function getNotifications(
   { limit = 50, before, alertTypes, severities, vehicleId, day, vehicleIds = null, sources }: NotificationQuery = {},
 ): Promise<NotificationPage> {
   if (vehicleIds && vehicleId && !vehicleIds.has(vehicleId)) return { items: [], source: 'database' }
+  // A read naming no sources is not a technician's: their flag notices stay out.
+  const hide = <T extends { source?: string | null }>(items: T[]) => (sources?.length ? items : withoutTechnicianOnly(items))
 
   /**
    * A whole vehicle-day is allowed past the paging cap.
@@ -132,7 +135,7 @@ export async function getNotifications(
     const cached = await readCachedVehicleDay(vehicleId, day)
     // `[]` is a real answer here — a unit that reported nothing that day — so
     // only a null miss falls through.
-    if (cached) return { items: cached, source: 'cache' }
+    if (cached) return { items: hide(cached), source: 'cache' }
   }
 
   // The cache is one mixed, capped, chronological set — it cannot answer a
@@ -153,9 +156,9 @@ export async function getNotifications(
     const cached = await readCachedNotifications(orgId, capped)
     // A short cache is a legitimate answer only if it holds everything asked
     // for; otherwise fall through so the caller gets a full page.
-    if (cached && cached.length >= capped) return { items: cached, source: 'cache' }
+    if (cached && cached.length >= capped) return { items: hide(cached), source: 'cache' }
     if (cached && cached.length > 0 && cached.length >= env.NOTIFICATION_CACHE_MAX) {
-      return { items: cached, source: 'cache' }
+      return { items: hide(cached), source: 'cache' }
     }
   }
 
@@ -170,7 +173,7 @@ export async function getNotifications(
       ...(vehicleId ? { vehicleId } : vehicleIds ? { vehicleId: { in: [...vehicleIds] } } : {}),
       ...(alertTypes?.length ? { alertType: { in: alertTypes } } : {}),
       ...(severities?.length ? { severity:  { in: severities } } : {}),
-      ...(sources?.length ? { source: { in: sources } } : {}),
+      ...(sources?.length ? { source: { in: sources } } : { source: { notIn: [...TECHNICIAN_ONLY_SOURCES] } }),
     },
     orderBy: { occurredAt: 'desc' },
     take:    capped,
@@ -205,5 +208,5 @@ export async function getNotifications(
     void cacheVehicleDay(vehicleId, day, items, dayRange.from.getTime())
   }
 
-  return { items, source: 'database' }
+  return { items: hide(items), source: 'database' }
 }
