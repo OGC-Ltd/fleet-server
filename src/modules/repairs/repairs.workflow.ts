@@ -237,14 +237,26 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
     throw err
   }
 
-  for (const job of report.items) {
-    const ref = refOf(job)
+  // One notice per unit, not per job: a flag naming transmission and fuel
+  // probe is one report, and two feed rows and two mails read as two flags
+  // (operator, 2026-10-27). The first job's id keys the feed row.
+  const byUnit = new Map<string, Job[]>()
+  for (const job of report.items) byUnit.set(job.vehicleId, [...(byUnit.get(job.vehicleId) ?? []), job])
+  for (const jobs of byUnit.values()) {
+    const ref = { ...refOf(jobs[0]!), label: jobs.map(labelOf).join(', ') }
+    const toControlTech = jobs.some((j) => j.queue === 'controltech')
+    const routes = jobs.length > 1
+      ? [{ label: 'Routed', value: jobs.map((j) => `${labelOf(j)}: ${STAGE_LABEL[j.stage] ?? j.stage}`).join('; ') }]
+      : []
     await tell(ref, {
       key: 'flagged', severity: 'warning',
-      headline: job.queue === 'controltech' ? 'Unit flagged for ControlTech' : 'Unit flagged for repair',
+      headline: jobs.every((j) => j.queue === 'controltech') ? 'Unit flagged for ControlTech' : 'Unit flagged for repair',
       text: `flagged by ${byName ?? 'the Control Room'}: ${dto.suspectedFault}`,
-      lines: [{ label: 'Suspected fault', value: dto.suspectedFault }, { label: 'Flagged by', value: byName ?? 'Control Room' }],
-      audience: job.queue === 'controltech' ? ['control_room', 'controltech'] : ['control_room'],
+      lines: [
+        { label: 'Suspected fault', value: dto.suspectedFault }, ...routes,
+        { label: 'Flagged by', value: byName ?? 'Control Room' },
+      ],
+      audience: toControlTech ? ['control_room', 'controltech'] : ['control_room'],
     })
   }
   return Promise.all(report.items.map((i) => findItemById(i.id, orgId)))
