@@ -28,9 +28,11 @@ import { repairRecipients } from './repairs.service.js'
 
 export const CONTROL_ROOM_ROLES = ['supervisor', 'fleet_analyst', 'operator'] as const
 export const HEAD_OF_SECURITY_ROLE = 'head_of_security'
+/** Who is told a repair ticket number once it is issued (operator, 2026-10-27). */
+export const TICKET_DESK_ROLES = ['operator', 'supervisor', HEAD_OF_SECURITY_ROLE, 'asst_head_of_security'] as const
 
 export type Audience =
-  | 'control_room' | 'controltech' | 'assignee' | 'head_of_security' | 'stores' | 'channel'
+  | 'control_room' | 'controltech' | 'assignee' | 'head_of_security' | 'stores' | 'channel' | 'ticket_desk'
 
 export interface JobRef {
   itemId:    string
@@ -143,6 +145,7 @@ async function resolveAudience(ref: JobRef, audience: Audience[]): Promise<{ to:
       // the repair notices (operator, 2026-10-27), so they are not mailed.
       if (a === 'assignee') out.push(...await userEmails([ref.assignedToId, ref.workshopTechnicianId]))
       if (a === 'channel') out.push(...repairRecipients())
+      if (a === 'ticket_desk') out.push(...await roleHolderEmails(ref.orgId, TICKET_DESK_ROLES, ref.vehicleId))
       // Stores has no role of its own yet (plan Q7b); whoever may issue from
       // stores in this organisation hears about a request.
       if (a === 'stores') out.push(...await roleHolderEmails(ref.orgId, ['admin'], ref.vehicleId))
