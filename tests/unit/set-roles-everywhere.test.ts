@@ -191,4 +191,13 @@ describe('setRolesEverywhere', () => {
     await expect(setRolesEverywhere('u1', ['yard_lead'], { fromOrgId: 'KASULU' })).rejects.toThrow(/yard_lead in SUKARI/)
     expect(live()).toEqual(['operator@KASULU', 'operator@SUKARI'])
   })
+
+  it('refuses two roles in one organisation', async () => {
+    member('KASULU')
+    grant('operator', 'KASULU')
+
+    await expect(setRolesEverywhere('u1', ['operator', 'supervisor'], { fromOrgId: 'KASULU' }))
+      .rejects.toMatchObject({ errors: { memberships: [expect.stringMatching(/one role per organisation/)] } })
+    expect(live()).toEqual(['operator@KASULU'])
+  })
 })
