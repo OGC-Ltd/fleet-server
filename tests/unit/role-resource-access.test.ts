@@ -30,3 +30,57 @@ describe('supervisor and operator sidebar access', () => {
     expect(permissions.has('fuel_theft:read')).toBe(false)
   })
 })
+
+describe('screen access named on 2026-10-26', () => {
+  it('gives supervisors every sidebar screen except Analytics', () => {
+    const permissions = permissionsFor('supervisor')
+    for (const permission of [
+      'map:read', 'map:filter', 'alerts:read', 'driver:read', 'sensor:read', 'repair:read',
+      'weighbridge:read', 'logbook:read', 'fuel_audit:read', 'fuel_filling:read', 'fuel_review:read',
+    ]) {
+      expect(permissions.has(permission), permission).toBe(true)
+    }
+    expect(permissions.has('analytics:read')).toBe(false)
+    expect(permissions.has('analytics:export')).toBe(false)
+  })
+
+  it('gives operators maintenance, audit and vehicle fuel analysis, not the logbook, performance or workshop', () => {
+    const permissions = permissionsFor('operator')
+    for (const permission of [
+      'map:read', 'map:filter', 'alerts:read', 'driver:read', 'weighbridge:read',
+      'sensor:read', 'fuel_audit:read', 'fuel_filling:read',
+    ]) {
+      expect(permissions.has(permission), permission).toBe(true)
+    }
+    for (const permission of ['logbook:read', 'fuel_review:read', 'repair:read', 'analytics:read']) {
+      expect(permissions.has(permission), permission).toBe(false)
+    }
+  })
+
+  it('leaves technicians the ControlTech queue and nothing that opens another screen', () => {
+    const permissions = permissionsFor('technician')
+    for (const permission of ['repair:read', 'repair:claim']) {
+      expect(permissions.has(permission), permission).toBe(true)
+    }
+    for (const permission of [
+      'map:read', 'sensor:read', 'driver:read', 'weighbridge:read', 'analytics:read',
+      'alerts:read', 'fuel_theft:read', 'fuel_audit:read', 'fuel_filling:read', 'logbook:read',
+      'repair:flag', 'repair:assess', 'repair:book', 'repair:verify', 'repair:work_any',
+    ]) {
+      expect(permissions.has(permission), permission).toBe(false)
+    }
+  })
+
+  it('keeps the logbook and performance view for every role that could open them before', () => {
+    for (const role of ROLE_DEFINITIONS) {
+      const permissions = new Set(role.permissions)
+      if (role.platform && role.slug === 'super_admin') continue
+      if (permissions.has('telemetry:read') && !['operator', 'technician'].includes(role.slug)) {
+        expect(permissions.has('logbook:read'), `${role.slug} logbook`).toBe(true)
+      }
+      if (permissions.has('fuel_filling:read') && role.slug !== 'operator') {
+        expect(permissions.has('fuel_review:read'), `${role.slug} performance`).toBe(true)
+      }
+    }
+  })
+})

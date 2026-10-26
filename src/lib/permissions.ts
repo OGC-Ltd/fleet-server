@@ -98,6 +98,14 @@ export const PERMISSION_CATALOGUE = {
   // nothing: every action on it keeps its own slug (triage, repair:*).
   // Granted by migration 20261001090000_fuel_audit_read.
   'fuel_audit:read':       'Open the Fuel Audit',
+  // Fuel > Report's fleet-wide Performance view (every unit against its
+  // standard). Split from `fuel_filling:read` (2026-10-26) because the
+  // operator gets the Report's one-unit Vehicle analytics and not this.
+  'fuel_review:read':      'View the fleet fuel performance review',
+  // The vehicle Logbook. Split from `telemetry:read` (2026-10-26): operator
+  // and technician keep telemetry for the screens they do see, and the
+  // Logbook is not one of them.
+  'logbook:read':          'Open the vehicle Logbook',
 
   // Repair reporting. A technician walks the yard with a list of faulty
   // probes, works through it, and files ONE report covering every unit they
@@ -190,9 +198,9 @@ const ORG_EVERYTHING: PermissionSlug[] = [
   'report:read', 'report:create', 'report:export', 'report:operations',
   'driver:read', 'driver:export',
   'weighbridge:read', 'weighbridge:create', 'weighbridge:update', 'weighbridge:export',
-  'fuel_filling:read', 'fuel_filling:create',
+  'fuel_filling:read', 'fuel_filling:create', 'fuel_review:read',
   'fuel_theft:read', 'fuel_theft:create',
-  'sensor:read',
+  'sensor:read', 'logbook:read',
   // The office reads what technicians file. A repair report nobody upstream
   // can open is a report that exists only in an inbox.
   //
@@ -340,7 +348,8 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'analytics:read', 'analytics:export',
       'report:read', 'report:export', 'report:operations',
       'driver:read', 'driver:export',
-      'fuel_filling:read', 'fuel_theft:read', 'fuel_audit:read',
+      'fuel_filling:read', 'fuel_review:read', 'fuel_theft:read', 'fuel_audit:read',
+      'logbook:read',
       'weighbridge:read', 'weighbridge:export',
       'geofence:read', 'route:read', 'dispatch:read',
       'repair:read', 'repair:flag', 'repair:book',
@@ -360,6 +369,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'dashboard:read', 'trip:read', 'sensor:read',
       'geofence:read', 'geofence:create', 'geofence:update',
       'fuel_theft:read', 'fuel_theft:create', 'fuel_theft:triage', 'fuel_audit:read', 'fuel_filling:read',
+      'fuel_review:read', 'logbook:read',
       'driver:read',
       'report:read', 'report:export', 'report:operations',
       // Suspected malicious damage found in a repair (Repair Workflow 4.2).
@@ -373,6 +383,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       ...TRACKING, ...MAP_TOOLS, 'map:playback',
       'dashboard:read', 'trip:read', 'sensor:read',
       'geofence:read', 'fuel_theft:read', 'fuel_audit:read', 'fuel_filling:read',
+      'fuel_review:read', 'logbook:read',
       'driver:read',
       'report:read', 'report:operations',
       'security_case:read',
@@ -387,8 +398,8 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     description: 'The units assigned to them, and the operations report.',
     permissions: [
       ...TRACKING, ...MAP_TOOLS, 'map:playback',
-      'dashboard:read', 'trip:read', 'fuel_filling:read',
-      'sensor:read', 'dispatch:read',
+      'dashboard:read', 'trip:read', 'fuel_filling:read', 'fuel_review:read',
+      'sensor:read', 'dispatch:read', 'logbook:read',
       'weighbridge:read', 'report:operations',
     ],
   },
@@ -397,25 +408,35 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     description: 'The units assigned to them, and the operations report.',
     permissions: [
       ...TRACKING, ...MAP_TOOLS, 'map:playback',
-      'dashboard:read', 'trip:read', 'fuel_filling:read',
-      'sensor:read', 'dispatch:read',
+      'dashboard:read', 'trip:read', 'fuel_filling:read', 'fuel_review:read',
+      'sensor:read', 'dispatch:read', 'logbook:read',
       'weighbridge:read', 'report:operations',
     ],
   },
 
   // ── Supervision and tracking ─────────────────────────────────────────────
-  // NOT SPECIFIED by the operator: seeded as operator plus the map tools and
-  // analytics, and expected to be corrected in the role editor.
+  // Named by the operator (2026-10-26): live map, alerts, drivers,
+  // maintenance, workshop, weighbridges, the Fleets block (types, in transit,
+  // units), Logbook, Fuel Audit and Fuel Report. Everything an org role gets
+  // EXCEPT analytics, which is the Analytics screen; overspeeding still
+  // reaches them on Alerts through `alerts:read`.
   {
     slug: 'supervisor', name: 'Supervisor', platform: false, vehicleScopable: false,
-    description: 'All resources within the organisations they belong to; no user administration.',
-    permissions: [...ORG_EVERYTHING, 'alerts:read', 'fuel_audit:read'],
+    description: 'Map, alerts, drivers, maintenance, workshop, weighbridges, logbook and fuel audit/report; no analytics, no user administration.',
+    permissions: [
+      ...ORG_EVERYTHING.filter((pm) => !pm.startsWith('analytics:')),
+      'alerts:read', 'fuel_audit:read',
+    ],
   },
   {
     slug: 'operator', name: 'Operator', platform: false, vehicleScopable: true,
-    description: 'Map, alerts, drivers, units, reports and weighbridge for assigned units.',
+    description: 'Map, alerts, drivers, maintenance, units, weighbridge, fuel audit and vehicle fuel analysis for assigned units.',
     /*
-     * Access includes the map, alerts, drivers, units, reports and weighbridge.
+     * Named by the operator (2026-10-26): live map, alerts, drivers,
+     * weighbridges, maintenance, the Fleets block (types, in transit, units),
+     * Fuel Audit, and of Fuel Report only Vehicle analytics. No Logbook
+     * (`logbook:read`), no Performance view (`fuel_review:read`), no Workshop
+     * (`repair:read`), no Analytics.
      *
      * `map:read`, `driver:read`, and the report permissions open those named
      * sidebar resources. `weighbridge:read` opens the weighbridge feeds.
@@ -436,16 +457,24 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'driver:read',
       'report:read', 'report:export', 'report:operations',
       'weighbridge:read',
+      'sensor:read',
+      'fuel_filling:read', 'fuel_audit:read',
     ],
   },
 
   {
     slug: 'technician', name: 'Technician', platform: false, vehicleScopable: false,
-    description: 'Probe and sensor faults for their organisation, and the repairs they file against them. Nothing else.',
+    description: 'The Workshop ControlTech queue: claim jobs and source their parts. Nothing else.',
     /*
+     * 2026-10-26, the operator: technicians see the Workshop and, in it, only
+     * the ControlTech tab. `sensor:read` is GONE (Maintenance closes with
+     * it), and the Workshop's Jobs and Day tabs are drawn only for the
+     * Control Room's verbs, which this role holds none of. The history below
+     * is kept for why the remaining grants are here.
+     *
      * The narrowest role in the system, and narrower than `operator` above.
      *
-     * `sensor:read` is the whole of the read grant that matters. It opens the
+     * `sensor:read` was the whole of the read grant that matters. It opens the
      * Maint tab - the dash grades that button on exactly this slug, the same
      * way it grades Fleet on `map:read` - and it opens the two feeds behind
      * the only two tabs this role sees: /fuel/probe-health and
@@ -483,7 +512,6 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
      */
     permissions: [
       ...TRACKING.filter((pm) => pm !== 'map:read'),
-      'sensor:read',
       'repair:read', 'repair:create', 'repair:resolve',
       // Repair Workflow: claim from the ControlTech queue; source the parts
       // a workshop job is missing.
@@ -513,7 +541,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'dashboard:read', 'trip:read', 'vehicle:read',
       'analytics:read', 'analytics:export',
       'report:read', 'report:export',
-      'fuel_filling:read', 'weighbridge:read',
+      'fuel_filling:read', 'fuel_review:read', 'weighbridge:read',
     ],
   },
 ]
