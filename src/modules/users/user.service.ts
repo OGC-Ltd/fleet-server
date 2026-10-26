@@ -242,6 +242,9 @@ export async function assignRoleToUser(orgId: string, userId: string, dto: Assig
   await getUser(orgId, userId, assignedById)
   try {
     const assigned = await repo.assignRole(userId, dto.roleId, assignedById)
+    // Without this the grant waited out the five-minute subject cache, and the
+    // person's open screens never heard about it.
+    await invalidateSubject(userId)
     await invalidateRosterForUser(userId, orgId)
     return assigned
   } catch (err: unknown) {
@@ -256,6 +259,7 @@ export async function revokeRoleFromUser(orgId: string, userId: string, roleId: 
   await getUser(orgId, userId, actorUserId)
   const result = await repo.revokeRole(userId, roleId)
   if (!result) throw new NotFoundError('Active role assignment')
+  await invalidateSubject(userId)
   await invalidateRosterForUser(userId, orgId)
   return result
 }
