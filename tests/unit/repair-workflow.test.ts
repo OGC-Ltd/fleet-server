@@ -166,6 +166,7 @@ describe('one flag, several faults (2026-10-22)', () => {
       expect(ref.ticketNo).toMatch(/^RT-\d{4}-000\d\d$/)
       expect(ev.audience).toEqual([])
       expect(ev.push).toEqual(['operator', 'head_of_security', 'asst_head_of_security'])
+      expect(ev.source).toBe('repair_ticket')
     }
   })
 
