@@ -42,6 +42,7 @@ vi.mock('../../src/modules/repairs/repairs.workflow.notify.js', () => ({
 import { assessmentSchema, checklistFor, flagUnitsSchema, queueFor, spotFixSchema, CHECKLISTS } from '../../src/modules/repairs/repairs.workflow.schema.js'
 import { book, complete, flagUnits, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
 import { ROLE_DEFINITIONS } from '../../src/lib/permissions.js'
+import { notifyWorkflow } from '../../src/modules/repairs/repairs.workflow.notify.js'
 import { ConflictError, ForbiddenError, UnprocessableError } from '../../src/core/errors/errors.js'
 
 const ORG = 'org-1'
@@ -123,6 +124,31 @@ describe('one flag, several faults (2026-10-22)', () => {
     expect(of('v1', 'gps')).toMatchObject({ targetKind: 'unit', queue: 'controltech', stage: 'forwarded' })
     expect(of('v2', 'ignition')).toMatchObject({ queue: 'controltech' })
     expect(of('v1', 'brakes')).toMatchObject({ queue: 'workshop', stage: 'awaiting_assessment', path: 'physical' })
+  })
+
+  it('sends one notice per unit, naming every fault, not one per job', async () => {
+    const plates: Record<string, string> = { v1: 'KBL 126W', v2: 'KDJ 820Z' }
+    const create = vi.fn(async ({ data }: { data: { items: { create: Array<Record<string, unknown>> } } }) => ({
+      items: data.items.create.map((it, i) => ({ id: `j${i}`, ...it, vehicle: { registrationPlate: plates[it.vehicleId as string] } })),
+    }))
+    const extra = prismaMock as unknown as Record<string, unknown>
+    extra.vehicle = { findMany: vi.fn(async () => [{ id: 'v1', registrationPlate: 'KBL 126W' }, { id: 'v2', registrationPlate: 'KDJ 820Z' }]) }
+    extra.repairReport = { create }
+    tx.repairReportItem.findMany.mockResolvedValueOnce([])
+    tx.repairReportItem.findFirst.mockResolvedValue(null)
+
+    await flagUnits(ORG, 'u1', flagUnitsSchema.parse({
+      vehicleIds: ['v1', 'v2'], faultCategories: ['transmission', 'fuel_probe'], suspectedFault: 'Slipping gears',
+    }), null).catch(() => undefined)
+
+    const calls = vi.mocked(notifyWorkflow).mock.calls
+    expect(calls).toHaveLength(2)
+    expect(calls.map(([ref]) => ref.plate).sort()).toEqual(['KBL 126W', 'KDJ 820Z'])
+    for (const [ref, ev] of calls) {
+      expect(ref.label.split(', ')).toHaveLength(2)
+      expect(ev.key).toBe('flagged')
+      expect(ev.audience).toContain('controltech')
+    }
   })
 
   it('refuses the whole flag when any of its faults is already open, naming it', async () => {
