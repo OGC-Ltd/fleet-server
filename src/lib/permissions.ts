@@ -39,6 +39,12 @@ export const PERMISSION_CATALOGUE = {
   'map:fuel_alerts':       'See fuel alerts on the map',
   'map:filter':            'Filter units by type or feature',
   'map:playback':          'Replay a vehicle journey',
+  // A RESTRICTION, not a capability: in an organisation where a role holds
+  // it, the units that role sees are only those with an open repair job
+  // (lib/authz/subject). A unit drops out once its job is resolved. Named by
+  // the operator for technicians (2026-10-27). Read straight off the role's
+  // grants, never through holds(): the wildcard must not narrow a super admin.
+  'vehicle:flagged_only':  'See only units with an open repair job',
 
   'dashboard:read':        'View the dashboard summary',
   'notification:read':     'View the live feed',
@@ -170,6 +176,9 @@ export const PERMISSION_CATALOGUE = {
 export type PermissionSlug = keyof typeof PERMISSION_CATALOGUE
 
 export const ALL_PERMISSIONS = Object.keys(PERMISSION_CATALOGUE) as PermissionSlug[]
+
+/** See `vehicle:flagged_only` in the catalogue. */
+export const FLAGGED_ONLY: PermissionSlug = 'vehicle:flagged_only'
 
 /** The wildcard. Held only by super_admin, satisfies every check. */
 export const WILDCARD: PermissionSlug = 'platform:admin'
@@ -464,13 +473,17 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
 
   {
     slug: 'technician', name: 'Technician', platform: false, vehicleScopable: false,
-    description: 'The Workshop ControlTech queue: claim jobs and source their parts. Nothing else.',
+    description: 'Units flagged for repair: the live map, units and in transit for those units only; Maintenance probes, malfunctions and repairs; the Workshop ControlTech queue.',
     /*
-     * 2026-10-26, the operator: technicians see the Workshop and, in it, only
-     * the ControlTech tab. `sensor:read` is GONE (Maintenance closes with
-     * it), and the Workshop's Jobs and Day tabs are drawn only for the
-     * Control Room's verbs, which this role holds none of. The history below
-     * is kept for why the remaining grants are here.
+     * 2026-10-27, the operator: technicians see the live map, Units and In
+     * transit only, but ONLY for units with an open repair job, in every
+     * organisation they belong to (`vehicle:flagged_only`, lib/authz/subject);
+     * a unit drops off once its job is resolved. Maintenance is back, with
+     * Probes, Malfunction and Repairs (Fuel FSL and Speed stay closed by their
+     * own slugs). Workshop stays ControlTech only (2026-10-26): its Jobs and
+     * Day tabs need a Control Room verb, which this role holds none of. No
+     * `map:filter` (machine-type chips, halted units) and no `map:fuel_alerts`.
+     * The history below is kept for why the remaining grants are here.
      *
      * The narrowest role in the system, and narrower than `operator` above.
      *
@@ -511,7 +524,8 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
      * them theirs.
      */
     permissions: [
-      ...TRACKING.filter((pm) => pm !== 'map:read'),
+      ...TRACKING, 'map:layers', 'vehicle:flagged_only',
+      'sensor:read',
       'repair:read', 'repair:create', 'repair:resolve',
       // Repair Workflow: claim from the ControlTech queue; source the parts
       // a workshop job is missing.

@@ -628,13 +628,12 @@ export const setUserStatus: RequestHandler = async (req, res, next) => {
 }
 
 /**
- * Replace somebody's roles in THIS organisation.
+ * Replace somebody's role, everywhere they belong.
  *
- * Goes through setMembership rather than the role endpoints below because it
- * is org-scoped by construction: setMembership refuses a membership outside
- * `restrictToOrgId`, and applyMembership refuses platform roles on that path.
- * It also invalidates the authz cache, which the older assignRoleToUser and
- * revokeRoleFromUser do not — a gap worth closing separately.
+ * Changed from THIS organisation's roster, but a person holds one role across
+ * all of their organisations, platform roles included. Platform roles may be
+ * named only by a caller holding the wildcard. Invalidates the authz cache,
+ * which also tells their open sessions to re-read their access.
  */
 export const setUserRole: RequestHandler = async (req, res, next) => {
   try {
@@ -652,20 +651,25 @@ export const setUserRole: RequestHandler = async (req, res, next) => {
     // putMembership: this goes through `setMembership`, which adds the
     // organisation when it is missing.
     await sameGroupOrThrow(req, userId)
-    await assertMayEdit(req, userId)
+    // The change reaches every organisation they belong to, so it needs the
+    // edit right in each: an org admin may not demote somebody who is a
+    // System Administrator or Director elsewhere.
+    const elsewhere = await prisma.orgMembership.findMany({
+      where:  { userId, revokedAt: null },
+      select: { organisationId: true },
+    })
+    for (const org of new Set([orgId, ...elsewhere.map((m) => m.organisationId)])) {
+      await assertMayEdit(req, userId, org)
+    }
 
-    const memberships = await provisioning.setMembership(
-      userId,
-      // allVehicles true and empty scope lists: this endpoint changes ROLES,
-      // and passing a narrower scope here would silently widen or clear a
-      // vehicle restriction set elsewhere. Vehicle scope has its own route.
-      { organisationId: orgId, roleSlugs, allVehicles: true, vehicleIds: [], vehicleGroupIds: [] },
-      {
-        restrictToOrgId: orgId,
-        grantedById: req.user?.id,
-        allowPlatformRoles: await callerMayGrantPlatformRoles(req.user?.id, orgId),
-      },
-    )
+    // Roles are organisation independent (operator, 2026-10-27): this
+    // replaces the role in every organisation they belong to and their
+    // platform roles, not only here. See provisioning.setRolesEverywhere.
+    const memberships = await provisioning.setRolesEverywhere(userId, roleSlugs, {
+      fromOrgId: orgId,
+      grantedById: req.user?.id,
+      allowPlatformRoles: await callerMayGrantPlatformRoles(req.user?.id, orgId),
+    })
     sendSuccess(res, { memberships }, 200)
   } catch (err) { next(err) }
 }

@@ -30,7 +30,8 @@
 import { prisma } from '../prisma.js'
 import { getCacheRedis } from '../redis.js'
 import { logger } from '../logger.js'
-import { WILDCARD } from '../permissions.js'
+import { FLAGGED_ONLY, WILDCARD } from '../permissions.js'
+import { emitAccessChanged } from '../sse.js'
 
 const KEY_PREFIX  = 'authz:v1'
 const EPOCH_KEY   = 'authz:epoch'
@@ -131,15 +132,23 @@ export async function bumpAuthzEpoch(): Promise<void> {
   }
 }
 
-/** Drop one account's cached subject. Use after editing that account's grants. */
+/**
+ * Drop one account's cached subject. Use after editing that account's grants.
+ *
+ * Also tells that account's open dashboards to re-read their access, so a
+ * role change shows at once instead of at their next reload. The cache is
+ * dropped FIRST: the browser's re-read must not be answered from it.
+ */
 export async function invalidateSubject(userId: string): Promise<void> {
   const redis = getCacheRedis()
-  if (!redis) return
-  try {
-    await redis.del(`${KEY_PREFIX}:${await currentEpoch()}:${userId}`)
-  } catch (err) {
-    logger.warn({ err, userId }, 'authz: failed to invalidate subject')
+  if (redis) {
+    try {
+      await redis.del(`${KEY_PREFIX}:${await currentEpoch()}:${userId}`)
+    } catch (err) {
+      logger.warn({ err, userId }, 'authz: failed to invalidate subject')
+    }
   }
+  emitAccessChanged(userId)
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +211,14 @@ async function loadSubject(userId: string): Promise<Subject> {
     byGroup.set(v.vehicleGroupId, [...(byGroup.get(v.vehicleGroupId) ?? []), v.id])
   }
 
+  // Where a role is restricted to flagged units, the units with an open repair
+  // job, read fresh on every resolution. Cached with the rest, and dropped
+  // early by refreshFlaggedScopes when a job opens or closes.
+  const flaggedOrgs = memberships
+    .map((m) => m.organisationId)
+    .filter((orgId) => orgPermissions.get(orgId)?.has(FLAGGED_ONLY))
+  const flagged = await openRepairVehicles(flaggedOrgs)
+
   const orgs = new Map<string, OrgGrant>()
   for (const m of memberships) {
     let vehicleIds: Set<string> | null = null
@@ -211,6 +228,11 @@ async function loadSubject(userId: string): Promise<Subject> {
         if (s.vehicleId) vehicleIds.add(s.vehicleId)
         if (s.vehicleGroupId) for (const id of byGroup.get(s.vehicleGroupId) ?? []) vehicleIds.add(id)
       }
+    }
+    const open = flagged.get(m.organisationId)
+    if (open) {
+      const within = vehicleIds
+      vehicleIds = new Set([...open].filter((id) => !within || within.has(id)))
     }
     orgs.set(m.organisationId, {
       // A membership with no role grants reaches the organisation and can do
@@ -226,6 +248,47 @@ async function loadSubject(userId: string): Promise<Subject> {
     isPlatform: platformPermissions.size > 0,
     platformPermissions,
     orgs,
+  }
+}
+
+/** Units with an open repair job, per organisation asked about. */
+export async function openRepairVehicles(orgIds: string[]): Promise<Map<string, Set<string>>> {
+  const out = new Map<string, Set<string>>(orgIds.map((id) => [id, new Set<string>()]))
+  if (orgIds.length === 0) return out
+  const rows = await prisma.repairReportItem.findMany({
+    where:    { organisationId: { in: orgIds }, resolvedAt: null },
+    select:   { organisationId: true, vehicleId: true },
+    distinct: ['organisationId', 'vehicleId'],
+  })
+  for (const r of rows) out.get(r.organisationId)?.add(r.vehicleId)
+  return out
+}
+
+/** The open-job units each organisation was last seen with, to skip no-op refreshes. */
+const lastFlagged = new Map<string, string>()
+
+/**
+ * A repair job changed in this organisation. If that changed WHICH units have
+ * an open job, everybody there restricted to flagged units gets their scope
+ * re-read now (and, through invalidateSubject, their open map told to reload)
+ * rather than when their cache next expires. Never throws.
+ */
+export async function refreshFlaggedScopes(orgId: string): Promise<void> {
+  try {
+    const now = [...((await openRepairVehicles([orgId])).get(orgId) ?? [])].sort().join(',')
+    if (lastFlagged.get(orgId) === now) return
+    lastFlagged.set(orgId, now)
+    const holders = await prisma.userRole.findMany({
+      where: {
+        revokedAt: null,
+        role: { organisationId: orgId, permissions: { some: { permission: { slug: FLAGGED_ONLY } } } },
+      },
+      select:   { userId: true },
+      distinct: ['userId'],
+    })
+    for (const { userId } of holders) await invalidateSubject(userId)
+  } catch (err) {
+    logger.warn({ err, orgId }, 'authz: could not refresh flagged-unit scopes')
   }
 }
 

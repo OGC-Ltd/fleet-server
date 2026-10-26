@@ -39,6 +39,7 @@ import {
 import { z } from 'zod'
 import { requireWorkableJob } from './repairs.authz.js'
 import { emitDashboardRepairChanged } from '../../lib/sse.js'
+import { refreshFlaggedScopes } from '../../lib/authz/subject.js'
 
 const router = Router({ mergeParams: true })
 
@@ -58,6 +59,8 @@ router.use((req, res, next) => {
       try {
         emitDashboardRepairChanged(req.params.orgId as string)
       } catch { /* a missed broadcast only means a later reload */ }
+      // A unit flagged or resolved changes what a technician's map shows.
+      void refreshFlaggedScopes(req.params.orgId as string)
     })
   }
   next()
