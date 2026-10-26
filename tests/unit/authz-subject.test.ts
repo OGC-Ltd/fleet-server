@@ -254,3 +254,44 @@ describe('only live grants count', () => {
       .toEqual({ userId: 'u1', revokedAt: null })
   })
 })
+
+describe('a role restricted to flagged units (operator, 2026-10-27)', () => {
+  const open = (organisationId: string, vehicleId: string) => ({ organisationId, vehicleId })
+
+  it('sees only the units with an open repair job, in every organisation it holds the restriction', async () => {
+    setup(
+      [membership(ORG_A), membership(ORG_B)],
+      [grant(ORG_A, 'map:read', 'vehicle:flagged_only'), grant(ORG_B, 'map:read', 'vehicle:flagged_only')],
+    )
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.repairReportItem.findMany as any).mockResolvedValue([open(ORG_A, 'v1'), open(ORG_B, 'v9')])
+    const s = await resolveSubject('u1')
+    expect([...vehicleScopeIn(s, ORG_A)!]).toEqual(['v1'])
+    expect([...vehicleScopeIn(s, ORG_B)!]).toEqual(['v9'])
+  })
+
+  it('sees nothing where no job is open, and stays inside a narrower membership', async () => {
+    setup(
+      [membership(ORG_A, false, [{ vehicleId: 'v1', vehicleGroupId: null }]), membership(ORG_B)],
+      [grant(ORG_A, 'vehicle:flagged_only'), grant(ORG_B, 'vehicle:flagged_only')],
+    )
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.repairReportItem.findMany as any).mockResolvedValue([open(ORG_A, 'v1'), open(ORG_A, 'v2')])
+    const s = await resolveSubject('u1')
+    expect([...vehicleScopeIn(s, ORG_A)!]).toEqual(['v1'])
+    expect(vehicleScopeIn(s, ORG_B)!.size).toBe(0)
+  })
+
+  it('leaves other organisations, and a platform administrator, unrestricted', async () => {
+    setup(
+      [membership(ORG_A), membership(ORG_B)],
+      [grant(ORG_A, 'vehicle:flagged_only'), grant(ORG_B, 'map:read')],
+    )
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.repairReportItem.findMany as any).mockResolvedValue([])
+    expect(vehicleScopeIn(await resolveSubject('u1'), ORG_B)).toBeNull()
+
+    setup([membership(ORG_A)], [grant(null, 'platform:admin'), grant(ORG_A, 'vehicle:flagged_only')])
+    expect(vehicleScopeIn(await resolveSubject('u1'), ORG_A)).toBeNull()
+  })
+})

@@ -57,13 +57,14 @@ describe('screen access named on 2026-10-26', () => {
     }
   })
 
-  it('leaves technicians the ControlTech queue and nothing that opens another screen', () => {
+  it('gives technicians the map restricted to flagged units, Maintenance and the ControlTech queue', () => {
+    // Map and Maintenance added 2026-10-27.
     const permissions = permissionsFor('technician')
-    for (const permission of ['repair:read', 'repair:claim']) {
+    for (const permission of ['repair:read', 'repair:claim', 'map:read', 'vehicle:flagged_only', 'sensor:read']) {
       expect(permissions.has(permission), permission).toBe(true)
     }
     for (const permission of [
-      'map:read', 'sensor:read', 'driver:read', 'weighbridge:read', 'analytics:read',
+      'map:filter', 'map:fuel_alerts', 'driver:read', 'weighbridge:read', 'analytics:read',
       'alerts:read', 'fuel_theft:read', 'fuel_audit:read', 'fuel_filling:read', 'logbook:read',
       'repair:flag', 'repair:assess', 'repair:book', 'repair:verify', 'repair:work_any',
     ]) {
@@ -82,5 +83,12 @@ describe('screen access named on 2026-10-26', () => {
         expect(permissions.has('fuel_review:read'), `${role.slug} performance`).toBe(true)
       }
     }
+  })
+})
+
+describe('vehicle:flagged_only', () => {
+  it('is held by the technician alone, so no other role is narrowed by it', () => {
+    const holders = ROLE_DEFINITIONS.filter((r) => r.permissions.includes('vehicle:flagged_only')).map((r) => r.slug)
+    expect(holders).toEqual(['technician'])
   })
 })

@@ -478,12 +478,13 @@ export function emitDashboardNotice(orgId: string, data: unknown) {
  * was authorised once, at handshake, and never asked again. This is how a
  * revocation reaches one that is already running.
  */
-export function closeDashboardStreamsForUser(userId: string): number {
+export function closeDashboardStreamsForUser(userId: string, lastFrame?: string): number {
   let closed = 0
   for (const [key, clients] of registry) {
     if (!key.endsWith(':dashboard')) continue
     for (const client of [...clients]) {
       if (client.userId !== userId) continue
+      try { if (lastFrame) client.res.write(lastFrame) } catch { /* already gone */ }
       try { client.res.end() } catch { /* already gone */ }
       clients.delete(client)
       closed++
@@ -491,4 +492,17 @@ export function closeDashboardStreamsForUser(userId: string): number {
     if (clients.size === 0) registry.delete(key)
   }
   return closed
+}
+
+/**
+ * This person's access just changed (a role, a membership, their status).
+ *
+ * Their open dashboards are told with an `access_changed` frame, on which the
+ * browser re-reads /auth/me and redraws its menus, and the streams are then
+ * closed: each was authorised and scoped at handshake, and the reconnect is
+ * checked against the new access. Without this a demoted user kept the old
+ * screens until they reloaded (operator, 2026-10-27).
+ */
+export function emitAccessChanged(userId: string): number {
+  return closeDashboardStreamsForUser(userId, frameOf('access_changed', { at: new Date().toISOString() }))
 }
