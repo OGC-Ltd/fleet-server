@@ -60,9 +60,9 @@ export interface WorkflowEvent {
   lines?:    { label: string; value: string }[]
   audience:  Audience[]
   at?:       Date
-  /** The feed source; 'repair' unless the notice is for technicians only
-   *  ('repair_flag', see notifications/technician-sources). */
-  source?:   'repair' | 'repair_flag'
+  /** The feed source; 'repair' unless only some viewers may see it
+   *  ('repair_flag', 'repair_ticket': see notifications/restricted-sources). */
+  source?:   'repair' | 'repair_flag' | 'repair_ticket'
   /** Role slugs whose holders get a Web Push notification of this event. */
   push?:     readonly string[]
 }

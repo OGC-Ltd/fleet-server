@@ -58,7 +58,7 @@ describe('getNotifications — vehicleId filter', () => {
 
     expect(prismaMock.notification.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where:   { organisationId: 'org_1', vehicleId: 'veh_1', source: { notIn: ['repair_flag'] } },
+        where:   { organisationId: 'org_1', vehicleId: 'veh_1', source: { notIn: ['repair_flag', 'repair_ticket'] } },
         orderBy: { occurredAt: 'desc' },
         take:    100,
       }),
@@ -246,7 +246,7 @@ describe('getNotifications — vehicle scope', () => {
     expect(primeCache).not.toHaveBeenCalled()
     expect(page.source).toBe('database')
     expect(prismaMock.notification.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { organisationId: 'org_1', vehicleId: { in: ['veh_1', 'veh_2'] }, source: { notIn: ['repair_flag'] } } }),
+      expect.objectContaining({ where: { organisationId: 'org_1', vehicleId: { in: ['veh_1', 'veh_2'] }, source: { notIn: ['repair_flag', 'repair_ticket'] } } }),
     )
   })
 
@@ -256,5 +256,14 @@ describe('getNotifications — vehicle scope', () => {
 
     expect(page.items).toEqual([])
     expect(prismaMock.notification.findMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('getNotifications — restricted sources', () => {
+  it('shows repair ticket notices only to a reader granted them', async () => {
+    await getNotifications('org_1', { vehicleId: 'veh_1', grants: ['repair_ticket'] })
+    expect(prismaMock.notification.findMany).toHaveBeenLastCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ source: { notIn: ['repair_flag'] } }),
+    }))
   })
 })

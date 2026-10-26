@@ -4,7 +4,7 @@ import { registerDashboardClient, writeHeartbeat, replayDashboardPositions, repl
 import { sendSuccess, sendError }   from '../../core/response/response.js'
 import { logger }                   from '../../lib/logger.js'
 import { getNotifications }         from '../../lib/notifications/notification.reader.js'
-import { feedSourcesFor }           from '../../lib/authz/subject.js'
+import { feedSourcesFor, feedGrantsFor } from '../../lib/authz/subject.js'
 
 // ─── GET /api/v1/organisations/:orgId/notifications ───────────────────────
 // Notification history. Served from the Redis cache when it can answer in
@@ -60,6 +60,7 @@ export async function listNotifications(req: Request, res: Response) {
 
   try {
     const sources = req.authz?.userId ? await feedSourcesFor(req.authz.userId, orgId) : null
+    const grants  = req.authz?.userId ? await feedGrantsFor(req.authz.userId, orgId) : []
     const page = await getNotifications(orgId, {
       limit:      parsedLimit,
       before:     beforeDate,
@@ -70,6 +71,7 @@ export async function listNotifications(req: Request, res: Response) {
       vehicleId:  vehicleId ? String(Array.isArray(vehicleId) ? vehicleId[0] : vehicleId) : undefined,
       day:        dayStr,
       vehicleIds: req.authz?.vehicleIds ?? null,
+      grants,
       ...(sources ? { sources } : {}),
     })
     return sendSuccess(res, {
@@ -134,7 +136,8 @@ export async function dashboardStream(req: Request, res: Response) {
   // registered so the replay cannot interleave with a live item arriving
   // mid-read, which would land an older event above a newer one.
   const sources = authz?.userId ? await feedSourcesFor(authz.userId, orgId).catch(() => null) : null
-  const feedReplayed = await replayDashboardFeed(orgId, res, 40, vehicleIds, sources)
+  const grants  = authz?.userId ? await feedGrantsFor(authz.userId, orgId).catch(() => []) : []
+  const feedReplayed = await replayDashboardFeed(orgId, res, 40, vehicleIds, sources, grants)
     .catch((err) => { logger.warn({ err, orgId }, 'Feed replay failed — panel starts empty and fills from live events'); return 0 })
 
   // Then the fleet's last-known positions, so this client is in sync with
@@ -150,6 +153,7 @@ export async function dashboardStream(req: Request, res: Response) {
 
   const cleanup   = registerDashboardClient(orgId, res, {
     vehicleIds, userId: authz?.userId, delta, feedSources: sources ? new Set(sources) : null,
+    feedGrants: grants.length ? new Set(grants) : null,
   })
   // Its OWN socket only — see writeHeartbeat for why this is not a broadcast.
   const heartbeat = setInterval(() => writeHeartbeat(res), HEARTBEAT_MS)

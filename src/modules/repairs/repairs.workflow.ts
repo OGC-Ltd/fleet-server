@@ -154,7 +154,9 @@ async function ticketFields(tx: Tx, job: { ticketNo: string | null }, at = new D
 /**
  * Push the ticket numbers just issued to the operator, Head of Security and
  * Assistant Head of Security: one notice per unit, naming every ticket it got.
- * A push notification, not mail (operator, 2026-10-27); the feed line stays.
+ * A push notification, not mail (operator, 2026-10-27). The feed line is a
+ * repair_ticket item: only the operator, supervisor and both security heads
+ * see it (notifications/restricted-sources), never the technicians.
  */
 async function tellTickets(jobs: Job[], how: string) {
   const byUnit = new Map<string, Job[]>()
@@ -166,7 +168,7 @@ async function tellTickets(jobs: Job[], how: string) {
       key: 'ticket', severity: 'info', headline: 'Repair ticket issued',
       text: `ticket ${nos} issued: ${how}`,
       lines: [{ label: group.length > 1 ? 'Tickets' : 'Ticket', value: tickets }, { label: 'Path', value: how }],
-      audience: [], push: TICKET_PUSH_ROLES,
+      audience: [], push: TICKET_PUSH_ROLES, source: 'repair_ticket',
     })
   }
 }

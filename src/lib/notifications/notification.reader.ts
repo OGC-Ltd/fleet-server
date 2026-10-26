@@ -7,7 +7,7 @@
  * that simply wanted yesterday, had nothing.
  */
 
-import { TECHNICIAN_ONLY_SOURCES, withoutTechnicianOnly } from './technician-sources.js'
+import { hiddenSources, withoutRestricted } from './restricted-sources.js'
 import { prisma } from '../prisma.js'
 import { readCachedNotifications, primeCache, readCachedVehicleDay, cacheVehicleDay, type NotificationItem } from './notification-cache.js'
 import { env } from '../../config/env.js'
@@ -75,6 +75,8 @@ export interface NotificationQuery {
   vehicleIds?: Set<string> | null
   /** Restrict to these `source`s, e.g. `['repair']` for a technician. */
   sources?: string[]
+  /** Restricted sources this reader may see (restricted-sources feedGrantsFor). */
+  grants?: string[] | null
 }
 
 /** DB row → the same shape the SSE feed and the cache use. */
@@ -105,11 +107,12 @@ function toItem(row: {
  */
 export async function getNotifications(
   orgId: string,
-  { limit = 50, before, alertTypes, severities, vehicleId, day, vehicleIds = null, sources }: NotificationQuery = {},
+  { limit = 50, before, alertTypes, severities, vehicleId, day, vehicleIds = null, sources, grants = null }: NotificationQuery = {},
 ): Promise<NotificationPage> {
   if (vehicleIds && vehicleId && !vehicleIds.has(vehicleId)) return { items: [], source: 'database' }
-  // A read naming no sources is not a technician's: their flag notices stay out.
-  const hide = <T extends { source?: string | null }>(items: T[]) => (sources?.length ? items : withoutTechnicianOnly(items))
+  // A read naming no sources is not a technician's: restricted sources it was
+  // not granted stay out (notifications/restricted-sources).
+  const hide = <T extends { source?: string | null }>(items: T[]) => (sources?.length ? items : withoutRestricted(items, grants))
 
   /**
    * A whole vehicle-day is allowed past the paging cap.
@@ -173,7 +176,7 @@ export async function getNotifications(
       ...(vehicleId ? { vehicleId } : vehicleIds ? { vehicleId: { in: [...vehicleIds] } } : {}),
       ...(alertTypes?.length ? { alertType: { in: alertTypes } } : {}),
       ...(severities?.length ? { severity:  { in: severities } } : {}),
-      ...(sources?.length ? { source: { in: sources } } : { source: { notIn: [...TECHNICIAN_ONLY_SOURCES] } }),
+      ...(sources?.length ? { source: { in: sources } } : { source: { notIn: hiddenSources(grants) } }),
     },
     orderBy: { occurredAt: 'desc' },
     take:    capped,
