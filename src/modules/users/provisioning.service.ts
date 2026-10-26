@@ -116,6 +116,14 @@ async function applyMembership(
     throw new NotFoundError(`Role(s) ${missing.join(', ')} in this organisation`)
   }
 
+  // One role per organisation (operator, 2026-10-27). A platform role is not
+  // an organisation's, so it does not count against it.
+  if (roles.filter((r) => r.organisationId !== null).length > 1) {
+    throw new ValidationError({
+      memberships: [`${input.organisationId}: a person holds one role per organisation`],
+    })
+  }
+
   if (!allVehicles && roles.some((role) => !VEHICLE_SCOPABLE_ROLE_SLUGS.includes(role.slug))) {
     throw new ValidationError({
       memberships: [`${input.organisationId}: one or more assigned roles require access to the whole organisation`],

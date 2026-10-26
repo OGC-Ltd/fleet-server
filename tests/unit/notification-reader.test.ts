@@ -237,3 +237,24 @@ describe('the whole fleet, one fleet day', () => {
     expect(primeCache).not.toHaveBeenCalled()
   })
 })
+
+describe('getNotifications — vehicle scope', () => {
+  it('reads only the units in scope, from Postgres, without priming the cache', async () => {
+    const page = await getNotifications('org_1', { vehicleIds: new Set(['veh_1', 'veh_2']) })
+
+    expect(readCachedNotifications).not.toHaveBeenCalled()
+    expect(primeCache).not.toHaveBeenCalled()
+    expect(page.source).toBe('database')
+    expect(prismaMock.notification.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { organisationId: 'org_1', vehicleId: { in: ['veh_1', 'veh_2'] } } }),
+    )
+  })
+
+  it('answers nothing for a vehicle outside the scope', async () => {
+    vi.mocked(prismaMock.notification.findMany).mockClear()
+    const page = await getNotifications('org_1', { vehicleId: 'veh_9', vehicleIds: new Set(['veh_1']) })
+
+    expect(page.items).toEqual([])
+    expect(prismaMock.notification.findMany).not.toHaveBeenCalled()
+  })
+})
