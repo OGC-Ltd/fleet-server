@@ -58,7 +58,7 @@ describe('getNotifications — vehicleId filter', () => {
 
     expect(prismaMock.notification.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where:   { organisationId: 'org_1', vehicleId: 'veh_1' },
+        where:   { organisationId: 'org_1', vehicleId: 'veh_1', source: { notIn: ['repair_flag'] } },
         orderBy: { occurredAt: 'desc' },
         take:    100,
       }),
@@ -246,7 +246,7 @@ describe('getNotifications — vehicle scope', () => {
     expect(primeCache).not.toHaveBeenCalled()
     expect(page.source).toBe('database')
     expect(prismaMock.notification.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { organisationId: 'org_1', vehicleId: { in: ['veh_1', 'veh_2'] } } }),
+      expect.objectContaining({ where: { organisationId: 'org_1', vehicleId: { in: ['veh_1', 'veh_2'] }, source: { notIn: ['repair_flag'] } } }),
     )
   })
 

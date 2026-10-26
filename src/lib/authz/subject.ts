@@ -357,8 +357,9 @@ export function vehicleScopeIn(subject: Subject, orgId: string): Set<string> | n
   return grant.vehicleIds
 }
 
-/** What a technician's Live Feed carries: the repair workflow's notices. */
-export const FLAGGED_ONLY_FEED_SOURCES = ['repair'] as const
+/** What a technician's Live Feed carries: the repair workflow's notices,
+ *  and the flag notices only they see (notifications/technician-sources). */
+export const FLAGGED_ONLY_FEED_SOURCES = ['repair', 'repair_flag'] as const
 
 /**
  * The feed sources this person is limited to in an organisation, or null for
