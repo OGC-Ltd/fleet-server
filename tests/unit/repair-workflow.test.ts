@@ -40,7 +40,7 @@ vi.mock('../../src/modules/repairs/repairs.workflow.notify.js', () => ({
 }))
 
 import { assessmentSchema, checklistFor, flagUnitsSchema, queueFor, spotFixSchema, CHECKLISTS } from '../../src/modules/repairs/repairs.workflow.schema.js'
-import { book, complete, flagUnits, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
+import { book, complete, decidePath, flagUnits, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
 import { ROLE_DEFINITIONS } from '../../src/lib/permissions.js'
 import { notifyWorkflow } from '../../src/modules/repairs/repairs.workflow.notify.js'
 import { ConflictError, ForbiddenError, UnprocessableError } from '../../src/core/errors/errors.js'
@@ -136,12 +136,15 @@ describe('one flag, several faults (2026-10-22)', () => {
     extra.repairReport = { create }
     tx.repairReportItem.findMany.mockResolvedValueOnce([])
     tx.repairReportItem.findFirst.mockResolvedValue(null)
+    let n = 40
+    tx.$queryRaw.mockImplementation(async () => [{ n: BigInt(++n) }])
 
     await flagUnits(ORG, 'u1', flagUnitsSchema.parse({
       vehicleIds: ['v1', 'v2'], faultCategories: ['transmission', 'fuel_probe'], suspectedFault: 'Slipping gears',
     }), null).catch(() => undefined)
 
-    const calls = vi.mocked(notifyWorkflow).mock.calls
+    const all = vi.mocked(notifyWorkflow).mock.calls
+    const calls = all.filter(([, ev]) => ev.key === 'flagged')
     expect(calls).toHaveLength(2)
     expect(calls.map(([ref]) => ref.plate).sort()).toEqual(['KBL 126W', 'KDJ 820Z'])
     for (const [ref, ev] of calls) {
@@ -149,6 +152,18 @@ describe('one flag, several faults (2026-10-22)', () => {
       expect(ev.key).toBe('flagged')
       expect(ev.audience).toEqual([])
       expect(ev.source).toBe('repair_flag')
+    }
+
+    // Transmission lands on the physical path, so it is ticketed at the flag;
+    // the fuel probe waits for ControlTech's remote-or-physical decision.
+    const items = create.mock.calls[0][0].data.items.create
+    expect(items.filter((i) => i.ticketNo)).toHaveLength(2)
+    expect(items.find((i) => i.faultCategory === 'fuel_probe')?.ticketNo).toBeUndefined()
+    const tickets = all.filter(([, ev]) => ev.key === 'ticket')
+    expect(tickets).toHaveLength(2)
+    for (const [ref, ev] of tickets) {
+      expect(ref.ticketNo).toMatch(/^RT-\d{4}-000\d\d$/)
+      expect(ev.audience).toEqual(['ticket_desk'])
     }
   })
 
@@ -216,6 +231,33 @@ describe('the workshop takes 3 booked vehicles a day', () => {
   it('refuses a scoped user a unit outside their scope', async () => {
     await expect(book(ORG, 'job-1', 'u-1', { workshopId: 'w-1', date: new Date('2030-01-10T00:00:00.000Z') }, new Set(['v-other'])))
       .rejects.toBeInstanceOf(ForbiddenError)
+  })
+})
+
+describe('a ticket for every fix, remote or physical (2026-10-27)', () => {
+  it.each([['remote', 'remote_fix', 'fixing remotely'], ['physical', 'awaiting_assessment', 'physical inspection']] as const)(
+    'issues the ticket when the path is %s, and tells the ticket desk', async (path, stage, how) => {
+      tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'forwarded', queue: 'controltech', faultCategory: 'gps', path: null }))
+      tx.$queryRaw.mockResolvedValue([{ n: 77n }])
+      await decidePath(ORG, 'job-1', 'u-1', { path }).catch(() => undefined)
+      expect(tx.repairReportItem.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ stage, path, ticketNo: `RT-${new Date().getUTCFullYear()}-00077` }),
+      }))
+      const ticket = vi.mocked(notifyWorkflow).mock.calls.find(([, ev]) => ev.key === 'ticket')
+      expect(ticket?.[1]).toMatchObject({ audience: ['ticket_desk'], text: expect.stringContaining(how) })
+    })
+
+  it('keeps the ticket a job already has', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'remote_fix', ticketNo: 'RT-2026-00005', path: 'remote' }))
+    await decidePath(ORG, 'job-1', 'u-1', { path: 'physical' }).catch(() => undefined)
+    expect(tx.$queryRaw).not.toHaveBeenCalled()
+    expect(vi.mocked(notifyWorkflow).mock.calls.some(([, ev]) => ev.key === 'ticket')).toBe(false)
+  })
+
+  it('completes a ticketed remote fix with no damage step', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'remote_fix', path: 'remote', ticketNo: 'RT-2026-00005' }))
+    const out = await complete(ORG, 'job-1', 'u-1', { testResult: 'pass', fixNote: 'Reconfigured the tracker' }).catch((e) => e)
+    expect(out).not.toBeInstanceOf(UnprocessableError)
   })
 })
 

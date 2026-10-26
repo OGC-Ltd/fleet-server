@@ -1519,7 +1519,7 @@ model RepairReportItem {
   pathNote               String?   @map("path_note")
   pathDecidedById        String?   @map("path_decided_by_id")
   pathDecidedAt          DateTime? @map("path_decided_at")
-  /// RT-YYYY-NNNNN from sequence repair_ticket_seq, issued on arrival. UNIQUE.
+  /// RT-YYYY-NNNNN from sequence repair_ticket_seq, issued when the path (remote or physical) is set. UNIQUE.
   ticketNo               String?   @unique @map("ticket_no")
   ticketIssuedAt         DateTime? @map("ticket_issued_at")
   /// The second assignee slot: who works it in the workshop. A user, or a
