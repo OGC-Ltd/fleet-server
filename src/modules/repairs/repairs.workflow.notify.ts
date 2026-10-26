@@ -24,15 +24,17 @@ import { logger } from '../../lib/logger.js'
 import { prisma } from '../../lib/prisma.js'
 import { repairWorkflowEmail } from '../../lib/mailer/templates.js'
 import { enqueueMail, enqueueNotification, isAccepted } from '../../lib/queues/outbound.js'
+import { pushService } from '../notifications/notifications.service.js'
 import { repairRecipients } from './repairs.service.js'
 
 export const CONTROL_ROOM_ROLES = ['supervisor', 'fleet_analyst', 'operator'] as const
 export const HEAD_OF_SECURITY_ROLE = 'head_of_security'
-/** Who is told a repair ticket number once it is issued (operator, 2026-10-27). */
-export const TICKET_DESK_ROLES = ['operator', 'supervisor', HEAD_OF_SECURITY_ROLE, 'asst_head_of_security'] as const
+/** Who gets a push notification with a repair ticket number once it is
+ *  issued — by push, not mail (operator, 2026-10-27). */
+export const TICKET_PUSH_ROLES = ['operator', HEAD_OF_SECURITY_ROLE, 'asst_head_of_security'] as const
 
 export type Audience =
-  | 'control_room' | 'controltech' | 'assignee' | 'head_of_security' | 'stores' | 'channel' | 'ticket_desk'
+  | 'control_room' | 'controltech' | 'assignee' | 'head_of_security' | 'stores' | 'channel'
 
 export interface JobRef {
   itemId:    string
@@ -61,6 +63,8 @@ export interface WorkflowEvent {
   /** The feed source; 'repair' unless the notice is for technicians only
    *  ('repair_flag', see notifications/technician-sources). */
   source?:   'repair' | 'repair_flag'
+  /** Role slugs whose holders get a Web Push notification of this event. */
+  push?:     readonly string[]
 }
 
 const live = {
@@ -71,10 +75,20 @@ const live = {
 /** Live holders of any of these role slugs in this organisation, with the
  *  vehicle scope applied for scoped memberships. */
 export async function roleHolderEmails(orgId: string, slugs: readonly string[], vehicleId?: string): Promise<string[]> {
+  return dedupe((await roleHolders(orgId, slugs, vehicleId, true)).map((u) => u.email))
+}
+
+/** The same holders as user ids, for push: an account with no email still has
+ *  devices. */
+export async function roleHolderIds(orgId: string, slugs: readonly string[], vehicleId?: string): Promise<string[]> {
+  return [...new Set((await roleHolders(orgId, slugs, vehicleId, false)).map((u) => u.id))]
+}
+
+async function roleHolders(orgId: string, slugs: readonly string[], vehicleId: string | undefined, withEmail: boolean) {
   const users = await prisma.user.findMany({
     where: {
       ...live,
-      email: { not: null },
+      ...(withEmail ? { email: { not: null } } : {}),
       OR: [
         { organisationId: orgId },
         { memberships: { some: { organisationId: orgId, revokedAt: null } } },
@@ -82,6 +96,7 @@ export async function roleHolderEmails(orgId: string, slugs: readonly string[], 
       userRoles: { some: { revokedAt: null, role: { slug: { in: [...slugs] }, organisationId: orgId } } },
     },
     select: {
+      id: true,
       email: true,
       memberships: {
         where: { organisationId: orgId, revokedAt: null },
@@ -94,11 +109,11 @@ export async function roleHolderEmails(orgId: string, slugs: readonly string[], 
     const v = await prisma.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleGroupId: true } })
     groupId = v?.vehicleGroupId ?? null
   }
-  return dedupe(users.filter((u) => {
+  return users.filter((u) => {
     const m = u.memberships[0]
     if (!vehicleId || !m || m.allVehicles) return true
     return m.vehicleScopes.some((s) => s.vehicleId === vehicleId || (groupId && s.vehicleGroupId === groupId))
-  }).map((u) => u.email))
+  })
 }
 
 /** Technicians assigned to this organisation. Used to keep them OFF repair
@@ -145,7 +160,6 @@ async function resolveAudience(ref: JobRef, audience: Audience[]): Promise<{ to:
       // the repair notices (operator, 2026-10-27), so they are not mailed.
       if (a === 'assignee') out.push(...await userEmails([ref.assignedToId, ref.workshopTechnicianId]))
       if (a === 'channel') out.push(...repairRecipients())
-      if (a === 'ticket_desk') out.push(...await roleHolderEmails(ref.orgId, TICKET_DESK_ROLES, ref.vehicleId))
       // Stores has no role of its own yet (plan Q7b); whoever may issue from
       // stores in this organisation hears about a request.
       if (a === 'stores') out.push(...await roleHolderEmails(ref.orgId, ['admin'], ref.vehicleId))
@@ -187,6 +201,21 @@ export async function notifyWorkflow(ref: JobRef, ev: WorkflowEvent): Promise<{ 
     })
   } catch (err) {
     logger.error({ err, itemId: ref.itemId, key: ev.key }, 'repair workflow: could not publish the feed item')
+  }
+
+  if (ev.push?.length) {
+    try {
+      const ids = await roleHolderIds(ref.orgId, ev.push, ref.vehicleId)
+      await pushService.sendToUsers(ids, {
+        title: ev.headline,
+        body:  `${plateRef} · ${ref.label}: ${ev.text}`,
+        tag:   `repair-${ev.key}-${ref.itemId}`,
+        icon:  '/logo-icon.png',
+        data:  { url: '/', orgId: ref.orgId, itemId: ref.itemId },
+      })
+    } catch (err) {
+      logger.error({ err, itemId: ref.itemId, key: ev.key }, 'repair workflow: could not send the push notification')
+    }
   }
 
   const { to, securityFallback } = await resolveAudience(ref, ev.audience)
