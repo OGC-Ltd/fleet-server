@@ -13,7 +13,7 @@ import { prisma } from '../../lib/prisma.js'
  */
 export type AssignmentEmailResult =
   | { sent: true; assigneeName: string }
-  | { sent: false; reason: 'self-assignment' | 'unassigned' | 'no-assignee-email' | 'unconfigured' | 'send-failed' | 'queued'; assigneeName?: string }
+  | { sent: false; reason: 'self-assignment' | 'in-app' | 'unassigned' | 'no-assignee-email' | 'unconfigured' | 'send-failed' | 'queued'; assigneeName?: string }
 
 export interface NotifyRepairAssignmentInput {
   itemId: string
@@ -25,6 +25,16 @@ export interface NotifyRepairAssignmentInput {
 
 export async function notifyRepairAssignment(input: NotifyRepairAssignmentInput): Promise<AssignmentEmailResult> {
   if (input.assignedById === input.assignedToId) return { sent: false, reason: 'self-assignment' }
+
+  // Technicians are not mailed: the assignment reaches them in the app's Live
+  // Feed and bell (operator, 2026-10-27).
+  const technician = await prisma.userRole.findFirst({
+    where:  { userId: input.assignedToId, revokedAt: null, role: { slug: 'technician', organisationId: input.orgId } },
+    select: { id: true, user: { select: { fullName: true } } },
+  })
+  if (technician) {
+    return { sent: false, reason: 'in-app', ...(technician.user.fullName ? { assigneeName: technician.user.fullName } : {}) }
+  }
 
   const [assigner, assignee, item] = await Promise.all([
     prisma.user.findUnique({

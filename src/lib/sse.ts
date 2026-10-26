@@ -19,6 +19,9 @@ interface SseClient {
   /** Asked for `position_delta` (changed vehicles and fields only) instead of
    *  full `position` frames — see positionDelta. */
   delta?: boolean
+  /** Feed items of these sources only; null for all. A technician's Live Feed
+   *  is the repair notifications on their flagged units (feedSourcesFor). */
+  feedSources?: Set<string> | null
 }
 
 /**
@@ -29,7 +32,8 @@ interface SseClient {
  * concerns a vehicle this person may see. Keep-alives are the exception -
  * withholding those would just kill the connection.
  */
-function visibleTo(client: SseClient, event: string, vehicleId: string | null): boolean {
+function visibleTo(client: SseClient, event: string, vehicleId: string | null, source?: string | null): boolean {
+  if (event === 'feed' && client.feedSources && !(source && client.feedSources.has(source))) return false
   if (client.vehicleIds === null) return true
   if (event === 'heartbeat' || event === 'connected') return true
   return vehicleId !== null && client.vehicleIds.has(vehicleId)
@@ -214,6 +218,8 @@ const MAX_BUFFERED_BYTES = 4 * 1024 * 1024
 
 interface Queued {
   seq: number; event: string; vehicleId: string | null; frame: string
+  /** Feed events only: the item's source, for clients limited by feedSources. */
+  source?: string | null
   /** Position events only: the change since the vehicle's previous position,
    *  or null when nothing changed. */
   delta?: Record<string, unknown> | null
@@ -230,12 +236,12 @@ function frameOf(event: string, data: unknown): string {
 
 function enqueueDashboard(
   orgId: string, event: string, vehicleId: string | null, frame: string,
-  delta?: Record<string, unknown> | null,
+  delta?: Record<string, unknown> | null, source?: string | null,
 ) {
   if (!registry.get(dashboardKey(orgId))?.size) return
   let q = outbox.get(orgId)
   if (!q) { q = []; outbox.set(orgId, q) }
-  q.push({ seq: ++seq, event, vehicleId, frame, delta })
+  q.push({ seq: ++seq, event, vehicleId, frame, delta, source })
   if (!flushTimer) {
     flushTimer = setTimeout(flushDashboards, FLUSH_MS)
     flushTimer.unref?.()
@@ -253,14 +259,14 @@ function flushDashboards() {
     let sharedFull: Buffer | null = null
     let sharedDelta: Buffer | null = null
     for (const client of [...clients]) {
-      if (client.vehicleIds === null && (client.fromSeq ?? 0) < firstSeq) {
+      if (client.vehicleIds === null && !client.feedSources && (client.fromSeq ?? 0) < firstSeq) {
         const buf = client.delta
           ? (sharedDelta ??= Buffer.from(encodeBatch(items, true)))
           : (sharedFull  ??= Buffer.from(encodeBatch(items, false)))
         if (buf.length) writeOrDrop(client, buf, clients)
         continue
       }
-      const mine = items.filter((i) => i.seq > (client.fromSeq ?? 0) && visibleTo(client, i.event, i.vehicleId))
+      const mine = items.filter((i) => i.seq > (client.fromSeq ?? 0) && visibleTo(client, i.event, i.vehicleId, i.source))
       const chunk = encodeBatch(mine, client.delta === true)
       if (chunk) writeOrDrop(client, chunk, clients)
     }
@@ -321,12 +327,13 @@ export function writeHeartbeat(res: Response): void {
 export function registerDashboardClient(
   orgId: string,
   res: Response,
-  scope: { vehicleIds?: Set<string> | null; userId?: string; delta?: boolean } = {},
+  scope: { vehicleIds?: Set<string> | null; userId?: string; delta?: boolean; feedSources?: Set<string> | null } = {},
 ): () => void {
   const key = dashboardKey(orgId)
   if (!registry.has(key)) registry.set(key, new Set())
   const client: SseClient = {
     res, vehicleIds: scope.vehicleIds ?? null, userId: scope.userId, fromSeq: seq, delta: scope.delta === true,
+    feedSources: scope.feedSources ?? null,
   }
   registry.get(key)!.add(client)
   return () => {
@@ -355,7 +362,9 @@ export function registerDashboardClient(
  */
 export function emitDashboardFeed(orgId: string, item: unknown) {
   const stamped = { ...(item as Record<string, unknown>), orgId }
-  broadcastDashboard(orgId, 'feed', stamped)
+  const source = (stamped as { source?: unknown }).source
+  enqueueDashboard(orgId, 'feed', vehicleIdOf(stamped), frameOf('feed', stamped), undefined,
+    typeof source === 'string' ? source : null)
 }
 
 /**
@@ -372,9 +381,10 @@ export async function replayDashboardFeed(
   res: Response,
   limit = 40,
   vehicleIds: Set<string> | null = null,
+  sources: string[] | null = null,
 ): Promise<number> {
   const { getNotifications } = await import('./notifications/notification.reader.js')
-  const { items } = await getNotifications(orgId, { limit })
+  const { items } = await getNotifications(orgId, { limit, ...(sources ? { sources, vehicleIds } : {}) })
 
   // getNotifications returns newest-first; the panel wants the replay in
   // arrival order so its prepend leaves the newest at the top.

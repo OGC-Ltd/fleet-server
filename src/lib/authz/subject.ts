@@ -356,3 +356,18 @@ export function vehicleScopeIn(subject: Subject, orgId: string): Set<string> | n
   if (!grant) return new Set()
   return grant.vehicleIds
 }
+
+/** What a technician's Live Feed carries: the repair workflow's notices. */
+export const FLAGGED_ONLY_FEED_SOURCES = ['repair'] as const
+
+/**
+ * The feed sources this person is limited to in an organisation, or null for
+ * every source. A role restricted to flagged units (technician) sees the
+ * repair notifications on those units rather than the tracking feed
+ * (operator, 2026-10-27).
+ */
+export async function feedSourcesFor(userId: string, orgId: string): Promise<string[] | null> {
+  const subject = await resolveSubject(userId)
+  if (subject.isPlatform) return null
+  return subject.orgs.get(orgId)?.permissions.has(FLAGGED_ONLY) ? [...FLAGGED_ONLY_FEED_SOURCES] : null
+}

@@ -72,6 +72,8 @@ export interface NotificationQuery {
    * withheld, the same fail-closed rule as the live stream (lib/sse).
    */
   vehicleIds?: Set<string> | null
+  /** Restrict to these `source`s, e.g. `['repair']` for a technician. */
+  sources?: string[]
 }
 
 /** DB row → the same shape the SSE feed and the cache use. */
@@ -102,7 +104,7 @@ function toItem(row: {
  */
 export async function getNotifications(
   orgId: string,
-  { limit = 50, before, alertTypes, severities, vehicleId, day, vehicleIds = null }: NotificationQuery = {},
+  { limit = 50, before, alertTypes, severities, vehicleId, day, vehicleIds = null, sources }: NotificationQuery = {},
 ): Promise<NotificationPage> {
   if (vehicleIds && vehicleId && !vehicleIds.has(vehicleId)) return { items: [], source: 'database' }
 
@@ -126,7 +128,7 @@ export async function getNotifications(
    * authoritative. Today always reads through.
    */
   const dayComplete = Boolean(dayRange && dayRange.to.getTime() <= Date.now())
-  if (vehicleId && day && dayComplete && !before && !alertTypes?.length && !severities?.length) {
+  if (vehicleId && day && dayComplete && !before && !alertTypes?.length && !severities?.length && !sources?.length) {
     const cached = await readCachedVehicleDay(vehicleId, day)
     // `[]` is a real answer here — a unit that reported nothing that day — so
     // only a null miss falls through.
@@ -145,7 +147,7 @@ export async function getNotifications(
   // with the day's cursor pointing before the day began. It also primed the
   // cache from a day-bounded page, which for a past day is old history
   // shadowing everything newer.
-  const filtered = Boolean(alertTypes?.length || severities?.length || vehicleId || dayRange || vehicleIds)
+  const filtered = Boolean(alertTypes?.length || severities?.length || vehicleId || dayRange || vehicleIds || sources?.length)
 
   if (!before && !filtered) {
     const cached = await readCachedNotifications(orgId, capped)
@@ -168,6 +170,7 @@ export async function getNotifications(
       ...(vehicleId ? { vehicleId } : vehicleIds ? { vehicleId: { in: [...vehicleIds] } } : {}),
       ...(alertTypes?.length ? { alertType: { in: alertTypes } } : {}),
       ...(severities?.length ? { severity:  { in: severities } } : {}),
+      ...(sources?.length ? { source: { in: sources } } : {}),
     },
     orderBy: { occurredAt: 'desc' },
     take:    capped,
@@ -198,7 +201,7 @@ export async function getNotifications(
    * that would cache a truncated day as if it were the whole one.
    */
   if (vehicleId && day && dayRange && dayComplete && !before && !alertTypes?.length && !severities?.length
-      && rows.length < capped) {
+      && !sources?.length && rows.length < capped) {
     void cacheVehicleDay(vehicleId, day, items, dayRange.from.getTime())
   }
 
