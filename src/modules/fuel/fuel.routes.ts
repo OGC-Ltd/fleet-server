@@ -32,7 +32,9 @@ router.get('/tank-state', requirePermission('fuel_filling:read'), ctrl.listTankS
 // Whole-fleet probe and sensor health. Unpaginated for the same reason as
 // tank-state, and cached in the service — see probe-report.service.
 // Fleet-wide fuel performance review: each unit's refills against its standard.
-router.get('/performance-review', requirePermission('fuel_filling:read'), ctrl.performanceReview)
+// The fleet-wide view needs fuel_review:read; one unit's stays on fuel_filling:read
+// (the operator's Vehicle analytics and the unit card read it).
+router.get('/performance-review', requirePermission('fuel_review:read'), ctrl.performanceReview)
 router.get('/performance-review/vehicles/:vehicleId', requirePermission('fuel_filling:read'), requireVehicleInScope, ctrl.unitPerformance)
 
 router.get('/probe-health', requirePermission('sensor:read'), ctrl.listProbeHealth)

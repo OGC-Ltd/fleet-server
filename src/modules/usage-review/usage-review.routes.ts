@@ -169,11 +169,13 @@ const getDay: RequestHandler = async (req, res, next) => {
 
 const router = Router({ mergeParams: true })
 router.use(authenticate, requireOrgAccess)
-const guard = [requirePermission('telemetry:read'), requireVehicleInScope, validateQuery(reviewQuery)]
+// logbook:read on top of telemetry:read: operator and technician read telemetry
+// for other screens and are not given the Logbook (2026-10-26).
+const guard = [requirePermission('telemetry:read'), requirePermission('logbook:read'), requireVehicleInScope, validateQuery(reviewQuery)]
 router.get('/vehicles/:vehicleId/usage-review', ...guard, getReview)
 router.get('/vehicles/:vehicleId/usage-review/xlsx', ...guard, getXlsx)
 router.get('/vehicles/:vehicleId/usage-review/pdf', ...guard, getPdf)
-router.post('/vehicles/:vehicleId/usage-review/activities', requirePermission('telemetry:read'), requireVehicleInScope, validateBody(activitiesBody), postActivities)
-router.get('/vehicles/:vehicleId/usage-review/day', requirePermission('telemetry:read'), requireVehicleInScope, validateQuery(dayQuery), getDay)
+router.post('/vehicles/:vehicleId/usage-review/activities', requirePermission('telemetry:read'), requirePermission('logbook:read'), requireVehicleInScope, validateBody(activitiesBody), postActivities)
+router.get('/vehicles/:vehicleId/usage-review/day', requirePermission('telemetry:read'), requirePermission('logbook:read'), requireVehicleInScope, validateQuery(dayQuery), getDay)
 
 export default router
