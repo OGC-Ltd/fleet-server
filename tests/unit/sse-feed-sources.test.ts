@@ -26,4 +26,21 @@ describe('feed sources on the dashboard stream', () => {
     for (const id of ['a', 'b', 'c']) expect(written(ops)).toContain(`"id":"${id}"`)
     offTech(); offOps()
   })
+
+  it('keeps a flag notice to the technician, off the rest of the feed', () => {
+    vi.useFakeTimers()
+    const tech = fakeRes()
+    const ops  = fakeRes()
+    const offTech = registerDashboardClient('org-g', tech, { vehicleIds: new Set(['v1']), feedSources: new Set(['repair', 'repair_flag']) })
+    const offOps  = registerDashboardClient('org-g', ops)
+
+    emitDashboardFeed('org-g', { id: 'f', source: 'repair_flag', vehicleId: 'v1', text: 'flagged' })
+    emitDashboardFeed('org-g', { id: 'z', source: 'zone',        vehicleId: 'v1', text: 'entered yard' })
+    vi.advanceTimersByTime(200)
+
+    expect(written(tech)).toContain('"id":"f"')
+    expect(written(ops)).not.toContain('"id":"f"')
+    expect(written(ops)).toContain('"id":"z"')
+    offTech(); offOps()
+  })
 })

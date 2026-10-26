@@ -1,3 +1,4 @@
+import { TECHNICIAN_ONLY_SOURCES } from './notifications/technician-sources.js'
 import type { Response } from 'express'
 
 interface SseClient {
@@ -34,6 +35,7 @@ interface SseClient {
  */
 function visibleTo(client: SseClient, event: string, vehicleId: string | null, source?: string | null): boolean {
   if (event === 'feed' && client.feedSources && !(source && client.feedSources.has(source))) return false
+  if (event === 'feed' && !client.feedSources && source && TECHNICIAN_ONLY_SOURCES.has(source)) return false
   if (client.vehicleIds === null) return true
   if (event === 'heartbeat' || event === 'connected') return true
   return vehicleId !== null && client.vehicleIds.has(vehicleId)
@@ -255,14 +257,16 @@ function flushDashboards() {
     const clients = registry.get(dashboardKey(orgId))
     if (!clients?.size) continue
     const firstSeq = items[0]!.seq
-    // One encode per org per wire format, shared by every unscoped client.
+    // One encode per org per wire format, shared by every unscoped client —
+    // who never get a technician-only feed item.
+    const common = items.filter((i) => !(i.event === 'feed' && i.source && TECHNICIAN_ONLY_SOURCES.has(i.source)))
     let sharedFull: Buffer | null = null
     let sharedDelta: Buffer | null = null
     for (const client of [...clients]) {
       if (client.vehicleIds === null && !client.feedSources && (client.fromSeq ?? 0) < firstSeq) {
         const buf = client.delta
-          ? (sharedDelta ??= Buffer.from(encodeBatch(items, true)))
-          : (sharedFull  ??= Buffer.from(encodeBatch(items, false)))
+          ? (sharedDelta ??= Buffer.from(encodeBatch(common, true)))
+          : (sharedFull  ??= Buffer.from(encodeBatch(common, false)))
         if (buf.length) writeOrDrop(client, buf, clients)
         continue
       }

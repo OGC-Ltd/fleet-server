@@ -239,12 +239,13 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
 
   // One notice per unit, not per job: a flag naming transmission and fuel
   // probe is one report, and two feed rows and two mails read as two flags
-  // (operator, 2026-10-27). The first job's id keys the feed row.
+  // (operator, 2026-10-27). The first job's id keys the feed row. It is for
+  // the technicians alone: the Control Room flagged it and neither sees it on
+  // its Live Feed nor gets mail about it.
   const byUnit = new Map<string, Job[]>()
   for (const job of report.items) byUnit.set(job.vehicleId, [...(byUnit.get(job.vehicleId) ?? []), job])
   for (const jobs of byUnit.values()) {
     const ref = { ...refOf(jobs[0]!), label: jobs.map(labelOf).join(', ') }
-    const toControlTech = jobs.some((j) => j.queue === 'controltech')
     const routes = jobs.length > 1
       ? [{ label: 'Routed', value: jobs.map((j) => `${labelOf(j)}: ${STAGE_LABEL[j.stage] ?? j.stage}`).join('; ') }]
       : []
@@ -256,7 +257,7 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
         { label: 'Suspected fault', value: dto.suspectedFault }, ...routes,
         { label: 'Flagged by', value: byName ?? 'Control Room' },
       ],
-      audience: toControlTech ? ['control_room', 'controltech'] : ['control_room'],
+      audience: [], source: 'repair_flag',
     })
   }
   return Promise.all(report.items.map((i) => findItemById(i.id, orgId)))

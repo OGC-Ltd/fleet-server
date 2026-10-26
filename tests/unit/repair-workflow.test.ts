@@ -147,7 +147,8 @@ describe('one flag, several faults (2026-10-22)', () => {
     for (const [ref, ev] of calls) {
       expect(ref.label.split(', ')).toHaveLength(2)
       expect(ev.key).toBe('flagged')
-      expect(ev.audience).toContain('controltech')
+      expect(ev.audience).toEqual([])
+      expect(ev.source).toBe('repair_flag')
     }
   })
 
