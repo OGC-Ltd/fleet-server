@@ -23,6 +23,7 @@ import { env } from '../config/env.js'
 import { ForbiddenError, UnauthorizedError, NotFoundError } from '../core/errors/errors.js'
 import { logger } from '../lib/logger.js'
 import { resolveSubject, can, canReachOrg, vehicleScopeIn } from '../lib/authz/subject.js'
+import { FLAGGED_ONLY } from '../lib/permissions.js'
 
 /** Chooses the permission from the request, for endpoints that serve several. */
 export type PermissionResolver = (req: Parameters<RequestHandler>[0]) => string
@@ -49,6 +50,11 @@ function scopeToApply(
   const scope = vehicleScopeIn(subject, orgId)
   if (scope === null) return null
   if (env.AUTHZ_ENFORCE) return scope
+  // A role limited to flagged units (technician) is limited in shadow mode
+  // too: that restriction is what the role IS, not a rollout to observe, and
+  // without it the Units list showed the whole fleet while the live stream,
+  // which is always scoped, moved only the flagged few (operator, 2026-10-27).
+  if (subject.orgs.get(orgId)?.permissions.has(FLAGGED_ONLY)) return scope
   logger.warn(
     { userId: subject.userId, orgId, visibleVehicles: scope.size, where },
     'authz: WOULD NARROW to a vehicle subset (shadow mode) — showing the whole fleet',
