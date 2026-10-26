@@ -37,6 +37,7 @@ vi.mock('../../src/modules/repairs/repairs.workflow.notify.js', () => ({
   notifyWorkflow: vi.fn(async () => ({ to: [], accepted: [] })),
   roleHolderEmails: vi.fn(async () => []),
   HEAD_OF_SECURITY_ROLE: 'head_of_security',
+  TICKET_PUSH_ROLES: ['operator', 'head_of_security', 'asst_head_of_security'],
 }))
 
 import { assessmentSchema, checklistFor, flagUnitsSchema, queueFor, spotFixSchema, CHECKLISTS } from '../../src/modules/repairs/repairs.workflow.schema.js'
@@ -163,7 +164,8 @@ describe('one flag, several faults (2026-10-22)', () => {
     expect(tickets).toHaveLength(2)
     for (const [ref, ev] of tickets) {
       expect(ref.ticketNo).toMatch(/^RT-\d{4}-000\d\d$/)
-      expect(ev.audience).toEqual(['ticket_desk'])
+      expect(ev.audience).toEqual([])
+      expect(ev.push).toEqual(['operator', 'head_of_security', 'asst_head_of_security'])
     }
   })
 
@@ -236,7 +238,7 @@ describe('the workshop takes 3 booked vehicles a day', () => {
 
 describe('a ticket for every fix, remote or physical (2026-10-27)', () => {
   it.each([['remote', 'remote_fix', 'fixing remotely'], ['physical', 'awaiting_assessment', 'physical inspection']] as const)(
-    'issues the ticket when the path is %s, and tells the ticket desk', async (path, stage, how) => {
+    'issues the ticket when the path is %s, and pushes it', async (path, stage, how) => {
       tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'forwarded', queue: 'controltech', faultCategory: 'gps', path: null }))
       tx.$queryRaw.mockResolvedValue([{ n: 77n }])
       await decidePath(ORG, 'job-1', 'u-1', { path }).catch(() => undefined)
@@ -244,7 +246,7 @@ describe('a ticket for every fix, remote or physical (2026-10-27)', () => {
         data: expect.objectContaining({ stage, path, ticketNo: `RT-${new Date().getUTCFullYear()}-00077` }),
       }))
       const ticket = vi.mocked(notifyWorkflow).mock.calls.find(([, ev]) => ev.key === 'ticket')
-      expect(ticket?.[1]).toMatchObject({ audience: ['ticket_desk'], text: expect.stringContaining(how) })
+      expect(ticket?.[1]).toMatchObject({ audience: [], push: expect.arrayContaining(['operator']), text: expect.stringContaining(how) })
     })
 
   it('keeps the ticket a job already has', async () => {

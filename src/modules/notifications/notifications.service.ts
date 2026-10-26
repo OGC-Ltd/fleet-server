@@ -93,12 +93,25 @@ class PushService {
 
   async broadcastToOrg(orgId: string, payload: PushPayload): Promise<void> {
     if (!this.isEnabled) return
-
-    const subs = await prisma.pushSubscription.findMany({
+    await this.deliver(await prisma.pushSubscription.findMany({
       where: { organisationId: orgId },
       select: { id: true, endpoint: true, p256dh: true, auth: true },
-    })
+    }), payload)
+  }
 
+  /** Every device these people turned notifications on from, whichever
+   *  organisation they were looking at when they did. */
+  async sendToUsers(userIds: string[], payload: PushPayload): Promise<void> {
+    if (!this.isEnabled || userIds.length === 0) return
+    await this.deliver(await prisma.pushSubscription.findMany({
+      where: { userId: { in: userIds } },
+      select: { id: true, endpoint: true, p256dh: true, auth: true },
+    }), payload)
+  }
+
+  private async deliver(
+    subs: { id: string; endpoint: string; p256dh: string; auth: string }[], payload: PushPayload,
+  ): Promise<void> {
     if (!subs.length) return
 
     const body = JSON.stringify(payload)

@@ -30,7 +30,7 @@ import { assertNoOutstandingParts } from './repairs.overhaul.js'
 import { canReceiveTriage } from './repairs.authz.js'
 import { repairSignedOff } from '../fuel/fuel-followup.service.js'
 import { humanKind, STAGE_LABEL } from './repairs.service.js'
-import { notifyWorkflow, roleHolderEmails, HEAD_OF_SECURITY_ROLE, type JobRef, type WorkflowEvent } from './repairs.workflow.notify.js'
+import { notifyWorkflow, roleHolderEmails, HEAD_OF_SECURITY_ROLE, TICKET_PUSH_ROLES, type JobRef, type WorkflowEvent } from './repairs.workflow.notify.js'
 import {
   checklistFor, queueFor, type Assessment, type Booking, type Complete, type Damage,
   type FaultCategory, type FlagUnits, type InvestigationUpdate, type PathBody, type SpotFix, type Verify,
@@ -152,9 +152,9 @@ async function ticketFields(tx: Tx, job: { ticketNo: string | null }, at = new D
 }
 
 /**
- * Tell the operator, supervisor, Head of Security and Assistant Head of
- * Security the ticket numbers just issued: one notice per unit, naming every
- * ticket it got (operator, 2026-10-27).
+ * Push the ticket numbers just issued to the operator, Head of Security and
+ * Assistant Head of Security: one notice per unit, naming every ticket it got.
+ * A push notification, not mail (operator, 2026-10-27); the feed line stays.
  */
 async function tellTickets(jobs: Job[], how: string) {
   const byUnit = new Map<string, Job[]>()
@@ -166,7 +166,7 @@ async function tellTickets(jobs: Job[], how: string) {
       key: 'ticket', severity: 'info', headline: 'Repair ticket issued',
       text: `ticket ${nos} issued: ${how}`,
       lines: [{ label: group.length > 1 ? 'Tickets' : 'Ticket', value: tickets }, { label: 'Path', value: how }],
-      audience: ['ticket_desk'],
+      audience: [], push: TICKET_PUSH_ROLES,
     })
   }
 }
