@@ -96,7 +96,8 @@ export async function roleHolderEmails(orgId: string, slugs: readonly string[], 
   }).map((u) => u.email))
 }
 
-/** Technicians assigned to this organisation. */
+/** Technicians assigned to this organisation. Used to keep them OFF repair
+ *  mail: they hear about jobs in the app. */
 export async function controltechEmails(orgId: string): Promise<string[]> {
   const users = await prisma.user.findMany({
     where: {
@@ -135,7 +136,8 @@ async function resolveAudience(ref: JobRef, audience: Audience[]): Promise<{ to:
   for (const a of audience) {
     try {
       if (a === 'control_room') out.push(...await roleHolderEmails(ref.orgId, CONTROL_ROOM_ROLES, ref.vehicleId))
-      if (a === 'controltech') out.push(...await controltechEmails(ref.orgId))
+      // ControlTech is told in the app only: their Live Feed and bell carry
+      // the repair notices (operator, 2026-10-27), so they are not mailed.
       if (a === 'assignee') out.push(...await userEmails([ref.assignedToId, ref.workshopTechnicianId]))
       if (a === 'channel') out.push(...repairRecipients())
       // Stores has no role of its own yet (plan Q7b); whoever may issue from
@@ -153,7 +155,15 @@ async function resolveAudience(ref: JobRef, audience: Audience[]): Promise<{ to:
       logger.error({ err, itemId: ref.itemId, audience: a }, 'repair workflow: could not resolve recipients')
     }
   }
-  return { to: dedupe(out), securityFallback }
+  // No technician is mailed, whichever audience named them (an assignee, a
+  // role list): their notices arrive in the app.
+  let technicians = new Set<string>()
+  try {
+    technicians = new Set(await controltechEmails(ref.orgId))
+  } catch (err) {
+    logger.error({ err, itemId: ref.itemId }, 'repair workflow: could not read the technicians to leave out')
+  }
+  return { to: dedupe(out).filter((addr) => !technicians.has(addr)), securityFallback }
 }
 
 /**
