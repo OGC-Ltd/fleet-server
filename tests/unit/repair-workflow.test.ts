@@ -21,9 +21,9 @@ const tx = vi.hoisted(() => ({
   repairAssessment:   { findFirst: vi.fn(), create: vi.fn() },
   workshop:           { findFirst: vi.fn() },
   workshopBooking:    { count: vi.fn(), create: vi.fn(), updateMany: vi.fn(), findMany: vi.fn() },
-  securityInvestigation: { findMany: vi.fn() },
+  securityInvestigation: { findMany: vi.fn(), findUnique: vi.fn(), create: vi.fn() },
   repairSparePart:    { findMany: vi.fn() },
-  repairWorkEntry:    { create: vi.fn() },
+  repairWorkEntry:    { create: vi.fn(), findMany: vi.fn() },
   user:               { findUnique: vi.fn() },
   $queryRaw:          vi.fn(),
 }))
@@ -65,6 +65,7 @@ beforeEach(() => {
   tx.repairReportItem.updateMany.mockResolvedValue({ count: 1 })
   tx.repairSparePart.findMany.mockResolvedValue([])
   tx.repairWorkEntry.create.mockResolvedValue({})
+  tx.repairWorkEntry.findMany.mockResolvedValue([{ text: 'Replaced the probe' }])
   tx.$queryRaw.mockResolvedValue([{ ok: 1 }])
 })
 
@@ -434,9 +435,11 @@ describe('one road for every repair', () => {
 })
 
 describe('work log opens by stage', () => {
-  const tech = (over: Record<string, unknown> = {}) => job({ assignedToId: 'tech-1', assignmentStatus: 'accepted', ...over })
-  const log = (kind: 'diagnosis' | 'repair' | 'test' | 'note' | 'verification', userId = 'tech-1') =>
-    addWork(ORG, 'job-1', userId, { kind, text: 'done' })
+  const tech = (over: Record<string, unknown> = {}) => job({ assignedToId: 'tech-1', assignmentStatus: 'accepted', ticketNo: 'RT-1', damageClass: 'genuine', ...over })
+  type Kind = 'diagnosis' | 'repair' | 'test' | 'note' | 'verification'
+  // What an entry that finishes its stage carries.
+  const NEEDS: Partial<Record<Kind, object>> = { diagnosis: { damageClass: 'genuine' }, test: { testResult: 'fail' }, verification: { verdict: 'accept' } }
+  const log = (kind: Kind, userId = 'tech-1') => addWork(ORG, 'job-1', userId, { kind, text: 'done', ...NEEDS[kind] })
 
   it('opens diagnosis to the technician at triage and in the workshop, not repair or test', async () => {
     for (const stage of ['forwarded', 'in_workshop', 'field_inspection']) {
@@ -448,7 +451,7 @@ describe('work log opens by stage', () => {
   })
 
   it('opens repair and test together while fixing, not diagnosis', async () => {
-    for (const stage of ['remote_fix', 'fixing', 'spare_outsourced']) {
+    for (const stage of ['remote_fix', 'fixing']) {
       tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage }))
       await expect(log('repair')).resolves.toBeDefined()
       await expect(log('test')).resolves.toBeDefined()
@@ -456,17 +459,23 @@ describe('work log opens by stage', () => {
     }
   })
 
+  it('opens repair but not test while waiting on parts', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'spare_outsourced' }))
+    await expect(log('repair')).resolves.toBeDefined()
+    await expect(log('test')).rejects.toBeInstanceOf(ConflictError)
+  })
+
   it("refuses a technician's entry from anyone but the job's technician", async () => {
     tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'fixing' }))
     await expect(log('repair', 'supervisor-1')).rejects.toBeInstanceOf(ForbiddenError)
     tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'fixing', assignmentStatus: 'pending' }))
     await expect(log('repair')).rejects.toBeInstanceOf(ForbiddenError)
-    tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'in_workshop', workshopTechnicianId: 'ws-1' }))
+    tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'in_workshop', workshopTechnicianId: 'ws-1', ticketNo: 'RT-1' }))
     await expect(log('diagnosis', 'ws-1')).resolves.toBeDefined()
   })
 
   it('opens only verification once completed, to the Control Room', async () => {
-    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'completed' }))
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'completed', completedById: 'tech-1' }))
     await expect(log('verification', 'supervisor-1')).resolves.toBeDefined()
     await expect(log('test')).rejects.toBeInstanceOf(ConflictError)
     await expect(log('note')).rejects.toBeInstanceOf(ConflictError)
@@ -479,6 +488,70 @@ describe('work log opens by stage', () => {
         await expect(log(kind)).rejects.toBeInstanceOf(ConflictError)
       }
     }
+    expect(tx.repairWorkEntry.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('the work moves the job on', () => {
+  const tech = (over: Record<string, unknown> = {}) => job({ assignedToId: 'tech-1', assignmentStatus: 'accepted', ticketNo: 'RT-1', ...over })
+  const movedTo = () => tx.repairReportItem.updateMany.mock.calls.map((c) => (c[0] as { data: { stage?: string } }).data.stage).filter(Boolean)
+  const entries = () => tx.repairWorkEntry.create.mock.calls.map((c) => (c[0] as { data: { kind: string, text: string } }).data)
+
+  it('a workshop diagnosis with its damage class starts the repair', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'in_workshop' }))
+    await addWork(ORG, 'job-1', 'tech-1', { kind: 'diagnosis', text: 'Probe cable chafed', damageClass: 'genuine' })
+    expect(movedTo()).toEqual(['fixing'])
+    expect(entries()).toEqual([expect.objectContaining({ kind: 'diagnosis', text: 'Probe cable chafed' })])
+  })
+
+  it('asks a workshop diagnosis for the damage class', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'in_workshop' }))
+    await expect(addWork(ORG, 'job-1', 'tech-1', { kind: 'diagnosis', text: 'x' })).rejects.toBeInstanceOf(UnprocessableError)
+  })
+
+  it('logs a triage diagnosis without moving the job: the path is still to decide', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'forwarded', queue: 'controltech' }))
+    await addWork(ORG, 'job-1', 'tech-1', { kind: 'diagnosis', text: 'No data since 04:00' })
+    expect(movedTo()).toEqual([])
+  })
+
+  it('a passed test completes the job, with the logged repair as its account', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'fixing', damageClass: 'genuine' }))
+    await addWork(ORG, 'job-1', 'tech-1', { kind: 'test', text: 'Road test 3 km', testResult: 'pass' })
+    expect(movedTo()).toEqual(['completed'])
+    const data = (tx.repairReportItem.updateMany.mock.calls[0][0] as { data: Record<string, unknown> }).data
+    expect(data).toMatchObject({ fixNote: 'Replaced the probe', testNote: 'Road test 3 km', testResult: 'pass' })
+  })
+
+  it('a passed test needs the repair logged first', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'remote_fix' }))
+    tx.repairWorkEntry.findMany.mockResolvedValue([])
+    await expect(addWork(ORG, 'job-1', 'tech-1', { kind: 'test', text: 'x', testResult: 'pass' })).rejects.toBeInstanceOf(UnprocessableError)
+  })
+
+  it('a failed test is logged and the work goes on', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'fixing', damageClass: 'genuine' }))
+    await addWork(ORG, 'job-1', 'tech-1', { kind: 'test', text: 'Still reads zero', testResult: 'fail' })
+    expect(movedTo()).toEqual([])
+    expect(entries()).toEqual([expect.objectContaining({ kind: 'test', text: 'Test failed: Still reads zero' })])
+  })
+
+  it('a verification verifies, and is logged', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'completed', completedById: 'tech-1' }))
+    await addWork(ORG, 'job-1', 'sup-1', { kind: 'verification', text: 'Reads true on the map', verdict: 'accept' })
+    expect(movedTo()).toEqual(['fixed'])
+    expect(entries()).toEqual([expect.objectContaining({ kind: 'verification', text: 'Verified: Reads true on the map' })])
+  })
+
+  it('a rejected verification sends the job back to fixing', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'completed', completedById: 'tech-1' }))
+    await addWork(ORG, 'job-1', 'sup-1', { kind: 'verification', text: 'Still drops out', verdict: 'reject' })
+    expect(movedTo()).toEqual(['fixing'])
+  })
+
+  it('keeps the completer from verifying their own repair', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'completed', completedById: 'sup-1' }))
+    await expect(addWork(ORG, 'job-1', 'sup-1', { kind: 'verification', text: 'ok', verdict: 'accept' })).rejects.toBeInstanceOf(ForbiddenError)
     expect(tx.repairWorkEntry.create).not.toHaveBeenCalled()
   })
 })
