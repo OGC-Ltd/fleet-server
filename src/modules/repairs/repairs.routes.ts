@@ -33,7 +33,7 @@ import * as wf from './repairs.workflow.controller.js'
 import {
   flagUnitsSchema, spotFixSchema, pathSchema, assessmentSchema, bookingSchema, cancelBookingSchema,
   workshopAssignSchema, damageSchema, warrantyVoidSchema, warrantyClearSchema, workEntrySchema,
-  completeSchema, verifySchema, voidSchema, sourcePartSchema, issuePartSchema,
+  completeSchema, verifySchema, voidSchema, movePhaseSchema, sourcePartSchema, issuePartSchema,
   investigationUpdateSchema, availabilityQuerySchema, dayQuerySchema, workshopUpdateSchema,
 } from './repairs.workflow.schema.js'
 import { z } from 'zod'
@@ -128,6 +128,8 @@ router.post('/items/:itemId/work', requirePermissionStrict('repair:resolve'), re
 router.post('/items/:itemId/complete', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(completeSchema), wf.complete)
 router.post('/items/:itemId/verify', requirePermissionStrict('repair:verify'), validateBody(verifySchema), wf.verify)
 router.post('/items/:itemId/void', requirePermissionStrict('repair:verify'), validateBody(voidSchema), wf.voidJob)
+// Back or forward to any phase by hand: the Control Room that verifies repairs.
+router.post('/items/:itemId/phase', requirePermissionStrict('repair:verify'), validateBody(movePhaseSchema), wf.movePhase)
 router.get('/items/:itemId/ticket', requirePermission('repair:read'), wf.ticket)
 // Sourcing and issuing are not the job's assignee's: ControlTech and stores act on any job.
 router.post('/items/:itemId/parts/:partId/source', requirePermissionStrict('repair:parts_source'), validateBody(sourcePartSchema), wf.sourcePart)

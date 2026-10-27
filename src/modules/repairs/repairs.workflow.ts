@@ -35,7 +35,7 @@ import { TICKET_FEED_ROLES } from '../../lib/notifications/restricted-sources.js
 import {
   checklistFor, queueFor, type Assessment, type Booking, type Complete, type Damage,
   type FaultCategory, type FlagUnits, type InvestigationUpdate, type PathBody, type SpotFix, type Verify,
-  type VoidBody, type WarrantyVoid, type WorkEntry, type WorkshopAssign,
+  type VoidBody, type WarrantyVoid, type WorkEntry, type WorkshopAssign, type MovePhase,
 } from './repairs.workflow.schema.js'
 import type { Stage } from './repairs.schema.js'
 
@@ -968,6 +968,60 @@ export async function voidJob(orgId: string, itemId: string, userId: string, dto
   })
   await tell(refOf(job, 'void'), {
     key: 'void', severity: 'info', headline: 'Repair job void', text: `void: ${dto.reason}`, audience: ['control_room'],
+  })
+  return findItemById(itemId, orgId)
+}
+
+// ── Moving a job by hand ────────────────────────────────────────────────────
+
+/** The six phases of the ladder, and the stage each one is entered at. */
+const PHASE_LABEL: Record<MovePhase['phase'], string> = {
+  flag: 'Flagged', triage: 'Triage', assess: 'Assessment', workshop: 'Workshop', repair: 'Repair', verify: 'Verification',
+}
+const PHASE_OF: Record<string, MovePhase['phase']> = {
+  pending: 'flag', forwarded: 'triage', awaiting_assessment: 'assess', booked: 'workshop', towing: 'workshop',
+  in_workshop: 'workshop', remote_fix: 'repair', field_inspection: 'repair', spare_outsourced: 'repair', fixing: 'repair',
+  completed: 'verify',
+}
+const PHASE_ORDER = ['flag', 'triage', 'assess', 'workshop', 'repair', 'verify'] as const
+
+/**
+ * Move an open job to another phase by hand, back or forward: the fix for a
+ * wrong click, or a step done outside the app (operator, 2026-10-27). The job
+ * lands on the phase's entry stage and the trail says who moved it, from
+ * where and why. Data the move would leave false is tidied: leaving
+ * Verification clears the completion; moving before the Workshop cancels a
+ * live booking; reaching the Workshop, Repair or Verification keeps or issues
+ * the ticket. No notification: the move corrects the record, it is not news.
+ */
+export async function movePhase(orgId: string, itemId: string, userId: string, dto: MovePhase) {
+  await prisma.$transaction(async (tx) => {
+    const job = await openJob(tx, itemId, orgId)
+    const from = PHASE_OF[job.stage]
+    if (!from) throw new ConflictError(`A job that is ${STAGE_LABEL[job.stage] ?? job.stage} cannot be moved`)
+    if (from === dto.phase) throw new ConflictError(`This job is already in ${PHASE_LABEL[dto.phase]}`)
+    if (dto.phase === 'triage' && job.queue !== 'controltech') {
+      throw new ConflictError('A mechanical fault has no triage: it goes straight to the workshop')
+    }
+    const to: Stage = ({
+      flag: 'pending', triage: 'forwarded', assess: 'awaiting_assessment', workshop: 'in_workshop',
+      repair: job.path === 'remote' ? 'remote_fix' : 'fixing', verify: 'completed',
+    } as const)[dto.phase]
+    const at = new Date()
+    if (PHASE_ORDER.indexOf(dto.phase) < PHASE_ORDER.indexOf('workshop')) {
+      await tx.workshopBooking.updateMany({ where: { repairItemId: itemId, status: 'booked' }, data: { status: 'cancelled' } })
+    }
+    // Past triage every job carries a ticket, remote or physical: a hand move
+    // must not open a way round that ("No ticket yet" while fixing).
+    const ticketed = dto.phase === 'workshop' || dto.phase === 'repair' || dto.phase === 'verify'
+    const physical = dto.phase === 'workshop' || (dto.phase === 'repair' && job.path !== 'remote')
+    await move(tx, job, to, userId,
+      `Moved by hand from ${PHASE_LABEL[from]} to ${PHASE_LABEL[dto.phase]}${dto.note ? `: ${dto.note}` : ''}`, {
+        ...(job.stage === 'completed' ? { completedAt: null, completedById: null, testResult: null } : {}),
+        ...(to === 'completed' ? { completedAt: at, completedById: null } : {}),
+        ...(physical ? { path: 'physical' } : {}),
+        ...(ticketed ? await ticketFields(tx, job, at) : {}),
+      })
   })
   return findItemById(itemId, orgId)
 }
