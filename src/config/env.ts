@@ -581,6 +581,9 @@ const schema = z.object({
   // The media server's secure WebSocket port, which the dashboard's player
   // connects to directly (VSS's own pages use 36301 behind https).
   VSS_STREAM_PORT: z.coerce.number().int().positive().optional().default(36301),
+  // The clock VSS writes its alarm times in (its server's own, no zone given):
+  // the dashcam alarms (modules/dashcam) read them in this zone.
+  VSS_TIMEZONE: z.string().optional().default('Africa/Nairobi'),
 })
 
 /**
