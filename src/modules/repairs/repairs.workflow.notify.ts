@@ -67,6 +67,10 @@ export interface WorkflowEvent {
   push?:     readonly string[]
   /** People who get a Web Push notification of this event, by user id. */
   pushUsers?: (string | null | undefined)[]
+  /** Whoever took the action. They are left out of the push and the mail,
+   *  and their feed shows the line as read: the notice is for everyone else
+   *  (operator, 2026-10-27). */
+  actorId?:  string | null
 }
 
 const live = {
@@ -136,6 +140,13 @@ export async function controltechEmails(orgId: string): Promise<string[]> {
   return dedupe(users.map((u) => u.email))
 }
 
+/** The actor's own address, to leave off the mail. */
+async function actorEmail(id: string | null | undefined): Promise<string | null> {
+  if (!id) return null
+  const u = await prisma.user.findUnique({ where: { id }, select: { email: true } })
+  return u?.email?.trim().toLowerCase() || null
+}
+
 async function userEmails(ids: (string | null | undefined)[]): Promise<string[]> {
   const want = ids.filter((x): x is string => !!x)
   if (want.length === 0) return []
@@ -199,7 +210,7 @@ export async function notifyWorkflow(ref: JobRef, ev: WorkflowEvent): Promise<{ 
     await enqueueNotification({
       orgId: ref.orgId, id: `repair-wf-${ref.itemId}-${ev.key}`, source: ev.source ?? 'repair', alertType: 'repair_workflow',
       severity: ev.severity, text: `${plateRef} · ${ref.label}: ${ev.text}`, at,
-      plate: ref.plate, vehicleId: ref.vehicleId,
+      plate: ref.plate, vehicleId: ref.vehicleId, actorId: ev.actorId ?? null,
     })
   } catch (err) {
     logger.error({ err, itemId: ref.itemId, key: ev.key }, 'repair workflow: could not publish the feed item')
@@ -210,7 +221,7 @@ export async function notifyWorkflow(ref: JobRef, ev: WorkflowEvent): Promise<{ 
       const ids = [...new Set([
         ...(ev.push?.length ? await roleHolderIds(ref.orgId, ev.push, ref.vehicleId) : []),
         ...(ev.pushUsers ?? []).filter((x): x is string => !!x),
-      ])]
+      ])].filter((id) => id !== ev.actorId)
       await pushService.sendToUsers(ids, {
         title: ev.headline,
         body:  `${plateRef} · ${ref.label}: ${ev.text}`,
@@ -223,7 +234,15 @@ export async function notifyWorkflow(ref: JobRef, ev: WorkflowEvent): Promise<{ 
     }
   }
 
-  const { to, securityFallback } = await resolveAudience(ref, ev.audience)
+  const resolved = await resolveAudience(ref, ev.audience)
+  const { securityFallback } = resolved
+  let to = resolved.to
+  try {
+    const own = await actorEmail(ev.actorId)
+    if (own) to = to.filter((addr) => addr !== own)
+  } catch (err) {
+    logger.error({ err, itemId: ref.itemId }, 'repair workflow: could not read the actor to leave out')
+  }
   if (securityFallback) {
     try {
       await enqueueNotification({
