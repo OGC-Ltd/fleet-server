@@ -180,6 +180,13 @@ export const verifySchema = z.object({
   path: ['note'], message: 'Say what does not match',
 })
 
+/** Move an open job to a phase by hand, back or forward (operator, 2026-10-27). */
+export const PHASE_KEYS = ['flag', 'triage', 'assess', 'workshop', 'repair', 'verify'] as const
+export const movePhaseSchema = z.object({
+  phase: z.enum(PHASE_KEYS),
+  note:  note(500).optional(),
+})
+
 export const voidSchema = z.object({
   reason:       required(500, 'Say why this job is void'),
   precededById: z.string().min(1).optional(),
@@ -234,6 +241,7 @@ export type WorkEntry     = z.infer<typeof workEntrySchema>
 export type Complete      = z.infer<typeof completeSchema>
 export type Verify        = z.infer<typeof verifySchema>
 export type VoidBody      = z.infer<typeof voidSchema>
+export type MovePhase     = z.infer<typeof movePhaseSchema>
 export type SourcePart    = z.infer<typeof sourcePartSchema>
 export type IssuePart     = z.infer<typeof issuePartSchema>
 export type InvestigationUpdate = z.infer<typeof investigationUpdateSchema>
