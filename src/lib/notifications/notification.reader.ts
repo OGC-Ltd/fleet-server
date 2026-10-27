@@ -7,7 +7,7 @@
  * that simply wanted yesterday, had nothing.
  */
 
-import { hiddenSources, withoutRestricted } from './restricted-sources.js'
+import { hiddenSources, withoutRestricted, SCOPE_EXEMPT_SOURCES } from './restricted-sources.js'
 import { prisma } from '../prisma.js'
 import { readCachedNotifications, primeCache, readCachedVehicleDay, cacheVehicleDay, type NotificationItem } from './notification-cache.js'
 import { env } from '../../config/env.js'
@@ -77,6 +77,17 @@ export interface NotificationQuery {
   sources?: string[]
   /** Restricted sources this reader may see (restricted-sources feedGrantsFor). */
   grants?: string[] | null
+}
+
+/**
+ * The vehicle-scope clause: units in scope, plus any source this reader is
+ * allowed that is exempt from scope (restricted-sources SCOPE_EXEMPT_SOURCES).
+ */
+function scopedTo(vehicleIds: Set<string>, sources: string[] | undefined) {
+  const exempt = (sources ?? []).filter((s) => SCOPE_EXEMPT_SOURCES.has(s))
+  return exempt.length
+    ? { OR: [{ vehicleId: { in: [...vehicleIds] } }, { source: { in: exempt } }] }
+    : { vehicleId: { in: [...vehicleIds] } }
 }
 
 /** DB row → the same shape the SSE feed and the cache use. */
@@ -173,7 +184,7 @@ export async function getNotifications(
       ...(dayRange
         ? { occurredAt: { gte: dayRange.from, lt: before && before < dayRange.to ? before : dayRange.to } }
         : before ? { occurredAt: { lt: before } } : {}),
-      ...(vehicleId ? { vehicleId } : vehicleIds ? { vehicleId: { in: [...vehicleIds] } } : {}),
+      ...(vehicleId ? { vehicleId } : vehicleIds ? scopedTo(vehicleIds, sources) : {}),
       ...(alertTypes?.length ? { alertType: { in: alertTypes } } : {}),
       ...(severities?.length ? { severity:  { in: severities } } : {}),
       ...(sources?.length ? { source: { in: sources } } : { source: { notIn: hiddenSources(grants) } }),

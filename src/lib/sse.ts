@@ -1,4 +1,4 @@
-import { RESTRICTED_SOURCES } from './notifications/restricted-sources.js'
+import { RESTRICTED_SOURCES, SCOPE_EXEMPT_SOURCES } from './notifications/restricted-sources.js'
 import type { Response } from 'express'
 
 interface SseClient {
@@ -41,6 +41,8 @@ function visibleTo(client: SseClient, event: string, vehicleId: string | null, s
   if (event === 'feed' && !client.feedSources && source && RESTRICTED_SOURCES.has(source) && !client.feedGrants?.has(source)) return false
   if (client.vehicleIds === null) return true
   if (event === 'heartbeat' || event === 'connected') return true
+  // Allowed by source above, and not tied to the unit still being in scope.
+  if (event === 'feed' && source && SCOPE_EXEMPT_SOURCES.has(source)) return true
   return vehicleId !== null && client.vehicleIds.has(vehicleId)
 }
 
@@ -406,7 +408,9 @@ export async function replayDashboardFeed(
     // history item that names no vehicle it may see.
     if (vehicleIds) {
       const vid = (item as { vehicleId?: unknown }).vehicleId
-      if (typeof vid !== 'string' || !vehicleIds.has(vid)) continue
+      const src = (item as { source?: unknown }).source
+      const exempt = typeof src === 'string' && SCOPE_EXEMPT_SOURCES.has(src)
+      if (!exempt && (typeof vid !== 'string' || !vehicleIds.has(vid))) continue
     }
     try {
       res.write(`event: feed\ndata: ${JSON.stringify({ ...item, orgId }, bigIntReplacer)}\n\n`)
