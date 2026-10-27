@@ -32,7 +32,7 @@ import * as ctrl from './repairs.controller.js'
 import * as wf from './repairs.workflow.controller.js'
 import {
   flagUnitsSchema, spotFixSchema, pathSchema, assessmentSchema, bookingSchema, cancelBookingSchema,
-  workshopAssignSchema, damageSchema, warrantyVoidSchema, warrantyClearSchema, workEntrySchema,
+  workshopAssignSchema, damageSchema, warrantyVoidSchema, warrantyClearSchema, workEntrySchema, workEditSchema,
   completeSchema, verifySchema, voidSchema, movePhaseSchema, sourcePartSchema, issuePartSchema,
   investigationUpdateSchema, availabilityQuerySchema, dayQuerySchema, workshopUpdateSchema,
 } from './repairs.workflow.schema.js'
@@ -129,6 +129,9 @@ router.post('/items/:itemId/warranty-void/clear', requirePermissionStrict('secur
 router.post('/items/:itemId/work',
   requirePermissionStrict((req) => (req.body as { kind?: string } | undefined)?.kind === 'verification' ? 'repair:verify' : 'repair:resolve'),
   validateBody(workEntrySchema), wf.work)
+// An entry is changed only by whoever logged it (repairs.workflow editWork, deleteWork).
+router.post('/items/:itemId/work/:entryId', requirePermissionStrict('repair:read'), validateBody(workEditSchema), wf.editWork)
+router.post('/items/:itemId/work/:entryId/delete', requirePermissionStrict('repair:read'), wf.deleteWork)
 router.post('/items/:itemId/complete', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(completeSchema), wf.complete)
 router.post('/items/:itemId/verify', requirePermissionStrict('repair:verify'), validateBody(verifySchema), wf.verify)
 router.post('/items/:itemId/void', requirePermissionStrict('repair:verify'), validateBody(voidSchema), wf.voidJob)
