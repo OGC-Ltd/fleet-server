@@ -66,4 +66,21 @@ describe('feed sources on the dashboard stream', () => {
     expect(written(other)).toContain('"id":"z"')
     for (const off of offs) off()
   })
+
+  it('sends a technician the verified notice even though the unit left their scope', () => {
+    vi.useFakeTimers()
+    const tech  = fakeRes()
+    const other = fakeRes()
+    const offs = [
+      registerDashboardClient('org-v', tech, { vehicleIds: new Set(['v1']), feedSources: new Set(['repair', 'repair_flag', 'repair_verified']) }),
+      registerDashboardClient('org-v', other),
+    ]
+    emitDashboardFeed('org-v', { id: 'ok', source: 'repair_verified', vehicleId: 'v9', text: 'verified' })
+    emitDashboardFeed('org-v', { id: 'no', source: 'repair',          vehicleId: 'v9', text: 'other unit' })
+    vi.advanceTimersByTime(200)
+    expect(written(tech)).toContain('"id":"ok"')
+    expect(written(tech)).not.toContain('"id":"no"')
+    expect(written(other)).not.toContain('"id":"ok"')
+    for (const off of offs) off()
+  })
 })

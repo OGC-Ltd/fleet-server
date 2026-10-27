@@ -252,7 +252,7 @@ describe('a ticket for every fix, remote or physical (2026-10-27)', () => {
       expect(calls[0]![0].ticketNo).toBe(`RT-${new Date().getUTCFullYear()}-00077`)
       expect(calls[0]![1]).toMatchObject({
         key: path === 'remote' ? 'path-remote' : 'path-physical', audience: [], source: 'repair_ticket',
-        push: expect.arrayContaining(['operator']), text: expect.stringContaining('ticket RT-'),
+        push: expect.arrayContaining(['operator']), text: expect.stringContaining('· ticket issued'),
       })
     })
 
@@ -270,6 +270,26 @@ describe('a ticket for every fix, remote or physical (2026-10-27)', () => {
     tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'remote_fix', path: 'remote', ticketNo: 'RT-2026-00005' }))
     const out = await complete(ORG, 'job-1', 'u-1', { testResult: 'pass', fixNote: 'Reconfigured the tracker' }).catch((e) => e)
     expect(out).not.toBeInstanceOf(UnprocessableError)
+  })
+})
+
+describe('who hears about completion and verification (2026-10-27)', () => {
+  it('tells the operator, supervisor and security heads a repair is completed and tested', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'fixing', ticketNo: 'RT-2026-00001', damageClass: 'genuine' }))
+    await complete(ORG, 'job-1', 'u-1', { testResult: 'pass', fixNote: 'Pads replaced' }).catch(() => undefined)
+    const [, ev] = vi.mocked(notifyWorkflow).mock.calls.find(([, e]) => e.key === 'completed')!
+    expect(ev).toMatchObject({ source: 'repair_ticket', audience: ['channel'] })
+    expect(ev.push).toEqual(['operator', 'supervisor', 'head_of_security', 'asst_head_of_security'])
+  })
+
+  it('tells the technicians on the job once the Control Room verifies it', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(job({
+      stage: 'completed', completedById: 'tech-1', assignedToId: 'tech-2', workshopTechnicianId: null,
+    }))
+    await verify(ORG, 'job-1', 'cr-1', { decision: 'accept' }, null).catch(() => undefined)
+    const [, ev] = vi.mocked(notifyWorkflow).mock.calls.find(([, e]) => e.key === 'verified')!
+    expect(ev).toMatchObject({ source: 'repair_verified', audience: ['channel'] })
+    expect(ev.pushUsers).toEqual(['tech-1', 'tech-2', null])
   })
 })
 
