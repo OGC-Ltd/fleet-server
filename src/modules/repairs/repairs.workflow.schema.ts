@@ -160,7 +160,7 @@ export const warrantyClearSchema = z.object({
 })
 
 export const workEntrySchema = z.object({
-  kind:          z.enum(['diagnosis', 'repair', 'test', 'note']),
+  kind:          z.enum(['diagnosis', 'repair', 'test', 'note', 'verification']),
   text:          required(4000, 'Write what was done'),
   labourMinutes: z.coerce.number().int().min(0).max(100_000).optional(),
 })
