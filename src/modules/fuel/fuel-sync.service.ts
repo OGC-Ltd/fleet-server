@@ -54,6 +54,11 @@ import {
   WEST_SUGAR_REPORT_RESOURCE_ID,
   AQUAMIST_RESOURCE_ID,
 } from '../../providers/wialon/wialon.account.js'
+import { ANNOUNCED_CAUSES } from './fuel-theft-classifier.js'
+
+/** A drain the operator was told about as a possible theft: an announced cause. */
+const isTheftCase = (r: { drainCause: string | null }): boolean =>
+  r.drainCause != null && (ANNOUNCED_CAUSES as readonly string[]).includes(r.drainCause)
 
 /**
  * Which Wialon resource holds each org's fuel templates.
@@ -319,6 +324,7 @@ export async function syncVehicleFuelEvents(
       select: {
         id: true, beganAt: true, detectedAt: true, stolenMl: true,
         finalFuelLevelMl: true, dismissedAt: true, verdict: true,
+        drainCause: true, reviewStatus: true,
       },
     }),
   ])
@@ -540,7 +546,7 @@ export async function syncVehicleFuelEvents(
             id: created.id, beganAt: t.beganAt, detectedAt: t.detectedAt,
             stolenMl: t.stolenMl, finalFuelLevelMl: t.finalFuelLevelMl,
             dismissedAt: created.dismissedAt ?? null,
-            verdict: 'PENDING',
+            verdict: 'PENDING', drainCause: null, reviewStatus: null,
           })
           claimedThefts.add(created.id)
         }
@@ -581,8 +587,15 @@ export async function syncVehicleFuelEvents(
     // drain used to return as a fresh alert with no memory of the deletion.
     // Nor one that began before the window: this read saw only its tail, so
     // its silence about it says nothing.
+    // Nor a theft case (issue #48): once our own telemetry has judged a drain
+    // a possible theft, only a person closes it — escalate, de-escalate or
+    // delete. Wialon dropping the event from its settled answer is not
+    // evidence against what our probe saw, and deleting it here took KDR
+    // 431Q's open case off the Alerts page with no decision recorded. The same
+    // for one that has been reviewed: its decision is the record.
     const staleTheftRows = knownThefts
-      .filter(r => !claimedThefts.has(r.id) && r.dismissedAt == null && r.beganAt >= opts.from)
+      .filter(r => !claimedThefts.has(r.id) && r.dismissedAt == null && r.beganAt >= opts.from
+        && !isTheftCase(r) && r.reviewStatus == null)
     const staleThefts = staleTheftRows.map(r => r.id)
     // Counted even in a dry run. This is the one branch that DELETES, so
     // "--reconcile without --apply" has to be able to answer "how much?"
