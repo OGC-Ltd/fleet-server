@@ -33,6 +33,10 @@ export interface WeatherPoint {
   windKmh: number | null
   gustKmh: number | null
   windFrom: string | null
+  /** Bearing the wind blows FROM, degrees clockwise from north. */
+  windDeg: number | null
+  /** Rain expected this hour, mm. */
+  rainMm: number | null
   visibilityKm: number | null
   humidityPct: number | null
   isDay: boolean | null
@@ -96,9 +100,9 @@ interface Conditions {
   weatherCondition?: { iconBaseUri?: string; description?: { text?: string }; type?: string }
   temperature?: Measure
   feelsLikeTemperature?: Measure
-  precipitation?: { probability?: Measure }
+  precipitation?: { probability?: Measure; qpf?: { quantity?: number } }
   thunderstormProbability?: number
-  wind?: { direction?: { cardinal?: string }; speed?: Measure; gust?: Measure }
+  wind?: { direction?: { cardinal?: string; degrees?: number }; speed?: Measure; gust?: Measure }
   visibility?: Measure
   relativeHumidity?: number
   isDaytime?: boolean
@@ -121,6 +125,8 @@ export function toPoint(lat: number, lng: number, c: Conditions): WeatherPoint {
     windKmh: num(c.wind?.speed?.value),
     gustKmh: num(c.wind?.gust?.value),
     windFrom: c.wind?.direction?.cardinal ?? null,
+    windDeg: num(c.wind?.direction?.degrees),
+    rainMm: num(c.precipitation?.qpf?.quantity),
     visibilityKm: num(c.visibility?.distance),
     humidityPct: num(c.relativeHumidity),
     isDay: typeof c.isDaytime === 'boolean' ? c.isDaytime : null,

@@ -37,12 +37,12 @@ describe('toPoint', () => {
     const p = toPoint(-0.82, 34.38, {
       weatherCondition: { iconBaseUri: 'https://maps.gstatic.com/weather/v1/partly_cloudy', description: { text: 'Partly sunny' }, type: 'PARTLY_CLOUDY' },
       temperature: { degrees: 20.1 },
-      precipitation: { probability: { percent: 5 } },
-      wind: { direction: { cardinal: 'EAST' }, speed: { value: 6 }, gust: { value: 11 } },
+      precipitation: { probability: { percent: 5 }, qpf: { quantity: 0.4 } },
+      wind: { direction: { cardinal: 'EAST', degrees: 91 }, speed: { value: 6 }, gust: { value: 11 } },
       isDaytime: true,
       currentTime: '2026-10-27T04:03:07Z',
     })
-    expect(p).toMatchObject({ type: 'PARTLY_CLOUDY', text: 'Partly sunny', tempC: 20.1, rainPct: 5, windKmh: 6, windFrom: 'EAST', isDay: true })
+    expect(p).toMatchObject({ type: 'PARTLY_CLOUDY', text: 'Partly sunny', tempC: 20.1, rainPct: 5, windKmh: 6, windFrom: 'EAST', windDeg: 91, rainMm: 0.4, isDay: true })
     expect(p.visibilityKm).toBeNull()
   })
 })
