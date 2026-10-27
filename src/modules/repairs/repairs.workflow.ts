@@ -173,6 +173,24 @@ async function tellTickets(jobs: Job[], how: string) {
   }
 }
 
+/**
+ * A step that issued the job's ticket says so in its OWN notice rather than
+ * in a second one: one notification per case, not two (operator, 2026-10-27).
+ * The notice becomes a repair_ticket item, seen by the operator, supervisor
+ * and both security heads, and pushed to the operator and the security heads;
+ * the Control Room is not also mailed about it.
+ */
+function withTicket(ev: WorkflowEvent, job: { ticketNo: string | null; issued?: boolean }): WorkflowEvent {
+  if (!job.issued || !job.ticketNo) return ev
+  return {
+    ...ev,
+    text: ev.text.includes(job.ticketNo) ? ev.text : `${ev.text} · ticket ${job.ticketNo} issued`,
+    lines: [...(ev.lines ?? []), { label: 'Ticket', value: job.ticketNo }],
+    audience: ev.audience.filter((a) => a !== 'control_room'),
+    push: TICKET_PUSH_ROLES, source: 'repair_ticket',
+  }
+}
+
 const day = (d: Date) => d.toISOString().slice(0, 10)
 const utcDay = (iso: string) => new Date(`${iso}T00:00:00.000Z`)
 function addDays(d: Date, n: number) { return new Date(d.getTime() + n * 86_400_000) }
@@ -320,12 +338,11 @@ export async function forwardJob(orgId: string, itemId: string, userId: string, 
     })
     return { ...job, stage: land.stage, queue: land.queue, ticketNo: ticket.ticketNo ?? job.ticketNo, issued: !!ticket.ticketNo }
   })
-  await tell(refOf(job), {
+  await tell(refOf(job), withTicket({
     key: 'forwarded', severity: 'info', headline: 'Repair forwarded',
     text: job.queue === 'controltech' ? 'forwarded to ControlTech' : 'forwarded to the workshop for assessment',
     audience: job.queue === 'controltech' ? ['controltech'] : ['control_room'],
-  })
-  if (job.issued) await tellTickets([job], 'physical: to the workshop for assessment')
+  }, job))
   return findItemById(itemId, orgId)
 }
 
@@ -481,13 +498,12 @@ export async function decidePath(orgId: string, itemId: string, userId: string, 
     })
     return { ...job, to, note, ticketNo: ticket.ticketNo ?? job.ticketNo, issued: !!ticket.ticketNo }
   })
-  await tell(refOf(job, job.to), job.to === 'remote_fix'
+  await tell(refOf(job, job.to), withTicket(job.to === 'remote_fix'
     ? { key: 'path-remote', severity: 'info', headline: 'Fixing remotely', text: job.note, audience: ['control_room'] }
     : {
       key: 'path-physical', severity: 'warning', headline: 'Physical inspection needed: assess the unit',
       text: `${job.note}. Book a physical inspection`, audience: ['control_room'],
-    })
-  if (job.issued) await tellTickets([job], job.to === 'remote_fix' ? 'fixing remotely' : 'physical inspection')
+    }, job))
   return findItemById(itemId, orgId)
 }
 
@@ -528,15 +544,14 @@ export async function assess(orgId: string, itemId: string, userId: string, dto:
     return { ...job, to, note, ticketNo, intervention: dto.intervention, reason: dto.reason, issued: ticketNo !== job.ticketNo }
   })
   const ref = refOf(job, job.to, job.ticketNo)
-  await tell(ref, job.intervention === 'workshop'
+  await tell(ref, withTicket(job.intervention === 'workshop'
     ? { key: 'assessed', severity: 'info', headline: 'Assessed roadworthy', text: job.note, audience: ['control_room'] }
     : {
       key: 'assessed', severity: 'warning',
       headline: job.intervention === 'tow' ? 'Unit not roadworthy: tow arranged' : 'Unit not roadworthy: field inspection',
       text: job.note, lines: [{ label: 'Reason', value: job.reason ?? '' }],
       audience: ['control_room', 'controltech', 'channel'],
-    })
-  if (job.issued) await tellTickets([job], 'physical: field inspection')
+    }, job))
   return findItemById(itemId, orgId)
 }
 
@@ -716,11 +731,10 @@ export async function arrive(orgId: string, itemId: string, userId: string, scop
     return { job: { ...job, ticketNo }, ticketNo, already: false, issued: !job.ticketNo }
   })
   if (!result.already) {
-    await tell(refOf(result.job, 'in_workshop', result.ticketNo), {
+    await tell(refOf(result.job, 'in_workshop', result.ticketNo), withTicket({
       key: 'arrived', severity: 'info', headline: 'Unit arrived at the workshop',
       text: `arrived; repair ticket ${result.ticketNo}`, audience: ['control_room', 'assignee', 'channel'],
-    })
-    if (result.issued) await tellTickets([result.job], 'physical: arrived at the workshop')
+    }, { ticketNo: result.ticketNo, issued: result.issued }))
   }
   return findItemById(itemId, orgId)
 }
