@@ -867,9 +867,37 @@ export async function clearWarranty(orgId: string, itemId: string, userId: strin
 
 // ── 6 · Work log, completion, verification ──────────────────────────────────
 
+/**
+ * Which work log entries a stage opens (operator, 2026-10-27). Diagnosis is
+ * the technician's at triage and in the workshop; repair and test are the
+ * technician's while the repair is under way; verification is the Control
+ * Room's once the job is completed. A stage not named opens none.
+ */
+export const WORK_KINDS_AT: Partial<Record<Stage, WorkEntry['kind'][]>> = {
+  forwarded: ['diagnosis', 'note'], in_workshop: ['diagnosis', 'note'], field_inspection: ['diagnosis', 'note'],
+  remote_fix: ['repair', 'test', 'note'], fixing: ['repair', 'test', 'note'], spare_outsourced: ['repair', 'test', 'note'],
+  completed: ['verification'],
+}
+const WORK_KIND_LABEL: Record<WorkEntry['kind'], string> = {
+  diagnosis: 'Diagnosis', repair: 'Repair', test: 'Test', note: 'Note', verification: 'Verification',
+}
+
+/**
+ * Log work on a job. The route has already checked the permission the kind
+ * needs (repair:verify for verification, repair:resolve otherwise); this
+ * checks the stage, and that a technician's entry comes from the job's own
+ * technician, not anyone who may work any job.
+ */
 export async function addWork(orgId: string, itemId: string, userId: string, dto: WorkEntry) {
   return prisma.$transaction(async (tx) => {
     const job = await openJob(tx, itemId, orgId)
+    if (!WORK_KINDS_AT[job.stage as Stage]?.includes(dto.kind)) {
+      throw new ConflictError(`A ${WORK_KIND_LABEL[dto.kind].toLowerCase()} entry cannot be logged while the job is ${STAGE_LABEL[job.stage] ?? job.stage}`)
+    }
+    const technician = job.workshopTechnicianId === userId || (job.assignedToId === userId && job.assignmentStatus === 'accepted')
+    if (dto.kind !== 'verification' && !technician) {
+      throw new ForbiddenError("Only the job's technician logs work at this stage")
+    }
     return workEntry(tx, job, userId, dto.kind, dto.text, dto.labourMinutes)
   })
 }

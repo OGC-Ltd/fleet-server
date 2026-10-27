@@ -1769,7 +1769,7 @@ model RepairWorkEntry {
   at             DateTime @default(now())
   byId           String?  @map("by_id")
   byName         String?  @map("by_name")
-  /// diagnosis | repair | test | note (CHECK)
+  /// diagnosis | repair | test | note | verification (CHECK)
   kind           String
   text           String
   labourMinutes  Int?     @map("labour_minutes")
