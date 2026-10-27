@@ -35,7 +35,7 @@ import { TICKET_FEED_ROLES } from '../../lib/notifications/restricted-sources.js
 import {
   checklistFor, queueFor, type Assessment, type Booking, type Complete, type Damage,
   type FaultCategory, type FlagUnits, type InvestigationUpdate, type PathBody, type SpotFix, type Verify,
-  type VoidBody, type WarrantyVoid, type WorkEntry, type WorkshopAssign, type MovePhase,
+  type VoidBody, type WarrantyVoid, type WorkEntry, type WorkEdit, type WorkshopAssign, type MovePhase,
 } from './repairs.workflow.schema.js'
 import type { Stage } from './repairs.schema.js'
 
@@ -58,7 +58,7 @@ const jobSelect = {
   id: true, organisationId: true, vehicleId: true, stage: true, stageHistory: true, resolvedAt: true,
   outcome: true, targetKind: true, faultKind: true, faultCategory: true, queue: true, path: true,
   ticketNo: true, assignedToId: true, assignmentStatus: true, workshopTechnicianId: true,
-  damageClass: true, completedById: true,
+  damageClass: true, completedById: true, stageChangedAt: true, diagnosis: true, fixNote: true,
   vehicle: { select: { registrationPlate: true } },
 } as const
 type Job = Prisma.RepairReportItemGetPayload<{ select: typeof jobSelect }>
@@ -910,6 +910,13 @@ export async function addWork(orgId: string, itemId: string, userId: string, dto
   if (dto.kind !== 'verification' && !technician) {
     throw new ForbiddenError("Only the job's technician logs work at this stage")
   }
+  // One entry of each kind while the job stands at a stage: a second is an
+  // edit of the first, or follows its deletion.
+  const logged = await prisma.repairWorkEntry.findFirst({
+    where: { repairItemId: itemId, kind: dto.kind, ...(job.stageChangedAt ? { at: { gte: job.stageChangedAt } } : {}) },
+    select: { id: true },
+  })
+  if (logged) throw new ConflictError(`A ${WORK_KIND_LABEL[dto.kind].toLowerCase()} entry is already logged at this stage: edit it, or delete it to log another`)
 
   if (dto.kind === 'diagnosis' && (job.stage === 'in_workshop' || job.stage === 'field_inspection')) {
     if (!dto.damageClass) throw new UnprocessableError('Say whether the damage is genuine or suspected malicious')
@@ -933,6 +940,72 @@ export async function addWork(orgId: string, itemId: string, userId: string, dto
     return out
   }
   return prisma.$transaction(async (tx) => workEntry(tx, await openJob(tx, itemId, orgId), userId, dto.kind, dto.text, dto.labourMinutes))
+}
+
+/** An entry its author may change: on an open job, and logged by them. */
+async function ownEntry(orgId: string, itemId: string, entryId: string, userId: string) {
+  const job = await prisma.repairReportItem.findFirst({ where: { id: itemId, organisationId: orgId }, select: jobSelect })
+  if (!job) throw new NotFoundError('Repair job not found')
+  if (job.resolvedAt) throw new ConflictError('This job is closed')
+  const entry = await prisma.repairWorkEntry.findFirst({ where: { id: entryId, repairItemId: itemId, organisationId: orgId } })
+  if (!entry) throw new NotFoundError('Work log entry not found')
+  if (entry.byId !== userId) throw new ForbiddenError('Only the person who logged an entry changes it')
+  return { job, entry }
+}
+
+const kindName = (kind: string) => WORK_KIND_LABEL[kind as WorkEntry['kind']]?.toLowerCase() ?? kind
+
+/** Note an edit or deletion on the trail; the stage stays where it is. */
+async function trailNote(tx: Tx, job: Job, userId: string, note: string) {
+  const byName = await nameOf(tx, userId)
+  await tx.repairReportItem.update({
+    where: { id: job.id },
+    data: {
+      stageHistory: appendStage(job.stageHistory, {
+        kind: 'work_log', by: userId, ...(byName ? { byName } : {}), at: new Date().toISOString(), note,
+      }) as Prisma.InputJsonValue,
+    },
+  })
+}
+
+/**
+ * Edit a work log entry, from this stage or an earlier one (operator,
+ * 2026-10-27). The job does not move: it stays at the stage it stands at.
+ * Where the job carries the entry's words (the diagnosis; the repair in the
+ * account of the fix), they change with it.
+ */
+export async function editWork(orgId: string, itemId: string, entryId: string, userId: string, dto: WorkEdit) {
+  const { job, entry } = await ownEntry(orgId, itemId, entryId, userId)
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.repairWorkEntry.update({
+      where: { id: entryId },
+      data: { text: dto.text, ...(dto.labourMinutes !== undefined ? { labourMinutes: dto.labourMinutes } : {}) },
+    })
+    const mirror: Prisma.RepairReportItemUncheckedUpdateInput = {}
+    if (entry.kind === 'diagnosis' && job.diagnosis === entry.text) mirror.diagnosis = dto.text
+    if (entry.kind === 'repair' && job.fixNote?.includes(entry.text)) mirror.fixNote = job.fixNote.replace(entry.text, dto.text).slice(0, 2000)
+    if (Object.keys(mirror).length) await tx.repairReportItem.update({ where: { id: itemId }, data: mirror })
+    await trailNote(tx, job, userId, `Edited the ${kindName(entry.kind)} entry`)
+    return updated
+  })
+}
+
+/**
+ * Delete a work log entry logged at the stage the job stands at, which
+ * opens that kind to be logged again. An earlier stage's entry is the
+ * record of what moved the job on: it can be edited, not deleted.
+ */
+export async function deleteWork(orgId: string, itemId: string, entryId: string, userId: string) {
+  const { job, entry } = await ownEntry(orgId, itemId, entryId, userId)
+  const open = WORK_KINDS_AT[job.stage as Stage] ?? []
+  if (!open.includes(entry.kind as WorkEntry['kind']) || (job.stageChangedAt && entry.at < job.stageChangedAt)) {
+    throw new ConflictError('This entry belongs to an earlier stage: edit it instead')
+  }
+  await prisma.$transaction(async (tx) => {
+    await tx.repairWorkEntry.delete({ where: { id: entryId } })
+    await trailNote(tx, job, userId, `Deleted the ${kindName(entry.kind)} entry: ${entry.text.slice(0, 200)}`)
+  })
+  return { deleted: entryId }
 }
 
 export async function complete(orgId: string, itemId: string, userId: string, dto: Complete) {

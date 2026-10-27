@@ -41,6 +41,15 @@ export type AssignmentRevokedEvent = {
   at: string
 }
 
+/** An edit or deletion on the work log, kept on the trail (operator, 2026-10-27). */
+export type WorkLogEvent = {
+  kind: 'work_log'
+  by: string
+  byName?: string
+  at: string
+  note: string
+}
+
 export type AssignmentResponseEvent = {
   kind: 'assignment_response'
   status: 'accepted' | 'declined'
@@ -58,7 +67,7 @@ export type AssignmentResponseEvent = {
  * spreading a string would produce an array of characters and the tracking
  * line would render one node per letter.
  */
-export function appendStage<T extends StageEvent | AssignmentEvent | AssignmentRevokedEvent | AssignmentResponseEvent>(history: unknown, event: T): T[] {
+export function appendStage<T extends StageEvent | AssignmentEvent | AssignmentRevokedEvent | AssignmentResponseEvent | WorkLogEvent>(history: unknown, event: T): T[] {
   const prior = Array.isArray(history) ? (history as T[]) : []
   // 200 moves is a job somebody is fighting with a button, not a repair. The
   // cap bounds the column rather than expressing a belief about repairs.
