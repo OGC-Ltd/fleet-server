@@ -4,7 +4,7 @@ import * as wf from './repairs.workflow.js'
 import * as overhaul from './repairs.overhaul.js'
 import type {
   Assessment, Booking, Complete, Damage, FlagUnits, InvestigationUpdate, IssuePart, PathBody,
-  SourcePart, SpotFix, Verify, VoidBody, WarrantyVoid, WorkEntry, WorkshopAssign, MovePhase,
+  SourcePart, SpotFix, Verify, VoidBody, WarrantyVoid, WorkEdit, WorkEntry, WorkshopAssign, MovePhase,
 } from './repairs.workflow.schema.js'
 
 const p = (req: Request, key: string) => req.params[key] as string
@@ -39,6 +39,8 @@ export const voidWarranty = handle((req) => wf.voidWarranty(p(req, 'orgId'), p(r
 export const clearWarranty = handle((req) => wf.clearWarranty(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, (req.body as { note: string }).note))
 
 export const work = handle((req) => wf.addWork(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as WorkEntry, scope(req)), 201)
+export const editWork = handle((req) => wf.editWork(p(req, 'orgId'), p(req, 'itemId'), p(req, 'entryId'), req.user!.id, req.body as WorkEdit))
+export const deleteWork = handle((req) => wf.deleteWork(p(req, 'orgId'), p(req, 'itemId'), p(req, 'entryId'), req.user!.id))
 export const complete = handle((req) => wf.complete(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as Complete))
 export const verify = handle((req) => wf.verify(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as Verify, scope(req)))
 export const movePhase = handle((req) => wf.movePhase(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as MovePhase))

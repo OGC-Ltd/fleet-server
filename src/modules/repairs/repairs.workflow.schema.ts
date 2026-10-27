@@ -181,6 +181,12 @@ export const workEntrySchema = z.object({
   path: ['verdict'], message: 'Say whether the repair is verified',
 })
 
+/** An edit to a logged entry: its words and minutes, never its kind. */
+export const workEditSchema = z.object({
+  text:          required(4000, 'Write what was done'),
+  labourMinutes: z.coerce.number().int().min(0).max(100_000).optional(),
+})
+
 export const completeSchema = z.object({
   testResult: z.enum(['pass', 'fail']),
   testNote:   note(2000).optional(),
@@ -254,6 +260,7 @@ export type WorkshopAssign = z.infer<typeof workshopAssignSchema>
 export type Damage        = z.infer<typeof damageSchema>
 export type WarrantyVoid  = z.infer<typeof warrantyVoidSchema>
 export type WorkEntry     = z.infer<typeof workEntrySchema>
+export type WorkEdit      = z.infer<typeof workEditSchema>
 export type Complete      = z.infer<typeof completeSchema>
 export type Verify        = z.infer<typeof verifySchema>
 export type VoidBody      = z.infer<typeof voidSchema>

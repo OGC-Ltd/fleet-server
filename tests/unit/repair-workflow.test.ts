@@ -23,7 +23,7 @@ const tx = vi.hoisted(() => ({
   workshopBooking:    { count: vi.fn(), create: vi.fn(), updateMany: vi.fn(), findMany: vi.fn() },
   securityInvestigation: { findMany: vi.fn(), findUnique: vi.fn(), create: vi.fn() },
   repairSparePart:    { findMany: vi.fn() },
-  repairWorkEntry:    { create: vi.fn(), findMany: vi.fn() },
+  repairWorkEntry:    { create: vi.fn(), findMany: vi.fn(), findFirst: vi.fn(), update: vi.fn(), delete: vi.fn() },
   user:               { findUnique: vi.fn() },
   $queryRaw:          vi.fn(),
 }))
@@ -41,7 +41,7 @@ vi.mock('../../src/modules/repairs/repairs.workflow.notify.js', () => ({
 }))
 
 import { assessmentSchema, checklistFor, flagUnitsSchema, queueFor, spotFixSchema, CHECKLISTS } from '../../src/modules/repairs/repairs.workflow.schema.js'
-import { addWork, book, complete, decidePath, flagUnits, movePhase, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
+import { addWork, book, complete, deleteWork, editWork, decidePath, flagUnits, movePhase, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
 import { ROLE_DEFINITIONS } from '../../src/lib/permissions.js'
 import { notifyWorkflow } from '../../src/modules/repairs/repairs.workflow.notify.js'
 import { ConflictError, ForbiddenError, UnprocessableError } from '../../src/core/errors/errors.js'
@@ -66,6 +66,7 @@ beforeEach(() => {
   tx.repairSparePart.findMany.mockResolvedValue([])
   tx.repairWorkEntry.create.mockResolvedValue({})
   tx.repairWorkEntry.findMany.mockResolvedValue([{ text: 'Replaced the probe' }])
+  tx.repairWorkEntry.findFirst.mockResolvedValue(null)
   tx.$queryRaw.mockResolvedValue([{ ok: 1 }])
 })
 
@@ -553,5 +554,67 @@ describe('the work moves the job on', () => {
     tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'completed', completedById: 'sup-1' }))
     await expect(addWork(ORG, 'job-1', 'sup-1', { kind: 'verification', text: 'ok', verdict: 'accept' })).rejects.toBeInstanceOf(ForbiddenError)
     expect(tx.repairWorkEntry.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('one entry of each kind per stage, edited or deleted by its author', () => {
+  const since = new Date('2026-10-27T05:00:00Z')
+  const tech = (over: Record<string, unknown> = {}) =>
+    job({ stage: 'fixing', assignedToId: 'tech-1', assignmentStatus: 'accepted', ticketNo: 'RT-1', damageClass: 'genuine', stageChangedAt: since, ...over })
+  const entry = (over: Record<string, unknown> = {}) =>
+    ({ id: 'e1', repairItemId: 'job-1', organisationId: ORG, byId: 'tech-1', kind: 'repair', text: 'Refitted', at: new Date('2026-10-27T05:17:00Z'), ...over })
+
+  it('refuses a second entry of a kind already logged at this stage', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech())
+    tx.repairWorkEntry.findFirst.mockResolvedValue({ id: 'e1' })
+    await expect(addWork(ORG, 'job-1', 'tech-1', { kind: 'repair', text: 'again' })).rejects.toBeInstanceOf(ConflictError)
+    expect(tx.repairWorkEntry.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ kind: 'repair', at: { gte: since } }),
+    }))
+  })
+
+  it('edits an entry in place and leaves the job where it stands', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ fixNote: 'Refitted' }))
+    tx.repairWorkEntry.findFirst.mockResolvedValue(entry())
+    tx.repairWorkEntry.update.mockResolvedValue({})
+    await editWork(ORG, 'job-1', 'e1', 'tech-1', { text: 'Refitted the probe', labourMinutes: 25 })
+    expect(tx.repairWorkEntry.update).toHaveBeenCalledWith({ where: { id: 'e1' }, data: { text: 'Refitted the probe', labourMinutes: 25 } })
+    const writes = tx.repairReportItem.update.mock.calls.map((c) => (c[0] as { data: Record<string, unknown> }).data)
+    expect(writes).toContainEqual({ fixNote: 'Refitted the probe' })
+    expect(writes.some((d) => 'stage' in d)).toBe(false)
+  })
+
+  it('edits an earlier stage’s entry too', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ diagnosis: 'Cable chafed' }))
+    tx.repairWorkEntry.findFirst.mockResolvedValue(entry({ kind: 'diagnosis', text: 'Cable chafed', at: new Date('2026-10-27T04:00:00Z') }))
+    tx.repairWorkEntry.update.mockResolvedValue({})
+    await editWork(ORG, 'job-1', 'e1', 'tech-1', { text: 'Cable chafed at the tank entry' })
+    const writes = tx.repairReportItem.update.mock.calls.map((c) => (c[0] as { data: Record<string, unknown> }).data)
+    expect(writes).toContainEqual({ diagnosis: 'Cable chafed at the tank entry' })
+  })
+
+  it('lets only the author change an entry', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech())
+    tx.repairWorkEntry.findFirst.mockResolvedValue(entry({ byId: 'someone-else' }))
+    await expect(editWork(ORG, 'job-1', 'e1', 'tech-1', { text: 'x' })).rejects.toBeInstanceOf(ForbiddenError)
+    await expect(deleteWork(ORG, 'job-1', 'e1', 'tech-1')).rejects.toBeInstanceOf(ForbiddenError)
+  })
+
+  it('deletes an entry of this stage, which opens its kind again', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech())
+    tx.repairWorkEntry.findFirst.mockResolvedValue(entry())
+    tx.repairWorkEntry.delete.mockResolvedValue({})
+    await expect(deleteWork(ORG, 'job-1', 'e1', 'tech-1')).resolves.toEqual({ deleted: 'e1' })
+    expect(tx.repairWorkEntry.delete).toHaveBeenCalledWith({ where: { id: 'e1' } })
+  })
+
+  it('keeps an earlier stage’s entry: edit, not delete', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech())
+    tx.repairWorkEntry.findFirst.mockResolvedValue(entry({ kind: 'diagnosis', at: new Date('2026-10-27T05:20:00Z') }))
+
+    await expect(deleteWork(ORG, 'job-1', 'e1', 'tech-1')).rejects.toBeInstanceOf(ConflictError)
+    tx.repairWorkEntry.findFirst.mockResolvedValue(entry({ at: new Date('2026-10-27T04:00:00Z') }))
+    await expect(deleteWork(ORG, 'job-1', 'e1', 'tech-1')).rejects.toBeInstanceOf(ConflictError)
+    expect(tx.repairWorkEntry.delete).not.toHaveBeenCalled()
   })
 })
