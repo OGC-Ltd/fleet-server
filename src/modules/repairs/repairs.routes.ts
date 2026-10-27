@@ -124,7 +124,11 @@ router.post('/items/:itemId/workshop-assign', requirePermissionStrict('repair:bo
 router.post('/items/:itemId/damage', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(damageSchema), wf.damage)
 router.post('/items/:itemId/warranty-void', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(warrantyVoidSchema), wf.voidWarranty)
 router.post('/items/:itemId/warranty-void/clear', requirePermissionStrict('security_case:update'), validateBody(warrantyClearSchema), wf.clearWarranty)
-router.post('/items/:itemId/work', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(workEntrySchema), wf.work)
+// The work log opens by stage (repairs.workflow WORK_KINDS_AT): the Control
+// Room logs verification; everything else is the job's technician's.
+router.post('/items/:itemId/work',
+  requirePermissionStrict((req) => (req.body as { kind?: string } | undefined)?.kind === 'verification' ? 'repair:verify' : 'repair:resolve'),
+  validateBody(workEntrySchema), wf.work)
 router.post('/items/:itemId/complete', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(completeSchema), wf.complete)
 router.post('/items/:itemId/verify', requirePermissionStrict('repair:verify'), validateBody(verifySchema), wf.verify)
 router.post('/items/:itemId/void', requirePermissionStrict('repair:verify'), validateBody(voidSchema), wf.voidJob)

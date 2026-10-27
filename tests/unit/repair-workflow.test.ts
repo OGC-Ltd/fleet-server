@@ -41,7 +41,7 @@ vi.mock('../../src/modules/repairs/repairs.workflow.notify.js', () => ({
 }))
 
 import { assessmentSchema, checklistFor, flagUnitsSchema, queueFor, spotFixSchema, CHECKLISTS } from '../../src/modules/repairs/repairs.workflow.schema.js'
-import { book, complete, decidePath, flagUnits, movePhase, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
+import { addWork, book, complete, decidePath, flagUnits, movePhase, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
 import { ROLE_DEFINITIONS } from '../../src/lib/permissions.js'
 import { notifyWorkflow } from '../../src/modules/repairs/repairs.workflow.notify.js'
 import { ConflictError, ForbiddenError, UnprocessableError } from '../../src/core/errors/errors.js'
@@ -430,5 +430,55 @@ describe('one road for every repair', () => {
     const fixing = writes.find((w) => w.where.id === 'old-fixing')!
     expect(fixing.data).toMatchObject({ queue: 'controltech', path: 'physical', faultCategory: 'fuel_probe', ticketNo: 'RT-2026-00007' })
     expect(fixing.data.stage).toBeUndefined()
+  })
+})
+
+describe('work log opens by stage', () => {
+  const tech = (over: Record<string, unknown> = {}) => job({ assignedToId: 'tech-1', assignmentStatus: 'accepted', ...over })
+  const log = (kind: 'diagnosis' | 'repair' | 'test' | 'note' | 'verification', userId = 'tech-1') =>
+    addWork(ORG, 'job-1', userId, { kind, text: 'done' })
+
+  it('opens diagnosis to the technician at triage and in the workshop, not repair or test', async () => {
+    for (const stage of ['forwarded', 'in_workshop', 'field_inspection']) {
+      tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage }))
+      await expect(log('diagnosis')).resolves.toBeDefined()
+      await expect(log('repair')).rejects.toBeInstanceOf(ConflictError)
+      await expect(log('test')).rejects.toBeInstanceOf(ConflictError)
+    }
+  })
+
+  it('opens repair and test together while fixing, not diagnosis', async () => {
+    for (const stage of ['remote_fix', 'fixing', 'spare_outsourced']) {
+      tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage }))
+      await expect(log('repair')).resolves.toBeDefined()
+      await expect(log('test')).resolves.toBeDefined()
+      await expect(log('diagnosis')).rejects.toBeInstanceOf(ConflictError)
+    }
+  })
+
+  it("refuses a technician's entry from anyone but the job's technician", async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'fixing' }))
+    await expect(log('repair', 'supervisor-1')).rejects.toBeInstanceOf(ForbiddenError)
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'fixing', assignmentStatus: 'pending' }))
+    await expect(log('repair')).rejects.toBeInstanceOf(ForbiddenError)
+    tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'in_workshop', workshopTechnicianId: 'ws-1' }))
+    await expect(log('diagnosis', 'ws-1')).resolves.toBeDefined()
+  })
+
+  it('opens only verification once completed, to the Control Room', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage: 'completed' }))
+    await expect(log('verification', 'supervisor-1')).resolves.toBeDefined()
+    await expect(log('test')).rejects.toBeInstanceOf(ConflictError)
+    await expect(log('note')).rejects.toBeInstanceOf(ConflictError)
+  })
+
+  it('opens nothing while flagged, awaiting assessment or booked', async () => {
+    for (const stage of ['pending', 'awaiting_assessment', 'booked', 'towing']) {
+      tx.repairReportItem.findFirst.mockResolvedValue(tech({ stage }))
+      for (const kind of ['diagnosis', 'repair', 'test', 'note', 'verification'] as const) {
+        await expect(log(kind)).rejects.toBeInstanceOf(ConflictError)
+      }
+    }
+    expect(tx.repairWorkEntry.create).not.toHaveBeenCalled()
   })
 })
