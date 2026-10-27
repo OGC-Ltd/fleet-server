@@ -41,7 +41,7 @@ vi.mock('../../src/modules/repairs/repairs.workflow.notify.js', () => ({
 }))
 
 import { assessmentSchema, checklistFor, flagUnitsSchema, queueFor, spotFixSchema, CHECKLISTS } from '../../src/modules/repairs/repairs.workflow.schema.js'
-import { book, complete, decidePath, flagUnits, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
+import { book, complete, decidePath, flagUnits, movePhase, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
 import { ROLE_DEFINITIONS } from '../../src/lib/permissions.js'
 import { notifyWorkflow } from '../../src/modules/repairs/repairs.workflow.notify.js'
 import { ConflictError, ForbiddenError, UnprocessableError } from '../../src/core/errors/errors.js'
@@ -290,6 +290,38 @@ describe('who hears about completion and verification (2026-10-27)', () => {
     const [, ev] = vi.mocked(notifyWorkflow).mock.calls.find(([, e]) => e.key === 'verified')!
     expect(ev).toMatchObject({ source: 'repair_verified', audience: ['channel'] })
     expect(ev.pushUsers).toEqual(['tech-1', 'tech-2', null])
+  })
+})
+
+describe('moving a job by hand to any phase (2026-10-27)', () => {
+  const stageSet = () => tx.repairReportItem.updateMany.mock.calls.at(-1)?.[0]?.data
+
+  it('goes back from Repair to Assessment and cancels a live booking', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'fixing', ticketNo: 'RT-2026-00003' }))
+    await movePhase(ORG, 'job-1', 'u-1', { phase: 'assess', note: 'Clicked the wrong button' }).catch(() => undefined)
+    expect(tx.workshopBooking.updateMany).toHaveBeenCalledWith({ where: { repairItemId: 'job-1', status: 'booked' }, data: { status: 'cancelled' } })
+    expect(stageSet()).toMatchObject({ stage: 'awaiting_assessment' })
+    const trail = stageSet().stageHistory.at(-1)
+    expect(trail.note).toBe('Moved by hand from Repair to Assessment: Clicked the wrong button')
+  })
+
+  it('goes forward to Repair and issues the ticket a remote job lacks', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'forwarded', queue: 'controltech', faultCategory: 'gps', path: 'remote' }))
+    tx.$queryRaw.mockResolvedValue([{ n: 91n }])
+    await movePhase(ORG, 'job-1', 'u-1', { phase: 'repair' }).catch(() => undefined)
+    expect(stageSet()).toMatchObject({ stage: 'remote_fix', ticketNo: `RT-${new Date().getUTCFullYear()}-00091` })
+  })
+
+  it('clears the completion when it leaves Verification', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'completed', completedById: 'u-9', ticketNo: 'RT-2026-00003' }))
+    await movePhase(ORG, 'job-1', 'u-1', { phase: 'repair' }).catch(() => undefined)
+    expect(stageSet()).toMatchObject({ stage: 'fixing', completedAt: null, completedById: null, testResult: null })
+  })
+
+  it('refuses triage for a mechanical fault, and a move to where it already is', async () => {
+    tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'awaiting_assessment', queue: 'workshop' }))
+    await expect(movePhase(ORG, 'job-1', 'u-1', { phase: 'triage' })).rejects.toBeInstanceOf(ConflictError)
+    await expect(movePhase(ORG, 'job-1', 'u-1', { phase: 'assess' })).rejects.toBeInstanceOf(ConflictError)
   })
 })
 
