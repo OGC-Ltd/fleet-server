@@ -398,6 +398,48 @@ describe('reconcile — the provider retracts an event', () => {
     expect(prismaMock.fuelTheft.deleteMany).not.toHaveBeenCalled()
   })
 
+  it('never deletes an open theft case the provider stopped reporting (issue #48)', async () => {
+    // KDR 431Q: our telemetry judged the drain a SIPHON, it sat open on the
+    // Alerts page, and the settle pass deleted it when Wialon's settled answer
+    // dropped the event — gone with no escalation or de-escalation.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([{ ...stale, drainCause: 'SIPHON', reviewStatus: null }])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.notification.findMany as any).mockResolvedValue([{ feedId: 'fuel-drain-veh_1-ft_stale' }])
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ from: SETTLE_FROM, reconcile: true }))
+
+    expect(out.removed).toBe(0)
+    expect(prismaMock.fuelTheft.deleteMany).not.toHaveBeenCalled()
+    // Its POSSIBLE THEFT line is not re-worded to "withdrawn" either.
+    expect(published()).toHaveLength(0)
+  })
+
+  it('never deletes a drain someone has already reviewed', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([{ ...stale, drainCause: null, reviewStatus: 'UNDER_REVIEW' }])
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ from: SETTLE_FROM, reconcile: true }))
+
+    expect(out.removed).toBe(0)
+    expect(prismaMock.fuelTheft.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('still deletes a retracted drain that never became a case', async () => {
+    // A cause that is not announced (here probe slosh) is a raw drain: the
+    // clean-up the loss figure depends on still applies to it.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.fuelTheft.findMany as any).mockResolvedValue([{ ...stale, drainCause: 'SLOSH', reviewStatus: null }])
+    vi.mocked(fetchUnitFuelEvents).mockResolvedValue({ fillings: [], thefts: [] })
+
+    const out = await syncVehicleFuelEvents({} as never, SOURCE, VEHICLE, opts({ from: SETTLE_FROM, reconcile: true }))
+
+    expect(out.removed).toBe(1)
+    expect(prismaMock.fuelTheft.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['ft_stale'] } } })
+  })
+
   it('counts but does not delete during a dry run', async () => {
     // This is the only branch that destroys data, so the dry run has to be able
     // to answer "how many rows would go?" before anyone runs it for real.
