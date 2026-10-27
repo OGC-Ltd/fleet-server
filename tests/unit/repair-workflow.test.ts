@@ -41,7 +41,7 @@ vi.mock('../../src/modules/repairs/repairs.workflow.notify.js', () => ({
 }))
 
 import { assessmentSchema, checklistFor, flagUnitsSchema, queueFor, spotFixSchema, CHECKLISTS } from '../../src/modules/repairs/repairs.workflow.schema.js'
-import { addWork, book, complete, deleteWork, editWork, decidePath, flagUnits, movePhase, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
+import { addWork, book, complete, deleteWork, editWork, decidePath, flagUnits, mine, movePhase, verify, workflowSweep } from '../../src/modules/repairs/repairs.workflow.js'
 import { ROLE_DEFINITIONS } from '../../src/lib/permissions.js'
 import { notifyWorkflow } from '../../src/modules/repairs/repairs.workflow.notify.js'
 import { ConflictError, ForbiddenError, UnprocessableError } from '../../src/core/errors/errors.js'
@@ -616,5 +616,18 @@ describe('one entry of each kind per stage, edited or deleted by its author', ()
     tx.repairWorkEntry.findFirst.mockResolvedValue(entry({ at: new Date('2026-10-27T04:00:00Z') }))
     await expect(deleteWork(ORG, 'job-1', 'e1', 'tech-1')).rejects.toBeInstanceOf(ConflictError)
     expect(tx.repairWorkEntry.delete).not.toHaveBeenCalled()
+  })
+})
+
+describe("a technician's own jobs (2026-10-27)", () => {
+  it('lists every job assigned to them or given to them in the workshop, open or closed, unscoped by unit', async () => {
+    prismaMock.repairReportItem.findMany.mockResolvedValueOnce([
+      { id: 'j2', stage: 'in_workshop', resolvedAt: null, assignedToId: 'u1' },
+      { id: 'j1', stage: 'fixed', resolvedAt: new Date('2026-10-26T08:00:00Z'), workshopTechnicianId: 'u1' },
+    ])
+    const rows = await mine('org-1', 'u1')
+    expect(rows.map((r) => r.id)).toEqual(['j2', 'j1'])
+    const where = prismaMock.repairReportItem.findMany.mock.calls.at(-1)![0].where
+    expect(where).toEqual({ organisationId: 'org-1', OR: [{ assignedToId: 'u1' }, { workshopTechnicianId: 'u1' }] })
   })
 })

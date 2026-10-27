@@ -100,6 +100,8 @@ router.post('/items/:itemId/parts/:partId', requirePermissionStrict('repair:reso
  * not, and apply the caller's vehicle scope in the service instead.
  */
 router.get('/queue', requirePermissionStrict('repair:claim'), wf.queue)
+// The caller's own jobs, open and closed (repairs.workflow mine).
+router.get('/mine', requirePermissionStrict('repair:read'), wf.mine)
 router.get('/service-states', requirePermission('repair:read'), wf.serviceStates)
 router.get('/workshops', requirePermission('repair:read'), wf.workshops)
 router.get('/workshops/:workshopId/availability', requirePermission('repair:read'), validateQuery(availabilityQuerySchema), wf.availability)
