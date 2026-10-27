@@ -50,11 +50,18 @@ import { GRAMMAR_RULES, tidyProse } from '../../lib/prose-grammar.js'
  *  the box 2026-10-20: VEHICLE_BRIEF_MODEL answers in ~2 s, ~2.8 s at worst. */
 const FRESH_WAIT_MS = 4_000
 
-/** How long one vehicle's brief stays fresh. */
+/** How long one vehicle's facts-only brief stays fresh. */
 const CACHE_TTL_MS = 10 * 60_000
 
-/** Bounded, so browsing a 597-vehicle fleet cannot grow this without limit. */
-const CACHE_MAX = 300
+/** How long a model-written brief is served as it is (operator, 2026-10-27:
+ *  the first AI brief on a unit at 07:00 is the one every user, on any
+ *  machine, sees for that unit until 08:00). A click inside the hour does not
+ *  buy another completion. */
+const MODEL_TTL_MS = 60 * 60_000
+
+/** Bounded, so browsing the fleets cannot grow this without limit. An hour of
+ *  briefs covers far more units than ten minutes did. */
+const CACHE_MAX = 2000
 
 /** Legs that mean the unit demonstrably left the yard on this run. On the other
  *  two ('at-yard', 'no-fix') there is no departure to look for. */
@@ -183,6 +190,12 @@ const generating = new Map<string, Promise<VehicleBrief>>()
 /** Last time the model was asked about a vehicle, so re-measuring a moving unit
  *  cannot turn into a completion per page view. See getVehicleBrief. */
 const lastModelAsk = new Map<string, number>()
+
+/** The hour's AI brief, when there is one: it answers everyone, fresh or not,
+ *  whatever the distance has done since, until the hour is up. */
+export function sharedHourlyBrief(hit: Entry | undefined, now = Date.now()): VehicleBrief | null {
+  return hit && hit.brief.source === 'model' && now - hit.at < MODEL_TTL_MS ? hit.brief : null
+}
 
 function remember(key: string, brief: VehicleBrief): void {
   if (cache.size >= CACHE_MAX) {
@@ -752,6 +765,11 @@ async function askModel(facts: VehicleFacts): Promise<VehicleBrief> {
  * version still lands detached, and the panel's follow-up reads (without
  * `fresh`) pick it up from the cache.
  *
+ * Shared hourly 2026-10-27: once the model has written a unit's brief, that
+ * brief is served to every request for MODEL_TTL_MS, `fresh` included, and the
+ * distance check does not drop it. Only a facts-only brief (no key, or the
+ * model failed) is re-measured as above.
+ *
  * Supercharged 2026-10-20: a fresh request waits up to FRESH_WAIT_MS for the
  * model and answers with its wording when it lands in time (about two seconds,
  * see VEHICLE_BRIEF_MODEL), so one click is one round trip to the AI brief.
@@ -762,6 +780,8 @@ export async function getVehicleBrief(
   const key = `${orgId}:${vehicleId}`
 
   const hit = cache.get(key)
+  const hourly = sharedHourlyBrief(hit)
+  if (hourly) return hourly
   if (!fresh && hit && Date.now() - hit.at < CACHE_TTL_MS && await distanceStillAgrees(orgId, vehicleId, hit.brief)) {
     return hit.brief
   }
