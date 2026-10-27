@@ -43,4 +43,27 @@ describe('feed sources on the dashboard stream', () => {
     expect(written(ops)).toContain('"id":"z"')
     offTech(); offOps()
   })
+
+  it('sends a ticket notice to the ticket roles only, never a technician', () => {
+    vi.useFakeTimers()
+    const tech = fakeRes()
+    const desk = fakeRes()
+    const other = fakeRes()
+    const offs = [
+      registerDashboardClient('org-t', tech, { vehicleIds: new Set(['v1']), feedSources: new Set(['repair', 'repair_flag']) }),
+      registerDashboardClient('org-t', desk, { feedGrants: new Set(['repair_ticket']) }),
+      registerDashboardClient('org-t', other),
+    ]
+
+    emitDashboardFeed('org-t', { id: 't', source: 'repair_ticket', vehicleId: 'v1', text: 'ticket RT-2026-00077' })
+    emitDashboardFeed('org-t', { id: 'z', source: 'zone',          vehicleId: 'v1', text: 'entered yard' })
+    vi.advanceTimersByTime(200)
+
+    expect(written(desk)).toContain('"id":"t"')
+    expect(written(desk)).toContain('"id":"z"')
+    expect(written(tech)).not.toContain('"id":"t"')
+    expect(written(other)).not.toContain('"id":"t"')
+    expect(written(other)).toContain('"id":"z"')
+    for (const off of offs) off()
+  })
 })
