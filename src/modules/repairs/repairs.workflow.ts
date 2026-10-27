@@ -875,7 +875,7 @@ export async function clearWarranty(orgId: string, itemId: string, userId: strin
  */
 export const WORK_KINDS_AT: Partial<Record<Stage, WorkEntry['kind'][]>> = {
   forwarded: ['diagnosis', 'note'], in_workshop: ['diagnosis', 'note'], field_inspection: ['diagnosis', 'note'],
-  remote_fix: ['repair', 'test', 'note'], fixing: ['repair', 'test', 'note'], spare_outsourced: ['repair', 'test', 'note'],
+  remote_fix: ['repair', 'test', 'note'], fixing: ['repair', 'test', 'note'], spare_outsourced: ['repair', 'note'],
   completed: ['verification'],
 }
 const WORK_KIND_LABEL: Record<WorkEntry['kind'], string> = {
@@ -883,23 +883,56 @@ const WORK_KIND_LABEL: Record<WorkEntry['kind'], string> = {
 }
 
 /**
- * Log work on a job. The route has already checked the permission the kind
- * needs (repair:verify for verification, repair:resolve otherwise); this
- * checks the stage, and that a technician's entry comes from the job's own
- * technician, not anyone who may work any job.
+ * Log work on a job, and let the work move the job on (operator,
+ * 2026-10-27): the entry that finishes a stage runs that stage's step, so
+ * its rules, ticket and notices are the step's own.
+ *
+ *   - a diagnosis in the workshop, with the damage class, starts the repair
+ *     (classifyDamage), Workshop → Repair;
+ *   - a passed test completes the job with the logged repair as its account
+ *     (complete), Repair → Verification; a failed one is logged and the work
+ *     goes on;
+ *   - a verification verifies or rejects (verify).
+ *
+ * Other entries are logged where they stand. The route has checked the
+ * permission the kind needs (repair:verify for verification, repair:resolve
+ * otherwise); this checks the stage, and that a technician's entry comes
+ * from the job's own technician, not anyone who may work any job.
  */
-export async function addWork(orgId: string, itemId: string, userId: string, dto: WorkEntry) {
-  return prisma.$transaction(async (tx) => {
-    const job = await openJob(tx, itemId, orgId)
-    if (!WORK_KINDS_AT[job.stage as Stage]?.includes(dto.kind)) {
-      throw new ConflictError(`A ${WORK_KIND_LABEL[dto.kind].toLowerCase()} entry cannot be logged while the job is ${STAGE_LABEL[job.stage] ?? job.stage}`)
-    }
-    const technician = job.workshopTechnicianId === userId || (job.assignedToId === userId && job.assignmentStatus === 'accepted')
-    if (dto.kind !== 'verification' && !technician) {
-      throw new ForbiddenError("Only the job's technician logs work at this stage")
-    }
-    return workEntry(tx, job, userId, dto.kind, dto.text, dto.labourMinutes)
-  })
+export async function addWork(orgId: string, itemId: string, userId: string, dto: WorkEntry, scope: Scope = null) {
+  const job = await prisma.repairReportItem.findFirst({ where: { id: itemId, organisationId: orgId }, select: jobSelect })
+  if (!job) throw new NotFoundError('Repair job not found')
+  if (job.resolvedAt) throw new ConflictError('This job is closed')
+  if (!WORK_KINDS_AT[job.stage as Stage]?.includes(dto.kind)) {
+    throw new ConflictError(`A ${WORK_KIND_LABEL[dto.kind].toLowerCase()} entry cannot be logged while the job is ${STAGE_LABEL[job.stage] ?? job.stage}`)
+  }
+  const technician = job.workshopTechnicianId === userId || (job.assignedToId === userId && job.assignmentStatus === 'accepted')
+  if (dto.kind !== 'verification' && !technician) {
+    throw new ForbiddenError("Only the job's technician logs work at this stage")
+  }
+
+  if (dto.kind === 'diagnosis' && (job.stage === 'in_workshop' || job.stage === 'field_inspection')) {
+    if (!dto.damageClass) throw new UnprocessableError('Say whether the damage is genuine or suspected malicious')
+    return classifyDamage(orgId, itemId, userId, { damageClass: dto.damageClass, note: dto.damageNote, diagnosis: dto.text })
+  }
+  if (dto.kind === 'test') {
+    // The account of the repair is what was logged as repair, oldest first.
+    const repairs = await prisma.repairWorkEntry.findMany({
+      where: { repairItemId: itemId, kind: 'repair' }, orderBy: { at: 'asc' }, select: { text: true },
+    })
+    if (dto.testResult === 'pass' && repairs.length === 0) throw new UnprocessableError('Log the repair before the test that passes it')
+    return complete(orgId, itemId, userId, {
+      testResult: dto.testResult!, testNote: dto.text,
+      fixNote: repairs.map((r) => r.text).join('\n').slice(0, 2000) || dto.text.slice(0, 2000),
+      ...(dto.recommendation ? { recommendation: dto.recommendation } : {}),
+    })
+  }
+  if (dto.kind === 'verification') {
+    const out = await verify(orgId, itemId, userId, { decision: dto.verdict!, note: dto.text }, scope)
+    await prisma.$transaction((tx) => workEntry(tx, job, userId, 'verification', `${dto.verdict === 'accept' ? 'Verified' : 'Rejected'}: ${dto.text}`))
+    return out
+  }
+  return prisma.$transaction(async (tx) => workEntry(tx, await openJob(tx, itemId, orgId), userId, dto.kind, dto.text, dto.labourMinutes))
 }
 
 export async function complete(orgId: string, itemId: string, userId: string, dto: Complete) {
