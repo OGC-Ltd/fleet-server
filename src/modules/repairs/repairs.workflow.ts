@@ -26,6 +26,7 @@ import { logger } from '../../lib/logger.js'
 import { prisma } from '../../lib/prisma.js'
 import { ConflictError, ForbiddenError, NotFoundError, UnprocessableError } from '../../core/errors/errors.js'
 import { appendStage, findItemById, type StageEvent } from './repairs.repository.js'
+import { withEffectiveStages } from './effective-stage.js'
 import { assertNoOutstandingParts } from './repairs.overhaul.js'
 import { canReceiveTriage } from './repairs.authz.js'
 import { repairSignedOff } from '../fuel/fuel-followup.service.js'
@@ -452,6 +453,32 @@ export async function queue(orgId: string) {
     orderBy: { forwardedAt: 'asc' },
   })
   return rows
+}
+
+/**
+ * A technician's own jobs (operator, 2026-10-27): every job assigned to them
+ * or given to them in the workshop, open or closed, wherever it has got to.
+ * The ControlTech queue drops a job once it leaves ControlTech; this keeps
+ * it, so a job sent on to the workshop, or signed off, is still theirs to
+ * find. Not vehicle scoped: a closed job's unit is no longer flagged.
+ */
+export async function mine(orgId: string, userId: string) {
+  const rows = await prisma.repairReportItem.findMany({
+    where: { organisationId: orgId, OR: [{ assignedToId: userId }, { workshopTechnicianId: userId }] },
+    include: {
+      vehicle: { select: { id: true, registrationPlate: true, name: true } },
+      assignedTo: { select: { id: true, fullName: true } },
+      workshopTechnician: { select: { id: true, fullName: true } },
+      bookings: {
+        where: { status: { in: ['booked', 'arrived'] } },
+        select: { id: true, bookingDate: true, status: true, workshop: { select: { name: true } } },
+        take: 1,
+      },
+    },
+    orderBy: { id: 'desc' },
+    take: 300,
+  })
+  return withEffectiveStages(rows)
 }
 
 /** A ControlTech technician takes a job from the queue: a self-assignment, already accepted. */
