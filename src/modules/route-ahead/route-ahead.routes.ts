@@ -7,6 +7,7 @@ import { sendSuccess } from '../../core/response/response.js'
 import { BadRequestError } from '../../core/errors/errors.js'
 import { getRouteAhead } from './route-ahead.service.js'
 import { googleRoutingAvailable } from '../../providers/google-routing/index.js'
+import { googleWeatherAvailable, weatherGrid } from '../../providers/google-weather/index.js'
 import { getHaltInvestigation, getTripInvestigation } from '../fuel/fuel-investigation.js'
 import { getHubs, getInbound, getInboundAt, getArrivalClasses, ARRIVAL_MINUTES } from './hub-arrivals.js'
 
@@ -46,7 +47,23 @@ const pointQuery = z.object({
   name: z.string().trim().max(80).optional(),
 }).and(inboundQuery)
 
+// The map's view, for the weather layer.
+const weatherQuery = z.object({
+  south: z.coerce.number().min(-90).max(90),
+  west:  z.coerce.number().min(-180).max(180),
+  north: z.coerce.number().min(-90).max(90),
+  east:  z.coerce.number().min(-180).max(180),
+}).refine((b) => b.north > b.south && b.east > b.west, 'bounds: north above south, east of west')
+
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
+
+const weather: RequestHandler = async (req, res, next) => {
+  try {
+    if (!googleWeatherAvailable()) { sendSuccess(res, { enabled: false, step: null, points: [] }); return }
+    const b = req.query as unknown as z.infer<typeof weatherQuery>
+    sendSuccess(res, { enabled: true, ...await weatherGrid(b) })
+  } catch (err) { next(err) }
+}
 
 const hubs: RequestHandler = async (req, res, next) => {
   try {
@@ -116,6 +133,8 @@ router.get('/routing/hubs', ...fleetGuard, hubs)
 router.get('/routing/hubs/:hubKey/inbound', ...fleetGuard, validateQuery(inboundQuery), inbound)
 // "Suggest a unit": the same for a spot picked on the map.
 router.get('/routing/point/inbound', ...fleetGuard, validateQuery(pointQuery), inboundAt)
+// Current weather over the map's view (Google Weather API, a grid of points).
+router.get('/weather/grid', ...fleetGuard, validateQuery(weatherQuery), weather)
 
 // The road from the unit's Wialon fix to where it is going, with a traffic ETA.
 router.get('/vehicles/:vehicleId/route-ahead', ...guard, validateQuery(routeQuery), routeAhead)
