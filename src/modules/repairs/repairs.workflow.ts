@@ -31,6 +31,7 @@ import { canReceiveTriage } from './repairs.authz.js'
 import { repairSignedOff } from '../fuel/fuel-followup.service.js'
 import { humanKind, STAGE_LABEL } from './repairs.service.js'
 import { notifyWorkflow, roleHolderEmails, HEAD_OF_SECURITY_ROLE, TICKET_PUSH_ROLES, type JobRef, type WorkflowEvent } from './repairs.workflow.notify.js'
+import { TICKET_FEED_ROLES } from '../../lib/notifications/restricted-sources.js'
 import {
   checklistFor, queueFor, type Assessment, type Booking, type Complete, type Damage,
   type FaultCategory, type FlagUnits, type InvestigationUpdate, type PathBody, type SpotFix, type Verify,
@@ -166,7 +167,7 @@ async function tellTickets(jobs: Job[], how: string) {
     const tickets = group.map((j) => `${j.ticketNo} (${labelOf(j)})`).join(', ')
     await tell({ ...refOf(group[0]!), label: group.map(labelOf).join(', '), ticketNo: nos }, {
       key: 'ticket', severity: 'info', headline: 'Repair ticket issued',
-      text: `ticket ${nos} issued: ${how}`,
+      text: `ticket issued: ${how}`,
       lines: [{ label: group.length > 1 ? 'Tickets' : 'Ticket', value: tickets }, { label: 'Path', value: how }],
       audience: [], push: TICKET_PUSH_ROLES, source: 'repair_ticket',
     })
@@ -184,7 +185,8 @@ function withTicket(ev: WorkflowEvent, job: { ticketNo: string | null; issued?: 
   if (!job.issued || !job.ticketNo) return ev
   return {
     ...ev,
-    text: ev.text.includes(job.ticketNo) ? ev.text : `${ev.text} · ticket ${job.ticketNo} issued`,
+    // The feed line already leads with "plate · ticket", so say it was issued, not which.
+    text: ev.text.includes(job.ticketNo) ? ev.text : `${ev.text} · ticket issued`,
     lines: [...(ev.lines ?? []), { label: 'Ticket', value: job.ticketNo }],
     audience: ev.audience.filter((a) => a !== 'control_room'),
     push: TICKET_PUSH_ROLES, source: 'repair_ticket',
@@ -896,11 +898,13 @@ export async function complete(orgId: string, itemId: string, userId: string, dt
     return { job, failed: false }
   })
   if (!result.failed) {
+    // Completed and tested: to the operator, supervisor and both security
+    // heads, in their feed and by push, not to everyone (operator, 2026-10-27).
     await tell(refOf(result.job, 'completed'), {
       key: 'completed', severity: 'warning', headline: 'Repair completed: verify it',
       text: `completed and tested, awaiting the Control Room: ${dto.fixNote}`,
       lines: [{ label: 'What was done', value: dto.fixNote }],
-      audience: ['control_room', 'channel'],
+      audience: ['channel'], source: 'repair_ticket', push: TICKET_FEED_ROLES,
     })
   }
   const item = await findItemById(itemId, orgId)
@@ -928,15 +932,19 @@ export async function verify(orgId: string, itemId: string, userId: string, dto:
   })
   // The existing sign-off chain: Fuel Audit cases close, "Probe reported" lifts.
   if (dto.decision === 'accept') await repairSignedOff(orgId, itemId)
+  // The Control Room's answer goes to the technicians who did the work: their
+  // feed and a push to each of them (operator, 2026-10-27).
+  const technicians = [result.completedById, result.assignedToId, result.workshopTechnicianId]
   await tell(refOf(result, dto.decision === 'accept' ? 'fixed' : 'fixing'), dto.decision === 'accept'
     ? {
       key: 'verified', severity: 'info', headline: 'Repair verified: unit available',
-      text: 'verified by the Control Room; the unit is fixed and available', audience: ['control_room', 'assignee', 'channel'],
+      text: 'verified by the Control Room; the unit is fixed and available', audience: ['channel'],
+      source: 'repair_verified', pushUsers: technicians,
     }
     : {
       key: 'verify-rejected', severity: 'warning', headline: 'Repair verification rejected',
       text: `verification rejected: ${dto.note}`, lines: [{ label: 'Reason', value: dto.note ?? '' }],
-      audience: ['control_room', 'assignee'],
+      audience: ['control_room', 'assignee'], pushUsers: technicians,
     })
   return findItemById(itemId, orgId)
 }

@@ -62,9 +62,11 @@ export interface WorkflowEvent {
   at?:       Date
   /** The feed source; 'repair' unless only some viewers may see it
    *  ('repair_flag', 'repair_ticket': see notifications/restricted-sources). */
-  source?:   'repair' | 'repair_flag' | 'repair_ticket'
+  source?:   'repair' | 'repair_flag' | 'repair_ticket' | 'repair_verified'
   /** Role slugs whose holders get a Web Push notification of this event. */
   push?:     readonly string[]
+  /** People who get a Web Push notification of this event, by user id. */
+  pushUsers?: (string | null | undefined)[]
 }
 
 const live = {
@@ -203,9 +205,12 @@ export async function notifyWorkflow(ref: JobRef, ev: WorkflowEvent): Promise<{ 
     logger.error({ err, itemId: ref.itemId, key: ev.key }, 'repair workflow: could not publish the feed item')
   }
 
-  if (ev.push?.length) {
+  if (ev.push?.length || ev.pushUsers?.some(Boolean)) {
     try {
-      const ids = await roleHolderIds(ref.orgId, ev.push, ref.vehicleId)
+      const ids = [...new Set([
+        ...(ev.push?.length ? await roleHolderIds(ref.orgId, ev.push, ref.vehicleId) : []),
+        ...(ev.pushUsers ?? []).filter((x): x is string => !!x),
+      ])]
       await pushService.sendToUsers(ids, {
         title: ev.headline,
         body:  `${plateRef} · ${ref.label}: ${ev.text}`,
