@@ -238,23 +238,32 @@ describe('the workshop takes 3 booked vehicles a day', () => {
 })
 
 describe('a ticket for every fix, remote or physical (2026-10-27)', () => {
-  it.each([['remote', 'remote_fix', 'fixing remotely'], ['physical', 'awaiting_assessment', 'physical inspection']] as const)(
-    'issues the ticket when the path is %s, and pushes it', async (path, stage, how) => {
+  it.each([['remote', 'remote_fix'], ['physical', 'awaiting_assessment']] as const)(
+    'issues the ticket when the path is %s, in the one notice for that step', async (path, stage) => {
       tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'forwarded', queue: 'controltech', faultCategory: 'gps', path: null }))
       tx.$queryRaw.mockResolvedValue([{ n: 77n }])
       await decidePath(ORG, 'job-1', 'u-1', { path }).catch(() => undefined)
       expect(tx.repairReportItem.updateMany).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({ stage, path, ticketNo: `RT-${new Date().getUTCFullYear()}-00077` }),
       }))
-      const ticket = vi.mocked(notifyWorkflow).mock.calls.find(([, ev]) => ev.key === 'ticket')
-      expect(ticket?.[1]).toMatchObject({ audience: [], push: expect.arrayContaining(['operator']), text: expect.stringContaining(how) })
+      // One notice for the step, carrying the ticket: not a second one.
+      const calls = vi.mocked(notifyWorkflow).mock.calls
+      expect(calls).toHaveLength(1)
+      expect(calls[0]![0].ticketNo).toBe(`RT-${new Date().getUTCFullYear()}-00077`)
+      expect(calls[0]![1]).toMatchObject({
+        key: path === 'remote' ? 'path-remote' : 'path-physical', audience: [], source: 'repair_ticket',
+        push: expect.arrayContaining(['operator']), text: expect.stringContaining('ticket RT-'),
+      })
     })
 
   it('keeps the ticket a job already has', async () => {
     tx.repairReportItem.findFirst.mockResolvedValue(job({ stage: 'remote_fix', ticketNo: 'RT-2026-00005', path: 'remote' }))
     await decidePath(ORG, 'job-1', 'u-1', { path: 'physical' }).catch(() => undefined)
     expect(tx.$queryRaw).not.toHaveBeenCalled()
-    expect(vi.mocked(notifyWorkflow).mock.calls.some(([, ev]) => ev.key === 'ticket')).toBe(false)
+    const calls = vi.mocked(notifyWorkflow).mock.calls
+    expect(calls).toHaveLength(1)
+    expect(calls[0]![1].push).toBeUndefined()
+    expect(calls[0]![1].audience).toEqual(['control_room'])
   })
 
   it('completes a ticketed remote fix with no damage step', async () => {
