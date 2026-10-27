@@ -132,9 +132,10 @@ async function workEntry(tx: Tx, job: Job, userId: string, kind: WorkEntry['kind
   })
 }
 
-/** Notify, never throwing. */
-async function tell(ref: JobRef, ev: WorkflowEvent) {
-  try { await notifyWorkflow(ref, ev) } catch { /* see repairs.workflow.notify */ }
+/** Notify, never throwing. `by` is whoever took the action: everyone else
+ *  hears about it, they do not (operator, 2026-10-27). */
+async function tell(ref: JobRef, ev: WorkflowEvent, by?: string) {
+  try { await notifyWorkflow(ref, by ? { ...ev, actorId: by } : ev) } catch { /* see repairs.workflow.notify */ }
 }
 
 /** RT-YYYY-NNNNN from the sequence. Never reused, never edited. */
@@ -160,7 +161,7 @@ async function ticketFields(tx: Tx, job: { ticketNo: string | null }, at = new D
  * repair_ticket item: only the operator, supervisor and both security heads
  * see it (notifications/restricted-sources), never the technicians.
  */
-async function tellTickets(jobs: Job[], how: string) {
+async function tellTickets(jobs: Job[], how: string, by?: string) {
   const byUnit = new Map<string, Job[]>()
   for (const j of jobs) if (j.ticketNo) byUnit.set(j.vehicleId, [...(byUnit.get(j.vehicleId) ?? []), j])
   for (const group of byUnit.values()) {
@@ -171,7 +172,7 @@ async function tellTickets(jobs: Job[], how: string) {
       text: `ticket issued: ${how}`,
       lines: [{ label: group.length > 1 ? 'Tickets' : 'Ticket', value: tickets }, { label: 'Path', value: how }],
       audience: [], push: TICKET_PUSH_ROLES, source: 'repair_ticket',
-    })
+    }, by)
   }
 }
 
@@ -321,9 +322,9 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
         { label: 'Flagged by', value: byName ?? 'Control Room' },
       ],
       audience: [], source: 'repair_flag',
-    })
+    }, userId)
   }
-  await tellTickets(report.items, 'physical: to the workshop for assessment')
+  await tellTickets(report.items, 'physical: to the workshop for assessment', userId)
   return Promise.all(report.items.map((i) => findItemById(i.id, orgId)))
 }
 
@@ -345,7 +346,7 @@ export async function forwardJob(orgId: string, itemId: string, userId: string, 
     key: 'forwarded', severity: 'info', headline: 'Repair forwarded',
     text: job.queue === 'controltech' ? 'forwarded to ControlTech' : 'forwarded to the workshop for assessment',
     audience: job.queue === 'controltech' ? ['controltech'] : ['control_room'],
-  }, job))
+  }, job), userId)
   return findItemById(itemId, orgId)
 }
 
@@ -427,7 +428,7 @@ export async function spotFix(orgId: string, userId: string, dto: SpotFix, scope
       text: `fixed on the spot, awaiting the Control Room: ${dto.fixNote}`,
       lines: [{ label: 'What was wrong', value: dto.suspectedFault }, { label: 'What was done', value: dto.fixNote }],
       audience: ['control_room', 'channel'],
-    })
+    }, userId)
   }
   return Promise.all(items.map((i) => findItemById(i.id, orgId)))
 }
@@ -508,7 +509,7 @@ export async function claim(orgId: string, itemId: string, userId: string) {
   await tell(refOf(job), {
     key: 'claimed', severity: 'info', headline: 'Repair claimed by ControlTech',
     text: `claimed by ${job.byName ?? 'a ControlTech technician'}`, audience: ['control_room'],
-  })
+  }, userId)
   return findItemById(itemId, orgId)
 }
 
@@ -532,7 +533,7 @@ export async function decidePath(orgId: string, itemId: string, userId: string, 
     : {
       key: 'path-physical', severity: 'warning', headline: 'Physical inspection needed: assess the unit',
       text: `${job.note}. Book a physical inspection`, audience: ['control_room'],
-    }, job))
+    }, job), userId)
   return findItemById(itemId, orgId)
 }
 
@@ -580,7 +581,7 @@ export async function assess(orgId: string, itemId: string, userId: string, dto:
       headline: job.intervention === 'tow' ? 'Unit not roadworthy: tow arranged' : 'Unit not roadworthy: field inspection',
       text: job.note, lines: [{ label: 'Reason', value: job.reason ?? '' }],
       audience: ['control_room', 'controltech', 'channel'],
-    }, job))
+    }, job), userId)
   return findItemById(itemId, orgId)
 }
 
@@ -717,7 +718,7 @@ export async function book(orgId: string, itemId: string, userId: string, dto: B
   await tell(refOf(result.job, 'booked'), {
     key: 'booked', severity: 'info', headline: 'Workshop booked', text: result.note,
     audience: ['control_room', 'assignee'],
-  })
+  }, userId)
   return findItemById(itemId, orgId)
 }
 
@@ -737,7 +738,7 @@ export async function cancelBooking(orgId: string, itemId: string, userId: strin
   await tell(refOf(job, 'awaiting_assessment'), {
     key: 'booking-cancelled', severity: 'info', headline: 'Workshop booking cancelled', text: `booking cancelled: ${reason}`,
     audience: ['control_room'],
-  })
+  }, userId)
   return findItemById(itemId, orgId)
 }
 
@@ -763,7 +764,7 @@ export async function arrive(orgId: string, itemId: string, userId: string, scop
     await tell(refOf(result.job, 'in_workshop', result.ticketNo), withTicket({
       key: 'arrived', severity: 'info', headline: 'Unit arrived at the workshop',
       text: `arrived; repair ticket ${result.ticketNo}`, audience: ['control_room', 'assignee', 'channel'],
-    }, { ticketNo: result.ticketNo, issued: result.issued }))
+    }, { ticketNo: result.ticketNo, issued: result.issued }), userId)
   }
   return findItemById(itemId, orgId)
 }
@@ -788,7 +789,7 @@ export async function workshopAssign(orgId: string, itemId: string, userId: stri
     await tell(refOf(job), {
       key: `ws-assign-${job.workshopTechnicianId}`, severity: 'info', headline: 'Workshop repair assigned to you',
       text: `workshop technician: ${job.name}`, audience: ['assignee'],
-    })
+    }, userId)
   }
   return findItemById(itemId, orgId)
 }
@@ -843,7 +844,7 @@ export async function classifyDamage(orgId: string, itemId: string, userId: stri
       text: `suspected malicious damage: ${result.note}. Head of Security notified; the repair continues`,
       lines: [{ label: 'Damage', value: result.note ?? '' }, { label: 'Investigation', value: result.opened ? 'Opened' : 'Already open' }],
       audience: ['control_room', 'head_of_security'],
-    })
+    }, userId)
   }
   return findItemById(itemId, orgId)
 }
@@ -877,7 +878,7 @@ export async function voidWarranty(orgId: string, itemId: string, userId: string
     key: 'warranty-void', severity: 'warning', headline: 'Warranty marked void',
     text: `warranty void (${job.what}): ${dto.note}`, lines: [{ label: 'Components', value: job.what }],
     audience: ['control_room', 'head_of_security'],
-  })
+  }, userId)
   return findItemById(itemId, orgId)
 }
 
@@ -1066,7 +1067,7 @@ export async function complete(orgId: string, itemId: string, userId: string, dt
       text: `completed and tested, awaiting the Control Room: ${dto.fixNote}`,
       lines: [{ label: 'What was done', value: dto.fixNote }],
       audience: ['channel'], source: 'repair_ticket', push: TICKET_FEED_ROLES,
-    })
+    }, userId)
   }
   const item = await findItemById(itemId, orgId)
   return { item, testFailed: result.failed }
@@ -1106,7 +1107,7 @@ export async function verify(orgId: string, itemId: string, userId: string, dto:
       key: 'verify-rejected', severity: 'warning', headline: 'Repair verification rejected',
       text: `verification rejected: ${dto.note}`, lines: [{ label: 'Reason', value: dto.note ?? '' }],
       audience: ['control_room', 'assignee'], pushUsers: technicians,
-    })
+    }, userId)
   return findItemById(itemId, orgId)
 }
 
@@ -1129,7 +1130,7 @@ export async function voidJob(orgId: string, itemId: string, userId: string, dto
   })
   await tell(refOf(job, 'void'), {
     key: 'void', severity: 'info', headline: 'Repair job void', text: `void: ${dto.reason}`, audience: ['control_room'],
-  })
+  }, userId)
   return findItemById(itemId, orgId)
 }
 

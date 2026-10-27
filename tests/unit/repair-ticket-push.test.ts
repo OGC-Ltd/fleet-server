@@ -6,7 +6,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const prismaMock = vi.hoisted(() => ({
-  user:         { findMany: vi.fn() },
+  user:         { findMany: vi.fn(), findUnique: vi.fn() },
   vehicle:      { findUnique: vi.fn() },
   organisation: { findUnique: vi.fn() },
 }))
@@ -51,5 +51,24 @@ describe('a new repair ticket', () => {
     expect(res.to).toEqual([])
     // The feed line stays.
     expect(out.enqueueNotification).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('whoever took the action', () => {
+  it('is left out of the push and the mail, and named on the feed line', async () => {
+    prismaMock.user.findUnique.mockResolvedValue({ email: 'OP@x.co' })
+    // Nobody here is a technician (they are never mailed whatever the audience).
+    const holders = await prismaMock.user.findMany()
+    prismaMock.user.findMany.mockReset()
+    prismaMock.user.findMany.mockImplementation(async (q) => (q.where.userRoles.some.role.slug === 'technician' ? [] : holders))
+    const res = await notifyWorkflow(ref, {
+      key: 'booked', severity: 'info', headline: 'Unit booked', text: 'booked',
+      audience: ['control_room'], push: ['operator'], actorId: 'op-1',
+    })
+
+    expect(push.sendToUsers).toHaveBeenCalledWith(['hos-1'], expect.anything())
+    expect(res.to).toEqual(['hos@x.co'])
+    expect(out.enqueueMail).toHaveBeenCalledTimes(1)
+    expect(out.enqueueNotification).toHaveBeenCalledWith(expect.objectContaining({ actorId: 'op-1' }))
   })
 })
