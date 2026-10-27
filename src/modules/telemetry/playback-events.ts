@@ -276,6 +276,11 @@ async function readLoggedEvents(vehicleId: string, from: Date, to: Date): Promis
   }
 
   for (const n of notes) {
+    // A refuel's feed line ("KTCC 453L refuelled 120 L at …") announces the
+    // ledger row read above, which already sits on the track with its volume.
+    // Kept, it was a second refill with no `ml`, and the map read its litres
+    // out of the text — taking the plate's "453L" for the volume (issue #47).
+    if (n.alertType === 'fuelFilling') continue
     out.push({
       t: n.occurredAt.getTime(),
       kind: kindOfNotification(n.alertType),
