@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from 'vitest'
 import {
-  buildFallback, factsForModel, modelBriefRejectionReason, type VehicleFacts,
+  buildFallback, factsForModel, modelBriefRejectionReason, sharedHourlyBrief, type VehicleFacts,
 } from '../../src/modules/vehicles/vehicle-brief.js'
 
 const facts = (over: Partial<VehicleFacts> = {}): VehicleFacts => ({
@@ -334,5 +334,21 @@ describe('factsForModel', () => {
   it('keeps a zero distance and the run count from two runs up', () => {
     const f = factsForModel(facts({ distanceTodayKm: 0, runsToday: 2, runIndex: 2 }))
     expect(f).toMatchObject({ distanceTodayKm: 0, runsToday: 2, runIndex: 2 })
+  })
+})
+
+describe('one AI brief per unit an hour, shared', () => {
+  const at = Date.parse('2026-10-27T07:00:00+03:00')
+  const brief = (source: 'model' | 'facts') => ({ msg: 'x', source, generatedAt: new Date(at).toISOString(), facts: facts() })
+
+  it('answers every request until the hour is up', () => {
+    const hit = { at, brief: brief('model') }
+    expect(sharedHourlyBrief(hit, Date.parse('2026-10-27T07:59:59+03:00'))).toBe(hit.brief)
+    expect(sharedHourlyBrief(hit, Date.parse('2026-10-27T08:00:00+03:00'))).toBeNull()
+  })
+
+  it('does not hold a facts-only brief for the hour', () => {
+    expect(sharedHourlyBrief({ at, brief: brief('facts') }, at + 60_000)).toBeNull()
+    expect(sharedHourlyBrief(undefined, at)).toBeNull()
   })
 })
