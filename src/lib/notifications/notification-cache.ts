@@ -56,6 +56,8 @@ export interface NotificationItem {
   alertType?: string | null
   plate?:     string | null
   vehicleId?: string | null
+  /** Who did it, when a person did. */
+  actorId?:   string | null
   orgId?:     string
   /** Emitter extras with no Postgres column (feed-events' lat/lng). */
   [k: string]: unknown

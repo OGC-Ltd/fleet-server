@@ -53,6 +53,9 @@ export interface PublishNotificationInput {
   at:         Date
   plate?:     string | null
   vehicleId?: string | null
+  /** The user whose action this is. They are not notified of it: their feed
+   *  marks it read (operator, 2026-10-27). */
+  actorId?:   string | null
   /**
    * False for history being replayed at boot: it is already in Postgres and
    * already in the cache, so re-writing both would be pure churn. The SSE
@@ -162,7 +165,7 @@ export function __resetPublishDedupe(): void {
 
 /** The feed item as SSE, the cache and the dashboard all consume it. */
 function buildItem(input: PublishNotificationInput): NotificationItem {
-  const { id, severity, text, at, source, alertType = null, plate = null, vehicleId = null, extra } = input
+  const { id, severity, text, at, source, alertType = null, plate = null, vehicleId = null, actorId, extra } = input
   return {
     id,
     time: clockFmt.format(at),
@@ -173,6 +176,7 @@ function buildItem(input: PublishNotificationInput): NotificationItem {
     alertType,
     plate,
     vehicleId,
+    ...(actorId ? { actorId } : {}),
     ...extra,
   }
 }
@@ -229,12 +233,12 @@ setMovementEmitter(emitLive)
 
 /** The durable write on its own, so both callers below share one upsert. */
 function writeNotification(input: PublishNotificationInput): Promise<unknown> {
-  const { orgId, id, source, alertType = null, severity, text, at, plate = null, vehicleId = null } = input
+  const { orgId, id, source, alertType = null, severity, text, at, plate = null, vehicleId = null, actorId = null } = input
   return prisma.notification.upsert({
     where:  { feedId: id },
     create: {
       feedId: id, organisationId: orgId, vehicleId, source,
-      alertType, severity, text, plate, occurredAt: at,
+      alertType, severity, text, plate, occurredAt: at, actorId,
     },
     // A redelivery may carry corrected wording or a resolved vehicle; the
     // occurredAt is rewritten too so a re-sync repairs rows stored before a

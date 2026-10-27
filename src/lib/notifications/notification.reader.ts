@@ -94,6 +94,7 @@ function scopedTo(vehicleIds: Set<string>, sources: string[] | undefined) {
 function toItem(row: {
   feedId: string; severity: string; text: string; source: string
   alertType: string | null; plate: string | null; vehicleId: string | null; occurredAt: Date
+  actorId?: string | null
 }): NotificationItem {
   return {
     id:        row.feedId,
@@ -105,6 +106,7 @@ function toItem(row: {
     alertType: row.alertType,
     plate:     row.plate,
     vehicleId: row.vehicleId,
+    ...(row.actorId ? { actorId: row.actorId } : {}),
   }
 }
 
@@ -193,7 +195,7 @@ export async function getNotifications(
     take:    capped,
     select:  {
       feedId: true, severity: true, text: true, source: true,
-      alertType: true, plate: true, vehicleId: true, occurredAt: true,
+      alertType: true, plate: true, vehicleId: true, occurredAt: true, actorId: true,
     },
   })
 

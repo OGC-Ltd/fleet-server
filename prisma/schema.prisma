@@ -3169,6 +3169,9 @@ model Notification {
   /// The retention sweep and the feed both order by this.
   occurredAt     DateTime @map("occurred_at")
   createdAt      DateTime @default(now()) @map("created_at")
+  /// The user whose action this is, when a person did it. Their own feed reads
+  /// it as already read: an action is not news to whoever took it.
+  actorId        String?  @map("actor_id")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
   vehicle      Vehicle?     @relation(fields: [vehicleId], references: [id])
