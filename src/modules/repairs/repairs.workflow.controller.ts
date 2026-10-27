@@ -38,7 +38,7 @@ export const damage = handle((req) => wf.classifyDamage(p(req, 'orgId'), p(req, 
 export const voidWarranty = handle((req) => wf.voidWarranty(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as WarrantyVoid))
 export const clearWarranty = handle((req) => wf.clearWarranty(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, (req.body as { note: string }).note))
 
-export const work = handle((req) => wf.addWork(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as WorkEntry), 201)
+export const work = handle((req) => wf.addWork(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as WorkEntry, scope(req)), 201)
 export const complete = handle((req) => wf.complete(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as Complete))
 export const verify = handle((req) => wf.verify(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as Verify, scope(req)))
 export const movePhase = handle((req) => wf.movePhase(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as MovePhase))

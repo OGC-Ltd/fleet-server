@@ -159,10 +159,26 @@ export const warrantyClearSchema = z.object({
   note: required(1000, 'Say why the warranty stands'),
 })
 
+/**
+ * A work log entry. Some entries finish their stage and carry what that step
+ * needs (repairs.workflow addWork): a workshop diagnosis its damage class, a
+ * test its result, a verification its verdict.
+ */
 export const workEntrySchema = z.object({
   kind:          z.enum(['diagnosis', 'repair', 'test', 'note', 'verification']),
   text:          required(4000, 'Write what was done'),
   labourMinutes: z.coerce.number().int().min(0).max(100_000).optional(),
+  damageClass:   z.enum(['genuine', 'suspected_malicious']).optional(),
+  damageNote:    note(2000).optional(),
+  testResult:    z.enum(['pass', 'fail']).optional(),
+  recommendation: note(2000).optional(),
+  verdict:       z.enum(['accept', 'reject']).optional(),
+}).refine((w) => w.damageClass !== 'suspected_malicious' || !!w.damageNote, {
+  path: ['damageNote'], message: 'Describe the damage: it goes to the Head of Security',
+}).refine((w) => w.kind !== 'test' || !!w.testResult, {
+  path: ['testResult'], message: 'Say whether the test passed',
+}).refine((w) => w.kind !== 'verification' || !!w.verdict, {
+  path: ['verdict'], message: 'Say whether the repair is verified',
 })
 
 export const completeSchema = z.object({
