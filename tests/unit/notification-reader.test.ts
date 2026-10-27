@@ -58,7 +58,7 @@ describe('getNotifications — vehicleId filter', () => {
 
     expect(prismaMock.notification.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where:   { organisationId: 'org_1', vehicleId: 'veh_1', source: { notIn: ['repair_flag', 'repair_ticket'] } },
+        where:   { organisationId: 'org_1', vehicleId: 'veh_1', source: { notIn: ['repair_flag', 'repair_ticket', 'repair_verified'] } },
         orderBy: { occurredAt: 'desc' },
         take:    100,
       }),
@@ -246,7 +246,7 @@ describe('getNotifications — vehicle scope', () => {
     expect(primeCache).not.toHaveBeenCalled()
     expect(page.source).toBe('database')
     expect(prismaMock.notification.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { organisationId: 'org_1', vehicleId: { in: ['veh_1', 'veh_2'] }, source: { notIn: ['repair_flag', 'repair_ticket'] } } }),
+      expect.objectContaining({ where: { organisationId: 'org_1', vehicleId: { in: ['veh_1', 'veh_2'] }, source: { notIn: ['repair_flag', 'repair_ticket', 'repair_verified'] } } }),
     )
   })
 
@@ -263,7 +263,19 @@ describe('getNotifications — restricted sources', () => {
   it('shows repair ticket notices only to a reader granted them', async () => {
     await getNotifications('org_1', { vehicleId: 'veh_1', grants: ['repair_ticket'] })
     expect(prismaMock.notification.findMany).toHaveBeenLastCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ source: { notIn: ['repair_flag'] } }),
+      where: expect.objectContaining({ source: { notIn: ['repair_flag', 'repair_verified'] } }),
+    }))
+  })
+})
+
+describe('getNotifications — a technician and a verified repair', () => {
+  it('reads repair_verified items whatever the unit, other sources only in scope', async () => {
+    await getNotifications('org_1', { vehicleIds: new Set(['veh_1']), sources: ['repair', 'repair_flag', 'repair_verified'] })
+    expect(prismaMock.notification.findMany).toHaveBeenLastCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        OR: [{ vehicleId: { in: ['veh_1'] } }, { source: { in: ['repair_verified'] } }],
+        source: { in: ['repair', 'repair_flag', 'repair_verified'] },
+      }),
     }))
   })
 })
