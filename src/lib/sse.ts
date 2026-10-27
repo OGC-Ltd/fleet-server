@@ -1,4 +1,4 @@
-import { TECHNICIAN_ONLY_SOURCES } from './notifications/technician-sources.js'
+import { RESTRICTED_SOURCES } from './notifications/restricted-sources.js'
 import type { Response } from 'express'
 
 interface SseClient {
@@ -23,6 +23,9 @@ interface SseClient {
   /** Feed items of these sources only; null for all. A technician's Live Feed
    *  is the repair notifications on their flagged units (feedSourcesFor). */
   feedSources?: Set<string> | null
+  /** Restricted feed sources this client may see beyond the common feed
+   *  (notifications/restricted-sources), e.g. repair_ticket for the operator. */
+  feedGrants?: Set<string> | null
 }
 
 /**
@@ -35,7 +38,7 @@ interface SseClient {
  */
 function visibleTo(client: SseClient, event: string, vehicleId: string | null, source?: string | null): boolean {
   if (event === 'feed' && client.feedSources && !(source && client.feedSources.has(source))) return false
-  if (event === 'feed' && !client.feedSources && source && TECHNICIAN_ONLY_SOURCES.has(source)) return false
+  if (event === 'feed' && !client.feedSources && source && RESTRICTED_SOURCES.has(source) && !client.feedGrants?.has(source)) return false
   if (client.vehicleIds === null) return true
   if (event === 'heartbeat' || event === 'connected') return true
   return vehicleId !== null && client.vehicleIds.has(vehicleId)
@@ -259,11 +262,14 @@ function flushDashboards() {
     const firstSeq = items[0]!.seq
     // One encode per org per wire format, shared by every unscoped client —
     // who never get a technician-only feed item.
-    const common = items.filter((i) => !(i.event === 'feed' && i.source && TECHNICIAN_ONLY_SOURCES.has(i.source)))
+    const restricted = (i: Queued) => i.event === 'feed' && !!i.source && RESTRICTED_SOURCES.has(i.source)
+    const common = items.filter((i) => !restricted(i))
+    const anyRestricted = common.length !== items.length
     let sharedFull: Buffer | null = null
     let sharedDelta: Buffer | null = null
     for (const client of [...clients]) {
-      if (client.vehicleIds === null && !client.feedSources && (client.fromSeq ?? 0) < firstSeq) {
+      if (client.vehicleIds === null && !client.feedSources && (client.fromSeq ?? 0) < firstSeq
+          && !(anyRestricted && client.feedGrants?.size)) {
         const buf = client.delta
           ? (sharedDelta ??= Buffer.from(encodeBatch(common, true)))
           : (sharedFull  ??= Buffer.from(encodeBatch(common, false)))
@@ -331,13 +337,14 @@ export function writeHeartbeat(res: Response): void {
 export function registerDashboardClient(
   orgId: string,
   res: Response,
-  scope: { vehicleIds?: Set<string> | null; userId?: string; delta?: boolean; feedSources?: Set<string> | null } = {},
+  scope: { vehicleIds?: Set<string> | null; userId?: string; delta?: boolean; feedSources?: Set<string> | null; feedGrants?: Set<string> | null } = {},
 ): () => void {
   const key = dashboardKey(orgId)
   if (!registry.has(key)) registry.set(key, new Set())
   const client: SseClient = {
     res, vehicleIds: scope.vehicleIds ?? null, userId: scope.userId, fromSeq: seq, delta: scope.delta === true,
     feedSources: scope.feedSources ?? null,
+    feedGrants: scope.feedGrants ?? null,
   }
   registry.get(key)!.add(client)
   return () => {
@@ -386,9 +393,10 @@ export async function replayDashboardFeed(
   limit = 40,
   vehicleIds: Set<string> | null = null,
   sources: string[] | null = null,
+  grants: string[] | null = null,
 ): Promise<number> {
   const { getNotifications } = await import('./notifications/notification.reader.js')
-  const { items } = await getNotifications(orgId, { limit, ...(sources ? { sources, vehicleIds } : {}) })
+  const { items } = await getNotifications(orgId, { limit, grants, ...(sources ? { sources, vehicleIds } : {}) })
 
   // getNotifications returns newest-first; the panel wants the replay in
   // arrival order so its prepend leaves the newest at the top.

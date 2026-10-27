@@ -32,6 +32,7 @@ import { getCacheRedis } from '../redis.js'
 import { logger } from '../logger.js'
 import { FLAGGED_ONLY, WILDCARD } from '../permissions.js'
 import { emitAccessChanged } from '../sse.js'
+import { TICKET_FEED_ROLES } from '../notifications/restricted-sources.js'
 
 const KEY_PREFIX  = 'authz:v1'
 const EPOCH_KEY   = 'authz:epoch'
@@ -358,7 +359,7 @@ export function vehicleScopeIn(subject: Subject, orgId: string): Set<string> | n
 }
 
 /** What a technician's Live Feed carries: the repair workflow's notices,
- *  and the flag notices only they see (notifications/technician-sources). */
+ *  and the flag notices only they see (notifications/restricted-sources). */
 export const FLAGGED_ONLY_FEED_SOURCES = ['repair', 'repair_flag'] as const
 
 /**
@@ -371,4 +372,19 @@ export async function feedSourcesFor(userId: string, orgId: string): Promise<str
   const subject = await resolveSubject(userId)
   if (subject.isPlatform) return null
   return subject.orgs.get(orgId)?.permissions.has(FLAGGED_ONLY) ? [...FLAGGED_ONLY_FEED_SOURCES] : null
+}
+
+/**
+ * The restricted feed sources this person may see in an organisation beyond
+ * the common feed: repair_ticket for the operator, supervisor, Head of
+ * Security and Assistant Head of Security there (operator, 2026-10-27).
+ * Read from the role itself, not a permission: it is who you are in that
+ * organisation that decides it.
+ */
+export async function feedGrantsFor(userId: string, orgId: string): Promise<string[]> {
+  const held = await prisma.userRole.findFirst({
+    where: { userId, revokedAt: null, role: { organisationId: orgId, slug: { in: [...TICKET_FEED_ROLES] } } },
+    select: { id: true },
+  })
+  return held ? ['repair_ticket'] : []
 }
