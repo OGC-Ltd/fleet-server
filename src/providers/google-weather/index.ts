@@ -52,10 +52,17 @@ export function googleWeatherAvailable(): boolean {
 const CACHE_TTL_MS = 15 * 60_000
 const CACHE_MAX = 5_000
 const TIMEOUT_MS = 8_000
-/** Points asked of Google at once. */
-const PARALLEL = 6
+/** Points asked of Google at once: a fresh 8-across view is up to 81. */
+const PARALLEL = 24
+/**
+ * Longest the map waits for a grid (operator, 2026-10-28: "make sure that the
+ * map grids respond fast without lagging"). Cells Google has not answered by
+ * then are left out and counted in `pending`; their lookups carry on into
+ * the cache, and the map asks again shortly for the rest.
+ */
+export const ANSWER_WITHIN_MS = 1_200
 /** At most this many cells across either side of the view. */
-const CELLS_ACROSS = 5
+const CELLS_ACROSS = 8 // 5 left a town's rain smeared over a whole district
 /** Cell sizes in degrees, finest first. 0.05° is about 5.5 km. */
 const STEPS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5]
 
@@ -134,6 +141,14 @@ export function toPoint(lat: number, lng: number, c: Conditions): WeatherPoint {
   }
 }
 
+/**
+ * Google turned the key itself away (API not enabled, key invalid or
+ * restricted, quota). Not cached, so it clears the moment the console is
+ * fixed, and reported to the map rather than read as "no weather".
+ */
+export class KeyRefused extends Error {}
+const REFUSING = new Set([401, 403, 429])
+
 async function lookup(lat: number, lng: number): Promise<WeatherPoint | null> {
   const url = new URL('https://weather.googleapis.com/v1/currentConditions:lookup')
   url.searchParams.set('key', env.GOOGLE_ROUTING_API_KEY)
@@ -141,6 +156,7 @@ async function lookup(lat: number, lng: number): Promise<WeatherPoint | null> {
   url.searchParams.set('location.longitude', String(lng))
   const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) })
   const j = await res.json().catch(() => ({})) as Conditions & { error?: { message?: string } }
+  if (REFUSING.has(res.status)) throw new KeyRefused(j.error?.message ?? `HTTP ${res.status}`)
   if (!res.ok) {
     // Google has no conditions for some places (open sea); not worth a retry.
     logger.warn({ status: res.status, lat, lng, msg: j.error?.message }, 'google weather: lookup refused')
@@ -157,6 +173,7 @@ function cached(key: string, lat: number, lng: number): Promise<WeatherPoint | n
   const p = lookup(lat, lng)
     .then((point) => { remember(key, point); return point })
     .catch((err) => {
+      if (err instanceof KeyRefused) throw err
       logger.warn({ err, lat, lng }, 'google weather: lookup failed')
       return hit?.point ?? null
     })
@@ -166,17 +183,40 @@ function cached(key: string, lat: number, lng: number): Promise<WeatherPoint | n
 }
 
 /** Current conditions across the view, one point a cell. */
-export async function weatherGrid(b: Bounds): Promise<{ step: number; points: WeatherPoint[] }> {
+export async function weatherGrid(
+  b: Bounds,
+  { within = ANSWER_WITHIN_MS }: { within?: number } = {},
+): Promise<{ step: number; points: WeatherPoint[]; pending: number; refused?: string }> {
   const { step, cells } = gridFor(b)
   const out: (WeatherPoint | null)[] = new Array(cells.length).fill(null)
+  let refused: string | undefined
   let next = 0
+  let answered = 0
   const worker = async () => {
     while (next < cells.length) {
       const k = next++
       const c = cells[k]!
-      out[k] = await cached(`${step}:${c.i}:${c.j}`, c.lat, c.lng)
+      const key = `${step}:${c.i}:${c.j}`
+      try {
+        out[k] = await cached(key, c.lat, c.lng)
+      } catch (err) {
+        if (!(err instanceof KeyRefused)) throw err
+        refused ??= err.message
+        out[k] = cache.get(key)?.point ?? null // the last answer, however old
+      }
+      answered++
     }
   }
-  await Promise.all(Array.from({ length: Math.min(PARALLEL, cells.length) }, worker))
-  return { step, points: out.filter((p): p is WeatherPoint => p != null) }
+  const all = Promise.all(Array.from({ length: Math.min(PARALLEL, cells.length) }, worker))
+  let timer: NodeJS.Timeout | undefined
+  const done = await Promise.race([
+    all.then(() => true),
+    new Promise<false>((r) => { timer = setTimeout(() => r(false), within) }),
+  ])
+  clearTimeout(timer)
+  if (!done) all.catch((err) => logger.warn({ err }, 'google weather: late lookups failed'))
+  const pending = done ? 0 : cells.length - answered
+  const points = out.filter((p): p is WeatherPoint => p != null)
+  if (refused) logger.warn({ msg: refused }, 'google weather: key refused')
+  return refused ? { step, points, pending, refused } : { step, points, pending }
 }
