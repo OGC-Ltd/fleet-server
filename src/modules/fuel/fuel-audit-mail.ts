@@ -1,5 +1,8 @@
 /**
- * The Fuel Audit report, mailed when an audit is done (operator, 2026-10-01).
+ * The Fuel Audit report, sent when an audit is done (operator, 2026-10-01) —
+ * by Web Push since 2026-10-28, when mail was kept for account access and
+ * escalations only. The push is the summary; the full report (the trail,
+ * inspections, parts) is on the Audit page it opens.
  *
  * An audit is done when the probe repair its cases wait on is signed off:
  * fixed (the cases close, PROBE_FIXED) or unsuccessful (logged on them,
@@ -21,8 +24,8 @@
 import { prisma } from '../../lib/prisma.js'
 import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
-import { enqueueMail, isAccepted } from '../../lib/queues/outbound.js'
-import { fuelAuditReportEmail, type FuelAuditReport } from '../../lib/mailer/templates.js'
+import { type FuelAuditReport } from '../../lib/mailer/templates.js'
+import { pushService } from '../notifications/notifications.service.js'
 
 export const AUDIT_REPORT_ROLE_SLUGS = [
   'head_of_security', 'asst_head_of_security', 'fleet_manager', 'dispatcher',
@@ -30,7 +33,7 @@ export const AUDIT_REPORT_ROLE_SLUGS = [
 ] as const
 
 /** Everybody the report goes to in `orgId`, one entry per address. */
-export async function auditReportRecipients(orgId: string): Promise<Array<{ email: string; name: string | null }>> {
+export async function auditReportRecipients(orgId: string): Promise<Array<{ id: string; email: string; name: string | null }>> {
   const users = await prisma.user.findMany({
     where: {
       deletedAt: null,
@@ -47,12 +50,12 @@ export async function auditReportRecipients(orgId: string): Promise<Array<{ emai
         },
       },
     },
-    select: { email: true, fullName: true },
+    select: { id: true, email: true, fullName: true },
   })
-  const seen = new Map<string, { email: string; name: string | null }>()
+  const seen = new Map<string, { id: string; email: string; name: string | null }>()
   for (const u of users) {
     const email = u.email?.trim().toLowerCase()
-    if (email && !seen.has(email)) seen.set(email, { email, name: u.fullName ?? null })
+    if (email && !seen.has(email)) seen.set(email, { id: u.id, email, name: u.fullName ?? null })
   }
   return [...seen.values()]
 }
@@ -124,9 +127,23 @@ async function gather(orgId: string, repairItemId: string, caseIds: string[]): P
   }
 }
 
+/** The push for one report: what was decided, on which unit, in one line. */
+export function fuelAuditPush(r: FuelAuditReport): { title: string; body: string } {
+  const n = r.alerts.length
+  const verdict = r.verdict === 'fixed' ? 'probe fixed' : 'probe repair unsuccessful'
+  const by = r.signedOffBy ? ` by ${r.signedOffBy}` : ''
+  const cost = r.parts.filter((p) => p.status !== 'cancelled').reduce((t, p) => t + (p.costKes ?? 0), 0)
+  return {
+    title: `Fuel audit done: ${r.plate}`,
+    body: `${verdict}${by} · ${n} fuel alert${n === 1 ? '' : 's'} found to be a faulty probe`
+      + (cost > 0 ? ` · parts KES ${cost.toLocaleString('en-KE')}` : '')
+      + (r.fixNote ? ` — ${r.fixNote}` : ''),
+  }
+}
+
 /**
- * Mail the report for one signed-off audit. Best-effort: a mail that cannot go
- * never undoes the sign-off, and every outcome is logged.
+ * Push the report for one signed-off audit. Best-effort: a notice that cannot
+ * go never undoes the sign-off, and every outcome is logged.
  */
 export async function sendFuelAuditReport(orgId: string, repairItemId: string, caseIds: string[]): Promise<void> {
   if (caseIds.length === 0) return
@@ -140,10 +157,13 @@ export async function sendFuelAuditReport(orgId: string, repairItemId: string, c
       logger.warn({ orgId, repairItemId }, 'fuel audit report: nobody holds a recipient role — nothing sent')
       return
     }
-    const mail = fuelAuditReportEmail(report)
-    const results = await Promise.all(recipients.map((r) => enqueueMail(r.email, r.name, mail)))
-    const failed = recipients.filter((_, i) => !isAccepted(results[i]!)).map((r) => r.email)
-    logger.info({ orgId, repairItemId, recipients: recipients.length, failed }, 'fuel audit report: mailed')
+    await pushService.sendToUsers(recipients.map((r) => r.id), {
+      ...fuelAuditPush(report),
+      tag:  `fuel-audit-${repairItemId}`,
+      icon: '/logo-icon.png',
+      data: { url: '/', orgId, repairItemId },
+    })
+    logger.info({ orgId, repairItemId, recipients: recipients.length }, 'fuel audit report: pushed')
   } catch (err) {
     logger.error({ err, orgId, repairItemId }, 'fuel audit report: could not be sent')
   }

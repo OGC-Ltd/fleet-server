@@ -49,7 +49,22 @@ import type { RenderedMail } from './templates.js'
 export type MailResult =
   | { sent: true }
   /** `retryAfterMs` is set only when the provider said "not now" rather than "no". */
-  | { sent: false; reason: 'unconfigured' | 'send-failed'; retryAfterMs?: number }
+  | { sent: false; reason: 'unconfigured' | 'send-failed' | 'not-allowed'; retryAfterMs?: number }
+
+/**
+ * The only mail that may leave: account access (operator, 2026-10-28).
+ * Repair notices, escalations included, and faulty-sensor notices go by Web
+ * Push instead. A
+ * template outside this set is refused here, the one choke point, so a new
+ * caller cannot quietly start spending the provider's daily quota again.
+ */
+export const ALLOWED_MAIL_CATEGORIES: ReadonlySet<string> = new Set([
+  'invite', 'password-reset', 'password-changed',
+])
+
+export function isMailAllowed(category: string): boolean {
+  return ALLOWED_MAIL_CATEGORIES.has(category)
+}
 
 /** When the provider names no time, ask again after this long. */
 const THROTTLE_DEFAULT_MS = 15 * 60_000
@@ -82,6 +97,10 @@ export async function sendMail(
   mail: RenderedMail,
   client: MailtrapClient = mailtrapClient,
 ): Promise<MailResult> {
+  if (!isMailAllowed(mail.category)) {
+    logger.warn({ template: mail.category, to }, 'mail: template is not allowed to send — nothing sent')
+    return { sent: false, reason: 'not-allowed' }
+  }
   if (!client.isConfigured) {
     logger.warn({ template: mail.category, to }, 'mail: not configured — nothing sent')
     return { sent: false, reason: 'unconfigured' }
