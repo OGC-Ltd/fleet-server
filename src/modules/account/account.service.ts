@@ -20,7 +20,7 @@ import { BadRequestError, NotFoundError } from '../../core/errors/errors.js'
 import { forgetUser } from '../../middleware/auth.js'
 import * as authService from '../auth/auth.service.js'
 import type { SessionContext } from '../auth/auth.service.js'
-import { enqueueMail, dispatchStatus } from '../../lib/queues/outbound.js'
+import { enqueueMail, sendMailNow, dispatchStatus, type MailDispatch } from '../../lib/queues/outbound.js'
 import { passwordChangedEmail, resetEmail, inviteEmail } from '../../lib/mailer/templates.js'
 import { env } from '../../config/env.js'
 import {
@@ -219,14 +219,14 @@ export async function sendInvite(
   user: { id: string; email: string | null; fullName: string },
   orgName: string,
   opts: { roleName?: string | undefined; createdById?: string | null; ip?: string | null },
-): Promise<{ sent: boolean; reason?: string }> {
+): Promise<AccessMailOutcome> {
   if (!user.email) return { sent: false, reason: 'no-email' }
 
   const { raw, expiresAt } = await mintPasswordToken(user.id, 'INVITE', {
     createdById: opts.createdById ?? null,
     ip: opts.ip ?? null,
   })
-  const dispatch = await enqueueMail(
+  const dispatch = await sendMailNow(
     user.email,
     user.fullName,
     inviteEmail({
@@ -237,13 +237,19 @@ export async function sendInvite(
       expiresAt,
     }),
   )
-  /* `queued` comes back as a reason rather than a tick, for the reason in this
-     function's header: an invited user whose mail never went has no way into
-     the system at all. It has not gone yet. The admin screen prints the reason
-     it is given, so it will say queued, which is true and is the one thing
-     that keeps "resend" an informed decision rather than a guess. */
+  /* Sent inline, so `sent` means the provider took it. `queued` now only
+     follows a refusal, and carries why and when it tries again, because an
+     invited user whose mail never went has no way into the system at all. */
+  return accessMailOutcome(dispatch)
+}
+
+export type AccessMailOutcome = { sent: boolean; reason?: string; because?: string; retryAt?: string }
+
+function accessMailOutcome(dispatch: MailDispatch): AccessMailOutcome {
   const status = dispatchStatus(dispatch)
-  return status === 'sent' ? { sent: true } : { sent: false, reason: status }
+  if (status === 'sent') return { sent: true }
+  if ('queued' in dispatch) return { sent: false, reason: status, because: dispatch.because, retryAt: dispatch.retryAt }
+  return { sent: false, reason: status }
 }
 
 /**
@@ -257,7 +263,7 @@ export async function sendInvite(
 export async function sendPasswordReset(
   user: { id: string; email: string | null; fullName: string },
   opts: { createdById?: string | null; ip?: string | null },
-): Promise<{ sent: boolean; reason?: string }> {
+): Promise<AccessMailOutcome> {
   if (!user.email) return { sent: false, reason: 'no-email' }
   if (await hasRecentToken(user.id, 'RESET')) return { sent: false, reason: 'recently-sent' }
 
@@ -265,13 +271,12 @@ export async function sendPasswordReset(
     createdById: opts.createdById ?? null,
     ip: opts.ip ?? null,
   })
-  const dispatch = await enqueueMail(
+  const dispatch = await sendMailNow(
     user.email,
     user.fullName,
     resetEmail({ fullName: user.fullName, link: setupLink(raw), expiresAt }),
   )
-  const status = dispatchStatus(dispatch)
-  return status === 'sent' ? { sent: true } : { sent: false, reason: status }
+  return accessMailOutcome(dispatch)
 }
 
 /**

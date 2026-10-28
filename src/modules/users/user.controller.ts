@@ -326,7 +326,7 @@ export const provisionInOrg: RequestHandler = async (req, res, next) => {
     // Invite only an account that cannot already sign in. Sending a
     // set-password link to somebody who HAS a password would let anyone who
     // can guess an email address take over that account through this route.
-    let invite: { sent: boolean; reason?: string } = { sent: false, reason: 'not-requested' }
+    let invite: account.AccessMailOutcome = { sent: false, reason: 'not-requested' }
     if (b.sendInvite && !hadPassword) {
       const org = await prisma.organisation.findUnique({ where: { id: orgId }, select: { name: true } })
       invite = await account.sendInvite(

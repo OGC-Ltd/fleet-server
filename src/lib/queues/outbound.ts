@@ -71,8 +71,14 @@ export const OUTBOUND_QUEUE = 'outbound'
 const MAIL_JOB = 'outbound:mail'
 const NOTIFICATION_JOB = 'outbound:notification'
 
-/** `{ queued: true }` means accepted for delivery, NOT delivered. */
-export type MailDispatch = MailResult | { queued: true }
+/**
+ * `{ queued: true }` means accepted for delivery, NOT delivered. `because` and
+ * `retryAt` are set by `sendMailNow`, which only queues after the provider has
+ * already said no once, so the screen can say why and roughly when.
+ */
+export type MailDispatch =
+  | MailResult
+  | { queued: true; because?: 'provider-quota' | 'send-failed'; retryAt?: string }
 
 export type DispatchStatus = 'sent' | 'queued' | 'unconfigured' | 'send-failed' | 'not-allowed'
 
@@ -177,6 +183,47 @@ export async function enqueueMail(
     // whole reason this is not a bare `add`.
     logger.warn({ err, template: mail.category, to }, 'mail: queue unavailable — sending inline')
     return sendMail(to, toName, mail)
+  }
+}
+
+/**
+ * Send now, and queue only what the provider would not take.
+ *
+ * For mail an administrator is standing in front of: an invite or a reset
+ * link. Queuing it first meant the screen could only ever say "queued", and a
+ * quota-held invite said that for an hour with nobody told why (operator,
+ * 2026-10-28). One inline attempt (bounded at 10 s by the client) gives the
+ * real answer in the common case; a refusal still lands in the queue with its
+ * retries, and the caller learns which kind of refusal it was.
+ */
+export async function sendMailNow(
+  to: string,
+  toName: string | null | undefined,
+  mail: RenderedMail,
+): Promise<MailDispatch> {
+  const now = Date.now()
+  // The worker already knows the provider is closed; another refused login
+  // would only burn time and tell us the same thing.
+  const result = now < throttledUntil
+    ? { sent: false as const, reason: 'send-failed' as const, retryAfterMs: throttledUntil - now }
+    : await sendMail(to, toName, mail)
+  if (result.sent || result.reason !== 'send-failed') return result
+
+  const q = getQueue()
+  if (!q) return result
+  const payload: MailPayload = { to, toName: toName ?? null, mail }
+  const delay = result.retryAfterMs ?? JOB_OPTIONS.backoff.delay
+  try {
+    await q.add(MAIL_JOB, payload, { ...JOB_OPTIONS, priority: mailPriority(mail.category), delay })
+  } catch (err) {
+    logger.warn({ err, template: mail.category, to }, 'mail: queue unavailable after a failed send')
+    return result
+  }
+  if (result.retryAfterMs != null) throttledUntil = Math.max(throttledUntil, now + result.retryAfterMs)
+  return {
+    queued: true,
+    because: result.retryAfterMs != null ? 'provider-quota' : 'send-failed',
+    retryAt: new Date(now + delay).toISOString(),
   }
 }
 
