@@ -586,6 +586,40 @@ export const resendInvite: RequestHandler = async (req, res, next) => {
 }
 
 /**
+ * Mail somebody a password reset link, from the user page.
+ *
+ * Only for an account that can sign in: one with no password yet needs its
+ * invitation resent instead, and a suspended one would be sent a link that
+ * the set-password screen then refuses.
+ */
+export const sendPasswordReset: RequestHandler = async (req, res, next) => {
+  try {
+    const orgId  = p(req, 'orgId')
+    const userId = p(req, 'userId')
+
+    await reachableOrThrow(req, orgId, userId)
+    await assertMayEdit(req, userId)
+    const user = await prisma.user.findFirst({
+      where:  { id: userId, deletedAt: null },
+      select: { id: true, email: true, fullName: true, passwordHash: true, status: true },
+    })
+    if (!user) throw new NotFoundError('User')
+    if (!user.passwordHash) {
+      throw new BadRequestError('This account has no password yet. Resend the invitation instead.')
+    }
+    if (user.status !== 'ACTIVE') {
+      throw new BadRequestError('This account is suspended. Reactivate it before sending a reset link.')
+    }
+
+    const reset = await account.sendPasswordReset(
+      { id: user.id, email: user.email, fullName: user.fullName },
+      { createdById: req.user?.id ?? null, ip: req.ip ?? null },
+    )
+    sendSuccess(res, { reset }, 200)
+  } catch (err) { next(err) }
+}
+
+/**
  * Suspend or reactivate somebody.
  *
  * Suspending REVOKES THEIR SESSIONS. Without that the flag only takes effect

@@ -218,6 +218,33 @@ describe('requestPasswordReset', () => {
   })
 })
 
+describe('sendPasswordReset — from the user page', () => {
+  it('mints a RESET token, mails it, and says it went', async () => {
+    prismaMock.passwordToken.findFirst.mockResolvedValue(null as never)
+
+    const out = await account.sendPasswordReset(USER, { createdById: 'admin-1', ip: '10.0.0.2' })
+
+    expect(out).toEqual({ sent: true })
+    expect(prismaMock.passwordToken.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ userId: 'u1', purpose: 'RESET', createdById: 'admin-1' }),
+    }))
+    expect(sendMail).toHaveBeenCalledWith(
+      'maya@example.test', 'Maya Okonkwo',
+      expect.objectContaining({ category: 'password-reset' }),
+    )
+  })
+
+  it('says why when it sends nothing', async () => {
+    await expect(account.sendPasswordReset({ ...USER, email: null }, {})).resolves.toEqual({ sent: false, reason: 'no-email' })
+
+    prismaMock.passwordToken.findFirst.mockResolvedValue({ id: 'recent' } as never)
+    await expect(account.sendPasswordReset(USER, {})).resolves.toEqual({ sent: false, reason: 'recently-sent' })
+
+    expect(prismaMock.passwordToken.create).not.toHaveBeenCalled()
+    expect(sendMail).not.toHaveBeenCalled()
+  })
+})
+
 describe('completeSetup', () => {
   it('refuses a link that is not live, without saying which kind of dead it is', async () => {
     prismaMock.passwordToken.findFirst.mockResolvedValue(null as never)

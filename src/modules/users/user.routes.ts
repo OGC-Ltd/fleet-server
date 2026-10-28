@@ -87,6 +87,7 @@ router.delete('/:userId/permanent', requireRealAuth, requirePermissionStrict('us
 
 // ── Administration of an existing person, all strictly gated ────────────────
 router.post('/:userId/resend-invite', requireRealAuth, requirePermissionStrict('user:create'), requireUserAdministrator, ctrl.resendInvite)
+router.post('/:userId/send-reset', requireRealAuth, requirePermissionStrict('user:update'), requireUserAdministrator, ctrl.sendPasswordReset)
 router.patch('/:userId/status', requireRealAuth, requirePermissionStrict('user:update'), requireUserAdministrator, validateBody(setUserStatusSchema), ctrl.setUserStatus)
 router.patch('/:userId/role', requireRealAuth, requirePermissionStrict('user:assign_role'), requireUserAdministrator, validateBody(setUserRoleSchema), ctrl.setUserRole)
 
