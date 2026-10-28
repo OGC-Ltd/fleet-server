@@ -13,7 +13,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const sendMailMock = vi.hoisted(() => vi.fn())
-vi.mock('../../src/lib/mailer/mailer.js', () => ({ sendMail: sendMailMock }))
+vi.mock('../../src/lib/mailer/mailer.js', async (orig) => ({
+  ...(await orig<typeof import('../../src/lib/mailer/mailer.js')>()),
+  sendMail: sendMailMock,
+}))
 
 const publishDurableMock = vi.hoisted(() => vi.fn())
 vi.mock('../../src/lib/notifications/notification.store.js', () => ({
@@ -43,7 +46,7 @@ vi.mock('../../src/lib/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
 
-const MAIL = { subject: 'Reset your password', text: 'link', html: '<p>link</p>', category: 'reset' as const }
+const MAIL = { subject: 'Reset your password', text: 'link', html: '<p>link</p>', category: 'password-reset' as const }
 
 /** The module holds a lazily-built Queue, so each test gets a fresh import. */
 async function load() {
@@ -225,11 +228,19 @@ describe("when the provider's quota is spent", () => {
     return processorRef.current! as (job: unknown, token?: string) => Promise<unknown>
   }
 
-  it('puts account mail ahead of notices', async () => {
+  it('queues account mail at the top priority', async () => {
     const { enqueueMail } = await load()
     await enqueueMail('a@b.c', null, { ...MAIL, category: 'invite' })
-    await enqueueMail('a@b.c', null, { ...MAIL, category: 'repair-workflow' })
-    expect(addMock.mock.calls[0]![2].priority).toBeLessThan(addMock.mock.calls[1]![2].priority)
+    await enqueueMail('a@b.c', null, { ...MAIL, category: 'password-changed' })
+    expect(addMock.mock.calls.map((c) => c[2].priority)).toEqual([1, 1])
+  })
+
+  it('never queues a template that may not send', async () => {
+    const { enqueueMail } = await load()
+    sendMailMock.mockResolvedValueOnce({ sent: false, reason: 'not-allowed' })
+    const out = await enqueueMail('a@b.c', null, { ...MAIL, category: 'repair-workflow' })
+    expect(addMock).not.toHaveBeenCalled()
+    expect(out).toEqual({ sent: false, reason: 'not-allowed' })
   })
 
   it('holds the mail until the quota resets instead of spending its attempts', async () => {

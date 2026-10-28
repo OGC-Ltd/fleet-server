@@ -109,6 +109,24 @@ class PushService {
     }), payload)
   }
 
+  /** Live accounts behind these addresses, as user ids. The repair lists in
+   *  env (REPAIR_NOTIFY_EMAILS and friends) name people by address; an
+   *  address with no account has no devices and is returned in `unmatched`. */
+  async usersForEmails(emails: string[]): Promise<{ ids: string[]; unmatched: string[] }> {
+    const want = [...new Set(emails.map((e) => e.trim().toLowerCase()).filter(Boolean))]
+    if (want.length === 0) return { ids: [], unmatched: [] }
+    const users = await prisma.user.findMany({
+      where: {
+        deletedAt: null,
+        status: { notIn: ['SUSPENDED', 'TERMINATED'] },
+        OR: want.map((e) => ({ email: { equals: e, mode: 'insensitive' as const } })),
+      },
+      select: { id: true, email: true },
+    })
+    const found = new Set(users.map((u) => u.email?.toLowerCase()))
+    return { ids: users.map((u) => u.id), unmatched: want.filter((e) => !found.has(e)) }
+  }
+
   private async deliver(
     subs: { id: string; endpoint: string; p256dh: string; auth: string }[], payload: PushPayload,
   ): Promise<void> {

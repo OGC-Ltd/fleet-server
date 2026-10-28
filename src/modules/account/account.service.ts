@@ -247,6 +247,34 @@ export async function sendInvite(
 }
 
 /**
+ * Mail a reset link on an administrator's behalf (operator, 2026-10-28).
+ *
+ * The self-service route answers the same whatever it finds; this one is
+ * behind user administration, so it says why it did not send. The previous
+ * reset link is revoked by the mint, and the same one-minute cooldown as the
+ * self-service route stops a double click mailing twice.
+ */
+export async function sendPasswordReset(
+  user: { id: string; email: string | null; fullName: string },
+  opts: { createdById?: string | null; ip?: string | null },
+): Promise<{ sent: boolean; reason?: string }> {
+  if (!user.email) return { sent: false, reason: 'no-email' }
+  if (await hasRecentToken(user.id, 'RESET')) return { sent: false, reason: 'recently-sent' }
+
+  const { raw, expiresAt } = await mintPasswordToken(user.id, 'RESET', {
+    createdById: opts.createdById ?? null,
+    ip: opts.ip ?? null,
+  })
+  const dispatch = await enqueueMail(
+    user.email,
+    user.fullName,
+    resetEmail({ fullName: user.fullName, link: setupLink(raw), expiresAt }),
+  )
+  const status = dispatchStatus(dispatch)
+  return status === 'sent' ? { sent: true } : { sent: false, reason: status }
+}
+
+/**
  * The devices signed in as this person.
  *
  * Read straight off auth_sessions, which has recorded issuedAt, userAgent and

@@ -77,6 +77,20 @@ describe('sendMail — dormant when unconfigured', () => {
   })
 })
 
+describe('sendMail — only account access may mail', () => {
+  it('sends the allowed templates and refuses every other one before the provider is touched', async () => {
+    const client = configured()
+    for (const category of ['invite', 'password-reset', 'password-changed']) {
+      await expect(sendMail('a@b.test', 'A', { ...MAIL, category }, client)).resolves.toEqual({ sent: true })
+    }
+    sendMailSpy.mockClear()
+    for (const category of ['repair-escalation', 'repair-report', 'repair-assignment', 'repair-workflow', 'repair-alert', 'fuel-audit-report']) {
+      await expect(sendMail('a@b.test', 'A', { ...MAIL, category }, client)).resolves.toEqual({ sent: false, reason: 'not-allowed' })
+    }
+    expect(sendMailSpy).not.toHaveBeenCalled()
+  })
+})
+
 describe('sendMail — a send failure never escapes', () => {
   it('resolves rather than rejecting when the transport throws', async () => {
     sendMailSpy.mockRejectedValueOnce(new Error('ECONNRESET'))

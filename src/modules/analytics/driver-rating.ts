@@ -12,6 +12,10 @@ const DRIVER_RATING_CONFIG = {
 
   theftPenaltyPerCase: 6,
   overspeedPenaltyPerCase: 3,
+  // Each harsh acceleration or hard braking report (operator, 2026-10-28).
+  // Lighter than overspeeding: one is a moment, not a sustained choice.
+  harshAccelerationPenaltyPerCase: 1,
+  harshBrakingPenaltyPerCase: 1,
 
   inactivityWindowDays: 30,
   inactiveScore: 0,
@@ -33,6 +37,8 @@ export interface DriverRatingInput {
   incentiveBonus?: number
   fuelTheftCases?: number
   overspeedingCases?: number
+  harshAccelerationCases?: number
+  harshBrakingCases?: number
   daysSinceLastTrip?: number
 }
 
@@ -50,6 +56,8 @@ export function calculateDriverRating(input: DriverRatingInput): DriverRatingRes
   const incentiveBonus = Math.max(0, input.incentiveBonus ?? 0)
   const fuelTheftCases = Math.max(0, input.fuelTheftCases ?? 0)
   const overspeedingCases = Math.max(0, input.overspeedingCases ?? 0)
+  const harshAccelerationCases = Math.max(0, input.harshAccelerationCases ?? 0)
+  const harshBrakingCases = Math.max(0, input.harshBrakingCases ?? 0)
   const daysSinceLastTrip = Math.max(0, input.daysSinceLastTrip ?? 0)
 
   // Workbook rule: no recent work is not a poor score; it is inactive.
@@ -79,11 +87,14 @@ export function calculateDriverRating(input: DriverRatingInput): DriverRatingRes
   // incentives sheet.
   const incentiveScore = clamp(incentiveBonus, 0, DRIVER_RATING_CONFIG.incentivesWeight)
 
-  // Safety score: workbook safety scoring is a penalty model. Theft and
-  // overspeeding are treated as conduct risks and reduce the score directly.
+  // Safety score: workbook safety scoring is a penalty model. Theft,
+  // overspeeding and harsh driving are treated as conduct risks and reduce the
+  // score directly, every recorded case.
   const safetyPenalty =
     fuelTheftCases * DRIVER_RATING_CONFIG.theftPenaltyPerCase +
-    overspeedingCases * DRIVER_RATING_CONFIG.overspeedPenaltyPerCase
+    overspeedingCases * DRIVER_RATING_CONFIG.overspeedPenaltyPerCase +
+    harshAccelerationCases * DRIVER_RATING_CONFIG.harshAccelerationPenaltyPerCase +
+    harshBrakingCases * DRIVER_RATING_CONFIG.harshBrakingPenaltyPerCase
   const safetyScore = clamp(
     DRIVER_RATING_CONFIG.safetyWeight - safetyPenalty,
     0,

@@ -59,4 +59,16 @@ describe('calculateDriverRating', () => {
     expect(result.score).toBeGreaterThanOrEqual(45)
     expect(result.score).toBeLessThan(55)
   })
+
+  it('takes a point off for every harsh acceleration and hard braking report', () => {
+    const base = { baseScore: 5, trips: 20, mileageKm: 1200, tonnes: 45, daysSinceLastTrip: 1 }
+    const clean = calculateDriverRating(base)
+    const harsh = calculateDriverRating({ ...base, harshAccelerationCases: 3, harshBrakingCases: 2 })
+    expect(clean.score - harsh.score).toBe(5)
+  })
+
+  it('takes three points off for every overspeeding case', () => {
+    const base = { baseScore: 5, trips: 20, mileageKm: 1200, tonnes: 45, daysSinceLastTrip: 1 }
+    expect(calculateDriverRating(base).score - calculateDriverRating({ ...base, overspeedingCases: 2 }).score).toBe(6)
+  })
 })
