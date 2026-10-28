@@ -808,6 +808,23 @@ export interface DriverIncident {
    * simply do not add to a number that can end an employment.
    */
   countsAgainstDriver: boolean
+  /**
+   * What the people reviewing the alert decided, where anyone has: an
+   * escalation as theft is a CONFIRMED theft, the strongest a case can be.
+   * Null while nobody has decided. See FuelTheft.reviewStatus.
+   */
+  review: 'confirmed' | 'not_theft' | 'probe_fault' | 'open' | null
+  reviewNote: string | null
+}
+
+/** One harsh acceleration or hard braking report on a driver's trip. */
+export interface DriverHarsh {
+  id:    string
+  at:    string
+  kind:  'acceleration' | 'braking'
+  plate: string | null
+  route: string | null
+  attributedBy: 'trip'
 }
 
 export interface DriverOverspeed {
@@ -826,6 +843,8 @@ export interface DriverDetail {
   totals: {
     trips: number; mileageKm: number; tonnes: number; hoursOnRoad: number
     fuelTheftCases: number; overspeedingCases: number; windowDays: number
+    /** Fuel cases a reviewer escalated as theft — a subset of fuelTheftCases. */
+    confirmedTheftCases: number
     harshAccelerationCases: number; harshBrakingCases: number
     /** Fuel events on the unit while they drove it, chargeable or not. */
     fuelEventsSeen: number
@@ -833,7 +852,7 @@ export interface DriverDetail {
   heaviestLoad: { tonnes: number; date: string; route: string } | null
   byDay: { day: string; tonnes: number; mileageKm: number }[]
   /** Every case behind the two counts above, newest first. */
-  incidents: { thefts: DriverIncident[]; overspeeds: DriverOverspeed[] }
+  incidents: { thefts: DriverIncident[]; overspeeds: DriverOverspeed[]; harsh: DriverHarsh[] }
 }
 
 export interface DriversOverview {
@@ -925,6 +944,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
         initialLocation: true,
         verdict: true, verdictReason: true,
         drainCause: true, causeConfidence: true, causeReason: true,
+        reviewStatus: true, reviewNote: true,
         vehicle: { select: { registrationPlate: true } },
       },
       orderBy: { beganAt: 'desc' },
@@ -953,7 +973,8 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     // from the tracker's Green Driving reports. Attributed like overspeeding.
     prisma.providerAlert.findMany({
       where:  { organisationId: orgId, type: { in: ['HARSH_ACCELERATION', 'HARSH_BRAKING'] }, vehicleId: { not: null } },
-      select: { vehicleId: true, type: true, createdAt: true },
+      select: { id: true, vehicleId: true, type: true, createdAt: true, vehicle: { select: { registrationPlate: true } } },
+      orderBy: { createdAt: 'desc' },
     }),
   ])
 
@@ -1040,7 +1061,19 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       // indeterminate, 12 unexplained burn, 8 high burn, 4 engine burn and 3
       // slosh. Counting those would suspend drivers for their engine using
       // fuel.
-      countsAgainstDriver: th.drainCause === 'SIPHON',
+      //
+      // A person's decision outranks the detector's (operator, 2026-10-29: the
+      // driver card is for CONFIRMED thefts): an alert escalated as theft
+      // counts whatever the classifier called it, and one a reviewer cleared
+      // -- not a theft, or a faulty probe -- no longer counts even if it was
+      // a siphon.
+      countsAgainstDriver: th.reviewStatus === 'CONFIRMED_THEFT'
+        || (th.drainCause === 'SIPHON' && th.reviewStatus !== 'NOT_THEFT' && th.reviewStatus !== 'PROBE_FAULT'),
+      review: th.reviewStatus === 'CONFIRMED_THEFT' ? 'confirmed'
+        : th.reviewStatus === 'NOT_THEFT' ? 'not_theft'
+        : th.reviewStatus === 'PROBE_FAULT' ? 'probe_fault'
+        : th.reviewStatus ? 'open' : null,
+      reviewNote: th.reviewNote ?? null,
     })
     theftsByDriver.set(driverId, arr)
   }
@@ -1080,6 +1113,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   // Harsh driving per driver: every report counts, pinned to the trip running
   // on that unit at that instant. Kept as instants so the detail can window them.
   const harshByDriver = new Map<string, { accel: Date[]; brake: Date[] }>()
+  const harshListByDriver = new Map<string, DriverHarsh[]>()
   for (const h of harsh) {
     if (!h.vehicleId) continue
     const hit = (tripsByVehicle.get(h.vehicleId) ?? []).find(t =>
@@ -1089,6 +1123,16 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     const entry = harshByDriver.get(hit.driverId) ?? { accel: [], brake: [] }
     ;(h.type === 'HARSH_ACCELERATION' ? entry.accel : entry.brake).push(h.createdAt)
     harshByDriver.set(hit.driverId, entry)
+    const list = harshListByDriver.get(hit.driverId) ?? []
+    list.push({
+      id:    h.id,
+      at:    h.createdAt.toISOString(),
+      kind:  h.type === 'HARSH_ACCELERATION' ? 'acceleration' : 'braking',
+      plate: h.vehicle?.registrationPlate ?? null,
+      route: hit.route?.name ?? null,
+      attributedBy: 'trip',
+    })
+    harshListByDriver.set(hit.driverId, list)
   }
 
   /**
@@ -1230,6 +1274,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
         fuelTheftCases:    windowThefts.filter(i => i.countsAgainstDriver).length,
         /** Everything on the unit during their trips, chargeable or not. */
         fuelEventsSeen:    windowThefts.length,
+        confirmedTheftCases: windowThefts.filter(i => i.review === 'confirmed').length,
         overspeedingCases,
         harshAccelerationCases: dHarsh.accel.filter(inWindow).length,
         harshBrakingCases:      dHarsh.brake.filter(inWindow).length,
@@ -1241,6 +1286,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       incidents: {
         thefts:     windowThefts,
         overspeeds: windowOverspeeds,
+        harsh:      (harshListByDriver.get(d.id) ?? []).filter(h => inWindow(new Date(h.at))),
       },
       heaviestLoad: heaviest && {
         tonnes: toTonnes(heaviest.kg),
