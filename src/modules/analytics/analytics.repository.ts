@@ -832,7 +832,14 @@ export interface DriverOverspeed {
   at:    string
   plate: string | null
   route: string | null
-  attributedBy: 'trip'
+  /** Fastest reading and the limit it broke, km/h. */
+  peakKmh:  number
+  limitKmh: number
+  /** 'record': the incident named the driver (the unit's assigned driver when
+   *  it was captured). 'trip': inferred from the trip running at the time. */
+  attributedBy: 'record' | 'trip'
+  /** An administrator escalated it on the Alerts page. */
+  escalated: boolean
 }
 
 export interface DriverDetail {
@@ -906,7 +913,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   // trip each: the drivers' full trip history (with cargo + route for tonnage
   // and the heaviest-load callout), their fuel-theft rows, and the org's
   // overspeeding alerts (attributed to trips by vehicle + time window below).
-  const [trips, thefts, alerts, assignments, harsh] = await Promise.all([
+  const [trips, thefts, speeding, assignments, harsh] = await Promise.all([
     prisma.trip.findMany({
       where:  { driverId: { in: driverIds }, vehicle: { organisationId: orgId } },
       select: {
@@ -949,9 +956,21 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       },
       orderBy: { beganAt: 'desc' },
     }),
-    prisma.vehicleAlert.findMany({
-      where:  { organisationId: orgId, type: 'overspeeding' },
-      select: { vehicleId: true, triggeredAt: true },
+    // Overspeeding as the Alerts page shows it: speeding incidents, one per
+    // episode over the limit, each carrying the driver posted to the unit
+    // when it was captured. The card used to count the raw `overspeeding`
+    // flags and credit a driver only through a trip covering the instant, so
+    // a driver the Alerts page names on several cases read 0 here whenever
+    // no trip of theirs was recorded (KCP 145, 2026-10-29). De-escalated
+    // incidents -- not a real overspeed -- are left out.
+    prisma.speedingIncident.findMany({
+      where:  { organisationId: orgId, OR: [{ reviewStatus: null }, { reviewStatus: { not: 'DEESCALATED' } }] },
+      select: {
+        id: true, vehicleId: true, driverId: true, startedAt: true,
+        peakKmh: true, limitKmh: true, reviewStatus: true,
+        vehicle: { select: { registrationPlate: true } },
+      },
+      orderBy: { startedAt: 'desc' },
     }),
     // Open postings, for the drivers with no trip to read a unit off. The
     // schema indexes exactly this ("which vehicle is this driver assigned to?"
@@ -1078,36 +1097,38 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     theftsByDriver.set(driverId, arr)
   }
 
-  // Lifetime overspeeding cases per driver: a case is a TRIP during which at
-  // least one overspeeding alert fired (matching vehicle + time window) — one
-  // trip counts once however many alerts it raised, so the count is bounded
-  // by trips and `cases / trips` reads as "share of trips oversped" (the
-  // suspension policy's 30-per-100-trips line).
+  // Overspeeding per driver. The incident's own driver wins; one with none is
+  // pinned to the trip running on that unit at that instant, and one with
+  // neither stays unattributed rather than landing on the unit's usual driver.
+  //
+  // Every incident lowers the rating (operator, 2026-10-28). The suspension
+  // rate still counts TRIPS oversped, one however many incidents a trip
+  // raised, so `cases / trips` keeps reading as a share of trips.
   const overspeedTripsByDriver = new Map<string, Set<TripRow>>()
   const overspeedsByDriver = new Map<string, DriverOverspeed[]>()
-  const plateByVehicle = new Map(
-    thefts.map(t => [t.vehicleId, t.vehicle?.registrationPlate ?? null]),
-  )
-  for (const a of alerts) {
+  for (const a of speeding) {
     const hit = (tripsByVehicle.get(a.vehicleId) ?? []).find(t =>
-      t.driverId && a.triggeredAt >= t.beganAt && (t.endedAt == null || a.triggeredAt <= t.endedAt),
+      (a.driverId ? t.driverId === a.driverId : !!t.driverId)
+        && a.startedAt >= t.beganAt && (t.endedAt == null || a.startedAt <= t.endedAt),
     )
-    if (hit?.driverId) {
-      const set = overspeedTripsByDriver.get(hit.driverId) ?? new Set<TripRow>()
-      set.add(hit); overspeedTripsByDriver.set(hit.driverId, set)
-
-      // The alerts themselves, for the case list. One trip still counts once
-      // toward the rate above; this is the evidence behind that one.
-      const arr = overspeedsByDriver.get(hit.driverId) ?? []
-      arr.push({
-        id:        `${a.vehicleId}-${a.triggeredAt.getTime()}`,
-        at:        a.triggeredAt.toISOString(),
-        plate:     plateByVehicle.get(a.vehicleId) ?? null,
-        route:     hit.route?.name ?? null,
-        attributedBy: 'trip',
-      })
-      overspeedsByDriver.set(hit.driverId, arr)
+    const driverId = a.driverId ?? hit?.driverId
+    if (!driverId) continue
+    if (hit) {
+      const set = overspeedTripsByDriver.get(driverId) ?? new Set<TripRow>()
+      set.add(hit); overspeedTripsByDriver.set(driverId, set)
     }
+    const arr = overspeedsByDriver.get(driverId) ?? []
+    arr.push({
+      id:        a.id,
+      at:        a.startedAt.toISOString(),
+      plate:     a.vehicle?.registrationPlate ?? null,
+      route:     hit?.route?.name ?? null,
+      peakKmh:   Math.round(a.peakKmh),
+      limitKmh:  Math.round(a.limitKmh),
+      attributedBy: a.driverId ? 'record' : 'trip',
+      escalated: a.reviewStatus === 'ESCALATED',
+    })
+    overspeedsByDriver.set(driverId, arr)
   }
 
   // Harsh driving per driver: every report counts, pinned to the trip running
@@ -1253,7 +1274,9 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
 
     // Windowed cases: every alert in the window, the same count the roster
     // and the rating use, so the headline matches the case list under it.
-    const inWindow = (at: Date) => at >= from && at <= to
+    // Up to NOW, not to the latest trip: an incident captured on their
+    // posted unit after their last recorded trip is still theirs to answer.
+    const inWindow = (at: Date) => at >= from
     const windowOverspeeds = (overspeedsByDriver.get(d.id) ?? []).filter(o => inWindow(new Date(o.at)))
     const overspeedingCases = windowOverspeeds.length
 
