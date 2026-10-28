@@ -746,12 +746,23 @@ export interface DriverRosterRow {
   /** 'trip' — the unit last driven. 'assignment' — an open posting, used only
    *  where there is no trip to read. null — neither exists. */
   vehicleFrom:       'trip' | 'assignment' | null
+  /** The same unit's descriptive name and provider class (TRUCK, TRACTOR,
+   *  PLANT, …) — what the Drivers page's type filter classifies on, exactly as
+   *  the map's Fleets funnel does. null wherever `vehicle` is null. */
+  vehicleName:       string | null
+  vehicleType:       string | null
   rating:            number
   trips:             number
   tonnes:            number
   mileageKm:         number
   fuelTheftCases:    number
+  /** Every overspeeding alert raised while they drove, not one per trip:
+   *  each case lowers the rating (operator, 2026-10-28). */
   overspeedingCases: number
+  /** Harsh acceleration and hard braking reports from the unit's tracker
+   *  (Wialon Green Driving) while they drove. Each lowers the rating. */
+  harshAccelerationCases: number
+  harshBrakingCases:      number
 }
 
 /**
@@ -815,6 +826,7 @@ export interface DriverDetail {
   totals: {
     trips: number; mileageKm: number; tonnes: number; hoursOnRoad: number
     fuelTheftCases: number; overspeedingCases: number; windowDays: number
+    harshAccelerationCases: number; harshBrakingCases: number
     /** Fuel events on the unit while they drove it, chargeable or not. */
     fuelEventsSeen: number
   }
@@ -875,14 +887,15 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   // trip each: the drivers' full trip history (with cargo + route for tonnage
   // and the heaviest-load callout), their fuel-theft rows, and the org's
   // overspeeding alerts (attributed to trips by vehicle + time window below).
-  const [trips, thefts, alerts, assignments] = await Promise.all([
+  const [trips, thefts, alerts, assignments, harsh] = await Promise.all([
     prisma.trip.findMany({
       where:  { driverId: { in: driverIds }, vehicle: { organisationId: orgId } },
       select: {
         driverId: true, vehicleId: true, beganAt: true, endedAt: true,
         mileageKm: true, durationSeconds: true, finalLocation: true,
-        // For the roster's vehicle column — the unit last driven.
-        vehicle:       { select: { registrationPlate: true } },
+        // For the roster's vehicle column — the unit last driven. Name and type
+        // ride along so the page can filter drivers by the class of machine.
+        vehicle:       { select: { registrationPlate: true, name: true, vehicleType: true } },
         route:         { select: { name: true, originName: true, destinationName: true } },
         cargoManifest: { select: { arrivalWeightKg: true, declaredWeightKg: true } },
       },
@@ -932,9 +945,15 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       },
       select: {
         userId: true, assignmentType: true, assignedAt: true,
-        vehicle: { select: { registrationPlate: true } },
+        vehicle: { select: { registrationPlate: true, name: true, vehicleType: true } },
       },
       orderBy: { assignedAt: 'desc' },
+    }),
+    // Harsh acceleration and braking, as the harsh-driving worker records them
+    // from the tracker's Green Driving reports. Attributed like overspeeding.
+    prisma.providerAlert.findMany({
+      where:  { organisationId: orgId, type: { in: ['HARSH_ACCELERATION', 'HARSH_BRAKING'] }, vehicleId: { not: null } },
+      select: { vehicleId: true, type: true, createdAt: true },
     }),
   ])
 
@@ -1058,16 +1077,31 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     }
   }
 
+  // Harsh driving per driver: every report counts, pinned to the trip running
+  // on that unit at that instant. Kept as instants so the detail can window them.
+  const harshByDriver = new Map<string, { accel: Date[]; brake: Date[] }>()
+  for (const h of harsh) {
+    if (!h.vehicleId) continue
+    const hit = (tripsByVehicle.get(h.vehicleId) ?? []).find(t =>
+      t.driverId && h.createdAt >= t.beganAt && (t.endedAt == null || h.createdAt <= t.endedAt),
+    )
+    if (!hit?.driverId) continue
+    const entry = harshByDriver.get(hit.driverId) ?? { accel: [], brake: [] }
+    ;(h.type === 'HARSH_ACCELERATION' ? entry.accel : entry.brake).push(h.createdAt)
+    harshByDriver.set(hit.driverId, entry)
+  }
+
   /**
    * One plate per driver: PRIMARY before any other kind, and the newest
    * posting before an older one — a driver can hold two open rows (a primary
    * unit and a relief), and a column shows one thing.
    */
-  const postedPlate = new Map<string, string>()
+  type PostedUnit = { registrationPlate: string; name: string | null; vehicleType: string }
+  const postedPlate = new Map<string, PostedUnit>()
   for (const a of [...assignments].sort((x, y) =>
     (x.assignmentType === y.assignmentType ? 0 : x.assignmentType === 'PRIMARY' ? -1 : 1)
     || (y.assignedAt.getTime() - x.assignedAt.getTime()))) {
-    if (!postedPlate.has(a.userId)) postedPlate.set(a.userId, a.vehicle.registrationPlate)
+    if (!postedPlate.has(a.userId)) postedPlate.set(a.userId, a.vehicle)
   }
 
   const roster: DriverRosterRow[] = []
@@ -1078,7 +1112,10 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     const dThefts = theftsByDriver.get(d.id) ?? []
     // Only the siphons count against them — see countsAgainstDriver.
     const chargeable = dThefts.filter(i => i.countsAgainstDriver).length
+    // Trips oversped, for the suspension rate; every alert, for the rating.
     const lifetimeOverspeed = overspeedTripsByDriver.get(d.id)?.size ?? 0
+    const lifetimeOverspeedAlerts = overspeedsByDriver.get(d.id)?.length ?? 0
+    const dHarsh = harshByDriver.get(d.id) ?? { accel: [], brake: [] }
     let lifetimeKm = 0, lifetimeKg = 0
     for (const t of dTrips) {
       lifetimeKm += t.mileageKm ?? 0
@@ -1098,7 +1135,9 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       tonnes: toTonnes(lifetimeKg),
       incentiveBonus: 0,
       fuelTheftCases: chargeable,
-      overspeedingCases: lifetimeOverspeed,
+      overspeedingCases: lifetimeOverspeedAlerts,
+      harshAccelerationCases: dHarsh.accel.length,
+      harshBrakingCases: dHarsh.brake.length,
       daysSinceLastTrip,
     })
     const rating = ratingResult.rating
@@ -1111,9 +1150,11 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     // `dTrips` is ordered by beganAt ascending, so the last entry is the most
     // recent trip and its vehicle is the unit this driver was last in. Where
     // there is no trip at all, the open posting stands in for it.
-    const lastDriven = dTrips.length ? dTrips[dTrips.length - 1].vehicle?.registrationPlate ?? null : null
+    const lastUnit = dTrips.length ? dTrips[dTrips.length - 1].vehicle ?? null : null
+    const lastDriven = lastUnit?.registrationPlate ? lastUnit : null
     const posted = postedPlate.get(d.id) ?? null
-    const vehicle = lastDriven ?? posted
+    const unit = lastDriven ?? posted
+    const vehicle = unit?.registrationPlate ?? null
     const vehicleFrom: DriverRosterRow['vehicleFrom'] =
       lastDriven ? 'trip' : posted ? 'assignment' : null
 
@@ -1123,12 +1164,16 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       status,
       vehicle,
       vehicleFrom,
+      vehicleName:       unit?.name ?? null,
+      vehicleType:       unit?.vehicleType ?? null,
       rating,
       trips:             dTrips.length,
       tonnes:            toTonnes(lifetimeKg),
       mileageKm:         Math.round(lifetimeKm),
       fuelTheftCases:    dThefts.filter(i => i.countsAgainstDriver).length,
-      overspeedingCases: lifetimeOverspeed,
+      overspeedingCases: lifetimeOverspeedAlerts,
+      harshAccelerationCases: dHarsh.accel.length,
+      harshBrakingCases:      dHarsh.brake.length,
     })
 
     // ── Detail: trailing window anchored to the driver's latest trip ──
@@ -1162,15 +1207,11 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       }
     }
 
-    // Windowed overspeeding: trips in the window during which at least one
-    // alert fired — same one-case-per-trip semantics as the lifetime count.
-    const overspeedingCases = windowTrips.filter(t =>
-      alerts.some(a =>
-        a.vehicleId === t.vehicleId &&
-        a.triggeredAt >= t.beganAt &&
-        t.endedAt != null && a.triggeredAt <= t.endedAt,
-      ),
-    ).length
+    // Windowed cases: every alert in the window, the same count the roster
+    // and the rating use, so the headline matches the case list under it.
+    const inWindow = (at: Date) => at >= from && at <= to
+    const windowOverspeeds = (overspeedsByDriver.get(d.id) ?? []).filter(o => inWindow(new Date(o.at)))
+    const overspeedingCases = windowOverspeeds.length
 
     details[d.id] = {
       driver: {
@@ -1190,6 +1231,8 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
         /** Everything on the unit during their trips, chargeable or not. */
         fuelEventsSeen:    windowThefts.length,
         overspeedingCases,
+        harshAccelerationCases: dHarsh.accel.filter(inWindow).length,
+        harshBrakingCases:      dHarsh.brake.filter(inWindow).length,
         windowDays:        days,
       },
       // The cases behind the two counts, newest first. Scoped to the same
@@ -1197,8 +1240,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       // headline of three.
       incidents: {
         thefts:     windowThefts,
-        overspeeds: (overspeedsByDriver.get(d.id) ?? [])
-          .filter(o => new Date(o.at) >= from && new Date(o.at) <= to),
+        overspeeds: windowOverspeeds,
       },
       heaviestLoad: heaviest && {
         tonnes: toTonnes(heaviest.kg),
@@ -1284,16 +1326,24 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
   })
 
   const vehicleIds = [...new Set(trips.map(t => t.vehicleId))]
-  let overspeedingCases = 0
+  let overspeedingCases = 0, harshAccelerationCases = 0, harshBrakingCases = 0
   if (vehicleIds.length > 0) {
-    const alerts = await prisma.vehicleAlert.findMany({
-      where:  { organisationId: orgId, vehicleId: { in: vehicleIds }, type: 'overspeeding', triggeredAt: { gte: from, lte: to } },
-      select: { vehicleId: true, triggeredAt: true },
-    })
-    // One case per TRIP that oversped, not per alert — matches driversOverview.
-    overspeedingCases = trips.filter(t =>
-      alerts.some(a => a.vehicleId === t.vehicleId && a.triggeredAt >= t.beganAt && a.triggeredAt <= t.endedAt),
-    ).length
+    const [alerts, harsh] = await Promise.all([
+      prisma.vehicleAlert.findMany({
+        where:  { organisationId: orgId, vehicleId: { in: vehicleIds }, type: 'overspeeding', triggeredAt: { gte: from, lte: to } },
+        select: { vehicleId: true, triggeredAt: true },
+      }),
+      prisma.providerAlert.findMany({
+        where:  { organisationId: orgId, vehicleId: { in: vehicleIds }, type: { in: ['HARSH_ACCELERATION', 'HARSH_BRAKING'] }, createdAt: { gte: from, lte: to } },
+        select: { vehicleId: true, type: true, createdAt: true },
+      }),
+    ])
+    // Every alert during one of their trips — matches driversOverview.
+    const onTrip = (vehicleId: string | null, at: Date) =>
+      trips.some(t => t.vehicleId === vehicleId && at >= t.beganAt && at <= t.endedAt)
+    overspeedingCases = alerts.filter(a => onTrip(a.vehicleId, a.triggeredAt)).length
+    harshAccelerationCases = harsh.filter(h => h.type === 'HARSH_ACCELERATION' && onTrip(h.vehicleId, h.createdAt)).length
+    harshBrakingCases = harsh.filter(h => h.type === 'HARSH_BRAKING' && onTrip(h.vehicleId, h.createdAt)).length
   }
 
   const finalDriverRating = driver
@@ -1305,6 +1355,8 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
         incentiveBonus: 0,
         fuelTheftCases,
         overspeedingCases,
+        harshAccelerationCases,
+        harshBrakingCases,
         daysSinceLastTrip: trips.length > 0 ? Math.floor((Date.now() - trips[trips.length - 1].beganAt.getTime()) / 86_400_000) : 999,
       })
     : null
@@ -1325,6 +1377,8 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
       hoursOnRoad:       Math.round(totalSeconds / 360) / 10, // seconds → hours, 1 dp
       fuelTheftCases,
       overspeedingCases,
+      harshAccelerationCases,
+      harshBrakingCases,
       windowDays:        q.days,
     },
     heaviestLoad: heaviest && {

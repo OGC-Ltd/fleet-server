@@ -1,17 +1,18 @@
 /**
  * Who hears about each step of the Vehicle Support and Repair Workflow.
  *
- * The channel is in-app notifications plus email (operator, 2026-10-20). Every
- * event writes ONE durable feed item for the organisation (the in-app half,
- * which reaches everyone on the dashboard) and mails the event's audience at
- * their account addresses (the email half). The table is §6 of
+ * The channel is in-app notifications plus Web Push (operator, 2026-10-28;
+ * it was email from 2026-10-20). Every event writes ONE durable feed item for
+ * the organisation (the in-app half, which reaches everyone on the dashboard)
+ * and pushes to the event's audience on every device they turned
+ * notifications on from. The table is §6 of
  * docs/vehicle-support-repair-workflow-plan.md.
  *
  * Audiences are looked up from live role holders, never from a hand-kept
  * list: the Control Room is `supervisor`, `fleet_analyst` and `operator`; the
  * Head of Security is every holder of `head_of_security` (NOT `hos`, which is
  * Head of Section); ControlTech is the technicians in the `controltech` user
- * group. A vehicle-scoped Control Room holder is mailed only about units in
+ * group. A vehicle-scoped Control Room holder is told only about units in
  * their scope.
  *
  * Like repairs.notify, nothing here throws into the request: a write that
@@ -22,8 +23,7 @@ import type { Prisma } from '../../../generated/prisma/client.js'
 import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
 import { prisma } from '../../lib/prisma.js'
-import { repairWorkflowEmail } from '../../lib/mailer/templates.js'
-import { enqueueMail, enqueueNotification, isAccepted } from '../../lib/queues/outbound.js'
+import { enqueueNotification } from '../../lib/queues/outbound.js'
 import { pushService } from '../notifications/notifications.service.js'
 import { repairRecipients } from './repairs.service.js'
 
@@ -200,8 +200,13 @@ async function resolveAudience(ref: JobRef, audience: Audience[]): Promise<{ to:
 }
 
 /**
- * Tell the feed and mail the audience. Returns the addresses the mail was
- * accepted for, which the caller may copy onto the trail.
+ * Tell the feed and push to the audience. Returns the audience's addresses
+ * and those that had an account to push to.
+ *
+ * The audience was mailed until 2026-10-28; it is now pushed to instead, the
+ * same people (live role holders, scoped, technicians and the actor left
+ * out), together with the event's own `push` roles and `pushUsers`, in one
+ * send so nobody gets the same notice twice.
  */
 export async function notifyWorkflow(ref: JobRef, ev: WorkflowEvent): Promise<{ to: string[]; accepted: string[] }> {
   const at = ev.at ?? new Date()
@@ -214,24 +219,6 @@ export async function notifyWorkflow(ref: JobRef, ev: WorkflowEvent): Promise<{ 
     })
   } catch (err) {
     logger.error({ err, itemId: ref.itemId, key: ev.key }, 'repair workflow: could not publish the feed item')
-  }
-
-  if (ev.push?.length || ev.pushUsers?.some(Boolean)) {
-    try {
-      const ids = [...new Set([
-        ...(ev.push?.length ? await roleHolderIds(ref.orgId, ev.push, ref.vehicleId) : []),
-        ...(ev.pushUsers ?? []).filter((x): x is string => !!x),
-      ])].filter((id) => id !== ev.actorId)
-      await pushService.sendToUsers(ids, {
-        title: ev.headline,
-        body:  `${plateRef} · ${ref.label}: ${ev.text}`,
-        tag:   `repair-${ev.key}-${ref.itemId}`,
-        icon:  '/logo-icon.png',
-        data:  { url: '/', orgId: ref.orgId, itemId: ref.itemId },
-      })
-    } catch (err) {
-      logger.error({ err, itemId: ref.itemId, key: ev.key }, 'repair workflow: could not send the push notification')
-    }
   }
 
   const resolved = await resolveAudience(ref, ev.audience)
@@ -253,28 +240,25 @@ export async function notifyWorkflow(ref: JobRef, ev: WorkflowEvent): Promise<{ 
       })
     } catch { /* the warning is a courtesy; the notice itself went to the feed */ }
   }
-  if (to.length === 0) return { to, accepted: [] }
 
-  let orgName = 'Fleet'
+  let accepted: string[] = []
   try {
-    orgName = (await prisma.organisation.findUnique({ where: { id: ref.orgId }, select: { name: true } }))?.name ?? orgName
-  } catch { /* the name is decoration */ }
-
-  const mail = repairWorkflowEmail({
-    orgName,
-    headline: ev.headline,
-    plate:    ref.plate,
-    ticketNo: ref.ticketNo ?? null,
-    stage:    ref.stage,
-    lines:    [{ label: 'Fault', value: ref.label }, ...(ev.lines ?? [])],
-    critical: ev.severity === 'critical',
-    ...(env.APP_BASE_URL ? { link: env.APP_BASE_URL } : {}),
-  })
-  try {
-    const results = await Promise.all(to.map((addr) => enqueueMail(addr, null, mail)))
-    return { to, accepted: to.filter((_, i) => isAccepted(results[i]!)) }
+    const audience = await pushService.usersForEmails(to)
+    accepted = to.filter((addr) => !audience.unmatched.includes(addr))
+    const ids = [...new Set([
+      ...audience.ids,
+      ...(ev.push?.length ? await roleHolderIds(ref.orgId, ev.push, ref.vehicleId) : []),
+      ...(ev.pushUsers ?? []).filter((x): x is string => !!x),
+    ])].filter((id) => id !== ev.actorId)
+    await pushService.sendToUsers(ids, {
+      title: ev.headline,
+      body:  `${plateRef} · ${ref.label}: ${ev.text}`,
+      tag:   `repair-${ev.key}-${ref.itemId}`,
+      icon:  '/logo-icon.png',
+      data:  { url: '/', orgId: ref.orgId, itemId: ref.itemId, critical: ev.severity === 'critical' },
+    })
   } catch (err) {
-    logger.error({ err, itemId: ref.itemId, key: ev.key }, 'repair workflow: could not send mail')
-    return { to, accepted: [] }
+    logger.error({ err, itemId: ref.itemId, key: ev.key }, 'repair workflow: could not send the push notification')
   }
+  return { to, accepted }
 }

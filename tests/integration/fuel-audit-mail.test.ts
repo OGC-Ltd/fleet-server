@@ -1,6 +1,7 @@
 /**
- * The Fuel Audit report mail (operator, 2026-10-01): when an audit is done
- * (its probe repair signed off), the full report goes to the named roles.
+ * The Fuel Audit report (operator, 2026-10-01): when an audit is done (its
+ * probe repair signed off), the named roles are told — by Web Push since
+ * 2026-10-28, never by mail.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -12,11 +13,15 @@ vi.mock('../../src/lib/queues/outbound.js', () => ({
   isAccepted: vi.fn(() => true),
   dispatchStatus: vi.fn(() => 'sent'),
 }))
+vi.mock('../../src/modules/notifications/notifications.service.js', () => ({
+  pushService: { sendToUsers: vi.fn(async () => undefined) },
+}))
 
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { enqueueMail } from '../../src/lib/queues/outbound.js'
 import { sendFuelAuditReport, auditReportRecipients, AUDIT_REPORT_ROLE_SLUGS } from '../../src/modules/fuel/fuel-audit-mail.js'
 import { fuelAuditReportEmail } from '../../src/lib/mailer/templates.js'
+import { pushService } from '../../src/modules/notifications/notifications.service.js'
 
 const signedOff = new Date('2026-10-01T09:30:00Z')
 
@@ -47,15 +52,15 @@ function mockAudit() {
   ] as never)
 }
 
-beforeEach(() => { vi.mocked(enqueueMail).mockClear() })
+beforeEach(() => { vi.mocked(enqueueMail).mockClear(); vi.mocked(pushService.sendToUsers).mockClear() })
 
 describe('Fuel Audit report recipients', () => {
   it('asks for live grants of exactly the named roles, here or platform-wide, on active accounts', async () => {
     prismaMock.user.findMany.mockResolvedValue([
-      { email: 'HOS@x.co', fullName: 'Head' }, { email: 'hos@x.co', fullName: 'Head again' }, { email: 'fm@x.co', fullName: null },
+      { id: 'u1', email: 'HOS@x.co', fullName: 'Head' }, { id: 'u1', email: 'hos@x.co', fullName: 'Head again' }, { id: 'u2', email: 'fm@x.co', fullName: null },
     ] as never)
     const r = await auditReportRecipients(TEST_ORG_ID)
-    expect(r).toEqual([{ email: 'hos@x.co', name: 'Head' }, { email: 'fm@x.co', name: null }])
+    expect(r).toEqual([{ id: 'u1', email: 'hos@x.co', name: 'Head' }, { id: 'u2', email: 'fm@x.co', name: null }])
     const where = (prismaMock.user.findMany.mock.calls[0]![0] as { where: Record<string, unknown> }).where
     expect(where).toEqual(expect.objectContaining({ deletedAt: null, status: 'ACTIVE' }))
     expect(JSON.stringify(where)).toContain(TEST_ORG_ID)
@@ -66,26 +71,29 @@ describe('Fuel Audit report recipients', () => {
   })
 })
 
-describe('Fuel Audit report mail', () => {
-  it('mails every recipient the full report when an audit is done', async () => {
+describe('Fuel Audit report', () => {
+  it('pushes the summary to every recipient when an audit is done, and mails nobody', async () => {
     mockAudit()
-    prismaMock.user.findMany.mockResolvedValue([{ email: 'hos@x.co', fullName: 'Head' }, { email: 'dir@x.co', fullName: 'Director' }] as never)
+    prismaMock.user.findMany.mockResolvedValue([
+      { id: 'u-hos', email: 'hos@x.co', fullName: 'Head' }, { id: 'u-dir', email: 'dir@x.co', fullName: 'Director' },
+    ] as never)
 
     await sendFuelAuditReport(TEST_ORG_ID, 'ri1', ['fu1'])
 
-    expect(enqueueMail).toHaveBeenCalledTimes(2)
-    const mail = vi.mocked(enqueueMail).mock.calls[0]![2]
-    expect(mail.subject).toBe('[Mufindi] Fuel Audit done — MUFINDI - DZ 20 · Probe repaired')
-    for (const s of ['Jumps around a lot', 'New probe cable fitted', 'Clip the cable away', 'Probe cable', 'TEST SUPPLIER',
-      'KES 1,000', 'Found to be a faulty probe', 'Head of Security', '19.4 L', 'controltech', 'Chafed']) {
-      expect(mail.text).toContain(s)
-      expect(mail.html).toContain(s)
+    expect(enqueueMail).not.toHaveBeenCalled()
+    expect(pushService.sendToUsers).toHaveBeenCalledTimes(1)
+    const [ids, payload] = vi.mocked(pushService.sendToUsers).mock.calls[0]!
+    expect(ids).toEqual(['u-hos', 'u-dir'])
+    expect(payload.title).toBe('Fuel audit done: MUFINDI - DZ 20')
+    for (const s of ['probe fixed', 'by controltech', '1 fuel alert found to be a faulty probe', 'KES 1,000', 'New probe cable fitted']) {
+      expect(payload.body).toContain(s)
     }
   })
 
   it('sends nothing when the sign-off closed no case', async () => {
     await sendFuelAuditReport(TEST_ORG_ID, 'ri1', [])
     expect(enqueueMail).not.toHaveBeenCalled()
+    expect(pushService.sendToUsers).not.toHaveBeenCalled()
   })
 
   it('escapes what people typed', () => {
