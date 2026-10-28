@@ -270,3 +270,45 @@ describe("when the provider's quota is spent", () => {
     expect(old.moveToDelayed).not.toHaveBeenCalled()
   })
 })
+
+describe('sendMailNow — account mail an administrator is waiting on', () => {
+  beforeEach(() => { redisMock.getQueueRedis.mockReturnValue({}) })
+
+  it('sends inline and says sent, without touching the queue', async () => {
+    const { sendMailNow } = await load()
+    await expect(sendMailNow('a@b.c', 'Ada', MAIL)).resolves.toEqual({ sent: true })
+    expect(addMock).not.toHaveBeenCalled()
+  })
+
+  it('queues a quota refusal for when it resets, and says so', async () => {
+    sendMailMock.mockResolvedValue({ sent: false, reason: 'send-failed', retryAfterMs: 3_600_000 })
+    const { sendMailNow } = await load()
+    const before = Date.now()
+    const out = await sendMailNow('a@b.c', 'Ada', MAIL) as { queued: true; because: string; retryAt: string }
+    expect(out).toMatchObject({ queued: true, because: 'provider-quota' })
+    expect(Date.parse(out.retryAt) - before).toBeGreaterThanOrEqual(3_600_000)
+    expect(addMock.mock.calls[0][2]).toMatchObject({ delay: 3_600_000, priority: 1 })
+  })
+
+  it('does not ask a provider it already knows is closed', async () => {
+    sendMailMock.mockResolvedValue({ sent: false, reason: 'send-failed', retryAfterMs: 3_600_000 })
+    const { sendMailNow } = await load()
+    await sendMailNow('a@b.c', 'Ada', MAIL)
+    await sendMailNow('d@e.f', 'Bo', MAIL)
+    expect(sendMailMock).toHaveBeenCalledTimes(1)
+    expect(addMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('queues a plain failure for a retry', async () => {
+    sendMailMock.mockResolvedValue({ sent: false, reason: 'send-failed' })
+    const { sendMailNow } = await load()
+    await expect(sendMailNow('a@b.c', null, MAIL)).resolves.toMatchObject({ queued: true, because: 'send-failed' })
+  })
+
+  it('reports an unconfigured mailer at once rather than queueing it', async () => {
+    sendMailMock.mockResolvedValue({ sent: false, reason: 'unconfigured' })
+    const { sendMailNow } = await load()
+    await expect(sendMailNow('a@b.c', null, MAIL)).resolves.toEqual({ sent: false, reason: 'unconfigured' })
+    expect(addMock).not.toHaveBeenCalled()
+  })
+})
