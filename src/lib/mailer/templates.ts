@@ -28,20 +28,31 @@ export interface RenderedMail {
 }
 
 /*
- * Hallmark · macrostructure: Letter (memo slip) · tone: utilitarian · anchor hue: blue 221°
+ * Hallmark · macrostructure: Marquee Hero (band + sheet) · tone: utilitarian · anchor hue: blue 221°
  * theme: new-ui's own palette (src/index.css) · enrichment: none (typography only)
+ * replaces: Letter (memo slip), 86ca3ab
  *
  * ## The layout every mail shares
  *
- *   letterhead     [logo]  FLEET OPERATIONS  ·  <organisation>   (on the grey paper)
- *   ┌ sheet ─────────────────────────────────────────────┐
- *   │ status         only when the mail carries a verdict │
- *   │ heading                                             │
- *   │ body, then a docket of label / value rows           │
- *   │ [ one button ]   and the same link written out      │
+ *   ┌ band (the logo's own #212121) ──────────────────────┐
+ *   │ [logo]  FLEET OPERATIONS · <organisation>           │
+ *   │ ● status        only when the mail carries a verdict│
+ *   │ Heading, large, white — the one thing the mail says │
+ *   ├ sheet ──────────────────────────────────────────────┤
+ *   │ body, then a tinted docket of label / value rows    │
+ *   │ [ one full-width button ]  and the link written out │
  *   │ small print: how long the link lasts, and so on     │
  *   └─────────────────────────────────────────────────────┘
  *   footer         who sent it, the domain, why you got it
+ *
+ * The statement lives in the band so the mail is read from its top line: a
+ * reset, an invite and an audit verdict each say what they are before the
+ * reader has scrolled, on a phone, in a preview pane. The band is the logo's
+ * own background colour, so the mark sits in it with no box around it.
+ *
+ * A verdict is a coloured hairline across the top of the band plus a dot and a
+ * label above the heading — never colour alone. The tones on the band are the
+ * lighter steps of the same hues, for contrast against the dark.
  *
  * Mail is not a browser. Gmail and Outlook drop custom properties, OKLCH and
  * most of <style>, and many clients block images until asked, so the tokens
@@ -64,6 +75,8 @@ export const LOGO_CID = 'rai-group-logo'
 const T = {
   paper:  '#f1f5f9',
   sheet:  '#ffffff',
+  /** The docket's tint, one step off the sheet. */
+  well:   '#f8fafc',
   rule:   '#e2e8f0',
   ink:    '#0f172a',
   ink2:   '#334155',
@@ -73,11 +86,19 @@ const T = {
   ok:     '#15803d',
   warn:   '#b45309',
   crit:   '#b91c1c',
+  /** The band: rai-group-logo.jpeg's background, sampled (33,33,33). */
+  band:      '#212121',
+  onBand:    '#ffffff',
+  bandMuted: '#a3a3a3',
+  bandOk:    '#4ade80',
+  bandWarn:  '#fbbf24',
+  bandCrit:  '#f87171',
   font:   "Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif",
   mono:   "'JetBrains Mono','SF Mono',Menlo,Consolas,monospace",
 } as const
 
 type Tone = 'ok' | 'warn' | 'crit'
+const BAND_TONE: Record<Tone, string> = { ok: T.bandOk, warn: T.bandWarn, crit: T.bandCrit }
 
 /** Body copy. */
 const para = (html: string): string =>
@@ -85,27 +106,27 @@ const para = (html: string): string =>
 /** Small print: link lifetimes, "if this was not you". */
 const note = (html: string, colour: string = T.muted): string =>
   `<p style="margin:0 0 6px;font-size:13px;line-height:1.5;color:${colour}">${html}</p>`
-/** A section title inside the sheet. */
+/** A section title inside the sheet: a hairline above, so long reports break into parts. */
 const h2 = (s: string, colour: string = T.ink): string =>
-  `<h2 style="margin:26px 0 8px;font-size:14px;line-height:1.4;font-weight:600;color:${colour}">${esc(s)}</h2>`
+  `<h2 style="margin:28px 0 10px;padding-top:18px;border-top:1px solid ${T.rule};font-size:15px;line-height:1.4;font-weight:600;color:${colour}">${esc(s)}</h2>`
 /** Plates and ticket numbers read as codes, so they are set as codes. */
 const code = (s: string): string =>
   `<span style="font-family:${T.mono};font-size:13px;color:${T.ink}">${esc(s)}</span>`
 const strong = (s: string): string => `<strong style="color:${T.ink};font-weight:600">${esc(s)}</strong>`
 
 /**
- * Label / value rows with hairlines between them. Values are HTML (a plate set
- * in mono); `kv` escapes a plain string into one.
+ * Label / value rows in a tinted well, hairlines between them. Values are HTML
+ * (a plate set in mono); `kv` escapes a plain string into one.
  */
 function docket(rows: Array<[label: string, valueHtml: string] | null | false | undefined | ''>): string {
   const live = rows.filter((r): r is [string, string] => Boolean(r))
   if (live.length === 0) return ''
-  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:2px 0 8px">${
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;margin:4px 0 10px;background:${T.well};border:1px solid ${T.rule};border-radius:8px">${
     live.map(([k, v], i) => {
       const line = i ? `border-top:1px solid ${T.rule};` : ''
       return `<tr>
-      <td style="padding:8px 14px 8px 0;width:34%;vertical-align:top;font-size:13px;line-height:1.5;color:${T.muted};${line}">${esc(k)}</td>
-      <td style="padding:8px 0;vertical-align:top;font-size:14px;line-height:1.5;color:${T.ink};${line}">${v}</td>
+      <td style="padding:10px 12px 10px 16px;width:34%;vertical-align:top;font-size:13px;line-height:1.5;color:${T.muted};${line}">${esc(k)}</td>
+      <td style="padding:10px 16px 10px 0;vertical-align:top;font-size:14px;line-height:1.5;color:${T.ink};${line}">${v}</td>
     </tr>`
     }).join('')
   }</table>`
@@ -142,13 +163,16 @@ function shell(opts: {
   /** Why this person got it, for the footer. Plain text. */
   reason:    string
 }): string {
+  const tone = opts.status ? BAND_TONE[opts.status.tone] : null
   const status = opts.status
-    ? `<p style="margin:0 0 10px;font-size:13px;line-height:1.4;font-weight:600;color:${T[opts.status.tone]}">&#9679;&nbsp;${esc(opts.status.label)}</p>`
+    ? `<p style="margin:0 0 8px;font-size:13px;line-height:1.4;font-weight:600;color:${tone}">&#9679;&nbsp;${esc(opts.status.label)}</p>`
     : ''
+  // Full width, so it is the one obvious thing to press on a phone; the table
+  // cell carries the colour because Outlook ignores background on <a>.
   const action = opts.action
-    ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 14px"><tr>
-        <td style="border-radius:6px;background:${T.accent}">
-          <a href="${esc(opts.action.href)}" style="display:inline-block;padding:12px 22px;font-family:${T.font};font-size:15px;font-weight:600;line-height:1.2;color:${T.onAccent};text-decoration:none;border-radius:6px;white-space:nowrap">${esc(opts.action.label)}</a>
+    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:24px 0 14px"><tr>
+        <td align="center" style="border-radius:8px;background:${T.accent}">
+          <a href="${esc(opts.action.href)}" style="display:block;padding:14px 20px;font-family:${T.font};font-size:15px;font-weight:600;line-height:1.2;color:${T.onAccent};text-decoration:none;text-align:center;border-radius:8px">${esc(opts.action.label)}</a>
         </td></tr></table>
       ${note(`Button not working? Paste this into your browser:<br><span style="word-break:break-all;color:${T.ink2}">${esc(opts.action.href)}</span>`)}`
     : ''
@@ -160,26 +184,27 @@ function shell(opts: {
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light">
 <title>${opts.heading}</title>
-<style>@media (max-width:480px){.sheet{padding:24px 20px !important}.wrap{padding:16px 8px !important}}</style>
+<style>@media (max-width:480px){.band{padding:22px 20px 24px !important}.sheet{padding:24px 20px !important}.wrap{padding:12px 8px !important}.hd{font-size:22px !important}}</style>
 </head>
 <body style="margin:0;padding:0;background:${T.paper};-webkit-text-size-adjust:100%">
 <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:${T.paper}">${esc(opts.preheader)}</div>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${T.paper}">
 <tr><td class="wrap" align="center" style="padding:32px 16px">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;font-family:${T.font}">
-    <tr><td style="padding:0 0 16px">
-      <table role="presentation" cellpadding="0" cellspacing="0"><tr>
-        <td style="vertical-align:middle;padding-right:14px">
-          <img src="cid:${LOGO_CID}" width="56" height="63" alt="RAI GROUP" style="display:block;width:56px;height:63px;border:0;border-radius:6px;background:${T.ink};color:${T.sheet};font-size:9px;font-weight:700;text-align:center">
+    <tr><td class="band" style="background:${T.band};border-radius:10px 10px 0 0;padding:26px 36px 30px;${tone ? `border-top:3px solid ${tone};` : ''}">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+        <td style="vertical-align:middle;width:40px;padding-right:14px">
+          <img src="cid:${LOGO_CID}" width="40" height="45" alt="RAI GROUP" style="display:block;width:40px;height:45px;border:0;background:${T.band};color:${T.onBand};font-size:8px;font-weight:700;text-align:center">
         </td>
-        <td style="vertical-align:middle;font-size:12px;line-height:1.4;letter-spacing:.08em;text-transform:uppercase;color:${T.muted}">
-          <strong style="color:${T.ink};font-weight:700">Fleet operations</strong>${opts.org ? `&nbsp;&nbsp;&middot;&nbsp;&nbsp;${esc(opts.org)}` : ''}
+        <td style="vertical-align:middle;font-size:11px;line-height:1.4;letter-spacing:.08em;text-transform:uppercase;color:${T.bandMuted}">
+          <strong style="color:${T.onBand};font-weight:700">Fleet operations</strong>${opts.org ? `&nbsp;&nbsp;&middot;&nbsp;&nbsp;${esc(opts.org)}` : ''}
         </td>
       </tr></table>
-    </td></tr>
-    <tr><td class="sheet" style="background:${T.sheet};border:1px solid ${T.rule};border-radius:8px;padding:32px 36px">
+      <div style="height:26px;line-height:26px;font-size:1px">&nbsp;</div>
       ${status}
-      <h1 style="margin:0 0 18px;font-size:22px;line-height:1.3;font-weight:600;letter-spacing:-.01em;color:${T.ink}">${opts.heading}</h1>
+      <h1 class="hd" style="margin:0;font-size:26px;line-height:1.25;font-weight:600;letter-spacing:-.015em;color:${T.onBand}">${opts.heading}</h1>
+    </td></tr>
+    <tr><td class="sheet" style="background:${T.sheet};border:1px solid ${T.rule};border-top:0;border-radius:0 0 10px 10px;padding:30px 36px 32px">
       ${opts.body}
       ${action}
       ${after}
