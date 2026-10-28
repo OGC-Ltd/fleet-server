@@ -35,6 +35,8 @@ vi.mock('../../src/lib/prisma.js', () => ({ prisma: prismaMock }))
 vi.mock('../../src/lib/notifications/notification.store.js', () => ({
   publishNotificationDurable: vi.fn(),
 }))
+const pushMock = vi.hoisted(() => ({ usersForEmails: vi.fn(), sendToUsers: vi.fn() }))
+vi.mock('../../src/modules/notifications/notifications.service.js', () => ({ pushService: pushMock }))
 
 import { notifyRepairAssignment, repairRecipients, notifyRepairReport } from '../../src/modules/repairs/repairs.service.js'
 import { repairAssignmentEmail, repairReportEmail } from '../../src/lib/mailer/templates.js'
@@ -69,6 +71,11 @@ beforeEach(() => {
   prismaMock.user.findUnique.mockReset()
   prismaMock.userRole.findFirst.mockReset().mockResolvedValue(null)
   prismaMock.repairReportItem.findUnique.mockReset()
+  // Every address has an account unless a test says otherwise.
+  pushMock.usersForEmails.mockImplementation(async (emails: string[]) => ({
+    ids: emails.map((e) => `id:${e}`), unmatched: [],
+  }))
+  pushMock.sendToUsers.mockResolvedValue(undefined)
 })
 
 describe('repairRecipients — one list, cleaned', () => {
@@ -89,48 +96,51 @@ describe('the send outcome is reported, never assumed', () => {
     expect(sendMailMock).not.toHaveBeenCalled()
   })
 
-  it('says sent only when every recipient took it', async () => {
+  it('pushes to every handler, and mails nobody', async () => {
     envMock.REPAIR_NOTIFY_EMAILS = 'a@x.com,b@x.com,c@x.com'
-    const out = await notifyRepairReport(report(), 'Rai Sugar', 'Amina Wanjiru')
-    expect(out.status).toBe('sent')
+    const out = await notifyRepairReport(report(), 'Rai Sugar', 'Amina Wanjiru', 'org-1')
+    expect(out.status).toBe('pushed')
     expect(out.sent).toHaveLength(3)
     expect(out.failed).toEqual([])
+    expect(sendMailMock).not.toHaveBeenCalled()
+    const [ids, payload] = pushMock.sendToUsers.mock.calls[0]!
+    expect(ids).toEqual(['id:a@x.com', 'id:b@x.com', 'id:c@x.com'])
+    expect(payload.title).toBe('Repair report: Amina Wanjiru')
+    expect(payload.body).toContain('KBZ 431A Fuel probe dead: Needs a spare part')
+    expect(payload.body).toContain('+1 more')
   })
 
-  it('says partial, and names who was missed, when one address fails', async () => {
+  it('says partial, and names who was missed, when one handler has no account', async () => {
     envMock.REPAIR_NOTIFY_EMAILS = 'a@x.com,b@x.com,c@x.com'
-    sendMailMock
-      .mockResolvedValueOnce({ sent: true })
-      .mockResolvedValueOnce({ sent: false, reason: 'send-failed' })
-      .mockResolvedValueOnce({ sent: true })
+    pushMock.usersForEmails.mockResolvedValueOnce({ ids: ['ia', 'ic'], unmatched: ['b@x.com'] })
     const out = await notifyRepairReport(report(), 'Rai Sugar', 'Amina Wanjiru')
     expect(out.status).toBe('partial')
     expect(out.failed).toEqual(['b@x.com'])
     expect(out.sent).toEqual(['a@x.com', 'c@x.com'])
   })
 
-  it('distinguishes a dormant mailer from a failing one', async () => {
+  it('says failed when nobody could be pushed to', async () => {
     envMock.REPAIR_NOTIFY_EMAILS = 'a@x.com,b@x.com'
-    sendMailMock.mockResolvedValue({ sent: false, reason: 'unconfigured' })
-    expect((await notifyRepairReport(report(), 'Rai Sugar', 'A. W.')).status).toBe('unconfigured')
+    pushMock.usersForEmails.mockResolvedValueOnce({ ids: [], unmatched: ['a@x.com', 'b@x.com'] })
+    expect((await notifyRepairReport(report(), 'Rai Sugar', 'A. W.')).status).toBe('failed')
 
-    sendMailMock.mockResolvedValue({ sent: false, reason: 'send-failed' })
+    pushMock.sendToUsers.mockRejectedValueOnce(new Error('db down'))
     expect((await notifyRepairReport(report(), 'Rai Sugar', 'A. W.')).status).toBe('failed')
   })
 })
 
 describe('triage assignment notifications', () => {
-  it('sends an email when the task is assigned to someone else', async () => {
+  it('pushes to the assignee when the task is assigned to someone else, and mails nobody', async () => {
     prismaMock.user.findUnique
-      .mockResolvedValueOnce({ fullName: 'Amina Wanjiru', email: 'a@x.com' })
-      .mockResolvedValueOnce({ fullName: 'Benson Otieno', email: 'b@x.com' })
+      .mockResolvedValueOnce({ fullName: 'Amina Wanjiru' })
+      .mockResolvedValueOnce({ fullName: 'Benson Otieno' })
     prismaMock.repairReportItem.findUnique.mockResolvedValue({
       vehicle: { registrationPlate: 'KBZ 431A' },
       faultKind: 'fuel_probe_dead',
       organisationId: 'org-1',
     })
 
-    await notifyRepairAssignment({
+    const result = await notifyRepairAssignment({
       itemId: 'r1',
       orgId: 'org-1',
       assignedById: 'u1',
@@ -138,8 +148,11 @@ describe('triage assignment notifications', () => {
       reason: 'Please inspect today',
     })
 
-    expect(sendMailMock).toHaveBeenCalledTimes(1)
-    expect(sendMailMock.mock.calls[0]?.[0]).toBe('b@x.com')
+    expect(result).toEqual({ sent: false, reason: 'in-app', assigneeName: 'Benson Otieno' })
+    expect(sendMailMock).not.toHaveBeenCalled()
+    expect(pushMock.sendToUsers).toHaveBeenCalledTimes(1)
+    expect(pushMock.sendToUsers.mock.calls[0]![0]).toEqual(['u2'])
+    expect(pushMock.sendToUsers.mock.calls[0]![1].body).toContain('KBZ 431A')
   })
 
   it('does not email a technician: they are told in the app', async () => {
@@ -153,7 +166,7 @@ describe('triage assignment notifications', () => {
     expect(sendMailMock).not.toHaveBeenCalled()
   })
 
-  it('does not email the assigner when they triage the task to themselves', async () => {
+  it('tells nobody when the assigner triages the task to themselves', async () => {
     await notifyRepairAssignment({
       itemId: 'r1',
       orgId: 'org-1',
@@ -163,6 +176,7 @@ describe('triage assignment notifications', () => {
     })
 
     expect(sendMailMock).not.toHaveBeenCalled()
+    expect(pushMock.sendToUsers).not.toHaveBeenCalled()
   })
 })
 

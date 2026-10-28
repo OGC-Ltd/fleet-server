@@ -15,14 +15,11 @@
  * transition, and a future caller that moves a ticket without coming through
  * here is a caller that has to work at going quiet.
  *
- * ## Two channels, and only one of them works today
+ * ## Two channels
  *
- * The durable feed is the channel that reaches people in production: the box
- * carries no MAILTRAP keys, so `sendMail` resolves `{ sent: false, reason:
- * 'unconfigured' }` and every address in `REPAIR_NOTIFY_EMAILS` learns nothing.
- * That is why every event below writes a feed item and only the two that leave
- * the building — a job that cannot be fixed, and an escalation — also try mail.
- * When the keys land, the mail half starts working with no change here.
+ * Every event below writes a feed item. The two that leave the building — a
+ * job that cannot be fixed, and an escalation — also reach the handlers
+ * directly, by Web Push (they were mailed until 2026-10-28).
  *
  * ## Failures here never fail the write
  *
@@ -35,9 +32,9 @@
 
 import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
-import { sendMail } from '../../lib/mailer/mailer.js'
 import { publishNotificationDurable } from '../../lib/notifications/notification.store.js'
-import { enqueueMail, enqueueNotification, isAccepted } from '../../lib/queues/outbound.js'
+import { enqueueNotification } from '../../lib/queues/outbound.js'
+import { pushService } from '../notifications/notifications.service.js'
 import { escalationPhrase, type EscalationEvent } from './repairs.escalation.js'
 import { STAGE_LABEL } from './repairs.service.js'
 
@@ -81,35 +78,21 @@ async function feed(
   }
 }
 
-/** Mail to a list, never throwing, and honest about having sent nothing. */
-async function mail(
-  to: string[], subject: string, lines: string[],
+/** Web Push to the accounts behind a list of addresses, never throwing.
+ *  `failed` is the addresses with no account, which have no devices. */
+async function push(
+  ref: TicketRef, to: string[], tag: string, title: string, body: string,
 ): Promise<{ sent: string[]; failed: string[] }> {
   if (to.length === 0) return { sent: [], failed: [] }
-  const body = lines.join('\n')
   try {
-    const results = await Promise.all(
-      to.map((addr) => enqueueMail(addr, null, {
-        subject,
-        text: body,
-        // No template in lib/mailer for these two yet: they are one plain
-        // paragraph each, and a shell borrowed from the report mail would put
-        // a heading and a button around three lines of text.
-        html: `<pre style="font-family:inherit">${body}</pre>`,
-        category: 'repair-alert',
-      })),
-    )
-    /* `sent` here has always meant "we are not going to tell anybody this
-       failed", and queued belongs on that side of the line — a job with
-       three attempts in front of it is not a failure to report. The precise
-       word, where a person reads one, is carried by EmailOutcome in
-       repairs.service; this pair only decides what to log. */
-    return {
-      sent:   to.filter((_, i) => isAccepted(results[i]!)),
-      failed: to.filter((_, i) => !isAccepted(results[i]!)),
-    }
+    const { ids, unmatched } = await pushService.usersForEmails(to)
+    await pushService.sendToUsers(ids, {
+      title, body, tag, icon: '/logo-icon.png',
+      data: { url: '/', orgId: ref.orgId, itemId: ref.itemId },
+    })
+    return { sent: to.filter((a) => !unmatched.includes(a)), failed: unmatched }
   } catch (err) {
-    logger.error({ err, subject }, 'repair: could not send mail')
+    logger.error({ err, tag }, 'repair: could not send the push notification')
     return { sent: [], failed: to }
   }
 }
@@ -143,9 +126,10 @@ export async function reportStageChange(
 /**
  * A job was signed off.
  *
- * The unsuccessful half also mails, because "this unit cannot be fixed here" is
- * the one closure that needs somebody outside the Repairs tab to decide what
- * happens to the machine.
+ * The unsuccessful half also pushes to the handlers (it mailed until
+ * 2026-10-28), because "this unit cannot be fixed here" is the one closure
+ * that needs somebody outside the Repairs tab to decide what happens to the
+ * machine.
  */
 export async function reportResolution(
   ref: TicketRef,
@@ -168,16 +152,13 @@ export async function reportResolution(
   )
   if (ok) return
 
-  const { sent, failed } = await mail(recipients, `Unit could not be fixed: ${ref.plate}`, [
-    `${ref.plate} — ${ref.label}`,
-    `Signed off unsuccessfully by ${byName} at ${at.toISOString()}.`,
-    '',
-    fixNote,
-    '',
-    env.APP_BASE_URL || '',
-  ])
+  const { sent, failed } = await push(
+    ref, recipients, `repair-closed-${ref.itemId}`,
+    `Unit could not be fixed: ${ref.plate}`,
+    `${ref.label} — signed off unsuccessfully by ${byName}${fixNote ? `: ${fixNote}` : ''}`,
+  )
   if (failed.length) {
-    logger.warn({ itemId: ref.itemId, sent, failed }, 'repair: unsuccessful sign-off not fully mailed')
+    logger.warn({ itemId: ref.itemId, sent, failed }, 'repair: unsuccessful sign-off not pushed to everyone')
   }
 }
 
@@ -205,19 +186,13 @@ export async function reportEscalation(
     at,
   )
 
-  const { sent, failed } = await mail(
-    recipients,
-    `Escalation (level ${event.level}): ${ref.plate} — ${phrase}`,
-    [
-      `${ref.plate} — ${ref.label}`,
-      `Escalation level ${event.level}: ${phrase}.`,
-      'The job is still open in the Ops App and has not been closed.',
-      '',
-      env.APP_BASE_URL || '',
-    ],
+  const { sent, failed } = await push(
+    ref, recipients, `repair-escalation-${ref.itemId}-${event.level}`,
+    `Escalation (level ${event.level}): ${ref.plate}`,
+    `${ref.label} — ${phrase}. The job is still open and has not been closed.`,
   )
   if (failed.length) {
-    logger.warn({ itemId: ref.itemId, level: event.level, sent, failed }, 'repair: escalation not fully mailed')
+    logger.warn({ itemId: ref.itemId, level: event.level, sent, failed }, 'repair: escalation not pushed to everyone')
   }
 }
 

@@ -15,7 +15,11 @@ const out = vi.hoisted(() => ({
   enqueueNotification: vi.fn(async () => undefined),
   isAccepted:          vi.fn(() => true),
 }))
-const push = vi.hoisted(() => ({ sendToUsers: vi.fn(async () => undefined) }))
+const ACCOUNTS: Record<string, string> = { 'op@x.co': 'op-1', 'hos@x.co': 'hos-1' }
+const push = vi.hoisted(() => ({
+  sendToUsers:    vi.fn(async () => undefined),
+  usersForEmails: vi.fn(async (emails: string[]) => ({ ids: [] as string[], unmatched: emails })),
+}))
 
 vi.mock('../../src/lib/prisma.js', () => ({ prisma: prismaMock }))
 vi.mock('../../src/lib/queues/outbound.js', () => out)
@@ -27,6 +31,10 @@ const ref = { itemId: 'job-1', orgId: 'org-1', vehicleId: 'v1', plate: 'KDA 001A
 
 beforeEach(() => {
   vi.clearAllMocks()
+  push.usersForEmails.mockImplementation(async (emails: string[]) => ({
+    ids: emails.map((e) => ACCOUNTS[e]).filter((x): x is string => !!x),
+    unmatched: emails.filter((e) => !ACCOUNTS[e]),
+  }))
   prismaMock.user.findMany.mockResolvedValue([
     { id: 'op-1',  email: 'op@x.co',  memberships: [{ allVehicles: true, vehicleScopes: [] }] },
     { id: 'hos-1', email: 'hos@x.co', memberships: [] },
@@ -41,8 +49,8 @@ describe('a new repair ticket', () => {
     })
 
     expect(TICKET_PUSH_ROLES).toEqual(['operator', 'head_of_security', 'asst_head_of_security'])
-    const where = prismaMock.user.findMany.mock.calls[0]![0].where
-    expect(where.userRoles.some.role.slug.in).toEqual([...TICKET_PUSH_ROLES])
+    const slugs = prismaMock.user.findMany.mock.calls.map((c) => c[0].where.userRoles.some.role.slug)
+    expect(slugs).toContainEqual({ in: [...TICKET_PUSH_ROLES] })
     expect(push.sendToUsers).toHaveBeenCalledWith(['op-1', 'hos-1'], expect.objectContaining({
       title: 'Repair ticket issued',
       body:  expect.stringContaining('RT-2026-00077'),
@@ -55,7 +63,7 @@ describe('a new repair ticket', () => {
 })
 
 describe('whoever took the action', () => {
-  it('is left out of the push and the mail, and named on the feed line', async () => {
+  it('is left out of the push, and named on the feed line', async () => {
     prismaMock.user.findUnique.mockResolvedValue({ email: 'OP@x.co' })
     // Nobody here is a technician (they are never mailed whatever the audience).
     const holders = await prismaMock.user.findMany()
@@ -66,9 +74,12 @@ describe('whoever took the action', () => {
       audience: ['control_room'], push: ['operator'], actorId: 'op-1',
     })
 
+    // One push for the audience and the push roles together: hos-1 once.
+    expect(push.sendToUsers).toHaveBeenCalledTimes(1)
     expect(push.sendToUsers).toHaveBeenCalledWith(['hos-1'], expect.anything())
     expect(res.to).toEqual(['hos@x.co'])
-    expect(out.enqueueMail).toHaveBeenCalledTimes(1)
+    expect(res.accepted).toEqual(['hos@x.co'])
+    expect(out.enqueueMail).not.toHaveBeenCalled()
     expect(out.enqueueNotification).toHaveBeenCalledWith(expect.objectContaining({ actorId: 'op-1' }))
   })
 })

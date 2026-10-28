@@ -60,7 +60,7 @@
 import { DelayedError, Queue, UnrecoverableError, Worker, type Job } from 'bullmq'
 import { getQueueRedis } from '../redis.js'
 import { logger } from '../logger.js'
-import { sendMail, type MailResult } from '../mailer/mailer.js'
+import { isMailAllowed, sendMail, type MailResult } from '../mailer/mailer.js'
 import type { RenderedMail } from '../mailer/templates.js'
 import {
   publishNotificationDurable,
@@ -74,7 +74,7 @@ const NOTIFICATION_JOB = 'outbound:notification'
 /** `{ queued: true }` means accepted for delivery, NOT delivered. */
 export type MailDispatch = MailResult | { queued: true }
 
-export type DispatchStatus = 'sent' | 'queued' | 'unconfigured' | 'send-failed'
+export type DispatchStatus = 'sent' | 'queued' | 'unconfigured' | 'send-failed' | 'not-allowed'
 
 /**
  * Flatten a dispatch into the one word a screen can print.
@@ -163,8 +163,9 @@ export async function enqueueMail(
   toName: string | null | undefined,
   mail: RenderedMail,
 ): Promise<MailDispatch> {
+  // Refused before it can take a place in the queue; sendMail says why.
   const q = getQueue()
-  if (!q) return sendMail(to, toName, mail)
+  if (!q || !isMailAllowed(mail.category)) return sendMail(to, toName, mail)
 
   const payload: MailPayload = { to, toName: toName ?? null, mail }
   try {

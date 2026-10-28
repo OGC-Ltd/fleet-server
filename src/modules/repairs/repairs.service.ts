@@ -1,9 +1,7 @@
 import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
-import { sendMail } from '../../lib/mailer/mailer.js'
-import { repairReportEmail } from '../../lib/mailer/templates.js'
 import { publishNotificationDurable } from '../../lib/notifications/notification.store.js'
-import { enqueueMail, dispatchStatus, isAccepted } from '../../lib/queues/outbound.js'
+import { pushService } from '../notifications/notifications.service.js'
 import { prisma } from '../../lib/prisma.js'
 import * as repo from './repairs.repository.js'
 import { reportResolution, reportStageChange } from './repairs.notify.js'
@@ -29,8 +27,11 @@ export type EmailOutcome = {
    * deliberately not a kind of `sent`: the dashboard prints this word, and the
    * standing rule in lib/mailer is that a tick is never shown for a mail that
    * has not left the building.
+   *
+   * `pushed` is today's answer: the report goes by Web Push (2026-10-28). The
+   * mail words stay for the rows filed before that.
    */
-  status:     'sent' | 'queued' | 'partial' | 'failed' | 'unconfigured' | 'no-recipients'
+  status:     'pushed' | 'sent' | 'queued' | 'partial' | 'failed' | 'unconfigured' | 'no-recipients'
   recipients: string[]
   sent:       string[]
   failed:     string[]
@@ -88,10 +89,20 @@ function humanKind(kind: string | null | undefined): string {
 
 type ReportWithItems = Awaited<ReturnType<typeof repo.createReport>>
 
+/**
+ * Tell the handlers a report was filed — by Web Push, not mail (operator,
+ * 2026-10-28: email is kept for account access and escalations).
+ *
+ * The handlers are still the ONE env list. Each address is matched to its
+ * account and every device that account turned notifications on from gets
+ * the push; an address with no account cannot be pushed to and comes back
+ * in `failed`, so the screen says who was not reached rather than a tick.
+ */
 export async function notifyRepairReport(
   report: ReportWithItems,
-  orgName: string,
+  _orgName: string,
   technicianName: string,
+  orgId?: string,
 ): Promise<EmailOutcome> {
   const recipients = repairRecipients()
   if (recipients.length === 0) {
@@ -99,48 +110,32 @@ export async function notifyRepairReport(
     return { status: 'no-recipients', recipients: [], sent: [], failed: [] }
   }
 
-  const mail = repairReportEmail({
-    orgName,
-    technicianName,
-    reportedAt: report.reportedAt,
-    ...(report.note ? { note: report.note } : {}),
-    ...(env.APP_BASE_URL ? { link: env.APP_BASE_URL } : {}),
-    items: report.items.map((i) => ({
-      plate:   i.vehicle.registrationPlate,
-      label:   humanKind(i.faultKind),
-      outcome: i.outcome as 'fixing' | 'needs_spare' | 'cannot_fix',
-      ...(i.sparePart   ? { sparePart:   i.sparePart }   : {}),
-      ...(i.problemNote ? { problemNote: i.problemNote } : {}),
-      ...(i.expectedResolutionAt ? { expectedResolutionAt: i.expectedResolutionAt } : {}),
-    })),
-  })
+  const lines = report.items.map((i) =>
+    `${i.vehicle.registrationPlate} ${humanKind(i.faultKind)}: ${OUTCOME_LABEL[i.outcome] ?? i.outcome}`)
+  const body = [
+    ...lines.slice(0, 3),
+    ...(lines.length > 3 ? [`+${lines.length - 3} more`] : []),
+  ].join(' · ')
 
-  /*
-   * enqueueMail takes ONE recipient and, like the sendMail it wraps, cannot
-   * reject — it resolves an outcome instead. That is what makes Promise.all
-   * safe here rather than a footgun: no single bad address can reject the lot
-   * and lose the outcome of the addresses that worked.
-   *
-   * With Redis this costs N `add` calls and returns; without it, it is the
-   * inline send it always was. Either way the fan-out keeps its shape, so the
-   * fold below did not have to change — only to learn one more word.
-   */
-  const results = await Promise.all(recipients.map((addr) => enqueueMail(addr, null, mail)))
-  const sent   = recipients.filter((_, i) => isAccepted(results[i]!))
-  const failed = recipients.filter((_, i) => !isAccepted(results[i]!))
-
-  const status: EmailOutcome['status'] =
-    // QUEUED IS ITS OWN ANSWER, consulted before the others. Folding it into
-    // `sent` would print a tick for a mail still sitting in Redis, which is the
-    // one thing this type exists to prevent; folding it into `failed` would
-    // send somebody chasing a mail that is simply in flight.
-    results.every((r) => dispatchStatus(r) === 'queued') ? 'queued'
-      : sent.length === recipients.length ? 'sent'
-        : sent.length > 0 ? 'partial'
-          : results.every((r) => dispatchStatus(r) === 'unconfigured') ? 'unconfigured'
-            : 'failed'
-
-  return { status, recipients, sent, failed }
+  try {
+    const { ids, unmatched } = await pushService.usersForEmails(recipients)
+    await pushService.sendToUsers(ids, {
+      title: `Repair report: ${technicianName}`,
+      body,
+      tag:   `repair-report-${report.id}`,
+      icon:  '/logo-icon.png',
+      data:  { url: '/', ...(orgId ? { orgId } : {}), reportId: report.id },
+    })
+    const failed = recipients.filter((r) => unmatched.includes(r))
+    const sent   = recipients.filter((r) => !unmatched.includes(r))
+    const status: EmailOutcome['status'] =
+      failed.length === 0 ? 'pushed' : sent.length > 0 ? 'partial' : 'failed'
+    if (failed.length) logger.warn({ reportId: report.id, failed }, 'repair report: handler has no account to push to')
+    return { status, recipients, sent, failed }
+  } catch (err) {
+    logger.error({ err, reportId: report.id }, 'repair report: could not send the push notification')
+    return { status: 'failed', recipients, sent: [], failed: recipients }
+  }
 }
 
 export async function submitRepairReport(orgId: string, userId: string, dto: CreateRepairReport) {
@@ -160,7 +155,7 @@ export async function submitRepairReport(orgId: string, userId: string, dto: Cre
    * holding a Postgres transaction open across an SMTP round trip is a row
    * lock held hostage to a third party's latency.
    */
-  const email = await notifyRepairReport(report, orgName, technicianName)
+  const email = await notifyRepairReport(report, orgName, technicianName, orgId)
 
   /*
    * Recording the outcome is a best-effort follow-up. If THIS throws, the

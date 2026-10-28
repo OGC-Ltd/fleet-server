@@ -1,6 +1,6 @@
-import { enqueueMail, dispatchStatus } from '../../lib/queues/outbound.js'
-import { repairAssignmentEmail } from '../../lib/mailer/templates.js'
+import { logger } from '../../lib/logger.js'
 import { prisma } from '../../lib/prisma.js'
+import { pushService } from '../notifications/notifications.service.js'
 
 /**
  * `queued` sits with the NOT-SENT reasons, and that placement is the point.
@@ -39,11 +39,11 @@ export async function notifyRepairAssignment(input: NotifyRepairAssignmentInput)
   const [assigner, assignee, item] = await Promise.all([
     prisma.user.findUnique({
       where: { id: input.assignedById },
-      select: { fullName: true, email: true },
+      select: { fullName: true },
     }),
     prisma.user.findUnique({
       where: { id: input.assignedToId },
-      select: { fullName: true, email: true },
+      select: { fullName: true },
     }),
     prisma.repairReportItem.findUnique({
       where: { id: input.itemId },
@@ -54,31 +54,22 @@ export async function notifyRepairAssignment(input: NotifyRepairAssignmentInput)
     }),
   ])
 
-  if (!assignee?.email) return {
-    sent: false,
-    reason: 'no-assignee-email',
-    ...(assignee?.fullName ? { assigneeName: assignee.fullName } : {}),
+  // By Web Push, not mail (operator, 2026-10-28): every device the assignee
+  // turned notifications on from. The assignment is also on their feed, so
+  // the answer is the same `in-app` a technician gets.
+  const assigneeName = assignee?.fullName ?? 'Technician'
+  const plate = item?.vehicle?.registrationPlate ?? 'Unknown unit'
+  try {
+    await pushService.sendToUsers([input.assignedToId], {
+      title: 'Repair triage assigned to you',
+      body:  `${plate} · ${item?.faultKind ?? 'Repair task'} — from ${assigner?.fullName ?? 'Operations'}${input.reason ? `: ${input.reason}` : ''}`,
+      tag:   `repair-assign-${input.itemId}`,
+      icon:  '/logo-icon.png',
+      data:  { url: '/', orgId: input.orgId, itemId: input.itemId },
+    })
+  } catch (err) {
+    logger.error({ err, itemId: input.itemId }, 'repair assignment: could not send the push notification')
+    return { sent: false, reason: 'send-failed', assigneeName }
   }
-
-  const mail = repairAssignmentEmail({
-    assigneeName: assignee.fullName ?? 'Technician',
-    assignerName: assigner?.fullName ?? 'Operations',
-    plate: item?.vehicle?.registrationPlate ?? 'Unknown unit',
-    label: item?.faultKind ?? 'Repair task',
-    reason: input.reason,
-    link: undefined,
-  })
-
-  /* Everything above this line stayed synchronous on purpose: the
-     self-assignment check, both user lookups and the missing-address case are
-     local, fast, and produce the answers a person acts on. Only the SMTP call
-     — the one thing that talks to a third party and can take ten seconds —
-     moves. So the mail travels to the worker fully rendered and the worker
-     opens no database connection of its own. */
-  const dispatch = await enqueueMail(assignee.email, assignee.fullName ?? null, mail)
-  const assigneeName = assignee.fullName ?? 'Technician'
-  const status = dispatchStatus(dispatch)
-  return status === 'sent'
-    ? { sent: true, assigneeName }
-    : { sent: false, reason: status, assigneeName }
+  return { sent: false, reason: 'in-app', assigneeName }
 }
