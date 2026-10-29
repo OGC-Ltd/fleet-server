@@ -237,6 +237,49 @@ export async function getProbeProfile(vehicleId: string, now: Date): Promise<Pro
 }
 
 /**
+ * What a judgement writes to its ledger row. One function for the live sweep
+ * and the re-judge backfill (prisma/readjudicate-fuel.ts --causes), so the two
+ * cannot come to write different fields for the same drain.
+ */
+export function judgementData(verdict: Awaited<ReturnType<typeof judgeDrain>>, now: Date) {
+  return {
+    verdict:           verdict.verdict,
+    verdictAt:         now,
+    recoveredMl:       verdict.recoveredMl,
+    verdictReason:     verdict.reason,
+    verdictConfidence: verdict.confidence,
+    // Written but NOT yet acted on. The notification gate in the sweep is
+    // deliberately unchanged in this step: causes accumulate on the ledger
+    // for a day so the thresholds can be checked against what the live
+    // pass actually decides, before any of them start suppressing an
+    // alert. Flipping the gate is a one-line change once that is done —
+    // see docs/fuel-theft-discrimination-plan.md step 6.
+    drainCause:        verdict.cause?.cause      ?? null,
+    causeConfidence:   verdict.cause?.confidence ?? null,
+    causeReason:       verdict.cause?.reason     ?? null,
+    // The measured shape this verdict was reached on. Persisted as it was
+    // at judgement time and never recomputed: the sweep re-reads telemetry,
+    // so a figure derived later would describe a different fall while
+    // looking like a contemporaneous measurement.
+    //
+    // `impliedLph` comes off the CAUSE rather than the evidence — the
+    // classifier is what decides which denominator applies, and the same
+    // fall implies a different rate under HOURS than under DISTANCE.
+    fallSeconds:       verdict.evidence?.fallSeconds    ?? null,
+    // The fall judged, so it still divides by fallSeconds; the figure
+    // STATED is cleanDropMl (no slosh, less the engine's burn).
+    measuredDropMl:    verdict.evidence?.dropMl     ?? null,
+    cleanDropMl:       verdict.lossMl,
+    engineSeconds:     verdict.evidence?.engineSeconds  ?? null,
+    engineEvidence:    verdict.evidence?.engineEvidence ?? null,
+    stepFraction:      verdict.evidence?.stepFraction   ?? null,
+    peakIntervalLph:   verdict.evidence?.peakIntervalLph ?? null,
+    fallDistanceKm:    verdict.evidence?.distanceKm     ?? null,
+    impliedLph:        verdict.cause?.impliedLph        ?? null,
+  }
+}
+
+/**
  * Gather the evidence for one drain and judge it.
  *
  * Separated from the sweep below because it has a SECOND caller: the backfill
@@ -284,42 +327,42 @@ export async function judgeDrain(
     // the standing-fall call alone (standing-theft): where the vehicle stood,
     // and whether it only idled there without changing its angle.
     prisma.$queryRaw<Array<{
-      captured_at: Date; fuel_level_ml: number; engine_on: boolean
-      speed_kmh: number | null; ignition_known: boolean | null
-      lat: number | null; lng: number | null; engine_hours_meter: number | null
-      accel_x_g: number | null; accel_y_g: number | null; accel_z_g: number | null
+    captured_at: Date; fuel_level_ml: number; engine_on: boolean
+    speed_kmh: number | null; ignition_known: boolean | null
+    lat: number | null; lng: number | null; engine_hours_meter: number | null
+    accel_x_g: number | null; accel_y_g: number | null; accel_z_g: number | null
     }>>`
-      SELECT t.captured_at, t.fuel_level_ml, t.engine_on, t.speed_kmh,
-             (r.payload->>'ignition_known')::boolean AS ignition_known,
-             t.lat, t.lng, t.engine_hours_meter, t.accel_x_g, t.accel_y_g, t.accel_z_g
-        FROM vehicle_telemetries t
-        JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
-       WHERE t.vehicle_id = ${drain.vehicleId}
-         AND t.captured_at >= ${from} AND t.captured_at <= ${to}
-         AND t.fuel_level_ml IS NOT NULL
-       ORDER BY t.captured_at ASC`,
+    SELECT t.captured_at, t.fuel_level_ml, t.engine_on, t.speed_kmh,
+           (r.payload->>'ignition_known')::boolean AS ignition_known,
+           t.lat, t.lng, t.engine_hours_meter, t.accel_x_g, t.accel_y_g, t.accel_z_g
+      FROM vehicle_telemetries t
+      JOIN vehicle_telemetry_raws r ON r.telemetry_id = t.id
+     WHERE t.vehicle_id = ${drain.vehicleId}
+       AND t.captured_at >= ${from} AND t.captured_at <= ${to}
+       AND t.fuel_level_ml IS NOT NULL
+     ORDER BY t.captured_at ASC`,
     prisma.fuelFilling.findFirst({
-      where:   {
-        vehicleId: drain.vehicleId,
-        filledAt:  { gte: drain.beganAt, lte: to },
-        // A filling only closes the recovery window if fuel actually arrived.
-        // Since 2026-08-11 fillings are adjudicated too, and 307 of 5,794 are
-        // REDISTRIBUTION — the up-swings of oscillating probes, claiming
-        // 13,075 L while those tanks collectively FELL 3,689 L. Letting one of
-        // those truncate a drain's evidence is how `filling-too-soon` reached
-        // 438 rows, and how a -27.7 L undulation on MUFINDI - EX 22 came to be
-        // classified a refill: the "fillings" that closed its window were the
-        // same probe swing as the drop.
-        //
-        // PENDING fillings still count. Unjudged is not disproved, and assuming
-        // a filling is real until shown otherwise is the conservative
-        // direction — it withholds confirmation rather than inventing it.
-        verdict:   { not: 'REDISTRIBUTION' },
-      },
-      select:  { filledAt: true },
-      // The EARLIEST filling is the one that closes the window — a later one
-      // cannot explain a rise the first already accounts for.
-      orderBy: { filledAt: 'asc' },
+    where:   {
+      vehicleId: drain.vehicleId,
+      filledAt:  { gte: drain.beganAt, lte: to },
+      // A filling only closes the recovery window if fuel actually arrived.
+      // Since 2026-08-11 fillings are adjudicated too, and 307 of 5,794 are
+      // REDISTRIBUTION — the up-swings of oscillating probes, claiming
+      // 13,075 L while those tanks collectively FELL 3,689 L. Letting one of
+      // those truncate a drain's evidence is how `filling-too-soon` reached
+      // 438 rows, and how a -27.7 L undulation on MUFINDI - EX 22 came to be
+      // classified a refill: the "fillings" that closed its window were the
+      // same probe swing as the drop.
+      //
+      // PENDING fillings still count. Unjudged is not disproved, and assuming
+      // a filling is real until shown otherwise is the conservative
+      // direction — it withholds confirmation rather than inventing it.
+      verdict:   { not: 'REDISTRIBUTION' },
+    },
+    select:  { filledAt: true },
+    // The EARLIEST filling is the one that closes the window — a later one
+    // cannot explain a rise the first already accounts for.
+    orderBy: { filledAt: 'asc' },
     }),
   ])
   const samples: LevelSample[] = rows.map(r => ({
@@ -361,7 +404,7 @@ export async function judgeDrain(
     cause = { cause: 'INDETERMINATE', reason: 'no-measurable-fall', confidence: 0.5, impliedLph: null }
   } else {
     band = resolveBand(orgCode, { plate, vehicleType, tankCapacityLitres },
-      rate == null ? null : { lPerHour: rate.lPerHour, basis: rate.basis, lPerKm })
+    rate == null ? null : { lPerHour: rate.lPerHour, basis: rate.basis, lPerKm })
     const profile = await getProbeProfile(drain.vehicleId, now)
     // Which denominator this machine is judged in, and — inside classifyDrain —
     // whether THIS fall belongs to it. A truck on the open road is judged per
@@ -388,7 +431,7 @@ export async function judgeDrain(
   const standing = skip ? null : standingTheft(rows.map(toFallReading), {
     spanFrom:       began,
     spanTo:         Math.max(drain.detectedAt.getTime(), began + 10 * 60_000,
-                      began + (measured?.evidence.fallSeconds ?? 0) * 1000),
+                    began + (measured?.evidence.fallSeconds ?? 0) * 1000),
     tankCapacityL:  tankCapacityLitres,
     idleLph:        band ? idleLphOf(band) : null,
   })
@@ -426,8 +469,8 @@ function toFallReading(r: {
     lat:           r.lat ?? null,
     lng:           r.lng ?? null,
     accel:         r.accel_x_g == null && r.accel_y_g == null && r.accel_z_g == null
-      ? null
-      : { x: r.accel_x_g ?? null, y: r.accel_y_g ?? null, z: r.accel_z_g ?? null },
+    ? null
+    : { x: r.accel_x_g ?? null, y: r.accel_y_g ?? null, z: r.accel_z_g ?? null },
   }
 }
 
@@ -459,19 +502,19 @@ export function __resetBandCache(): void {
 export async function getBandInputs(vehicleId: string, now: Date): Promise<BandInputs> {
   if (bandCache == null || now.getTime() - bandCache.at >= BAND_TTL_MS) {
     const [vehicles, rates] = await Promise.all([
-      prisma.vehicle.findMany({
-        select: {
-          id: true, registrationPlate: true, vehicleType: true, organisationId: true,
-          tankCapacityLitres: true,
-          organisation: { select: { code: true } },
-        },
-      }),
-      prisma.vehicleFuelRate.findMany({ select: { vehicleId: true, lPerHour: true, lPerKm: true, runs: true } }),
+    prisma.vehicle.findMany({
+      select: {
+        id: true, registrationPlate: true, vehicleType: true, organisationId: true,
+        tankCapacityLitres: true,
+        organisation: { select: { code: true } },
+      },
+    }),
+    prisma.vehicleFuelRate.findMany({ select: { vehicleId: true, lPerHour: true, lPerKm: true, runs: true } }),
     ])
     bandCache = { at: now.getTime(), byVehicle: assembleBandInputs(vehicles, rates) }
   }
   return bandCache.byVehicle.get(vehicleId)
-      ?? { orgCode: '', plate: '', rate: null, lPerKm: null, vehicleType: null, tankCapacityLitres: null }
+    ?? { orgCode: '', plate: '', rate: null, lPerKm: null, vehicleType: null, tankCapacityLitres: null }
 }
 
 /**
@@ -540,13 +583,13 @@ export async function getIncidentHistory(
   // than whatever the settle pass happens to have written already.
   const prior = await prisma.$queryRaw<Array<{ stolen_ml: number; is_siphon: boolean }>>`
     SELECT t.stolen_ml, (t.drain_cause::text = 'SIPHON') AS is_siphon
-      FROM fuel_thefts t
+    FROM fuel_thefts t
      WHERE t.vehicle_id = ${vehicleId}
-       AND t.began_at  >= ${from}
-       AND t.began_at   < ${beganAt}
-       AND (t.drain_cause::text = ANY(${[...ANNOUNCED_CAUSES]}::text[])
-         OR t.cause_reason      = ANY(${[...ANNOUNCED_REASON_SLUGS]}::text[]))
-       AND (t.clean_drop_ml IS DISTINCT FROM 0 OR t.drain_cause::text = 'SIPHON')
+     AND t.began_at  >= ${from}
+     AND t.began_at   < ${beganAt}
+     AND (t.drain_cause::text = ANY(${[...ANNOUNCED_CAUSES]}::text[])
+       OR t.cause_reason      = ANY(${[...ANNOUNCED_REASON_SLUGS]}::text[]))
+     AND (t.clean_drop_ml IS DISTINCT FROM 0 OR t.drain_cause::text = 'SIPHON')
      ORDER BY t.began_at DESC`
 
   return {
@@ -578,8 +621,8 @@ export function repeatClause(h: IncidentHistory, allSiphons: boolean): string {
   const drops = h.recentMl.map(ml => L(ml))
   const recent = drops.length
     ? `; the previous drops were ${drops.length > 1
-        ? `${drops.slice(0, -1).join(', ')} and ${drops[drops.length - 1]}`
-        : drops[0]}`
+      ? `${drops.slice(0, -1).join(', ')} and ${drops[drops.length - 1]}`
+      : drops[0]}`
     : ''
   return ` This is the ${ordinal(h.totalCount)} ${what} on this unit in 30 days, ${L(h.totalMl)} in total${recent}.`
 }
@@ -590,14 +633,14 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
 
   const pending = await prisma.fuelTheft.findMany({
     where: {
-      verdict:    'PENDING',
-      detectedAt: { lte: ripeBefore },
-      ...(opts.orgId ? { vehicle: { organisationId: opts.orgId } } : {}),
+    verdict:    'PENDING',
+    detectedAt: { lte: ripeBefore },
+    ...(opts.orgId ? { vehicle: { organisationId: opts.orgId } } : {}),
     },
     select: {
-      id: true, vehicleId: true, beganAt: true, detectedAt: true, stolenMl: true,
-      initialLocation: true, finalFuelLevelMl: true,
-      vehicle: { select: { organisationId: true, registrationPlate: true } },
+    id: true, vehicleId: true, beganAt: true, detectedAt: true, stolenMl: true,
+    initialLocation: true, finalFuelLevelMl: true,
+    vehicle: { select: { organisationId: true, registrationPlate: true } },
     },
     orderBy: { detectedAt: 'asc' },
     take: opts.limit ?? 500,
@@ -606,12 +649,12 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
 
   const provisionalFeedIds = opts.apply && opts.notify
     ? new Set((await prisma.notification.findMany({
-      where: {
-        feedId: {
-          in: pending.map(t => `fuel-drain-${t.vehicleId}-${t.id}`),
-        },
+    where: {
+      feedId: {
+        in: pending.map(t => `fuel-drain-${t.vehicleId}-${t.id}`),
       },
-      select: { feedId: true },
+    },
+    select: { feedId: true },
     })).map(n => n.feedId))
     : new Set<string>()
 
@@ -621,8 +664,8 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     out.examined++
 
     const verdict = await judgeDrain(
-      { vehicleId: t.vehicleId, beganAt: t.beganAt, detectedAt: t.detectedAt, stolenMl: t.stolenMl },
-      now,
+    { vehicleId: t.vehicleId, beganAt: t.beganAt, detectedAt: t.detectedAt, stolenMl: t.stolenMl },
+    now,
     )
 
     if (verdict.verdict === 'PENDING') { out.stillPending++; continue }
@@ -632,44 +675,7 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
 
     if (!opts.apply) continue
 
-    await prisma.fuelTheft.update({
-      where: { id: t.id },
-      data:  {
-        verdict:           verdict.verdict,
-        verdictAt:         now,
-        recoveredMl:       verdict.recoveredMl,
-        verdictReason:     verdict.reason,
-        verdictConfidence: verdict.confidence,
-        // Written but NOT yet acted on. The notification gate below is
-        // deliberately unchanged in this step: causes accumulate on the ledger
-        // for a day so the thresholds can be checked against what the live
-        // pass actually decides, before any of them start suppressing an
-        // alert. Flipping the gate is a one-line change once that is done —
-        // see docs/fuel-theft-discrimination-plan.md step 6.
-        drainCause:        verdict.cause?.cause      ?? null,
-        causeConfidence:   verdict.cause?.confidence ?? null,
-        causeReason:       verdict.cause?.reason     ?? null,
-        // The measured shape this verdict was reached on. Persisted as it was
-        // at judgement time and never recomputed: the sweep re-reads telemetry,
-        // so a figure derived later would describe a different fall while
-        // looking like a contemporaneous measurement.
-        //
-        // `impliedLph` comes off the CAUSE rather than the evidence — the
-        // classifier is what decides which denominator applies, and the same
-        // fall implies a different rate under HOURS than under DISTANCE.
-        fallSeconds:       verdict.evidence?.fallSeconds    ?? null,
-        // The fall judged, so it still divides by fallSeconds; the figure
-        // STATED is cleanDropMl (no slosh, less the engine's burn).
-        measuredDropMl:    verdict.evidence?.dropMl     ?? null,
-        cleanDropMl:       verdict.lossMl,
-        engineSeconds:     verdict.evidence?.engineSeconds  ?? null,
-        engineEvidence:    verdict.evidence?.engineEvidence ?? null,
-        stepFraction:      verdict.evidence?.stepFraction   ?? null,
-        peakIntervalLph:   verdict.evidence?.peakIntervalLph ?? null,
-        fallDistanceKm:    verdict.evidence?.distanceKm     ?? null,
-        impliedLph:        verdict.cause?.impliedLph        ?? null,
-      },
-    })
+    await prisma.fuelTheft.update({ where: { id: t.id }, data: judgementData(verdict, now) })
 
     // ── the gate ─────────────────────────────────────────────────────────
     //
@@ -703,25 +709,25 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     // A siphon is a call on how the fuel left, and keeps its alert.
     const burnExplains = verdict.lossMl === 0 && verdict.cause?.cause !== 'SIPHON'
     if (verdict.cause == null || !announces(verdict.cause) || burnExplains) {
-      if (!existing) continue
-      const resolution = verdict.verdict === 'REDISTRIBUTION'
-        ? 'the level recovered and the drop was not confirmed as fuel loss'
-        : verdict.verdict === 'SENSOR_FAULT'
-        ? 'the review identified a sensor fault, not a confirmed fuel loss'
-        : 'the review did not meet the criteria for a fuel-loss alert'
-      const { published } = await publishNotificationDurable({
-        orgId:     t.vehicle.organisationId,
-        id:        feedId,
-        source:    'wialon',
-        alertType: 'fuelInconsistency',
-        severity:  'info',
-        text:      `FUEL DROP REVIEWED: ${t.vehicle.registrationPlate}; ${resolution}.`,
-        at:        t.beganAt,
-        plate:     t.vehicle.registrationPlate,
-        vehicleId: t.vehicleId,
-      })
-      if (published) out.published++
-      continue
+    if (!existing) continue
+    const resolution = verdict.verdict === 'REDISTRIBUTION'
+      ? 'the level recovered and the drop was not confirmed as fuel loss'
+      : verdict.verdict === 'SENSOR_FAULT'
+      ? 'the review identified a sensor fault, not a confirmed fuel loss'
+      : 'the review did not meet the criteria for a fuel-loss alert'
+    const { published } = await publishNotificationDurable({
+      orgId:     t.vehicle.organisationId,
+      id:        feedId,
+      source:    'wialon',
+      alertType: 'fuelInconsistency',
+      severity:  'info',
+      text:      `FUEL DROP REVIEWED: ${t.vehicle.registrationPlate}; ${resolution}.`,
+      at:        t.beganAt,
+      plate:     t.vehicle.registrationPlate,
+      vehicleId: t.vehicleId,
+    })
+    if (published) out.published++
+    continue
     }
     if (!inNotifyWindow && !existing) continue
     // FUEL RATE and FUEL DOWN reach the feed once a day as a summary, not one
@@ -731,20 +737,20 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     // summary keeps only what nobody can call a theft. The ledger row above is
     // written either way.
     if (!mayUseTheftWording(verdict.cause.cause) && env.FUEL_RATE_ALERTS !== 'live') {
-      if (!existing) continue
-      const { published } = await publishNotificationDurable({
-        orgId:     t.vehicle.organisationId,
-        id:        feedId,
-        source:    'wialon',
-        alertType: 'fuelInconsistency',
-        severity:  'info',
-        text:      `FUEL DROP REVIEWED: ${t.vehicle.registrationPlate}; it will be included in the fuel summary rather than sent as a separate alert.`,
-        at:        t.beganAt,
-        plate:     t.vehicle.registrationPlate,
-        vehicleId: t.vehicleId,
-      })
-      if (published) out.published++
-      continue
+    if (!existing) continue
+    const { published } = await publishNotificationDurable({
+      orgId:     t.vehicle.organisationId,
+      id:        feedId,
+      source:    'wialon',
+      alertType: 'fuelInconsistency',
+      severity:  'info',
+      text:      `FUEL DROP REVIEWED: ${t.vehicle.registrationPlate}; it will be included in the fuel summary rather than sent as a separate alert.`,
+      at:        t.beganAt,
+      plate:     t.vehicle.registrationPlate,
+      vehicleId: t.vehicleId,
+    })
+    if (published) out.published++
+    continue
     }
     // A unit already reported for a fuel probe repair is announced like any
     // other, and the message says it was reported (operator, 2026-10-13: "do
@@ -778,7 +784,7 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     // the gate, so it costs one indexed read per ANNOUNCEMENT rather than per
     // drain — a few a day against roughly fifty.
     const history = await getIncidentHistory(
-      t.vehicleId, t.beganAt, t.stolenMl, cause.cause === 'SIPHON',
+    t.vehicleId, t.beganAt, t.stolenMl, cause.cause === 'SIPHON',
     )
     // "Possible theft" only when EVERY event being counted was a siphon. A
     // count that mixed one siphon with five rate findings and called the total
@@ -800,41 +806,41 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     // The verb stays "recorded a drop of": only a SIPHON may speak of loss.
     const drop = L(verdict.lossMl || (verdict.evidence?.dropMl ?? t.stolenMl))
     const headline = verdict.standing
-      ? `${standingTheftText(plate, verdict.standing, where)}${tank}`
-      : mayUseTheftWording(cause.cause)
-      ? `POSSIBLE THEFT: ${plate} recorded a drop of ${drop}, drawn off while parked${where}${tank}`
-      : cause.reason === 'drop-while-stationary'
-      ? `FUEL DOWN: ${plate} recorded a drop of ${drop} while stationary, with nothing driven${where}${tank}`
-      : cause.reason === 'drop-exceeds-distance'
-      ? `FUEL DOWN: ${plate} recorded a drop of ${drop} beyond what the distance driven accounts for${where}${tank}`
-      : rate
-      ? `FUEL RATE: ${plate} recorded a drop of ${drop} beyond its normal burn, falling at ${rate}, above what this machine is measured to burn${where}${tank}`
-      : `FUEL RATE: ${plate} recorded a drop of ${drop} beyond its normal burn, above this machine's measured rate${where}${tank}`
+    ? `${standingTheftText(plate, verdict.standing, where)}${tank}`
+    : mayUseTheftWording(cause.cause)
+    ? `POSSIBLE THEFT: ${plate} recorded a drop of ${drop}, drawn off while parked${where}${tank}`
+    : cause.reason === 'drop-while-stationary'
+    ? `FUEL DOWN: ${plate} recorded a drop of ${drop} while stationary, with nothing driven${where}${tank}`
+    : cause.reason === 'drop-exceeds-distance'
+    ? `FUEL DOWN: ${plate} recorded a drop of ${drop} beyond what the distance driven accounts for${where}${tank}`
+    : rate
+    ? `FUEL RATE: ${plate} recorded a drop of ${drop} beyond its normal burn, falling at ${rate}, above what this machine is measured to burn${where}${tank}`
+    : `FUEL RATE: ${plate} recorded a drop of ${drop} beyond its normal burn, above this machine's measured rate${where}${tank}`
 
     const { published } = await publishNotificationDurable({
-      orgId:     t.vehicle.organisationId,
-      id:        feedId,
-      source:    'wialon',
-      alertType: 'fuelInconsistency',
-      // A siphon is the only one we are prepared to call theft, so it is the
-      // only one that arrives as critical on its own merits.
-      //
-      // A REPEAT is the other route to critical, and it is the point of
-      // counting: one unexplained drop on a machine is a reading, the fourth in
-      // a fortnight is a pattern, and the operator should not have to notice
-      // that themselves by scrolling the feed. Third and beyond, because a
-      // second event is a coincidence often enough to be worth staying quiet
-      // about — of the five repeat vehicles measured, two stopped at two.
-      //
-      // Neither applies to a drain found hours after the fact — see
-      // LATE_DRAIN_WARNING_MS.
-      severity:  now.getTime() - t.beganAt.getTime() > LATE_DRAIN_WARNING_MS ? 'warning'
-               : cause.cause === 'SIPHON' || history.totalCount >= 3 ? 'critical' : 'warning',
-      text:      `${headline}${repeat}${probeReported ? ` ${PROBE_REPORTED_NOTE}` : ''}` +
-                 lateNote(t.beganAt, now, DRAIN_ON_TIME_MS, `found on a later read of the tracker's data`),
-      at:        t.beganAt,
-      plate,
-      vehicleId: t.vehicleId,
+    orgId:     t.vehicle.organisationId,
+    id:        feedId,
+    source:    'wialon',
+    alertType: 'fuelInconsistency',
+    // A siphon is the only one we are prepared to call theft, so it is the
+    // only one that arrives as critical on its own merits.
+    //
+    // A REPEAT is the other route to critical, and it is the point of
+    // counting: one unexplained drop on a machine is a reading, the fourth in
+    // a fortnight is a pattern, and the operator should not have to notice
+    // that themselves by scrolling the feed. Third and beyond, because a
+    // second event is a coincidence often enough to be worth staying quiet
+    // about — of the five repeat vehicles measured, two stopped at two.
+    //
+    // Neither applies to a drain found hours after the fact — see
+    // LATE_DRAIN_WARNING_MS.
+    severity:  now.getTime() - t.beganAt.getTime() > LATE_DRAIN_WARNING_MS ? 'warning'
+             : cause.cause === 'SIPHON' || history.totalCount >= 3 ? 'critical' : 'warning',
+    text:      `${headline}${repeat}${probeReported ? ` ${PROBE_REPORTED_NOTE}` : ''}` +
+               lateNote(t.beganAt, now, DRAIN_ON_TIME_MS, `found on a later read of the tracker's data`),
+    at:        t.beganAt,
+    plate,
+    vehicleId: t.vehicleId,
     })
     if (published) out.published++
   }
