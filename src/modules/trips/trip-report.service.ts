@@ -28,6 +28,14 @@ import { logger } from '../../lib/logger.js'
 const MAX_WINDOW_MS = 7 * 86_400_000
 /** Points sent for stops and distance; a day at one fix per 15 s is ~5,800. */
 const MAX_TRACK_POINTS = 8000
+/**
+ * The leg track reaches past the dispatch on both sides, positions only, so the
+ * report can say when the unit left the yard and when it got back: a dispatch
+ * is often raised after the truck is out and closed before it is home.
+ */
+const LEG_BEFORE_MS = 12 * 3_600_000
+const LEG_AFTER_MS = 24 * 3_600_000
+const MAX_LEG_POINTS = 4000
 const MAX_FUEL_POINTS = 500
 
 const thin = <T>(rows: T[], max: number): T[] => {
@@ -113,7 +121,9 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
     if (p) dest = { lat: p.lat, lng: p.lng, spreadM: p.spreadM, name: dispatch.destination!.trim() }
   }
 
-  const [fixes, fillings, thefts, speeding, harsh, weighments] = await Promise.all([
+  const legFrom = new Date(begin - LEG_BEFORE_MS)
+  const legTo = new Date(Math.min(now, to.getTime() + LEG_AFTER_MS))
+  const [fixes, fillings, thefts, speeding, harsh, weighments, legFixes] = await Promise.all([
     prisma.vehicleTelemetry.findMany({
       where:   { vehicleId, capturedAt: { gte: from, lte: to } },
       orderBy: { capturedAt: 'asc' },
@@ -152,6 +162,11 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
                  factoryGrossWeightKg: true, factoryGrossAt: true, factoryGrossBridgeNo: true,
                  factoryTareWeightKg: true, factoryTareAt: true, factoryTareBridgeNo: true, factoryNetWeightKg: true,
                  productName: true, category: true, centerName: true, driverName: true },
+    }),
+    prisma.vehicleTelemetry.findMany({
+      where:   { vehicleId, capturedAt: { gte: legFrom, lte: legTo }, lat: { not: null }, lng: { not: null } },
+      orderBy: { capturedAt: 'asc' },
+      select:  { capturedAt: true, lat: true, lng: true },
     }),
   ])
 
@@ -219,6 +234,7 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
     dest,
     arrivedAt,
     track,
+    legTrack: thin(legFixes, MAX_LEG_POINTS).map(f => [f.capturedAt.getTime(), f.lat!, f.lng!]),
     map,
     fuel: {
       hasProbe: levels.length > 1,
