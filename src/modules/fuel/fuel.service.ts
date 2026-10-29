@@ -46,11 +46,11 @@ export async function theftOutcomes(orgId: string, q: TheftOutcomesQuery) {
   for (const r of rows) {
     const key = r.reviewStatus ?? 'unreviewed'
     const s = byStatus.get(key) ?? { count: 0, litres: 0 }
-    s.count++; s.litres += r.stolenMl / 1000
+    s.count++; s.litres += (r.cleanDropMl ?? r.stolenMl) / 1000
     byStatus.set(key, s)
     if (r.reviewStatus === 'CONFIRMED_THEFT') {
       const v = confirmedByVehicle.get(r.vehicleId) ?? { vehicleId: r.vehicleId, plate: r.vehicle.registrationPlate, count: 0, litres: 0 }
-      v.count++; v.litres += r.stolenMl / 1000
+      v.count++; v.litres += (r.cleanDropMl ?? r.stolenMl) / 1000
       confirmedByVehicle.set(r.vehicleId, v)
     }
     if ((r.reviewStatus === 'CONFIRMED_THEFT' || r.reviewStatus === 'NOT_THEFT' || r.reviewStatus === 'PROBE_FAULT')
@@ -131,7 +131,7 @@ export async function reviewTheft(
   }
 
   const who = review.by ?? 'An administrator'
-  const incident = `${row.vehicle.registrationPlate} fuel incident (${(row.stolenMl / 1000).toFixed(1)} L)`
+  const incident = `${row.vehicle.registrationPlate} fuel incident (${((row.cleanDropMl ?? row.stolenMl) / 1000).toFixed(1)} L)`
   try {
     publishNotification({
       orgId,

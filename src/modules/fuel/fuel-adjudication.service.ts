@@ -582,7 +582,7 @@ export async function getIncidentHistory(
   // Strictly BEFORE this drain, so the ordinal counts what came first rather
   // than whatever the settle pass happens to have written already.
   const prior = await prisma.$queryRaw<Array<{ stolen_ml: number; is_siphon: boolean }>>`
-    SELECT t.stolen_ml, (t.drain_cause::text = 'SIPHON') AS is_siphon
+    SELECT coalesce(t.clean_drop_ml, t.stolen_ml) AS stolen_ml, (t.drain_cause::text = 'SIPHON') AS is_siphon
     FROM fuel_thefts t
      WHERE t.vehicle_id = ${vehicleId}
      AND t.began_at  >= ${from}
@@ -784,7 +784,7 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
     // the gate, so it costs one indexed read per ANNOUNCEMENT rather than per
     // drain — a few a day against roughly fifty.
     const history = await getIncidentHistory(
-    t.vehicleId, t.beganAt, t.stolenMl, cause.cause === 'SIPHON',
+    t.vehicleId, t.beganAt, verdict.lossMl || t.stolenMl, cause.cause === 'SIPHON',
     )
     // "Possible theft" only when EVERY event being counted was a siphon. A
     // count that mixed one siphon with five rate findings and called the total

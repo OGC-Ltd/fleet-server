@@ -237,7 +237,7 @@ async function build(orgId: string, theftId: string, now: number): Promise<Inves
     plate: theft.vehicle?.name ?? null,
     beganAt: theft.beganAt.toISOString(),
     detectedAt: theft.detectedAt.toISOString(),
-    litres: Math.round(theft.stolenMl / 100) / 10,
+    litres: Math.round((theft.cleanDropMl ?? theft.stolenMl) / 100) / 10,
     window: { from: from.toISOString(), to: to.toISOString() },
     point,
     track,

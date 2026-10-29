@@ -127,7 +127,7 @@ export function fuelRows(
   return prisma.$queryRaw<FuelAlertRow[]>`
     SELECT t.id, v.organisation_id AS "orgId", t.vehicle_id AS "vehicleId",
            v.registration_plate AS plate, v.name AS "vehicleName",
-           t.began_at AS at, t.detected_at AS "detectedAt", t.stolen_ml AS "stolenMl",
+           t.began_at AS at, t.detected_at AS "detectedAt", coalesce(t.clean_drop_ml, t.stolen_ml) AS "stolenMl",
            t.initial_location AS location,
            t.initial_fuel_level_ml AS "tankBeforeMl", t.final_fuel_level_ml AS "tankAfterMl",
            t.drain_cause::text AS cause, t.cause_reason AS rule, t.cause_confidence AS confidence,

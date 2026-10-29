@@ -233,7 +233,7 @@ async function readLoggedEvents(vehicleId: string, from: Date, to: Date): Promis
     }),
     prisma.fuelTheft.findMany({
       where: { vehicleId, beganAt: { gte: from, lt: to } },
-      select: { beganAt: true, detectedAt: true, stolenMl: true, verdict: true, verdictReason: true },
+      select: { beganAt: true, detectedAt: true, stolenMl: true, cleanDropMl: true, verdict: true, verdictReason: true },
       orderBy: { beganAt: 'asc' },
     }),
     prisma.notification.findMany({
@@ -270,8 +270,8 @@ async function readLoggedEvents(vehicleId: string, from: Date, to: Date): Promis
       kind: 'theft',
       severity: confirmed ? 'critical' : 'warning',
       label: confirmed ? 'Fuel drain' : 'Fuel drain (unconfirmed)',
-      detail: litres(th.stolenMl) ?? undefined,
-      ml: th.stolenMl ?? undefined,
+      detail: litres(th.cleanDropMl ?? th.stolenMl) ?? undefined,
+      ml: th.cleanDropMl ?? th.stolenMl ?? undefined,
     })
   }
 

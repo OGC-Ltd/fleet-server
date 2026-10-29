@@ -81,7 +81,7 @@ async function gather(orgId: string, repairItemId: string, caseIds: string[]): P
       orderBy: { openedAt: 'asc' },
       select: {
         status: true,
-        theft: { select: { stolenMl: true, beganAt: true, drainCause: true } },
+        theft: { select: { stolenMl: true, cleanDropMl: true, beganAt: true, drainCause: true } },
         actions: { orderBy: { at: 'asc' }, select: { kind: true, note: true, at: true, actor: PERSON } },
       },
     }),
@@ -114,7 +114,7 @@ async function gather(orgId: string, repairItemId: string, caseIds: string[]): P
     },
     alerts: cases.map((c) => ({
       beganAt: c.theft.beganAt,
-      litres: Math.round(c.theft.stolenMl / 100) / 10,
+      litres: Math.round((c.theft.cleanDropMl ?? c.theft.stolenMl) / 100) / 10,
       cause: c.theft.drainCause ?? null,
       trail: c.actions.map((a) => ({ kind: a.kind, at: a.at, by: a.actor?.fullName ?? null, note: a.note })),
     })),

@@ -139,7 +139,7 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
       where:   { vehicleId, beganAt: { gte: new Date(Math.min(from.getTime(), dayFrom.getTime())), lte: new Date(Math.max(to.getTime(), dayTo.getTime())) },
                  OR: [{ drainCause: 'SIPHON' }, { reviewStatus: 'CONFIRMED_THEFT' }] },
       orderBy: { beganAt: 'asc' },
-      select:  { beganAt: true, stolenMl: true, finalFuelLevelMl: true, initialLocation: true, reviewStatus: true },
+      select:  { beganAt: true, stolenMl: true, cleanDropMl: true, finalFuelLevelMl: true, initialLocation: true, reviewStatus: true },
     }),
     prisma.speedingIncident.findMany({
       where:   { vehicleId, startedAt: { gte: dayFrom, lte: dayTo } },
@@ -243,13 +243,13 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
       fillings: fillings
         .filter(f => f.verdict === 'REFILL' || f.verdict === 'PENDING')
         .map(f => ({ t: f.filledAt.getTime(), litres: f.filledMl / 1000, after: f.finalFuelLevelMl != null ? f.finalFuelLevelMl / 1000 : null, place: f.location })),
-      drains: thefts.filter(t => inTrip(t.beganAt)).map(t => ({ t: t.beganAt.getTime(), litres: t.stolenMl / 1000, after: t.finalFuelLevelMl != null ? t.finalFuelLevelMl / 1000 : null,
+      drains: thefts.filter(t => inTrip(t.beganAt)).map(t => ({ t: t.beganAt.getTime(), litres: (t.cleanDropMl ?? t.stolenMl) / 1000, after: t.finalFuelLevelMl != null ? t.finalFuelLevelMl / 1000 : null,
                                  place: t.initialLocation, review: t.reviewStatus })),
     },
     // Driver conduct, for the day.
     dashcam,
     escalatedThefts: thefts.filter(t => inDay(t.beganAt) && t.reviewStatus === 'CONFIRMED_THEFT')
-      .map(t => ({ t: t.beganAt.getTime(), litres: t.stolenMl / 1000, place: t.initialLocation })),
+      .map(t => ({ t: t.beganAt.getTime(), litres: (t.cleanDropMl ?? t.stolenMl) / 1000, place: t.initialLocation })),
     speeding: speeding.map(s => ({ t: s.startedAt.getTime(), durationSec: s.durationSec, distanceM: s.distanceM, peakKmh: s.peakKmh, limitKmh: s.limitKmh,
                                    lat: s.peakLat, lng: s.peakLng })),
     harsh: harsh.map(h => {

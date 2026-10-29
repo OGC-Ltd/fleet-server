@@ -166,7 +166,7 @@ export async function reviewTheft(args: {
     const decided = await tx.fuelTheft.findUniqueOrThrow({
       where: { id },
       select: {
-        id: true, vehicleId: true, stolenMl: true, reviewStatus: true, reviewedAt: true, reviewNote: true,
+        id: true, vehicleId: true, stolenMl: true, cleanDropMl: true, reviewStatus: true, reviewedAt: true, reviewNote: true,
         reviewedBy: { select: { fullName: true } },
         vehicle: { select: { registrationPlate: true } },
       },
@@ -290,7 +290,7 @@ export function theftOutcomeRows(orgId: string, from?: Date, to?: Date) {
   return prisma.fuelTheft.findMany({
     where: { vehicle: { organisationId: orgId }, ...(dateFilter ? { beganAt: dateFilter } : {}) },
     select: {
-      vehicleId: true, stolenMl: true, reviewStatus: true, dismissedAt: true, reviewedAt: true,
+      vehicleId: true, stolenMl: true, cleanDropMl: true, reviewStatus: true, dismissedAt: true, reviewedAt: true,
       vehicle: { select: { registrationPlate: true } },
     },
   })
