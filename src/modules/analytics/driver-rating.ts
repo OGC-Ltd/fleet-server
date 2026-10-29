@@ -40,6 +40,8 @@ export interface DriverRatingInput {
   harshAccelerationCases?: number
   harshBrakingCases?: number
   daysSinceLastTrip?: number
+  /** Posted to a unit now. A posted driver is rated even with no trips. */
+  postedToUnit?: boolean
 }
 
 export interface DriverRatingResult {
@@ -60,8 +62,11 @@ export function calculateDriverRating(input: DriverRatingInput): DriverRatingRes
   const harshBrakingCases = Math.max(0, input.harshBrakingCases ?? 0)
   const daysSinceLastTrip = Math.max(0, input.daysSinceLastTrip ?? 0)
 
-  // Workbook rule: no recent work is not a poor score; it is inactive.
-  if (trips === 0 && mileageKm === 0 && daysSinceLastTrip >= DRIVER_RATING_CONFIG.inactivityWindowDays) {
+  // Workbook rule: no recent work is not a poor score; it is inactive -- unless
+  // they hold a unit now (operator, 2026-10-29). Menengai logs no trips, so its
+  // posted drivers were all unrated and their cases never touched the rating.
+  const noTrips = trips === 0 && mileageKm === 0
+  if (noTrips && !input.postedToUnit && daysSinceLastTrip >= DRIVER_RATING_CONFIG.inactivityWindowDays) {
     return {
       score: DRIVER_RATING_CONFIG.inactiveScore,
       rating: DRIVER_RATING_CONFIG.inactiveRating,
@@ -99,11 +104,20 @@ export function calculateDriverRating(input: DriverRatingInput): DriverRatingRes
     DRIVER_RATING_CONFIG.safetyWeight,
   )
 
-  const score = clamp(
-    retainerComponent + productivityScore + incentiveScore + safetyScore,
-    0,
-    100,
-  )
+  // A posted driver with no trips has no productivity to measure, which is
+  // not the same as none: they start at 5 and only their cases take it down,
+  // so the rest of the score is scaled up to stand for the whole.
+  const score = noTrips
+    ? clamp(
+        (retainerComponent + incentiveScore + safetyScore) * 100 / (100 - DRIVER_RATING_CONFIG.productivityWeight),
+        0,
+        100,
+      )
+    : clamp(
+        retainerComponent + productivityScore + incentiveScore + safetyScore,
+        0,
+        100,
+      )
 
   const banded =
     score >= DRIVER_RATING_CONFIG.excellentMin ? 5
