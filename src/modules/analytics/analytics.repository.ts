@@ -752,6 +752,9 @@ export interface DriverRosterRow {
   vehicleName:       string | null
   vehicleType:       string | null
   rating:            number
+  /** Where the rating landed. 'Inactive' is the unrated 0; harsh driving can
+   *  take a driver who has worked to 0 too, and that one reads 'Poor'. */
+  ratingBand:        string
   trips:             number
   tonnes:            number
   mileageKm:         number
@@ -847,7 +850,7 @@ export interface DriverOverspeed {
 
 export interface DriverDetail {
   driver: {
-    id: string; fullName: string; status: string; rating: number
+    id: string; fullName: string; status: string; rating: number; ratingBand: string
     licenceNumber: string | null; employeeId: string | null
   }
   totals: {
@@ -1118,13 +1121,14 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       // slosh. Counting those would suspend drivers for their engine using
       // fuel.
       //
-      // A person's decision outranks the detector's (operator, 2026-10-29: the
-      // driver card is for CONFIRMED thefts): an alert escalated as theft
-      // counts whatever the classifier called it, and one a reviewer cleared
-      // -- not a theft, or a faulty probe -- no longer counts even if it was
-      // a siphon.
-      countsAgainstDriver: attributedBy !== 'posted' && (th.reviewStatus === 'CONFIRMED_THEFT'
-        || (th.drainCause === 'SIPHON' && th.reviewStatus !== 'NOT_THEFT' && th.reviewStatus !== 'PROBE_FAULT')),
+      // And only once a person has CONFIRMED it (operator, 2026-10-29: "fuel
+      // theft which is confirmed we stick to our original decisions"). The
+      // original rule -- six points off the rating per case, suspension at
+      // two cases with overspeeding on 30% of trips -- now takes confirmed
+      // thefts only. A siphon awaiting review is flagged on the card and
+      // counts for nothing until someone escalates it; one cleared as not a
+      // theft or a faulty probe never counts.
+      countsAgainstDriver: attributedBy !== 'posted' && th.reviewStatus === 'CONFIRMED_THEFT',
       review: th.reviewStatus === 'CONFIRMED_THEFT' ? 'confirmed'
         : th.reviewStatus === 'NOT_THEFT' ? 'not_theft'
         : th.reviewStatus === 'PROBE_FAULT' ? 'probe_fault'
@@ -1232,7 +1236,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   for (const d of drivers) {
     const dTrips = tripsByDriver.get(d.id) ?? []
     const dThefts = theftsByDriver.get(d.id) ?? []
-    // Only the siphons count against them — see countsAgainstDriver.
+    // Only confirmed thefts count against them — see countsAgainstDriver.
     const chargeable = dThefts.filter(i => i.countsAgainstDriver).length
     // Trips oversped, for the suspension rate; every alert, for the rating.
     const lifetimeOverspeed = overspeedTripsByDriver.get(d.id)?.size ?? 0
@@ -1289,6 +1293,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       vehicleName:       unit?.name ?? null,
       vehicleType:       unit?.vehicleType ?? null,
       rating,
+      ratingBand:        ratingResult.band,
       trips:             dTrips.length,
       tonnes:            toTonnes(lifetimeKg),
       mileageKm:         Math.round(lifetimeKm),
@@ -1343,6 +1348,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
         fullName:      d.fullName,
         status,        // conduct-derived — matches the roster badge
         rating,
+        ratingBand:    ratingResult.band,
         licenceNumber: d.licenceNumber,
         employeeId:    d.employeeId,
       },
@@ -1442,12 +1448,13 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
   }
 
   const fuelTheftCases = await prisma.fuelTheft.count({
-    // Same exclusion as driversOverview — a redistribution is not a case
+    // Same rule as driversOverview — only a confirmed theft is a case
     // against the driver.
     where: {
       driverId, vehicle: { organisationId: orgId },
       beganAt: { gte: from, lte: to },
       verdict: { notIn: NO_FUEL_LEFT },
+      reviewStatus: 'CONFIRMED_THEFT',
     },
   })
 
