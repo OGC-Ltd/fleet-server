@@ -2355,8 +2355,9 @@ model FuelTheft {
   /// `stolenMl`, which is the provider's claim; the two disagreeing is itself
   /// evidence and the pair must stay comparable.
   measuredDropMl  Int?   @map("measured_drop_ml")
-  /// What LEFT the tank, millilitres: `measuredDropMl` less what the engine
-  /// burnt across the fall (idle by the hour, driving by the km), or a standing
+  /// What LEFT the tank, millilitres: the same fall read between settled levels
+  /// (no slosh), less what the engine burnt across it (idle by the hour,
+  /// driving by the km), or a standing
   /// call's own cleaned fall. The figure every screen and alert states, since
   /// 2026-10-29; `measuredDropMl` stays the fall the verdict judged, so it and
   /// `fallSeconds` still describe the same thing. Null before that date, and

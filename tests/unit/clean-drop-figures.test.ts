@@ -30,13 +30,18 @@ describe('measureFall — slosh is not fuel', () => {
 
   it('reads the top of the drop where the tank stood settled, not at the spike', () => {
     const m = measureFall(run, claim, asIs)!
-    expect(m.evidence.dropMl).toBe(9_000)
+    expect(m.clean.dropMl).toBe(9_000)
+  })
+
+  it('leaves the fall the classifier judges as it was: spike and all', () => {
+    // The classifier's thresholds were set on this geometry; only the stated litres are cleaned.
+    expect(measureFall(run, claim, asIs)!.evidence.dropMl).toBe(18_000)
   })
 
   it('keeps a reading within the settle time of a move out of it', () => {
     expect(SLOSH_SETTLE_SECONDS).toBe(60)
     const settledSpike = run.map(r => r.capturedAt.getTime() === at(10.75).getTime() ? { ...r, fuelLevelMl: 320_000 } : r)
-    expect(measureFall(settledSpike, claim, asIs)!.evidence.dropMl).toBe(9_000)
+    expect(measureFall(settledSpike, claim, asIs)!.clean.dropMl).toBe(9_000)
   })
 
   it('ends the fall where the vehicle drives away, not at a stop hours later', () => {
@@ -45,7 +50,7 @@ describe('measureFall — slosh is not fuel', () => {
       ...Array.from({ length: 30 }, (_, k) => s(33 + k, 291 - (k + 1) * 0.3, 45)),   // 9 L burnt on the road
       ...Array.from({ length: 20 }, (_, k) => s(63 + k, 282)),                       // parked at the next stop
     ]
-    expect(measureFall(onward, claim, asIs)!.evidence.dropMl).toBe(9_000)
+    expect(measureFall(onward, claim, asIs)!.clean.dropMl).toBe(9_000)
   })
 
   it('keeps measuring an excavator whose GPS shows speed as its cab swings', () => {
@@ -56,24 +61,24 @@ describe('measureFall — slosh is not fuel', () => {
       fuelLevelMl: k < 20 ? 400_000 : k < 30 ? 400_000 - (k - 19) * 2_000 : 380_000,
     }))
     const m = measureFall(swinging, { beganAt: new Date(T0 + 20 * 30_000), detectedAt: new Date(T0 + 30 * 30_000) }, asIs)
-    expect(m!.evidence.dropMl).toBe(20_000)
+    expect(m!.clean.dropMl).toBe(20_000)
   })
 
   it('does not end a road drain at detection: a lorry already driving has not driven away', () => {
     // At 40 km/h throughout, 12 L down from minute 20 to 34; the provider ends it at 28.
     const road = Array.from({ length: 60 }, (_, k) => s(k, k < 20 ? 300 : k < 35 ? 300 - (k - 19) * 0.8 : 288, 40))
-    expect(measureFall(road, { beganAt: at(20), detectedAt: at(28) }, asIs)!.evidence.dropMl).toBe(12_000)
+    expect(measureFall(road, { beganAt: at(20), detectedAt: at(28) }, asIs)!.clean.dropMl).toBe(12_000)
   })
 
   it('does not take a pause partway down as the bottom', () => {
     // Swinging at 6 km/h but for one stand at minute 22; 20 L down from 20 to 29.
     const paused = Array.from({ length: 40 }, (_, k) => s(k, k < 20 ? 400 : k < 30 ? 400 - (k - 19) * 2 : 380, k === 22 || k < 5 ? 0 : 6))
-    expect(measureFall(paused, { beganAt: at(20), detectedAt: at(30) }, asIs)!.evidence.dropMl).toBe(20_000)
+    expect(measureFall(paused, { beganAt: at(20), detectedAt: at(30) }, asIs)!.clean.dropMl).toBe(20_000)
   })
 
   it('falls back to every reading where the vehicle never stood', () => {
     const driving = run.map(r => ({ ...r, speedKmh: 40 }))
-    expect(measureFall(driving, claim, asIs)!.evidence.dropMl).toBe(18_000)
+    expect(measureFall(driving, claim, asIs)!.clean.dropMl).toBe(18_000)
   })
 })
 

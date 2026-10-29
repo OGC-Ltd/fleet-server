@@ -56,10 +56,14 @@ async function main() {
 
   // The probe profile as getProbeProfile reads it (21 days, 30-min parked
   // windows), taken as of now rather than of each drain's judgement.
-  const profiles = new Map<string, ProbeProfile>()
-  const profileOf = async (vehicleId: string): Promise<ProbeProfile> => {
-    const hit = profiles.get(vehicleId); if (hit) return hit
-    const r = (await c.query(`
+  // A vehicle whose profile read times out is judged without one (as a new
+  // machine would be) rather than ending the run; counted in `noProfile`.
+  const profiles = new Map<string, ProbeProfile | null>()
+  let noProfile = 0
+  const profileOf = async (vehicleId: string): Promise<ProbeProfile | null> => {
+    if (profiles.has(vehicleId)) return profiles.get(vehicleId)!
+    let r
+    try { r = (await c.query(`
       WITH win AS (
         SELECT date_trunc('hour', captured_at) + interval '30 min' * floor(extract(minute FROM captured_at) / 30) AS bucket,
                count(*) AS n, max(fuel_level_ml) - min(fuel_level_ml) AS swing,
@@ -74,7 +78,11 @@ async function main() {
          GROUP BY v.tank_capacity_litres)
       SELECT count(*) AS parked, count(*) FILTER (WHERE swing >= $3) AS swinging, (SELECT fill_ratio FROM cap) AS fill_ratio
         FROM win WHERE n >= 30 AND top_speed = 0 AND running = 0`,
-      [vehicleId, ts(new Date(Date.now() - 21 * 86_400_000)), SWING_ML])).rows[0]
+      [vehicleId, ts(new Date(Date.now() - 21 * 86_400_000)), SWING_ML])).rows[0] }
+    catch (e) {
+      if ((e as { code?: string }).code !== '57014') throw e
+      noProfile++; profiles.set(vehicleId, null); return null
+    }
     const p: ProbeProfile = { parkedWindows: Number(r?.parked ?? 0), swingWindows: Number(r?.swinging ?? 0), fillRatio: r?.fill_ratio != null ? Number(r.fill_ratio) : null }
     profiles.set(vehicleId, p); return p
   }
@@ -98,10 +106,10 @@ async function main() {
     const b = inputs.get(d.vehicle_id)
     const band = b ? resolveBand(b.orgCode, { plate: b.plate, vehicleType: b.vehicleType, tankCapacityLitres: b.tankCapacityLitres },
       b.rate == null ? null : { lPerHour: b.rate.lPerHour, basis: b.rate.basis, lPerKm: b.lPerKm }) : null
-    const burnMl = burnDuringFallMl(m.fall, band)
+    const burnMl = burnDuringFallMl(m.clean.fall, band)
     const basis = b ? resolveBasis(b.orgCode, { plate: b.plate, vehicleType: b.vehicleType, tankCapacityLitres: b.tankCapacityLitres }) : undefined
     const j = classifyDrain(m.evidence, band, await profileOf(d.vehicle_id), basis)
-    out.push({ d, dropMl: m.evidence.dropMl, burnMl, lossMl: Math.max(0, m.evidence.dropMl - burnMl), cause: j.cause, reason: j.reason, announced: announces(j) })
+    out.push({ d, dropMl: m.clean.dropMl, burnMl, lossMl: Math.max(0, m.clean.dropMl - burnMl), cause: j.cause, reason: j.reason, announced: announces(j) })
   }
 
   const n = out.length
@@ -125,6 +133,7 @@ async function main() {
     const k = `${o.d.cause} -> ${o.cause}`
     if (o.cause !== o.d.cause) flips.set(k, (flips.get(k) ?? 0) + 1)
   }
+  console.log(`vehicles judged without a probe profile (read timed out): ${noProfile}`)
   console.log(`re-judged ${judged.length} (standing calls left out): cause unchanged on ${judged.filter(o => o.cause === o.d.cause).length}`)
   console.log('cause flips (ledger -> now):', JSON.stringify([...flips].sort((x, y) => y[1] - x[1])))
   console.log(`announced now but clean 0, alert withheld: ${out.filter(o => o.announced && o.lossMl === 0 && o.cause !== 'SIPHON').length}`)
