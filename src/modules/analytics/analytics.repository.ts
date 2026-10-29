@@ -768,11 +768,12 @@ export interface DriverRosterRow {
 /**
  * One fuel event pinned to a driver.
  *
- * `attributedBy` is on the record because the two routes are not equally
- * certain: 'record' means the event itself named the driver, 'trip' means we
- * inferred it from the trip running on that vehicle at that instant. Nothing
- * currently writes the former, so every case today is inferred — and a card
- * that shows a suspension-relevant count should be able to say so.
+ * `attributedBy` is on the record because the routes are not equally
+ * certain: 'record' means the event itself named the driver, 'trip' the trip
+ * running on that vehicle at that instant, 'posting' the driver posted to it
+ * then, 'posted' the driver posted to it now, for an event from before anyone
+ * was. Nothing currently writes the first, so every case today is inferred —
+ * and a card that shows a suspension-relevant count should be able to say so.
  *
  * `verdict` and `confirmed` travel with it rather than being reduced to a
  * boolean here: whether an event may be called a theft is the adjudicator's
@@ -797,7 +798,7 @@ export interface DriverIncident {
   cause:           string | null
   causeReason:     string | null
   causeConfidence: number | null
-  attributedBy: 'record' | 'trip'
+  attributedBy: 'record' | 'trip' | 'posting' | 'posted'
   /**
    * Whether this event counts toward the driver's case total.
    *
@@ -1017,26 +1018,54 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     varr.push(t); tripsByVehicle.set(t.vehicleId, varr)
   }
 
+  // Who was posted to a unit, from the roster drivers' postings: at an
+  // instant, before it, and now. A unit with two drivers posted at once is
+  // ambiguous and answers null.
+  const postingsByVehicle = new Map<string, typeof postings>()
+  for (const p of postings) {
+    const arr = postingsByVehicle.get(p.vehicleId) ?? []
+    arr.push(p); postingsByVehicle.set(p.vehicleId, arr)
+  }
+  const postedAt = (vehicleId: string, at: Date): string | null => {
+    const on = [...new Set((postingsByVehicle.get(vehicleId) ?? [])
+      .filter(p => p.assignedAt <= at && (p.unassignedAt == null || p.unassignedAt > at))
+      .map(p => p.userId))]
+    return on.length === 1 ? on[0] : null
+  }
+  const postedBefore = (vehicleId: string, at: Date): boolean =>
+    (postingsByVehicle.get(vehicleId) ?? []).some(p => p.assignedAt <= at)
+  const postedNow = (vehicleId: string): string | null => {
+    const on = [...new Set((postingsByVehicle.get(vehicleId) ?? []).filter(p => p.unassignedAt == null).map(p => p.userId))]
+    return on.length === 1 ? on[0] : null
+  }
+
   /**
-   * Fuel events, pinned to whoever was driving the unit at the time.
+   * Fuel events, pinned to whoever had the unit at the time, first match wins:
+   * an explicit `driverId` (nothing writes it yet), the driver of the trip
+   * covering that instant, the roster driver posted to the unit then, and --
+   * for an event from before the unit had any driver posted -- the one driver
+   * posted to it now. The same routes overspeeding takes below.
    *
-   * An explicit `driverId` wins where one exists; otherwise the driver is the
-   * one on the trip covering that instant on that vehicle — the same resolution
-   * overspeeding uses ten lines down, and the only one available, since nothing
-   * writes the column.
+   * The postings are what put KCP 145P's four de-escalated siphons on its
+   * driver's card (operator, 2026-10-29): the unit has no trips, so the trip
+   * route alone left every Menengai fuel case unattributed.
    *
-   * An event nobody was driving for stays unattributed rather than being
-   * assigned to the vehicle's usual driver. Measured on SUKARI, 176 of 1,256
-   * events fall inside a trip; the other 1,080 happened with no trip running,
-   * and guessing an owner for those would put a suspension case on somebody who
-   * was not there.
+   * Only the first three may count against the driver. A case from before
+   * anyone was posted is shown on the card of who holds the unit now, but
+   * conductStatus SUSPENDS at two fuel-theft cases, and that driver was not
+   * there.
    */
   const theftsByDriver = new Map<string, DriverIncident[]>()
   for (const th of thefts) {
-    const driverId = th.driverId ?? (tripsByVehicle.get(th.vehicleId) ?? []).find(t =>
+    const hit = th.driverId ? null : (tripsByVehicle.get(th.vehicleId) ?? []).find(t =>
       t.driverId && th.beganAt >= t.beganAt && (t.endedAt == null || th.beganAt <= t.endedAt),
-    )?.driverId
+    )?.driverId ?? null
+    const posting = th.driverId || hit ? null : postedAt(th.vehicleId, th.beganAt)
+    const posted = th.driverId || hit || posting || postedBefore(th.vehicleId, th.beganAt)
+      ? null : postedNow(th.vehicleId)
+    const driverId = th.driverId ?? hit ?? posting ?? posted
     if (!driverId) continue
+    const attributedBy = th.driverId ? 'record' : hit ? 'trip' : posting ? 'posting' : 'posted'
 
     const arr = theftsByDriver.get(driverId) ?? []
     arr.push({
@@ -1074,7 +1103,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       cause:         th.drainCause ?? null,
       causeReason:   th.causeReason ?? null,
       causeConfidence: th.causeConfidence ?? null,
-      attributedBy: th.driverId ? 'record' : 'trip',
+      attributedBy,
       // Whether this event may be counted AGAINST the driver.
       //
       // Only a siphon may. The schema says so where the enum is declared:
@@ -1094,8 +1123,8 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       // counts whatever the classifier called it, and one a reviewer cleared
       // -- not a theft, or a faulty probe -- no longer counts even if it was
       // a siphon.
-      countsAgainstDriver: th.reviewStatus === 'CONFIRMED_THEFT'
-        || (th.drainCause === 'SIPHON' && th.reviewStatus !== 'NOT_THEFT' && th.reviewStatus !== 'PROBE_FAULT'),
+      countsAgainstDriver: attributedBy !== 'posted' && (th.reviewStatus === 'CONFIRMED_THEFT'
+        || (th.drainCause === 'SIPHON' && th.reviewStatus !== 'NOT_THEFT' && th.reviewStatus !== 'PROBE_FAULT')),
       review: th.reviewStatus === 'CONFIRMED_THEFT' ? 'confirmed'
         : th.reviewStatus === 'NOT_THEFT' ? 'not_theft'
         : th.reviewStatus === 'PROBE_FAULT' ? 'probe_fault'
@@ -1122,23 +1151,6 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   // rate still counts TRIPS oversped, one however many incidents a trip
   // raised, so `cases / trips` keeps reading as a share of trips.
   const onRoster = new Set(driverIds)
-  const postingsByVehicle = new Map<string, typeof postings>()
-  for (const p of postings) {
-    const arr = postingsByVehicle.get(p.vehicleId) ?? []
-    arr.push(p); postingsByVehicle.set(p.vehicleId, arr)
-  }
-  const postedAt = (vehicleId: string, at: Date): string | null => {
-    const on = [...new Set((postingsByVehicle.get(vehicleId) ?? [])
-      .filter(p => p.assignedAt <= at && (p.unassignedAt == null || p.unassignedAt > at))
-      .map(p => p.userId))]
-    return on.length === 1 ? on[0] : null
-  }
-  const postedBefore = (vehicleId: string, at: Date): boolean =>
-    (postingsByVehicle.get(vehicleId) ?? []).some(p => p.assignedAt <= at)
-  const postedNow = (vehicleId: string): string | null => {
-    const on = [...new Set((postingsByVehicle.get(vehicleId) ?? []).filter(p => p.unassignedAt == null).map(p => p.userId))]
-    return on.length === 1 ? on[0] : null
-  }
   const overspeedTripsByDriver = new Map<string, Set<TripRow>>()
   const overspeedsByDriver = new Map<string, DriverOverspeed[]>()
   for (const a of speeding) {
