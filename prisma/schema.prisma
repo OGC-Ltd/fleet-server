@@ -2355,6 +2355,13 @@ model FuelTheft {
   /// `stolenMl`, which is the provider's claim; the two disagreeing is itself
   /// evidence and the pair must stay comparable.
   measuredDropMl  Int?   @map("measured_drop_ml")
+  /// What LEFT the tank, millilitres: `measuredDropMl` less what the engine
+  /// burnt across the fall (idle by the hour, driving by the km), or a standing
+  /// call's own cleaned fall. The figure every screen and alert states, since
+  /// 2026-10-29; `measuredDropMl` stays the fall the verdict judged, so it and
+  /// `fallSeconds` still describe the same thing. Null before that date, and
+  /// where no fall was measured. Zero means the engine accounts for all of it.
+  cleanDropMl     Int?   @map("clean_drop_ml")
   /// Engine-on seconds inside the fall, and the share of its readings carrying
   /// a MEASURED ignition rather than the speed fallback. The second number is
   /// what says whether the first can be trusted.

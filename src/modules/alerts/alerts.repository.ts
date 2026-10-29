@@ -89,6 +89,8 @@ function fuelWhere(w: AlertWindow, scopes: OrgScope[]): Prisma.Sql {
     ${scopeSql(scopes, 'v.organisation_id', 't.vehicle_id')}
     AND (t.drain_cause::text = ANY(${ANNOUNCED_CAUSES as unknown as string[]}::text[])
       OR t.cause_reason      = ANY(${incidentReasonSlugs()}::text[]))
+    -- a fall the engine's burn accounts for in full was never announced
+    AND (t.clean_drop_ml IS DISTINCT FROM 0 OR t.drain_cause::text = 'SIPHON')
     AND t.began_at >= ${from} AND t.began_at <= ${w.to}
     ${plateSql(w.q)}`
 }

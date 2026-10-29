@@ -5,10 +5,16 @@ vi.mock('../../src/lib/notifications/notification.store.js', () => ({
   publishNotification: vi.fn(),
   publishNotificationDurable: vi.fn(async (i: unknown) => ({ item: i, published: true })),
 }))
+// The real burn, wrapped so one case can make the engine account for a whole fall.
+vi.mock('../../src/modules/fuel/fuel-theft-classifier.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../src/modules/fuel/fuel-theft-classifier.js')>()
+  return { ...real, burnDuringFallMl: vi.fn(real.burnDuringFallMl) }
+})
 
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { env } from '../../src/config/env.js'
 import { publishNotificationDurable } from '../../src/lib/notifications/notification.store.js'
+import { burnDuringFallMl } from '../../src/modules/fuel/fuel-theft-classifier.js'
 import {
   adjudicatePendingDrains, __resetProbeProfileCache, __resetBandCache,
 } from '../../src/modules/fuel/fuel-adjudication.service.js'
@@ -185,6 +191,32 @@ describe('adjudicatePendingDrains', () => {
     expect(item['text']).not.toMatch(/theft|stolen|suspicious|loss|lost|unexplained/i)
     expect(item['severity']).toBe('warning')
     expect(item['at']).toEqual(BEGAN)
+  })
+
+  it('stores the fall judged and, apart, what left the tank less the idling burn', async () => {
+    setLevels([...STEADY, ...DRAINING, 160_000, 159_000, 158_000, 158_000])
+
+    await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data = (prismaMock.fuelTheft.update as any).mock.calls[0][0].data
+    expect(data.measuredDropMl).toBe(42_000)
+    // Engine measured on, standing: the idle rate, a quarter of 10 L/h, not 10.
+    expect(data.cleanDropMl).toBeLessThan(42_000)
+    expect(data.cleanDropMl).toBeGreaterThan(42_000 - 2_500)
+    expect(published()[0]![0]['text']).toContain('recorded a drop of ' + (data.cleanDropMl / 1000).toFixed(1))
+  })
+
+  it('says nothing about a fall the engine’s burn accounts for in full', async () => {
+    setLevels([...STEADY, ...DRAINING, 160_000, 159_000, 158_000, 158_000])
+    vi.mocked(burnDuringFallMl).mockReturnValueOnce(1_000_000)
+
+    const out = await adjudicatePendingDrains({ apply: true, notify: true, now: NOW })
+
+    expect(out.published).toBe(0)
+    expect(prismaMock.fuelTheft.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ drainCause: 'UNEXPLAINED_BURN', measuredDropMl: 42_000, cleanDropMl: 0 }),
+    }))
   })
 
   it('says nothing at all about a claim it could not check', async () => {

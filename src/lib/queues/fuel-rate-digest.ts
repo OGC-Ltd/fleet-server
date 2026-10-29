@@ -61,9 +61,12 @@ export async function runFuelRateDigest(now: Date = new Date()): Promise<FuelRat
       dismissedAt: null,
       causeReason: { in: [...ANNOUNCED_REASON_SLUGS] },
       drainCause:  { not: 'SIPHON' },
+      // A fall the engine's burn accounts for in full was never announced.
+      // (`NOT { cleanDropMl: 0 }` alone would drop the NULLs too: SQL three-valued logic.)
+      OR:          [{ cleanDropMl: null }, { cleanDropMl: { not: 0 } }],
     },
     select: {
-      stolenMl: true, causeReason: true,
+      stolenMl: true, measuredDropMl: true, cleanDropMl: true, causeReason: true,
       vehicle: { select: { organisationId: true, registrationPlate: true } },
     },
   })
@@ -73,7 +76,9 @@ export async function runFuelRateDigest(now: Date = new Date()): Promise<FuelRat
     const kind = digestKind(f.causeReason)
     if (!kind) continue
     const rows = byOrg.get(f.vehicle.organisationId) ?? []
-    rows.push({ plate: f.vehicle.registrationPlate, kind, stolenMl: f.stolenMl })
+    // Our cleaned figure (no slosh, less the engine's burn) where there is one;
+    // rows judged before 2026-10-29 have only the fall.
+    rows.push({ plate: f.vehicle.registrationPlate, kind, stolenMl: f.cleanDropMl ?? f.measuredDropMl ?? f.stolenMl })
     byOrg.set(f.vehicle.organisationId, rows)
   }
 
