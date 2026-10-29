@@ -68,6 +68,14 @@ describe('calculateDriverRating', () => {
     expect(harsh.rating).toBe(clean.rating - 1)
   })
 
+  it('rates a driver posted to a unit with no trips, from 5 down by their cases', () => {
+    const posted = { baseScore: 5, trips: 0, mileageKm: 0, daysSinceLastTrip: 999, postedToUnit: true }
+    expect(calculateDriverRating({ ...posted, postedToUnit: false }).band).toBe('Inactive')
+    expect(calculateDriverRating(posted).rating).toBe(5)
+    expect(calculateDriverRating({ ...posted, harshAccelerationCases: 1 }).rating).toBe(4.8)
+    expect(calculateDriverRating({ ...posted, fuelTheftCases: 2 }).rating).toBeLessThan(5)
+  })
+
   it('never takes the rating below 0', () => {
     const base = { baseScore: 5, trips: 20, mileageKm: 1200, tonnes: 45, daysSinceLastTrip: 1 }
     const r = calculateDriverRating({ ...base, harshAccelerationCases: 400, harshBrakingCases: 300 })

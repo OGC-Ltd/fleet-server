@@ -1265,6 +1265,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       harshAccelerationCases: dHarsh.accel.length,
       harshBrakingCases: dHarsh.brake.length,
       daysSinceLastTrip,
+      postedToUnit: postedPlate.has(d.id),
     })
     const rating = ratingResult.rating
 
