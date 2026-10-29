@@ -39,6 +39,22 @@ const thin = <T>(rows: T[], max: number): T[] => {
 
 const ms = (d: Date | null | undefined) => (d ? d.getTime() : null)
 
+/** CANE_DELIVERY → "Cane delivery". */
+const humanise = (s: string) => s.charAt(0) + s.slice(1).toLowerCase().replace(/_/g, ' ')
+
+/**
+ * When the ticket's load was weighed. The provider's gross clock is not always
+ * trustworthy: on 28 Oct ticket 1000906522 read gross 00:57 on the 28th for a
+ * truck raised at 14:12 that day and back through the gate at 00:50 on the
+ * 29th (right time, wrong date). A gross before the token is impossible, so the
+ * tare weighing is quoted instead, then the token itself.
+ */
+function weighedAt(w: { tokenAt: Date; grossAt: Date | null; tareAt: Date | null }): number {
+  if (w.grossAt && w.grossAt >= w.tokenAt) return w.grossAt.getTime()
+  if (w.tareAt && w.tareAt >= w.tokenAt) return w.tareAt.getTime()
+  return w.tokenAt.getTime()
+}
+
 export async function getTripReportData(orgId: string, vehicleId: string, dispatchExternalId?: string) {
   const vehicle = await prisma.vehicle.findFirst({
     where:  { id: vehicleId, organisationId: orgId },
@@ -114,7 +130,7 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
                  // looks a few hours past its return; a ticket before departure is the last run's.
                  tokenAt: { gte: from, lte: new Date(to.getTime() + (dispatch.actualReturnAt ? 6 * 3_600_000 : 0)) } },
       orderBy: { tokenAt: 'asc' },
-      select:  { tokenNumber: true, tokenAt: true, grossWeightKg: true, grossAt: true, grossBridgeNo: true,
+      select:  { tokenNumber: true, tokenAt: true, grossWeightKg: true, grossAt: true, grossBridgeNo: true, tareAt: true,
                  tareWeightKg: true, netWeightKg: true, productName: true, category: true, centerName: true, driverName: true },
     }),
   ])
@@ -153,7 +169,8 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
     vehicle: {
       id: vehicle.id,
       plate: vehicle.registrationPlate,
-      type: vehicle.makeModel ?? vehicle.model ?? vehicle.vehicleType ?? null,
+      // UNSPECIFIED / UNKNOWN are the registry's placeholders, not a type.
+      type: vehicle.makeModel ?? vehicle.model ?? (/^(UNSPECIFIED|UNKNOWN|OTHER)$/i.test(vehicle.vehicleType) ? null : vehicle.vehicleType),
     },
     dispatch: {
       externalId:   dispatch.externalId,
@@ -199,8 +216,8 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
       })),
     },
     weighments: weighments.map(w => ({
-      ticket: w.tokenNumber.toString(), at: (w.grossAt ?? w.tokenAt).getTime(), bridge: w.grossBridgeNo != null ? `${w.centerName} · bridge ${w.grossBridgeNo}` : w.centerName,
-      grossKg: w.grossWeightKg, tareKg: w.tareWeightKg, netKg: w.netWeightKg, cargo: w.productName ?? w.category, driver: w.driverName || null,
+      ticket: w.tokenNumber.toString(), at: weighedAt(w), bridge: w.grossBridgeNo != null ? `${w.centerName} · bridge ${w.grossBridgeNo}` : w.centerName,
+      grossKg: w.grossWeightKg, tareKg: w.tareWeightKg, netKg: w.netWeightKg, cargo: w.productName ?? humanise(w.category), driver: w.driverName || null,
     })),
   }
 }
