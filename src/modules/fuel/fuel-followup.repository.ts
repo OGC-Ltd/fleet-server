@@ -33,7 +33,7 @@ export const FOLLOW_UP_SELECT = {
   assignedBy: PERSON,
   theft: {
     select: {
-      id: true, vehicleId: true, stolenMl: true, beganAt: true, detectedAt: true,
+      id: true, vehicleId: true, stolenMl: true, cleanDropMl: true, beganAt: true, detectedAt: true,
       drainCause: true, initialLocation: true,
       vehicle: { select: { registrationPlate: true } },
     },

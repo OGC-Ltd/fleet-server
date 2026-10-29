@@ -88,7 +88,7 @@ export function toDto(row: FollowUpRow, viewerId: string | null, canAssign = fal
       id: t.id,
       vehicleId: t.vehicleId,
       plate: t.vehicle.registrationPlate,
-      volumeMl: t.stolenMl,
+      volumeMl: t.cleanDropMl ?? t.stolenMl,
       beganAt: t.beganAt,
       detectedAt: t.detectedAt,
       cause: t.drainCause,
