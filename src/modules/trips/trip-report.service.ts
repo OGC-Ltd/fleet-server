@@ -9,6 +9,9 @@
 //
 // The window is departure → return (or now, while the run is open), capped at
 // the last 7 days so an unclosed dispatch cannot turn into a month of fixes.
+// The driver's conduct and the weighbridge tickets are for the whole fleet DAY
+// of the departure (operator, 2026-10-29), stretched to the trip's end when the
+// run crosses midnight.
 
 import { prisma } from '../../lib/prisma.js'
 import { NotFoundError } from '../../core/errors/errors.js'
@@ -16,17 +19,13 @@ import { knownDestination } from '../dispatches/known-destinations.js'
 import { factoryOf, bagsFromTonnes } from '../webhooks/factory-map.js'
 import { arrivalRadiusM, haversineM, type Point } from '../../lib/dispatch-trip.js'
 import { findZoneTimeline } from '../telemetry/telemetry.repository.js'
-import { getAlarms } from '../dashcam/dashcam.service.js'
+import { fleetDayStart } from '../../lib/provider-time.js'
 import { logger } from '../../lib/logger.js'
 
 const MAX_WINDOW_MS = 7 * 86_400_000
 /** Points sent for stops and distance; a day at one fix per 15 s is ~5,800. */
 const MAX_TRACK_POINTS = 8000
 const MAX_FUEL_POINTS = 500
-/** Dashcam codes the report counts. Harsh driving and speed come from the tracker. */
-const DASHCAM_SEATBELT = new Set([51])
-const DASHCAM_CORNERING = new Set([71])
-const DASHCAM_WAIT_MS = 12_000
 
 const thin = <T>(rows: T[], max: number): T[] => {
   if (rows.length <= max) return rows
@@ -75,6 +74,8 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
   const end = Math.min(dispatch.actualReturnAt?.getTime() ?? now, now)
   const begin = Math.max(dispatch.dispatchedAt.getTime(), end - MAX_WINDOW_MS)
   const from = new Date(begin), to = new Date(Math.max(end, begin + 60_000))
+  const dayFrom = fleetDayStart(dispatch.dispatchedAt)
+  const dayTo = new Date(Math.min(now, Math.max(dayFrom.getTime() + 86_400_000, to.getTime())))
 
   // Where it left from and where it was going — the same anchors as the trip
   // card: the gate it was signed out at, else the organisation's hub; a stated
@@ -109,41 +110,39 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
       select:  { filledAt: true, filledMl: true, finalFuelLevelMl: true, location: true, verdict: true },
     }),
     prisma.fuelTheft.findMany({
-      where:   { vehicleId, beganAt: { gte: from, lte: to },
+      where:   { vehicleId, beganAt: { gte: new Date(Math.min(from.getTime(), dayFrom.getTime())), lte: new Date(Math.max(to.getTime(), dayTo.getTime())) },
                  OR: [{ drainCause: 'SIPHON' }, { reviewStatus: 'CONFIRMED_THEFT' }] },
       orderBy: { beganAt: 'asc' },
       select:  { beganAt: true, stolenMl: true, finalFuelLevelMl: true, initialLocation: true, reviewStatus: true },
     }),
     prisma.speedingIncident.findMany({
-      where:   { vehicleId, startedAt: { gte: from, lte: to } },
+      where:   { vehicleId, startedAt: { gte: dayFrom, lte: dayTo } },
       orderBy: { startedAt: 'asc' },
-      select:  { startedAt: true, durationSec: true, peakKmh: true, limitKmh: true, peakLat: true, peakLng: true },
+      select:  { startedAt: true, durationSec: true, distanceM: true, peakKmh: true, limitKmh: true, peakLat: true, peakLng: true },
     }),
     prisma.providerAlert.findMany({
-      where:   { vehicleId, type: { in: ['HARSH_ACCELERATION', 'HARSH_BRAKING'] }, createdAt: { gte: from, lte: to } },
+      where:   { vehicleId, type: { in: ['HARSH_ACCELERATION', 'HARSH_BRAKING'] }, createdAt: { gte: dayFrom, lte: dayTo } },
       orderBy: { createdAt: 'asc' },
       select:  { type: true, createdAt: true, raw: true },
     }),
     prisma.weighment.findMany({
       where:   { organisationId: orgId, OR: [{ vehicleId }, { vehiclePlate: vehicle.registrationPlate }],
-                 // A cane truck crosses the bridge when it comes BACK, so a closed run
-                 // looks a few hours past its return; a ticket before departure is the last run's.
-                 tokenAt: { gte: from, lte: new Date(to.getTime() + (dispatch.actualReturnAt ? 6 * 3_600_000 : 0)) } },
+                 // Every ticket the unit raised that fleet day — a cane truck is
+                 // weighed when it comes back, so a run past midnight keeps its own.
+                 tokenAt: { gte: dayFrom, lte: dayTo } },
       orderBy: { tokenAt: 'asc' },
       select:  { tokenNumber: true, tokenAt: true, grossWeightKg: true, grossAt: true, grossBridgeNo: true, tareAt: true,
                  tareWeightKg: true, netWeightKg: true, productName: true, category: true, centerName: true, driverName: true },
     }),
   ])
 
-  // Zone crossings and dashcam alarms are both best-effort: a slow PostGIS
-  // timeline or an unreachable VSS server must not cost the operator the page.
-  const [zones, camera] = await Promise.all([
-    findZoneTimeline(vehicleId, orgId, from, to).catch((err) => {
-      logger.warn({ err, vehicleId }, 'trip report: zone timeline failed')
-      return null
-    }),
-    dashcamFor(orgId, vehicleId, from, to),
-  ])
+  // Best-effort: a slow PostGIS timeline must not cost the operator the page.
+  const zones = await findZoneTimeline(vehicleId, orgId, from, to).catch((err) => {
+    logger.warn({ err, vehicleId }, 'trip report: zone timeline failed')
+    return null
+  })
+  const inTrip = (d: Date) => d >= from && d <= to
+  const inDay = (d: Date) => d >= dayFrom && d <= dayTo
 
   const located = fixes.filter(f => f.lat != null && f.lng != null)
   const track = thin(located, MAX_TRACK_POINTS).map(f => [
@@ -186,6 +185,7 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
       cargoName:    dispatch.kind === 'SALES' ? gate?.commodity ?? null : null,
     },
     window: { from: begin, to: to.getTime(), clipped: begin > dispatch.dispatchedAt.getTime() },
+    day: { from: dayFrom.getTime(), to: dayTo.getTime() },
     yard,
     dest,
     arrivedAt,
@@ -197,10 +197,13 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
       fillings: fillings
         .filter(f => f.verdict === 'REFILL' || f.verdict === 'PENDING')
         .map(f => ({ t: f.filledAt.getTime(), litres: f.filledMl / 1000, after: f.finalFuelLevelMl != null ? f.finalFuelLevelMl / 1000 : null, place: f.location })),
-      drains: thefts.map(t => ({ t: t.beganAt.getTime(), litres: t.stolenMl / 1000, after: t.finalFuelLevelMl != null ? t.finalFuelLevelMl / 1000 : null,
+      drains: thefts.filter(t => inTrip(t.beganAt)).map(t => ({ t: t.beganAt.getTime(), litres: t.stolenMl / 1000, after: t.finalFuelLevelMl != null ? t.finalFuelLevelMl / 1000 : null,
                                  place: t.initialLocation, review: t.reviewStatus })),
     },
-    speeding: speeding.map(s => ({ t: s.startedAt.getTime(), durationSec: s.durationSec, peakKmh: s.peakKmh, limitKmh: s.limitKmh,
+    // Driver conduct, for the day.
+    escalatedThefts: thefts.filter(t => inDay(t.beganAt) && t.reviewStatus === 'CONFIRMED_THEFT')
+      .map(t => ({ t: t.beganAt.getTime(), litres: t.stolenMl / 1000, place: t.initialLocation })),
+    speeding: speeding.map(s => ({ t: s.startedAt.getTime(), durationSec: s.durationSec, distanceM: s.distanceM, peakKmh: s.peakKmh, limitKmh: s.limitKmh,
                                    lat: s.peakLat, lng: s.peakLng })),
     harsh: harsh.map(h => {
       const raw = (h.raw ?? {}) as Record<string, unknown>
@@ -208,7 +211,6 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
       return { t: h.createdAt.getTime(), type: h.type === 'HARSH_BRAKING' ? 'brake' : 'accel', lat: num(raw.lat), lng: num(raw.lng),
                speedKmh: num(raw.speedKmh), ms2: num(raw.ms2) }
     }),
-    camera,
     zones: zones === null ? { timedOut: true, visits: [] } : {
       timedOut: false,
       visits: zones.rows.filter(v => v.zone_id !== null).map(v => ({
@@ -219,26 +221,5 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
       ticket: w.tokenNumber.toString(), at: weighedAt(w), bridge: w.grossBridgeNo != null ? `${w.centerName} · bridge ${w.grossBridgeNo}` : w.centerName,
       grossKg: w.grossWeightKg, tareKg: w.tareWeightKg, netKg: w.netWeightKg, cargo: w.productName ?? humanise(w.category), driver: w.driverName || null,
     })),
-  }
-}
-
-/** The unit's seat-belt and cornering alarms, or `fitted: false` when it has no VSS camera. */
-async function dashcamFor(orgId: string, vehicleId: string, from: Date, to: Date) {
-  try {
-    const answer = await Promise.race([
-      getAlarms(orgId, new Set([vehicleId]), from.toISOString()),
-      new Promise<null>(resolve => setTimeout(() => resolve(null), DASHCAM_WAIT_MS)),
-    ])
-    if (!answer) return { fitted: true, complete: false, alarms: [] }
-    if (answer.cameras === 0) return { fitted: false, complete: true, alarms: [] }
-    const alarms = answer.incidents
-      .filter(a => a.vehicleId === vehicleId && (DASHCAM_SEATBELT.has(a.code) || DASHCAM_CORNERING.has(a.code)))
-      .map(a => ({ t: a.occurredAt ? Date.parse(a.occurredAt) : null, kind: DASHCAM_SEATBELT.has(a.code) ? 'seatbelt' : 'turn',
-                   label: a.label, lat: a.lat, lng: a.lng, speed: a.speed }))
-      .filter(a => a.t != null && a.t >= from.getTime() && a.t <= to.getTime())
-    return { fitted: true, complete: !answer.partial && !answer.stale, alarms }
-  } catch (err) {
-    logger.warn({ err, vehicleId }, 'trip report: dashcam alarms failed')
-    return { fitted: true, complete: false, alarms: [] }
   }
 }
