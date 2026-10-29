@@ -21,6 +21,8 @@ import { factoryOf, bagsFromTonnes } from '../webhooks/factory-map.js'
 import { arrivalRadiusM, haversineM, type Point } from '../../lib/dispatch-trip.js'
 import { findZoneTimeline } from '../telemetry/telemetry.repository.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
+import { getAlarms } from '../dashcam/dashcam.service.js'
+import { tile, lon2x, lat2y } from '../usage-review/usage-review.pdf.js'
 import { logger } from '../../lib/logger.js'
 
 const MAX_WINDOW_MS = 7 * 86_400_000
@@ -38,6 +40,19 @@ const thin = <T>(rows: T[], max: number): T[] => {
 }
 
 const ms = (d: Date | null | undefined) => (d ? d.getTime() : null)
+
+/**
+ * Dashcam alarms that count as driver conduct (operator, 2026-10-29), by the
+ * VSS code that raises them. Only units with a camera get these columns.
+ */
+const DASHCAM_CONDUCT: Record<string, number[]> = {
+  seatbelt: [125, 51],     // No seat belt (driver camera), tracker seat-belt alarm
+  phone:    [116],         // Phone call
+  hands:    [262, 263],    // One / both hands off the wheel
+}
+const DASHCAM_KIND = new Map(Object.entries(DASHCAM_CONDUCT).flatMap(([k, codes]) => codes.map(c => [c, k] as const)))
+/** A VSS search can queue behind another; past this the page goes without. */
+const DASHCAM_WAIT_MS = 20_000
 
 /** CANE_DELIVERY → "Cane delivery". */
 const humanise = (s: string) => s.charAt(0) + s.slice(1).toLowerCase().replace(/_/g, ' ')
@@ -140,11 +155,21 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
     }),
   ])
 
-  // Best-effort: a slow PostGIS timeline must not cost the operator the page.
-  const zones = await findZoneTimeline(vehicleId, orgId, from, to).catch((err) => {
-    logger.warn({ err, vehicleId }, 'trip report: zone timeline failed')
-    return null
-  })
+  // Best-effort, both: a slow PostGIS timeline or a busy VSS server must not
+  // cost the operator the page.
+  const located0 = fixes.filter(f => f.lat != null && f.lng != null)
+  const [zones, dashcam, map] = await Promise.all([
+    findZoneTimeline(vehicleId, orgId, from, to).catch((err) => {
+      logger.warn({ err, vehicleId }, 'trip report: zone timeline failed')
+      return null
+    }),
+    dashcamConduct(orgId, vehicleId, dayFrom, dayTo),
+    routeMap([...located0.map(f => [f.lat!, f.lng!] as [number, number]),
+              ...[yard, dest].filter(Boolean).map(p => [p!.lat, p!.lng] as [number, number])]).catch((err) => {
+      logger.warn({ err, vehicleId }, 'trip report: map tiles failed')
+      return null
+    }),
+  ])
   const inTrip = (d: Date) => d >= from && d <= to
   const inDay = (d: Date) => d >= dayFrom && d <= dayTo
 
@@ -194,6 +219,7 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
     dest,
     arrivedAt,
     track,
+    map,
     fuel: {
       hasProbe: levels.length > 1,
       series: thin(levels, MAX_FUEL_POINTS).map(f => [f.capturedAt.getTime(), Math.round(f.fuelLevelMl! / 100) / 10]),
@@ -205,6 +231,7 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
                                  place: t.initialLocation, review: t.reviewStatus })),
     },
     // Driver conduct, for the day.
+    dashcam,
     escalatedThefts: thefts.filter(t => inDay(t.beganAt) && t.reviewStatus === 'CONFIRMED_THEFT')
       .map(t => ({ t: t.beganAt.getTime(), litres: t.stolenMl / 1000, place: t.initialLocation })),
     speeding: speeding.map(s => ({ t: s.startedAt.getTime(), durationSec: s.durationSec, distanceM: s.distanceM, peakKmh: s.peakKmh, limitKmh: s.limitKmh,
@@ -241,4 +268,63 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
         })),
     })),
   }
+}
+
+/**
+ * The unit's seat-belt, phone and hands-off-wheel alarms from its dashcam.
+ * `fitted: false` when it has no VSS camera (the page then has no such
+ * columns); `complete: false` when the camera server could not answer in time.
+ */
+async function dashcamConduct(orgId: string, vehicleId: string, from: Date, to: Date) {
+  try {
+    const answer = await Promise.race([
+      getAlarms(orgId, new Set([vehicleId]), from.toISOString()),
+      new Promise<null>(resolve => setTimeout(() => resolve(null), DASHCAM_WAIT_MS)),
+    ])
+    if (!answer) return { fitted: true, complete: false, alarms: [] }
+    if (answer.cameras === 0) return { fitted: false, complete: true, alarms: [] }
+    const alarms = answer.incidents
+      .filter(a => a.vehicleId === vehicleId && DASHCAM_KIND.has(a.code) && a.occurredAt)
+      .map(a => ({ t: Date.parse(a.occurredAt!), kind: DASHCAM_KIND.get(a.code)!, label: a.label, lat: a.lat, lng: a.lng, speed: a.speed }))
+      .filter(a => a.t >= from.getTime() && a.t <= to.getTime())
+      .sort((x, y) => x.t - y.t)
+    return { fitted: true, complete: !answer.partial && !answer.stale, alarms }
+  } catch (err) {
+    logger.warn({ err, vehicleId }, 'trip report: dashcam alarms failed')
+    return { fitted: true, complete: false, alarms: [] }
+  }
+}
+
+/** The route box on the page, in tile pixels (2:1, as the page draws it). */
+const MAP_W = 640, MAP_H = 320
+
+/**
+ * The base map under the route: the Logbook report's own OpenStreetMap tiles
+ * (greyed for print, cached), framed on the trip, as data URIs so the page
+ * needs nothing else to print. Null when there is nothing to frame or no
+ * tile came back — the page then draws the route on a blank box as before.
+ */
+async function routeMap(pts: [number, number][]) {
+  if (pts.length < 2) return null
+  let s = Infinity, n = -Infinity, w = Infinity, e = -Infinity
+  for (const [la, lo] of pts) { s = Math.min(s, la); n = Math.max(n, la); w = Math.min(w, lo); e = Math.max(e, lo) }
+  let z = 16
+  for (; z > 3; z--) {
+    if (lon2x(e, z) - lon2x(w, z) <= MAP_W * 0.86 && lat2y(s, z) - lat2y(n, z) <= MAP_H * 0.86) break
+  }
+  const cx = (lon2x(w, z) + lon2x(e, z)) / 2, cy = (lat2y(n, z) + lat2y(s, z)) / 2
+  const x0 = cx - MAP_W / 2, y0 = cy - MAP_H / 2
+  const max = 2 ** z
+  const want: { x: number; y: number }[] = []
+  for (let ty = Math.floor(y0 / 256); ty <= Math.floor((y0 + MAP_H) / 256); ty++) {
+    for (let tx = Math.floor(x0 / 256); tx <= Math.floor((x0 + MAP_W) / 256); tx++) {
+      if (ty >= 0 && ty < max) want.push({ x: tx, y: ty })
+    }
+  }
+  const tiles = (await Promise.all(want.map(async t => {
+    const buf = await tile(z, ((t.x % max) + max) % max, t.y)
+    return buf ? { x: t.x, y: t.y, src: `data:image/png;base64,${buf.toString('base64')}` } : null
+  }))).filter(Boolean)
+  if (!tiles.length) return null
+  return { z, x0, y0, w: MAP_W, h: MAP_H, tiles, attribution: '© OpenStreetMap contributors' }
 }
