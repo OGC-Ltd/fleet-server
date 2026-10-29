@@ -824,7 +824,7 @@ export interface DriverHarsh {
   kind:  'acceleration' | 'braking'
   plate: string | null
   route: string | null
-  attributedBy: 'trip'
+  attributedBy: 'trip' | 'posting' | 'posted'
 }
 
 export interface DriverOverspeed {
@@ -836,8 +836,10 @@ export interface DriverOverspeed {
   peakKmh:  number
   limitKmh: number
   /** 'record': the incident named the driver (the unit's assigned driver when
-   *  it was captured). 'trip': inferred from the trip running at the time. */
-  attributedBy: 'record' | 'trip'
+   *  it was captured). 'trip': the trip running at the time. 'posting': the
+   *  driver posted to the unit at the time. 'posted': captured before the unit
+   *  had any driver posted, credited to the one posted to it now. */
+  attributedBy: 'record' | 'trip' | 'posting' | 'posted'
   /** An administrator escalated it on the Alerts page. */
   escalated: boolean
 }
@@ -913,7 +915,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   // trip each: the drivers' full trip history (with cargo + route for tonnage
   // and the heaviest-load callout), their fuel-theft rows, and the org's
   // overspeeding alerts (attributed to trips by vehicle + time window below).
-  const [trips, thefts, speeding, assignments, harsh] = await Promise.all([
+  const [trips, thefts, speeding, assignments, harsh, postings] = await Promise.all([
     prisma.trip.findMany({
       where:  { driverId: { in: driverIds }, vehicle: { organisationId: orgId } },
       select: {
@@ -994,6 +996,12 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       where:  { organisationId: orgId, type: { in: ['HARSH_ACCELERATION', 'HARSH_BRAKING'] }, vehicleId: { not: null } },
       select: { id: true, vehicleId: true, type: true, createdAt: true, vehicle: { select: { registrationPlate: true } } },
       orderBy: { createdAt: 'desc' },
+    }),
+    // Every posting of a roster driver, open or closed: who was on a unit at
+    // an instant, for the overspeeding no trip covers.
+    prisma.vehicleAssignment.findMany({
+      where:  { userId: { in: driverIds }, vehicle: { organisationId: orgId } },
+      select: { userId: true, vehicleId: true, assignedAt: true, unassignedAt: true },
     }),
   ])
 
@@ -1097,21 +1105,52 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     theftsByDriver.set(driverId, arr)
   }
 
-  // Overspeeding per driver. The incident's own driver wins; one with none is
-  // pinned to the trip running on that unit at that instant, and one with
-  // neither stays unattributed rather than landing on the unit's usual driver.
+  // Overspeeding per driver, first match wins:
+  //   1. the driver the incident names, when they are on the roster (a
+  //      dispatch posting can name a user who is not a driver);
+  //   2. the driver of the trip running on that unit at that instant;
+  //   3. the roster driver posted to the unit at that instant;
+  //   4. an incident from before the unit had ANY driver posted -- Menengai's
+  //      roster went in on 2026-10-21, months after its trackers began
+  //      reporting -- goes to the one roster driver posted to the unit now.
+  //      Two or more posted now is ambiguous and it stays unattributed.
+  // Steps 3-4 are what put KCP 145P's cases on its driver's card (operator,
+  // 2026-10-29: "he has overspeed cases but his card shows 0"). The card says
+  // which route credited each case.
   //
   // Every incident lowers the rating (operator, 2026-10-28). The suspension
   // rate still counts TRIPS oversped, one however many incidents a trip
   // raised, so `cases / trips` keeps reading as a share of trips.
+  const onRoster = new Set(driverIds)
+  const postingsByVehicle = new Map<string, typeof postings>()
+  for (const p of postings) {
+    const arr = postingsByVehicle.get(p.vehicleId) ?? []
+    arr.push(p); postingsByVehicle.set(p.vehicleId, arr)
+  }
+  const postedAt = (vehicleId: string, at: Date): string | null => {
+    const on = [...new Set((postingsByVehicle.get(vehicleId) ?? [])
+      .filter(p => p.assignedAt <= at && (p.unassignedAt == null || p.unassignedAt > at))
+      .map(p => p.userId))]
+    return on.length === 1 ? on[0] : null
+  }
+  const postedBefore = (vehicleId: string, at: Date): boolean =>
+    (postingsByVehicle.get(vehicleId) ?? []).some(p => p.assignedAt <= at)
+  const postedNow = (vehicleId: string): string | null => {
+    const on = [...new Set((postingsByVehicle.get(vehicleId) ?? []).filter(p => p.unassignedAt == null).map(p => p.userId))]
+    return on.length === 1 ? on[0] : null
+  }
   const overspeedTripsByDriver = new Map<string, Set<TripRow>>()
   const overspeedsByDriver = new Map<string, DriverOverspeed[]>()
   for (const a of speeding) {
+    const named = a.driverId && onRoster.has(a.driverId) ? a.driverId : null
     const hit = (tripsByVehicle.get(a.vehicleId) ?? []).find(t =>
-      (a.driverId ? t.driverId === a.driverId : !!t.driverId)
+      (named ? t.driverId === named : !!t.driverId)
         && a.startedAt >= t.beganAt && (t.endedAt == null || a.startedAt <= t.endedAt),
     )
-    const driverId = a.driverId ?? hit?.driverId
+    const posting = named || hit?.driverId ? null : postedAt(a.vehicleId, a.startedAt)
+    const posted = named || hit?.driverId || posting || postedBefore(a.vehicleId, a.startedAt)
+      ? null : postedNow(a.vehicleId)
+    const driverId = named ?? hit?.driverId ?? posting ?? posted
     if (!driverId) continue
     if (hit) {
       const set = overspeedTripsByDriver.get(driverId) ?? new Set<TripRow>()
@@ -1125,14 +1164,17 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       route:     hit?.route?.name ?? null,
       peakKmh:   Math.round(a.peakKmh),
       limitKmh:  Math.round(a.limitKmh),
-      attributedBy: a.driverId ? 'record' : 'trip',
+      attributedBy: named ? 'record' : hit?.driverId ? 'trip' : posting ? 'posting' : 'posted',
       escalated: a.reviewStatus === 'ESCALATED',
     })
     overspeedsByDriver.set(driverId, arr)
   }
 
-  // Harsh driving per driver: every report counts, pinned to the trip running
-  // on that unit at that instant. Kept as instants so the detail can window them.
+  // Harsh driving per driver: every report counts, credited like overspeeding
+  // (trip, then the posting at the time, then -- before the unit had any
+  // driver posted -- the one posted now). Kept as instants so the detail can
+  // window them. Trip-only crediting missed every unit with no trips recorded,
+  // KCP 145P's harsh acceleration of 2026-10-28 among them.
   const harshByDriver = new Map<string, { accel: Date[]; brake: Date[] }>()
   const harshListByDriver = new Map<string, DriverHarsh[]>()
   for (const h of harsh) {
@@ -1140,20 +1182,23 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     const hit = (tripsByVehicle.get(h.vehicleId) ?? []).find(t =>
       t.driverId && h.createdAt >= t.beganAt && (t.endedAt == null || h.createdAt <= t.endedAt),
     )
-    if (!hit?.driverId) continue
-    const entry = harshByDriver.get(hit.driverId) ?? { accel: [], brake: [] }
+    const vId = h.vehicleId
+    const driverId = hit?.driverId ?? postedAt(vId, h.createdAt)
+      ?? (postedBefore(vId, h.createdAt) ? null : postedNow(vId))
+    if (!driverId) continue
+    const entry = harshByDriver.get(driverId) ?? { accel: [], brake: [] }
     ;(h.type === 'HARSH_ACCELERATION' ? entry.accel : entry.brake).push(h.createdAt)
-    harshByDriver.set(hit.driverId, entry)
-    const list = harshListByDriver.get(hit.driverId) ?? []
+    harshByDriver.set(driverId, entry)
+    const list = harshListByDriver.get(driverId) ?? []
     list.push({
       id:    h.id,
       at:    h.createdAt.toISOString(),
       kind:  h.type === 'HARSH_ACCELERATION' ? 'acceleration' : 'braking',
       plate: h.vehicle?.registrationPlate ?? null,
-      route: hit.route?.name ?? null,
-      attributedBy: 'trip',
+      route: hit?.route?.name ?? null,
+      attributedBy: hit?.driverId ? 'trip' : postedBefore(vId, h.createdAt) ? 'posting' : 'posted',
     })
-    harshListByDriver.set(hit.driverId, list)
+    harshListByDriver.set(driverId, list)
   }
 
   /**
