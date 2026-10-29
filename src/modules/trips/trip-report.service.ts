@@ -9,9 +9,10 @@
 //
 // The window is departure → return (or now, while the run is open), capped at
 // the last 7 days so an unclosed dispatch cannot turn into a month of fixes.
-// The driver's conduct and the weighbridge tickets are for the whole fleet DAY
-// of the departure (operator, 2026-10-29), stretched to the trip's end when the
-// run crosses midnight.
+// The driver's conduct and the weighbridge tickets run from the start of the
+// fleet day of departure to the END OF THE TRIP (operator, 2026-10-29): earlier
+// runs that day count, a run past midnight keeps its return weighing, and
+// nothing after the unit is back does.
 
 import { prisma } from '../../lib/prisma.js'
 import { NotFoundError } from '../../core/errors/errors.js'
@@ -75,7 +76,7 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
   const begin = Math.max(dispatch.dispatchedAt.getTime(), end - MAX_WINDOW_MS)
   const from = new Date(begin), to = new Date(Math.max(end, begin + 60_000))
   const dayFrom = fleetDayStart(dispatch.dispatchedAt)
-  const dayTo = new Date(Math.min(now, Math.max(dayFrom.getTime() + 86_400_000, to.getTime())))
+  const dayTo = to
 
   // Where it left from and where it was going — the same anchors as the trip
   // card: the gate it was signed out at, else the organisation's hub; a stated
@@ -127,8 +128,8 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
     }),
     prisma.weighment.findMany({
       where:   { organisationId: orgId, OR: [{ vehicleId }, { vehiclePlate: vehicle.registrationPlate }],
-                 // Every ticket the unit raised that fleet day — a cane truck is
-                 // weighed when it comes back, so a run past midnight keeps its own.
+                 // Every ticket the unit raised from the start of the day to the end
+                 // of the trip — a cane truck is weighed when it comes back.
                  tokenAt: { gte: dayFrom, lte: dayTo } },
       orderBy: { tokenAt: 'asc' },
       select:  { tokenNumber: true, tokenAt: true, grossWeightKg: true, grossAt: true, grossBridgeNo: true,
