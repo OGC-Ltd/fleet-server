@@ -37,12 +37,20 @@
  *   npx tsx prisma/readjudicate-fuel.ts --days 45
  *   npx tsx prisma/readjudicate-fuel.ts --days 45 --apply
  *   npx tsx prisma/readjudicate-fuel.ts --org SUKARI --days 60 --apply
+ *
+ * --causes also rewrites the CAUSE, the figures and the measured evidence
+ * (judgementData, the live sweep's own write) wherever any of them would
+ * change, not the verdict alone. Still never notifies. Used 2026-10-30 to bring
+ * drains judged since 29 Oct onto the clean figures and the widened
+ * standing-theft rule:
+ *
+ *   npx tsx prisma/readjudicate-fuel.ts --since 2026-10-29T00:00:00+03:00 --causes
  */
 
 import 'dotenv/config'
 import { prisma } from '../src/lib/prisma.js'
 import { isConfirmed, isUncheckable, OBSERVED_DROP_MIN_RATIO, RECOVERY_THRESHOLD } from '../src/modules/fuel/fuel-adjudication.js'
-import { judgeDrain } from '../src/modules/fuel/fuel-adjudication.service.js'
+import { judgeDrain, judgementData } from '../src/modules/fuel/fuel-adjudication.service.js'
 import { announces } from '../src/modules/fuel/fuel-theft-classifier.js'
 
 const argv  = process.argv.slice(2)
@@ -54,13 +62,17 @@ const flag  = (name: string): string | null => {
 const ONLY_ORG = flag('org')?.toUpperCase() ?? null
 const DAYS     = Number(flag('days') ?? 30)
 const LIMIT    = Number(flag('limit') ?? 5000)
+const SINCE    = flag('since')
+const CAUSES   = argv.includes('--causes')
 
 const L = (ml: number) => `${(ml / 1000).toFixed(1)} L`
 
 async function main() {
-  const since = new Date(Date.now() - DAYS * 24 * 3600_000)
+  const since = SINCE ? new Date(SINCE) : new Date(Date.now() - DAYS * 24 * 3600_000)
+  if (Number.isNaN(since.getTime())) throw new Error(`--since: not a date: ${SINCE}`)
+  if (CAUSES) console.log('    --causes: cause, figures and evidence are rewritten too')
   console.log(`\n⛽  re-judging drains already given a verdict  ${APPLY ? '(APPLYING)' : '(dry run)'}`)
-  console.log(`    window ${DAYS} days (since ${since.toISOString().slice(0, 10)}) · recovery ${(RECOVERY_THRESHOLD * 100).toFixed(0)}% · observed drop ≥ ${(OBSERVED_DROP_MIN_RATIO * 100).toFixed(0)}% of claim\n`)
+  console.log(`    window since ${since.toISOString().slice(0, 16).replace('T', ' ')} UTC · recovery ${(RECOVERY_THRESHOLD * 100).toFixed(0)}% · observed drop ≥ ${(OBSERVED_DROP_MIN_RATIO * 100).toFixed(0)}% of claim\n`)
 
   const orgs = await prisma.organisation.findMany({ select: { id: true, code: true, name: true } })
   const now  = new Date()
@@ -79,7 +91,7 @@ async function main() {
       select: {
         id: true, vehicleId: true, beganAt: true, detectedAt: true, stolenMl: true,
         verdict: true, verdictReason: true, recoveredMl: true,
-        drainCause: true, causeReason: true,
+        drainCause: true, causeReason: true, measuredDropMl: true, cleanDropMl: true,
         vehicle: { select: { registrationPlate: true } },
       },
       orderBy: { beganAt: 'desc' },
@@ -149,6 +161,22 @@ async function main() {
       causeMatrix[`${cFrom} → ${cTo}`] = (causeMatrix[`${cFrom} → ${cTo}`] ?? 0) + 1
       if (t.drainCause != null && announces({ cause: t.drainCause, reason: t.causeReason ?? '' })) announcedBefore++
       if (next.cause != null && announces(next.cause)) announcedAfter++
+
+      // The stated figure: the clean one where the row has it, else the fall.
+      if (CAUSES) {
+        const figure = (ml: number | null) => ml == null ? '—' : L(ml)
+        const before = t.cleanDropMl ?? t.measuredDropMl
+        const after  = next.lossMl ?? next.evidence?.dropMl ?? null
+        if (from === to && cFrom === cTo && before === after) continue
+        changes.push(
+          `     ${t.vehicle.registrationPlate.padEnd(16)} ${t.beganAt.toISOString().slice(0, 16).replace('T', ' ')}  ` +
+          `${cFrom === cTo ? cFrom : `${cFrom} → ${cTo}`}  ${figure(before)} → ${figure(after)}` +
+          (from === to ? '' : `  [${from} → ${to}]`),
+        )
+        grandChanged++
+        if (APPLY) await prisma.fuelTheft.update({ where: { id: t.id }, data: judgementData(next, now) })
+        continue
+      }
 
       if (from === to) continue
 
