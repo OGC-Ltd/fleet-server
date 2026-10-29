@@ -60,11 +60,24 @@ describe('calculateDriverRating', () => {
     expect(result.score).toBeLessThan(55)
   })
 
-  it('takes a point off for every harsh acceleration and hard braking report', () => {
+  it('takes 0.2 off the rating for every harsh acceleration and hard braking report', () => {
     const base = { baseScore: 5, trips: 20, mileageKm: 1200, tonnes: 45, daysSinceLastTrip: 1 }
     const clean = calculateDriverRating(base)
     const harsh = calculateDriverRating({ ...base, harshAccelerationCases: 3, harshBrakingCases: 2 })
-    expect(clean.score - harsh.score).toBe(5)
+    expect(harsh.score).toBe(clean.score)
+    expect(harsh.rating).toBe(clean.rating - 1)
+  })
+
+  it('never takes the rating below 0', () => {
+    const base = { baseScore: 5, trips: 20, mileageKm: 1200, tonnes: 45, daysSinceLastTrip: 1 }
+    const r = calculateDriverRating({ ...base, harshAccelerationCases: 400, harshBrakingCases: 300 })
+    expect(r.rating).toBe(0)
+    expect(r.band).toBe('Poor')
+  })
+
+  it('takes six points off for every fuel theft case', () => {
+    const base = { baseScore: 5, trips: 20, mileageKm: 1200, tonnes: 45, daysSinceLastTrip: 1 }
+    expect(calculateDriverRating(base).score - calculateDriverRating({ ...base, fuelTheftCases: 2 }).score).toBe(12)
   })
 
   it('takes three points off for every overspeeding case', () => {
