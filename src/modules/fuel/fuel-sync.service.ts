@@ -323,7 +323,7 @@ export async function syncVehicleFuelEvents(
       where:  { vehicleId: vehicle.id, beganAt: { lte: opts.to }, detectedAt: { gte: opts.from } },
       select: {
         id: true, beganAt: true, detectedAt: true, stolenMl: true,
-        finalFuelLevelMl: true, dismissedAt: true, verdict: true,
+        initialFuelLevelMl: true, finalFuelLevelMl: true, dismissedAt: true, verdict: true,
         drainCause: true, reviewStatus: true,
       },
     }),
@@ -544,7 +544,7 @@ export async function syncVehicleFuelEvents(
         if (created) {
           knownThefts.push({
             id: created.id, beganAt: t.beganAt, detectedAt: t.detectedAt,
-            stolenMl: t.stolenMl, finalFuelLevelMl: t.finalFuelLevelMl,
+            stolenMl: t.stolenMl, initialFuelLevelMl: t.initialFuelLevelMl, finalFuelLevelMl: t.finalFuelLevelMl,
             dismissedAt: created.dismissedAt ?? null,
             verdict: 'PENDING', drainCause: null, reviewStatus: null,
           })

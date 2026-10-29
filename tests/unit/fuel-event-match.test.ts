@@ -73,6 +73,47 @@ describe('sameDrain', () => {
     const b = drain('2026-08-03T10:30:00Z', '2026-08-03T11:00:00Z')
     expect(sameDrain(a, b)).toBe(true)
   })
+
+  describe('re-clamped instants', () => {
+    const lv = (began: string, detected: string, initialL: number, finalL: number) =>
+      ({ ...drain(began, detected), initialFuelLevelMl: initialL * 1000, finalFuelLevelMl: finalL * 1000 })
+
+    it('matches one fall Wialon placed at two minutes (KCX 795S, 24 Oct)', () => {
+      // Our tank fell 10 L in all; these were stored as two rows and announced
+      // as two possible thefts, the second 8 h late.
+      const a = lv('2026-10-24T16:30:36Z', '2026-10-24T16:31:52Z', 54, 43)
+      const b = lv('2026-10-24T16:38:01Z', '2026-10-24T16:38:01Z', 54, 43)
+      expect(sameDrain(a, b)).toBe(true)
+      expect(sameDrain(b, a)).toBe(true)
+    })
+
+    it('matches a version 15 min on that ends at the same level (KTCC 189M, 27 Oct)', () => {
+      const a = lv('2026-10-27T16:42:32Z', '2026-10-27T16:43:32Z', 35, 24)
+      const b = lv('2026-10-27T16:58:32Z', '2026-10-27T16:58:32Z', 37, 24)
+      expect(sameDrain(a, b)).toBe(true)
+    })
+
+    it('keeps a second drain that ends lower apart', () => {
+      // KTCC 192M, 28 Oct: 85→70 then 69→53 — the tank went on falling.
+      const a = lv('2026-10-28T10:09:13Z', '2026-10-28T10:09:25Z', 85, 70)
+      const b = lv('2026-10-28T10:28:19Z', '2026-10-28T10:29:19Z', 69, 53)
+      expect(sameDrain(a, b)).toBe(false)
+    })
+
+    it('keeps them apart when fuel arrived in between', () => {
+      // Same end level, but the second starts well above the first: a refill
+      // came between two real drains.
+      const a = lv('2026-10-28T10:00:00Z', '2026-10-28T10:02:00Z', 60, 40)
+      const b = lv('2026-10-28T10:15:00Z', '2026-10-28T10:16:00Z', 80, 40)
+      expect(sameDrain(a, b)).toBe(false)
+    })
+
+    it('keeps them apart past the gap, or without levels', () => {
+      const a = lv('2026-10-28T10:00:00Z', '2026-10-28T10:02:00Z', 54, 43)
+      expect(sameDrain(a, lv('2026-10-28T10:23:00Z', '2026-10-28T10:23:00Z', 54, 43))).toBe(false)
+      expect(sameDrain(a, drain('2026-10-28T10:08:00Z', '2026-10-28T10:08:00Z'))).toBe(false)
+    })
+  })
 })
 
 describe('sameFilling', () => {
