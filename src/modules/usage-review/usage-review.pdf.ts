@@ -132,7 +132,7 @@ export function greyPng(buf: Buffer): Buffer {
 }
 
 const tileCache = new Map<string, Buffer | null>()
-async function tile(z: number, x: number, y: number): Promise<Buffer | null> {
+export async function tile(z: number, x: number, y: number): Promise<Buffer | null> {
   const k = `${z}/${x}/${y}`
   if (tileCache.has(k)) return tileCache.get(k) ?? null
   try {
@@ -144,8 +144,8 @@ async function tile(z: number, x: number, y: number): Promise<Buffer | null> {
   } catch { return null }
 }
 
-const lon2x = (lng: number, z: number) => ((lng + 180) / 360) * 256 * 2 ** z
-const lat2y = (lat: number, z: number) => {
+export const lon2x = (lng: number, z: number) => ((lng + 180) / 360) * 256 * 2 ** z
+export const lat2y = (lat: number, z: number) => {
   const s = Math.sin((lat * Math.PI) / 180)
   return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * 256 * 2 ** z
 }
