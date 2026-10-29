@@ -1,95 +1,48 @@
 import { describe, expect, it } from 'vitest'
-import { calculateDriverRating } from '../../src/modules/analytics/driver-rating.js'
+import { calculateDriverRating, dutyDaysOf } from '../../src/modules/analytics/driver-rating.js'
 
 describe('calculateDriverRating', () => {
-  it('marks a driver inactive when they have no recent work', () => {
-    const result = calculateDriverRating({
-      baseScore: 4,
-      trips: 0,
-      mileageKm: 0,
-      tonnes: 0,
-      incentiveBonus: 0,
-      fuelTheftCases: 0,
-      overspeedingCases: 0,
-      daysSinceLastTrip: 45,
-    })
+  const full = { trips: 40, mileageKm: 2500, tonnes: 100, dutyDays: 30 }
 
-    expect(result).toEqual({
-      score: 0,
-      rating: 0,
-      band: 'Inactive',
-    })
+  it('leaves a driver with no work and no duty unrated', () => {
+    expect(calculateDriverRating({})).toEqual({ score: 0, rating: 0, band: 'Inactive' })
   })
 
-  it('rewards a strong, safe, productive driver with an excellent rating', () => {
-    const result = calculateDriverRating({
-      baseScore: 5,
-      trips: 40,
-      mileageKm: 2500,
-      tonnes: 100,
-      incentiveBonus: 10,
-      fuelTheftCases: 0,
-      overspeedingCases: 0,
-      daysSinceLastTrip: 7,
-    })
-
-    expect(result.band).toBe('Excellent')
-    expect(result.rating).toBe(5)
-    expect(result.score).toBeGreaterThanOrEqual(85)
+  it('earns 5 from full work and a month on duty', () => {
+    const r = calculateDriverRating(full)
+    expect(r.rating).toBe(5)
+    expect(r.band).toBe('Excellent')
   })
 
-  it('penalizes theft and overspeeding heavily', () => {
-    const result = calculateDriverRating({
-      baseScore: 3,
-      trips: 20,
-      mileageKm: 1200,
-      tonnes: 45,
-      incentiveBonus: 2,
-      fuelTheftCases: 2,
-      overspeedingCases: 4,
-      daysSinceLastTrip: 10,
-    })
-
-    // The band this tier reports was renamed 'Weak' -> 'Needs Improvement'
-    // for the operator-facing scale; the tier itself did not move. Its
-    // threshold constant is still DRIVER_RATING_CONFIG.weakMin and it still
-    // scores rating 3, which is why the two assertions below are untouched.
-    expect(result.band).toBe('Needs Improvement')
-    expect(result.rating).toBe(3)
-    expect(result.score).toBeGreaterThanOrEqual(45)
-    expect(result.score).toBeLessThan(55)
+  it('earns half from work and half from duty, starting at 0', () => {
+    expect(calculateDriverRating({ dutyDays: 30 }).rating).toBe(2.5)
+    expect(calculateDriverRating({ dutyDays: 15 }).rating).toBe(1.3)
+    expect(calculateDriverRating({ trips: 40, mileageKm: 2500, tonnes: 100 }).rating).toBe(2.5)
+    expect(calculateDriverRating({ trips: 20, mileageKm: 1250, tonnes: 50, dutyDays: 30 }).rating).toBe(3.8)
   })
 
-  it('takes 0.2 off the rating for every harsh acceleration and hard braking report', () => {
-    const base = { baseScore: 5, trips: 20, mileageKm: 1200, tonnes: 45, daysSinceLastTrip: 1 }
-    const clean = calculateDriverRating(base)
-    const harsh = calculateDriverRating({ ...base, harshAccelerationCases: 3, harshBrakingCases: 2 })
-    expect(harsh.score).toBe(clean.score)
-    expect(harsh.rating).toBe(clean.rating - 1)
+  it('takes 0.2 off for every harsh acceleration and hard braking report', () => {
+    expect(calculateDriverRating({ ...full, harshAccelerationCases: 3, harshBrakingCases: 2 }).rating).toBe(4)
   })
 
-  it('rates a driver posted to a unit with no trips, from 5 down by their cases', () => {
-    const posted = { baseScore: 5, trips: 0, mileageKm: 0, daysSinceLastTrip: 999, postedToUnit: true }
-    expect(calculateDriverRating({ ...posted, postedToUnit: false }).band).toBe('Inactive')
-    expect(calculateDriverRating(posted).rating).toBe(5)
-    expect(calculateDriverRating({ ...posted, harshAccelerationCases: 1 }).rating).toBe(4.8)
-    expect(calculateDriverRating({ ...posted, fuelTheftCases: 2 }).rating).toBeLessThan(5)
+  it('keeps the original weights for confirmed theft and overspeeding', () => {
+    expect(calculateDriverRating({ ...full, fuelTheftCases: 2 }).rating).toBe(4.4)
+    expect(calculateDriverRating({ ...full, overspeedingCases: 2 }).rating).toBe(4.7)
   })
 
-  it('never takes the rating below 0', () => {
-    const base = { baseScore: 5, trips: 20, mileageKm: 1200, tonnes: 45, daysSinceLastTrip: 1 }
-    const r = calculateDriverRating({ ...base, harshAccelerationCases: 400, harshBrakingCases: 300 })
+  it('never goes below 0', () => {
+    const r = calculateDriverRating({ dutyDays: 30, harshAccelerationCases: 400 })
     expect(r.rating).toBe(0)
     expect(r.band).toBe('Poor')
   })
+})
 
-  it('takes six points off for every fuel theft case', () => {
-    const base = { baseScore: 5, trips: 20, mileageKm: 1200, tonnes: 45, daysSinceLastTrip: 1 }
-    expect(calculateDriverRating(base).score - calculateDriverRating({ ...base, fuelTheftCases: 2 }).score).toBe(12)
-  })
-
-  it('takes three points off for every overspeeding case', () => {
-    const base = { baseScore: 5, trips: 20, mileageKm: 1200, tonnes: 45, daysSinceLastTrip: 1 }
-    expect(calculateDriverRating(base).score - calculateDriverRating({ ...base, overspeedingCases: 2 }).score).toBe(6)
+describe('dutyDaysOf', () => {
+  const d = (s: string) => new Date(s + 'T00:00:00Z')
+  it('counts overlapping postings once and open ones up to now', () => {
+    expect(dutyDaysOf([
+      { assignedAt: d('2026-10-01'), unassignedAt: d('2026-10-11') },
+      { assignedAt: d('2026-10-05'), unassignedAt: null },
+    ], d('2026-10-21'))).toBe(20)
   })
 })

@@ -7,7 +7,7 @@ import { fleetDayStart } from '../../lib/provider-time.js'
 // how two cards on one page start disagreeing about how far a fleet went.
 import { coveredSince } from '../dispatches/dispatch.repository.js'
 import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery } from './analytics.schema.js'
-import { calculateDriverRating } from './driver-rating.js'
+import { calculateDriverRating, dutyDaysOf } from './driver-rating.js'
 import type { FuelEventVerdict } from '../../../generated/prisma/client.js'
 import { NO_FUEL_LEFT, NO_FUEL_ARRIVED } from '../fuel/fuel-adjudication.js'
 import { vehicleSql } from './vehicle-filter.js'
@@ -1037,6 +1037,11 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   }
   const postedBefore = (vehicleId: string, at: Date): boolean =>
     (postingsByVehicle.get(vehicleId) ?? []).some(p => p.assignedAt <= at)
+  const postingsByDriver = new Map<string, typeof postings>()
+  for (const p of postings) {
+    const arr = postingsByDriver.get(p.userId) ?? []
+    arr.push(p); postingsByDriver.set(p.userId, arr)
+  }
   const postedNow = (vehicleId: string): string | null => {
     const on = [...new Set((postingsByVehicle.get(vehicleId) ?? []).filter(p => p.unassignedAt == null).map(p => p.userId))]
     return on.length === 1 ? on[0] : null
@@ -1248,24 +1253,17 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       lifetimeKg += manifestKg(t.cargoManifest)
     }
 
-    const latestTripAt = dTrips.reduce<Date | null>((latest, t) => {
-      if (!latest || t.beganAt > latest) return t.beganAt
-      return latest
-    }, null)
-    const daysSinceLastTrip = latestTripAt ? Math.floor((Date.now() - latestTripAt.getTime()) / 86_400_000) : 999
-
+    // Earned from 0: lifetime work, days posted, minus lifetime cases -- the
+    // same figures the roster row shows.
     const ratingResult = calculateDriverRating({
-      baseScore: d.driverRatingScore ?? 5,
       trips: dTrips.length,
       mileageKm: lifetimeKm,
       tonnes: toTonnes(lifetimeKg),
-      incentiveBonus: 0,
+      dutyDays: dutyDaysOf(postingsByDriver.get(d.id) ?? []),
       fuelTheftCases: chargeable,
       overspeedingCases: lifetimeOverspeedAlerts,
       harshAccelerationCases: dHarsh.accel.length,
       harshBrakingCases: dHarsh.brake.length,
-      daysSinceLastTrip,
-      postedToUnit: postedPlate.has(d.id),
     })
     const rating = ratingResult.rating
 
@@ -1480,18 +1478,26 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
     harshBrakingCases = harsh.filter(h => h.type === 'HARSH_BRAKING' && onTrip(h.vehicleId, h.createdAt)).length
   }
 
+  // Days on duty inside the window, from their postings in this org.
+  const postings = driver
+    ? await prisma.vehicleAssignment.findMany({
+        where:  { userId: driverId, vehicle: { organisationId: orgId }, assignedAt: { lte: to },
+                  OR: [{ unassignedAt: null }, { unassignedAt: { gte: from } }] },
+        select: { assignedAt: true, unassignedAt: true },
+      })
+    : []
   const finalDriverRating = driver
     ? calculateDriverRating({
-        baseScore: driver.driverRatingScore ?? 5,
         trips: trips.length,
         mileageKm: trips.reduce((sum, t) => sum + (t.mileageKm ?? 0), 0),
         tonnes: toTonnes(trips.reduce((sum, t) => sum + manifestKg(t.cargoManifest), 0)),
-        incentiveBonus: 0,
+        dutyDays: dutyDaysOf(postings.map(p => ({
+          assignedAt: p.assignedAt < from ? from : p.assignedAt, unassignedAt: p.unassignedAt,
+        })), to),
         fuelTheftCases,
         overspeedingCases,
         harshAccelerationCases,
         harshBrakingCases,
-        daysSinceLastTrip: trips.length > 0 ? Math.floor((Date.now() - trips[trips.length - 1].beganAt.getTime()) / 86_400_000) : 999,
       })
     : null
 
