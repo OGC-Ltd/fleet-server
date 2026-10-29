@@ -131,8 +131,11 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
                  // weighed when it comes back, so a run past midnight keeps its own.
                  tokenAt: { gte: dayFrom, lte: dayTo } },
       orderBy: { tokenAt: 'asc' },
-      select:  { tokenNumber: true, tokenAt: true, grossWeightKg: true, grossAt: true, grossBridgeNo: true, tareAt: true,
-                 tareWeightKg: true, netWeightKg: true, productName: true, category: true, centerName: true, driverName: true },
+      select:  { tokenNumber: true, tokenAt: true, grossWeightKg: true, grossAt: true, grossBridgeNo: true,
+                 tareWeightKg: true, tareAt: true, tareBridgeNo: true, netWeightKg: true,
+                 factoryGrossWeightKg: true, factoryGrossAt: true, factoryGrossBridgeNo: true,
+                 factoryTareWeightKg: true, factoryTareAt: true, factoryTareBridgeNo: true, factoryNetWeightKg: true,
+                 productName: true, category: true, centerName: true, driverName: true },
     }),
   ])
 
@@ -217,9 +220,24 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
         name: v.zone_name, enteredAt: v.entered_at.getTime(), leftAt: v.left_at.getTime(), enforced: v.enforced ?? false,
       })),
     },
+    // Every weighing on every ticket of the day, as the bridge recorded it.
     weighments: weighments.map(w => ({
-      ticket: w.tokenNumber.toString(), at: weighedAt(w), bridge: w.grossBridgeNo != null ? `${w.centerName} · bridge ${w.grossBridgeNo}` : w.centerName,
-      grossKg: w.grossWeightKg, tareKg: w.tareWeightKg, netKg: w.netWeightKg, cargo: w.productName ?? humanise(w.category), driver: w.driverName || null,
+      ticket: w.tokenNumber.toString(), tokenAt: w.tokenAt.getTime(), at: weighedAt(w),
+      centre: w.centerName, grossKg: w.grossWeightKg, tareKg: w.tareWeightKg, netKg: w.factoryNetWeightKg ?? w.netWeightKg,
+      cargo: w.productName ?? humanise(w.category), driver: w.driverName || null,
+      weighings: ([
+        ['Tare', w.tareWeightKg, w.tareAt, w.tareBridgeNo, w.centerName],
+        ['Gross', w.grossWeightKg, w.grossAt, w.grossBridgeNo, w.centerName],
+        ['Factory gross', w.factoryGrossWeightKg, w.factoryGrossAt, w.factoryGrossBridgeNo, 'Factory'],
+        ['Factory tare', w.factoryTareWeightKg, w.factoryTareAt, w.factoryTareBridgeNo, 'Factory'],
+      ] as const)
+        .filter(([, kg, at]) => kg != null && at != null)
+        .map(([kind, kg, at, bridgeNo, centre]) => ({
+          kind, kg, at: at!.getTime(), bridge: bridgeNo != null ? `${centre} · bridge ${bridgeNo}` : centre,
+          // A weighing stamped before its own ticket was raised has a wrong date
+          // at source (see weighedAt); it is printed, but not measured against.
+          doubtful: at! < w.tokenAt,
+        })),
     })),
   }
 }
