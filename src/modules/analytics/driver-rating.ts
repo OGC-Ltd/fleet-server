@@ -1,146 +1,108 @@
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
+// A driver's rating starts at 0 and is EARNED up to 5 (operator, 2026-10-29:
+// "by default the rating starts from 0 working it all up to 5"): half from the
+// work they have done, half from the days they have been on duty. Their cases
+// then come off it, and it never goes below 0. Nothing is given for being on
+// the books -- the old model handed every driver half the score as a retainer.
 const DRIVER_RATING_CONFIG = {
-  retainerWeight: 50,
-  productivityWeight: 30,
-  incentivesWeight: 10,
-  safetyWeight: 20,
+  maxRating: 5,
+  workShare: 0.5,
+  dutyShare: 0.5,
 
+  // Work: the workbook's trip-wise pay model -- trip volume, distance and
+  // tonnage, each capped so one metric cannot carry it alone.
   maxTripsForProductivity: 40,
   maxMileageKmForProductivity: 2500,
   maxTonnesForProductivity: 100,
+  tripsPoints: 12,
+  mileagePoints: 10,
+  tonnesPoints: 8,
 
-  theftPenaltyPerCase: 6,
-  overspeedPenaltyPerCase: 3,
-  // Each harsh acceleration or hard braking report takes 0.2 off the rating
-  // out of 5 itself, not off the score (operator, 2026-10-29), and the rating
-  // stops at 0.
-  harshRatingPenaltyPerCase: 0.2,
+  // Duty: days posted to a unit. A month on duty is the full half.
+  fullDutyDays: 30,
 
-  inactivityWindowDays: 30,
-  inactiveScore: 0,
-  inactiveRating: 0,
-
-  excellentMin: 85,
-  veryGoodMin: 75,
-  goodMin: 65,
-  fairMin: 55,
-  weakMin: 45,
-  poorMin: 35,
+  // Off the rating out of 5, per case. Theft and overspeeding keep their
+  // original weights on the 100-point scale (6 and 3 points), here in fifths
+  // of 100; harsh driving is 0.2 a report (operator, 2026-10-29).
+  theftPenaltyPerCase: 6 / 20,
+  overspeedPenaltyPerCase: 3 / 20,
+  harshPenaltyPerCase: 0.2,
 } as const
 
 export interface DriverRatingInput {
-  baseScore?: number
   trips?: number
   mileageKm?: number
   tonnes?: number
-  incentiveBonus?: number
+  /** Days posted to a unit, counted once however many postings overlap. */
+  dutyDays?: number
   fuelTheftCases?: number
   overspeedingCases?: number
   harshAccelerationCases?: number
   harshBrakingCases?: number
-  daysSinceLastTrip?: number
-  /** Posted to a unit now. A posted driver is rated even with no trips. */
-  postedToUnit?: boolean
 }
 
 export interface DriverRatingResult {
+  /** The rating on a 100-point scale (rating x 20), for anything that sorts by it. */
   score: number
   rating: number
   band: 'Inactive' | 'Poor' | 'Needs Improvement' | 'Fair' | 'Good' | 'Very Good' | 'Excellent'
 }
 
 export function calculateDriverRating(input: DriverRatingInput): DriverRatingResult {
-  const baseScore = clamp(input.baseScore ?? 0, 0, 5)
+  const C = DRIVER_RATING_CONFIG
   const trips = Math.max(0, input.trips ?? 0)
   const mileageKm = Math.max(0, input.mileageKm ?? 0)
   const tonnes = Math.max(0, input.tonnes ?? 0)
-  const incentiveBonus = Math.max(0, input.incentiveBonus ?? 0)
+  const dutyDays = Math.max(0, input.dutyDays ?? 0)
   const fuelTheftCases = Math.max(0, input.fuelTheftCases ?? 0)
   const overspeedingCases = Math.max(0, input.overspeedingCases ?? 0)
-  const harshAccelerationCases = Math.max(0, input.harshAccelerationCases ?? 0)
-  const harshBrakingCases = Math.max(0, input.harshBrakingCases ?? 0)
-  const daysSinceLastTrip = Math.max(0, input.daysSinceLastTrip ?? 0)
+  const harshCases = Math.max(0, input.harshAccelerationCases ?? 0) + Math.max(0, input.harshBrakingCases ?? 0)
 
-  // Workbook rule: no recent work is not a poor score; it is inactive -- unless
-  // they hold a unit now (operator, 2026-10-29). Menengai logs no trips, so its
-  // posted drivers were all unrated and their cases never touched the rating.
-  const noTrips = trips === 0 && mileageKm === 0
-  if (noTrips && !input.postedToUnit && daysSinceLastTrip >= DRIVER_RATING_CONFIG.inactivityWindowDays) {
-    return {
-      score: DRIVER_RATING_CONFIG.inactiveScore,
-      rating: DRIVER_RATING_CONFIG.inactiveRating,
-      band: 'Inactive',
-    }
-  }
-
-  // Retainer / base score: fixed starting point from the workbook's baseline.
-  const retainerComponent = (baseScore / 5) * DRIVER_RATING_CONFIG.retainerWeight
-
-  // Productivity score: trip volume, distance, and tonnage in the workbook's
-  // trip-wise pay model. All three contribute, but they are capped so one
-  // metric cannot dominate the score.
-  const productivityScore = clamp(
-    (trips / DRIVER_RATING_CONFIG.maxTripsForProductivity) * 12 +
-      (mileageKm / DRIVER_RATING_CONFIG.maxMileageKmForProductivity) * 10 +
-      (tonnes / DRIVER_RATING_CONFIG.maxTonnesForProductivity) * 8,
+  // 0..1 each.
+  const work = clamp(
+    (trips / C.maxTripsForProductivity) * C.tripsPoints +
+      (mileageKm / C.maxMileageKmForProductivity) * C.mileagePoints +
+      (tonnes / C.maxTonnesForProductivity) * C.tonnesPoints,
     0,
-    DRIVER_RATING_CONFIG.productivityWeight,
-  )
+    C.tripsPoints + C.mileagePoints + C.tonnesPoints,
+  ) / (C.tripsPoints + C.mileagePoints + C.tonnesPoints)
+  const duty = clamp(dutyDays / C.fullDutyDays, 0, 1)
 
-  // Incentive score: a positive performance uplift from the workbook's
-  // incentives sheet.
-  const incentiveScore = clamp(incentiveBonus, 0, DRIVER_RATING_CONFIG.incentivesWeight)
+  // No work and never on duty: nothing to rate, which is not the same as a
+  // poor driver.
+  if (work === 0 && duty === 0) return { score: 0, rating: 0, band: 'Inactive' }
 
-  // Safety score: workbook safety scoring is a penalty model. Theft and
-  // overspeeding are treated as conduct risks and reduce the score directly,
-  // every recorded case. Harsh driving comes off the rating below.
-  const safetyPenalty =
-    fuelTheftCases * DRIVER_RATING_CONFIG.theftPenaltyPerCase +
-    overspeedingCases * DRIVER_RATING_CONFIG.overspeedPenaltyPerCase
-  const safetyScore = clamp(
-    DRIVER_RATING_CONFIG.safetyWeight - safetyPenalty,
-    0,
-    DRIVER_RATING_CONFIG.safetyWeight,
-  )
+  const earned = C.maxRating * (C.workShare * work + C.dutyShare * duty)
+  const penalty =
+    fuelTheftCases * C.theftPenaltyPerCase +
+    overspeedingCases * C.overspeedPenaltyPerCase +
+    harshCases * C.harshPenaltyPerCase
+  // Tenths, so 0.2 a case adds up without float noise.
+  const rating = clamp(Math.round((earned - penalty) * 10) / 10, 0, C.maxRating)
 
-  // A posted driver with no trips has no productivity to measure, which is
-  // not the same as none: they start at 5 and only their cases take it down,
-  // so the rest of the score is scaled up to stand for the whole.
-  const score = noTrips
-    ? clamp(
-        (retainerComponent + incentiveScore + safetyScore) * 100 / (100 - DRIVER_RATING_CONFIG.productivityWeight),
-        0,
-        100,
-      )
-    : clamp(
-        retainerComponent + productivityScore + incentiveScore + safetyScore,
-        0,
-        100,
-      )
-
-  const banded =
-    score >= DRIVER_RATING_CONFIG.excellentMin ? 5
-    : score >= DRIVER_RATING_CONFIG.veryGoodMin ? 4.5
-    : score >= DRIVER_RATING_CONFIG.goodMin ? 4
-    : score >= DRIVER_RATING_CONFIG.fairMin ? 3.5
-    : score >= DRIVER_RATING_CONFIG.weakMin ? 3
-    : score >= DRIVER_RATING_CONFIG.poorMin ? 2.5
-    : 2
-
-  // Harsh driving, straight off the rating, never below 0. Tenths, so 0.2 a
-  // case adds up without float noise.
-  const harshCases = harshAccelerationCases + harshBrakingCases
-  const rating = Math.max(0, Math.round((banded - harshCases * DRIVER_RATING_CONFIG.harshRatingPenaltyPerCase) * 10) / 10)
-
-  // The band names where the rating landed, after harsh driving.
   const band: DriverRatingResult['band'] =
-    rating >= 5 ? 'Excellent'
-    : rating >= 4.5 ? 'Very Good'
-    : rating >= 4 ? 'Good'
-    : rating >= 3.5 ? 'Fair'
-    : rating >= 3 ? 'Needs Improvement'
+    rating >= 4.5 ? 'Excellent'
+    : rating >= 4 ? 'Very Good'
+    : rating >= 3.5 ? 'Good'
+    : rating >= 3 ? 'Fair'
+    : rating >= 2.5 ? 'Needs Improvement'
     : 'Poor'
 
-  return { score: Math.round(score), rating, band }
+  return { score: Math.round(rating * 20), rating, band }
+}
+
+/** Whole days covered by a set of postings up to `now`, overlaps counted once. */
+export function dutyDaysOf(postings: { assignedAt: Date; unassignedAt: Date | null }[], now = new Date()): number {
+  const spans = postings
+    .map(p => [p.assignedAt.getTime(), Math.min((p.unassignedAt ?? now).getTime(), now.getTime())] as const)
+    .filter(([a, b]) => b > a)
+    .sort((x, y) => x[0] - y[0])
+  let ms = 0, end = -Infinity
+  for (const [a, b] of spans) {
+    if (b <= end) continue
+    ms += b - Math.max(a, end)
+    end = b
+  }
+  return Math.floor(ms / 86_400_000)
 }
