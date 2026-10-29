@@ -966,7 +966,7 @@ export async function findFleetSnapshot(orgId: string) {
   // memory. DISTINCT ON keeps the newest per vehicle.
   const incidents = await prisma.$queryRaw<Array<{
     vehicle_id: string; id: string; drain_cause: string; cause_reason: string | null
-    cause_confidence: number | null; stolen_ml: number; began_at: Date; detected_at: Date
+    cause_confidence: number | null; stolen_ml: number; clean_drop_ml: number | null; began_at: Date; detected_at: Date
     initial_location: string | null; final_fuel_level_ml: number | null
     initial_fuel_level_ml: number | null
     verdict: string; verdict_reason: string | null; verdict_confidence: number | null
@@ -977,7 +977,7 @@ export async function findFleetSnapshot(orgId: string) {
   }>>`
     SELECT DISTINCT ON (t.vehicle_id)
            t.vehicle_id, t.id, t.drain_cause::text AS drain_cause, t.cause_reason,
-           t.cause_confidence, t.stolen_ml, t.began_at, t.detected_at,
+           t.cause_confidence, t.stolen_ml, t.clean_drop_ml, t.began_at, t.detected_at,
            t.initial_location, t.final_fuel_level_ml, t.initial_fuel_level_ml,
            t.verdict::text AS verdict, t.verdict_reason, t.verdict_confidence,
            t.recovered_ml, t.initial_speed_kmh, t.final_speed_kmh,
@@ -1035,7 +1035,7 @@ export async function findFleetSnapshot(orgId: string) {
     }>>`
       SELECT t.vehicle_id,
              count(*)::bigint                     AS n,
-             coalesce(sum(t.stolen_ml), 0)::bigint AS ml,
+             coalesce(sum(coalesce(t.clean_drop_ml, t.stolen_ml)), 0)::bigint AS ml,
              count(*) FILTER (WHERE t.drain_cause::text = 'SIPHON')::bigint AS siphons,
              min(t.began_at)                      AS first_at
         FROM fuel_thefts t
@@ -1148,7 +1148,7 @@ export async function findFleetSnapshot(orgId: string) {
            * 1 on a first event, which is six of the eleven flagged vehicles.
            */
           repeatCount:   historyByVehicle.get(v.id)?.n       ?? 1,
-          repeatMl:      historyByVehicle.get(v.id)?.ml      ?? incident.stolen_ml,
+          repeatMl:      historyByVehicle.get(v.id)?.ml      ?? incident.clean_drop_ml ?? incident.stolen_ml,
           repeatSiphons: historyByVehicle.get(v.id)?.siphons ?? 0,
           repeatSinceAt: historyByVehicle.get(v.id)?.firstAt?.toISOString()
                       ?? incident.began_at.toISOString(),
@@ -1156,7 +1156,9 @@ export async function findFleetSnapshot(orgId: string) {
           cause:       incident.drain_cause,
           reason:      incident.cause_reason,
           confidence:  incident.cause_confidence,
-          volumeMl:    incident.stolen_ml,
+          // Ours, cleaned (no slosh, less the engine's burn) where the drain has
+          // one since 2026-10-29 — the figure the alert stated; else the provider's.
+          volumeMl:    incident.clean_drop_ml ?? incident.stolen_ml,
           beganAt:     incident.began_at.toISOString(),
           detectedAt:  incident.detected_at.toISOString(),
           location:    incident.initial_location,
