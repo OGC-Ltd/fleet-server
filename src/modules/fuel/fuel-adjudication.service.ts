@@ -394,13 +394,14 @@ export async function judgeDrain(
   })
   if (standing) cause = { cause: 'SIPHON', reason: standing.rule, confidence: standing.confidence, impliedLph: null }
 
-  // The figure stated for this drain: what LEFT the tank. The fall is already
-  // read between settled levels (measureFall, no slosh); what the engine burnt
-  // across it comes off too. The classifier above judged the whole fall, burn
-  // included, because the burn is what it compares — only the stated litres
-  // are cleaned. A standing call states its own, cleaned the same way.
+  // The figure stated for this drain: what LEFT the tank — the fall read
+  // between settled levels (measureFall's `clean`, no slosh), less what the
+  // engine burnt across it. The classifier above judged the fall as measured,
+  // slosh and burn included, on the geometry its thresholds were set on; only
+  // the stated litres are cleaned. A standing call states its own, cleaned the
+  // same way.
   const lossMl = standing ? standing.fallMl
-    : measured ? Math.max(0, measured.evidence.dropMl - burnDuringFallMl(measured.fall, band))
+    : measured ? Math.max(0, measured.clean.dropMl - burnDuringFallMl(measured.clean.fall, band))
     : null
 
   // The evidence rides out alongside the cause so the caller can PERSIST what
@@ -657,8 +658,8 @@ export async function adjudicatePendingDrains(opts: AdjudicateOptions): Promise<
         // classifier is what decides which denominator applies, and the same
         // fall implies a different rate under HOURS than under DISTANCE.
         fallSeconds:       verdict.evidence?.fallSeconds    ?? null,
-        // The fall judged (slosh-free since 2026-10-29), so it still divides by
-        // fallSeconds; the figure STATED is cleanDropMl, less the engine's burn.
+        // The fall judged, so it still divides by fallSeconds; the figure
+        // STATED is cleanDropMl (no slosh, less the engine's burn).
         measuredDropMl:    verdict.evidence?.dropMl     ?? null,
         cleanDropMl:       verdict.lossMl,
         engineSeconds:     verdict.evidence?.engineSeconds  ?? null,

@@ -581,6 +581,65 @@ export interface FallMeasurement {
    * measure different falls and nobody would notice.
    */
   fall: FallSample[]
+  /**
+   * What the fall STATES, since 2026-10-29: the same fall read between settled
+   * levels (no slosh) and ended where the vehicle drives away, with the
+   * segment it spans so the engine's burn across it can come off. Never what
+   * the classifier judges — see measureFall.
+   */
+  clean: { dropMl: number; fall: FallSample[] }
+}
+
+/**
+ * The clean top and bottom of a fall, cleanest first. Each attempt that finds
+ * no fall hands over to the next, and the last is the judged fall itself — so
+ * cleaning can change a drain's figure but never take away a fall that was
+ * measurable:
+ *
+ *   1. settled readings only (SLOSH_SETTLE_SECONDS), bottom within the fall's
+ *      own end (fallEndMs)
+ *   2. every reading, bottom within the fall's own end
+ *   3. the judged fall
+ *
+ * An excavator reports speed as its cab swings, so a working machine can have
+ * almost no settled reading; that is what 2 and 3 are for.
+ */
+function cleanFall(
+  series: readonly FallSample[], before: FallSample[], post: FallSample[],
+  claim: { beganAt: Date; detectedAt: Date },
+  judged: { baseline: FallSample; lowest: FallSample; fall: FallSample[] },
+): { dropMl: number; fall: FallSample[] } {
+  const highOf = (xs: FallSample[]) => xs.reduce((hi, s) => s.fuelLevelMl > hi.fuelLevelMl ? s : hi, xs[0]!)
+  const lowOf  = (xs: FallSample[]) => xs.reduce((lo, s) => s.fuelLevelMl < lo.fuelLevelMl ? s : lo, xs[0]!)
+  const endMs   = fallEndMs(series, claim.detectedAt.getTime())
+  const settled = settledOf(series)
+  const own     = post.filter(s => s.capturedAt.getTime() <= endMs)
+  const attempts: Array<[FallSample[], FallSample[]]> = [
+    [settled.filter(s => s.capturedAt <= claim.beganAt), settled.filter(s => s.capturedAt >= claim.beganAt && s.capturedAt.getTime() <= endMs)],
+    [before, own],
+  ]
+  // A settled bottom must be where the fall ENDED, not a pause on the way down:
+  // an excavator that stood once mid-fall would otherwise be measured to that
+  // pause (a 20 L fall read as 6 L). So the settled readings must run on to
+  // within SETTLED_BOTTOM_LEEWAY_MINUTES of the lowest reading of the fall's
+  // own window; stopping short of it, they do not describe the bottom and the
+  // next attempt does.
+  const ownLowMs = own.length > 0 ? lowOf(own).capturedAt.getTime() : -Infinity
+  for (const [k, [tops, bottoms]] of attempts.entries()) {
+    if (tops.length === 0 || bottoms.length === 0) continue
+    const hi = highOf(tops), lo = lowOf(bottoms)
+    const lastMs = bottoms[bottoms.length - 1]!.capturedAt.getTime()
+    if (k === 0 && lastMs < ownLowMs - SETTLED_BOTTOM_LEEWAY_MINUTES * 60_000) continue
+    if (lo.capturedAt > hi.capturedAt && hi.fuelLevelMl > lo.fuelLevelMl) {
+      // The burn is taken across the descent, plateau trimmed as the judged fall is.
+      const dropMl = hi.fuelLevelMl - lo.fuelLevelMl
+      const span = series.filter(s => s.capturedAt >= hi.capturedAt && s.capturedAt <= lo.capturedAt)
+      const atTop = span.filter(s => s.fuelLevelMl >= hi.fuelLevelMl - dropMl * PLATEAU_TOLERANCE)
+      const from = atTop.length > 0 ? atTop[atTop.length - 1]!.capturedAt : hi.capturedAt
+      return { dropMl, fall: span.filter(s => s.capturedAt >= from) }
+    }
+  }
+  return { dropMl: judged.baseline.fuelLevelMl - judged.lowest.fuelLevelMl, fall: judged.fall }
 }
 
 export function measureFall(
@@ -605,48 +664,17 @@ export function measureFall(
   const after  = series.filter(s => s.capturedAt >= claim.detectedAt)
   if (before.length < 3 || after.length < 3) return null
 
-  // Top and bottom, cleanest first (2026-10-29). Each attempt that finds no
-  // fall hands over to the next, and the last is the geometry as it stood
-  // before — so cleaning can change a drain's figure but never take away a
-  // fall that was measurable:
-  //
-  //   1. settled readings only (SLOSH_SETTLE_SECONDS), bottom within the fall's
-  //      own end (fallEndMs)
-  //   2. every reading, bottom within the fall's own end
-  //   3. every reading, bottom anywhere in the lookahead
-  //
-  // An excavator reports speed as its cab swings, so a working machine can
-  // have almost no settled reading; that is what 2 and 3 are for.
-  const highOf = (xs: FallSample[]) => xs.reduce((hi, s) => s.fuelLevelMl > hi.fuelLevelMl ? s : hi, xs[0]!)
-  const lowOf  = (xs: FallSample[]) => xs.reduce((lo, s) => s.fuelLevelMl < lo.fuelLevelMl ? s : lo, xs[0]!)
-  const endMs   = fallEndMs(series, claim.detectedAt.getTime())
-  const settled = settledOf(series)
-  const post    = series.filter(s => s.capturedAt >= claim.beganAt)
+  // The fall the CLASSIFIER judges: highest before, lowest anywhere after,
+  // exactly as before 2026-10-29. Its thresholds were set on this geometry, and
+  // judging the cleaned fall instead re-caused 266 of 1,384 drains in a week's
+  // replay, 12 siphons among them. Cleaning is for the litres stated, below.
+  const baseline = before.reduce((hi, s) => s.fuelLevelMl > hi.fuelLevelMl ? s : hi, before[0]!)
+  const post     = series.filter(s => s.capturedAt >= claim.beganAt)
   if (post.length < 3) return null
-  const own     = post.filter(s => s.capturedAt.getTime() <= endMs)
-  const attempts: Array<[FallSample[], FallSample[]]> = [
-    [settled.filter(s => s.capturedAt <= claim.beganAt), settled.filter(s => s.capturedAt >= claim.beganAt && s.capturedAt.getTime() <= endMs)],
-    [before, own],
-    [before, post],
-  ]
-  // A settled bottom must be where the fall ENDED, not a pause on the way down:
-  // an excavator that stood once mid-fall would otherwise be measured to that
-  // pause (a 20 L fall read as 6 L). So the settled readings must run on to
-  // within SETTLED_BOTTOM_LEEWAY_MINUTES of the lowest reading of the fall's
-  // own window; stopping short of it, they do not describe the bottom and the
-  // next attempt does.
-  const ownLowMs = own.length > 0 ? lowOf(own).capturedAt.getTime() : -Infinity
-  let baseline: FallSample | null = null, lowest: FallSample | null = null
-  for (const [k, [tops, bottoms]] of attempts.entries()) {
-    if (tops.length === 0 || bottoms.length === 0) continue
-    const hi = highOf(tops), lo = lowOf(bottoms)
-    const lastMs = bottoms[bottoms.length - 1]!.capturedAt.getTime()
-    if (k === 0 && lastMs < ownLowMs - SETTLED_BOTTOM_LEEWAY_MINUTES * 60_000) continue
-    if (lo.capturedAt > hi.capturedAt && hi.fuelLevelMl > lo.fuelLevelMl) { baseline = hi; lowest = lo; break }
-  }
-  if (baseline == null || lowest == null) return null
+  const lowest   = post.reduce((lo, s) => s.fuelLevelMl < lo.fuelLevelMl ? s : lo, post[0]!)
 
   const dropMl = baseline.fuelLevelMl - lowest.fuelLevelMl
+  if (dropMl <= 0) return null
 
   // Trim the plateau: the descent begins at the LAST reading still at the top.
   const top          = baseline.fuelLevelMl - dropMl * PLATEAU_TOLERANCE
@@ -683,6 +711,7 @@ export function measureFall(
 
   return {
     fall,
+    clean: cleanFall(series, before, post, claim, { baseline, lowest, fall }),
     evidence: {
       dropMl,
       fallSeconds,
