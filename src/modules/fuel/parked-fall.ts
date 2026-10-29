@@ -363,17 +363,23 @@ const metres = (a: { lat: number; lng: number }, b: { lat: number; lng: number }
  * The machine's stands: runs of readings that did not move, at one spot. A
  * reading faster than MOVE_KMH ends one; so does a position more than
  * SAME_SPOT_M from where it began, or — on a unit that reports no position — a
- * silence longer than STAND_GAP_MS, which could hide a trip.
+ * silence longer than STAND_GAP_MS, which could hide a trip. `limits` widens
+ * both for a caller that tolerates shuffles inside a stand (standing-theft).
  */
-export function standsOf(readings: readonly FallReading[]): Stand[] {
+export function standsOf(
+  readings: readonly FallReading[],
+  limits: { moveKmh?: number; sameSpotM?: number } = {},
+): Stand[] {
+  const moveKmh = limits.moveKmh ?? MOVE_KMH
+  const sameSpotM = limits.sameSpotM ?? SAME_SPOT_M
   const out: Stand[] = []
   let cur: Stand | null = null
   let at: { lat: number; lng: number } | null = null
   const close = (next: number) => { if (cur) { cur.until = next; out.push(cur) } }
   for (const r of readings) {
-    if ((r.speedKmh ?? 0) > MOVE_KMH) { close(r.t); cur = null; at = null; continue }
+    if ((r.speedKmh ?? 0) > moveKmh) { close(r.t); cur = null; at = null; continue }
     const pos = r.lat != null && r.lng != null ? { lat: r.lat, lng: r.lng } : null
-    const moved = cur != null && at != null && pos != null && metres(at, pos) > SAME_SPOT_M
+    const moved = cur != null && at != null && pos != null && metres(at, pos) > sameSpotM
     const silent = cur != null && r.t - cur.to > STAND_GAP_MS && (at == null || pos == null)
     if (cur == null || moved || silent) {
       close(r.t)
@@ -389,7 +395,7 @@ export function standsOf(readings: readonly FallReading[]): Stand[] {
   return out
 }
 
-type Vec = [number, number, number]
+export type Vec = [number, number, number]
 type FullAccel = FallReading & { accel: { x: number; y: number; z: number } }
 const full = (r: FallReading): r is FullAccel => r.accel?.x != null && r.accel?.y != null && r.accel?.z != null
 

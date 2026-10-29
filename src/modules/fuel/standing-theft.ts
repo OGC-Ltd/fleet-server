@@ -12,11 +12,14 @@
  * was the fourth time in a month on that truck, each within minutes of a refuel
  * (31 Aug, 10 Sep, 18 Sep), and the first three were never announced at all.
  *
- * ## The two rules (operator, 2026-09-27)
+ * ## The two rules (operator, 2026-09-27; widened 2026-10-29)
  *
- *   fell-while-standing   a FUEL RATE or FUEL DOWN finding that fell 10 L or
- *                         more inside one stand with nothing there to burn it.
- *                         7 in the 30 days to 27 Sep, of 598 such findings.
+ *   fell-while-standing   any drain — whatever the classifier made of it,
+ *                         except SLOSH — that fell inside one stand, at one
+ *                         angle, with nothing there to burn it: at least
+ *                         STEADY_FALL_MIN_ML, and faster than
+ *                         STEADY_FALL_MIN_LPH. Until 2026-10-29 only a FUEL
+ *                         RATE or FUEL DOWN finding was asked, at 10 L.
  *   fell-after-refuel     any drain that stayed down, whatever the classifier
  *                         made of it — except SLOSH, a fall it already judged
  *                         faster than any pump draws — that fell 10 L or more
@@ -46,18 +49,55 @@
  * different level with the same fuel in it, which is why the live watch
  * withholds such a fall too.
  *
- * "Stood" is the parked-fall rule's own stand (`standsOf`): not faster than
- * MOVE_KMH, and within SAME_SPOT_M of where it stopped — speed and position
- * both, since GPS speed alone reads a creeping truck as parked.
+ * ## Why it was widened: MUFINDI: FTT 05, 29 Oct 2026
+ *
+ * Standing on the R324 with its engine idling, the lorry's level fell 303.4 →
+ * 294.5 L in 6½ minutes (~80 L/h; an idling lorry burns 2–4) at one steady
+ * angle. Nothing was called, three ways:
+ *
+ *   - the drain was INDETERMINATE (its window ran on into 3.8 km of driving),
+ *     and only a FUEL RATE / FUEL DOWN was asked;
+ *   - it shuffled ~10 m twice inside the stop, tilting the tank, and the old
+ *     test measured across the tilt and then vetoed the whole stand for it;
+ *   - the clean fall, 8.9 L, sat under the 10 L floor.
+ *
+ * ## Stands, and the pieces of a stand held at one angle
+ *
+ * A stand here is wider than the parked-fall rule's: anything not faster than
+ * STAND_MOVE_KMH within STAND_RADIUS_M of where it stopped. Measured over the
+ * fleet, 22–28 Oct 2026 (1,765 units, 9.36M readings): 79% of truck and lorry
+ * shuffles inside a stop stay within 100 m, and those within 50 m peak at a
+ * median 6 km/h (p99 16) — speed cannot tell a shuffle from a trip, distance
+ * can. Plant shuffles ~32 times a stop, 94% within 100 m.
+ *
+ * Inside a stand the level is read only at one angle at a time: the stand is
+ * cut into pieces wherever the accelerometer's angle moves TILT_SHIFT_G from
+ * the piece so far, or a reading is faster than MOVE_KMH. A fall is measured
+ * within one piece, so a shuffle's tilt (FTT 05: +4.7 L, −3.4 L on the gauge)
+ * is never counted as fuel — and no longer throws away the fall beside it.
+ * A unit with no accelerometer has one piece per run of slow readings, and can
+ * still be called with its engine measured off.
  */
 
 import {
   standsOf, attitudeOf, vibrationOf, stillDown, probeReadsEmpty,
-  MOVE_KMH, TILT_SHIFT_G, WORKING_VIB_G, type FallReading,
+  MOVE_KMH, TILT_SHIFT_G, WORKING_VIB_G, type FallReading, type Vec,
 } from './parked-fall.js'
 
-/** The smallest standing fall either rule calls — the size both were measured at. */
+/** The smallest fall after a refuel the rule calls — the size it was measured at. */
 export const STANDING_FALL_MIN_ML = 10_000
+/** The smallest fall the rule calls with no refuel before it, inside one piece held at one angle. */
+export const STEADY_FALL_MIN_ML = 5_000
+/**
+ * ...and it must fall at least this fast. An idling engine burns 2–4 L/h and
+ * diesel cooling overnight a litre or two in hours; a pump or a hose draws
+ * tens of litres an hour (FTT 05: ~80 L/h).
+ */
+export const STEADY_FALL_MIN_LPH = 20
+/** A stand tolerates moves up to this speed... (fleet measurement, 22–28 Oct 2026) */
+export const STAND_MOVE_KMH = 20
+/** ...that stay within this distance of where the vehicle stopped. */
+export const STAND_RADIUS_M = 100
 /**
  * ...and on a big tank, this share of it. A probe reads a 1,200 L tank on the
  * same scale as a 300 L one, so 12 L after a refuel is ~1% of its range —
@@ -98,7 +138,10 @@ export interface StandingTheft {
   toT:        number
   beforeMl:   number
   afterMl:    number
+  /** What left the tank: the gauge's fall less `burnMl`. */
   fallMl:     number
+  /** What the engine burnt idling across the fall, already taken off `fallMl`. Zero with the engine off. */
+  burnMl:     number
   /** The refuel it followed: the level it rose from and to, and when it topped out. */
   refuel:     { fromMl: number; toMl: number; atT: number } | null
   /** How far the machine's angle moved across the fall, where the unit has an accelerometer. */
@@ -112,9 +155,13 @@ export interface StandingTheftInput {
   /** The drain's own stretch on the ledger: when it began, and when its fall ended. */
   spanFrom:       number
   spanTo:         number
-  /** Is the drain a FUEL RATE or FUEL DOWN finding? Only those are called without a refuel. */
-  fuelRateOrDown: boolean
   tankCapacityL:  number | null
+  /**
+   * The least this machine burns per engine-hour (its band's low edge), taken
+   * off a fall it stood through idling so the figure is the fuel that left.
+   * Null or absent: nothing is taken off.
+   */
+  idleLph?:       number | null
 }
 
 const median = (ns: readonly number[]): number => {
@@ -151,6 +198,34 @@ function biggestFall(rows: readonly FallReading[]): StandFall | null {
   return { fromT: f[i]!.t, toT: f[j]!.t, beforeMl: m[best.i]!, afterMl: m[best.j]!, fallMl: best.size }
 }
 
+/** Each reading's angle as the median of it and its two neighbours, so one jolt starts no new piece. */
+function smoothedAttitudes(rows: readonly FallReading[]): Array<Vec | null> {
+  return rows.map((_, k) => attitudeOf(rows.slice(Math.max(0, k - 1), k + 2)))
+}
+
+/**
+ * A stand cut into the runs of readings held at one angle: a new piece starts
+ * where the angle has moved TILT_SHIFT_G from the piece so far, and a reading
+ * faster than MOVE_KMH (the shuffle itself, sloshing the tank) belongs to none.
+ */
+function levelPieces(rows: readonly FallReading[]): FallReading[][] {
+  const out: FallReading[][] = []
+  const att = smoothedAttitudes(rows)
+  let cur: FallReading[] = []
+  rows.forEach((r, k) => {
+    if ((r.speedKmh ?? 0) > MOVE_KMH) { if (cur.length) out.push(cur); cur = []; return }
+    const here = att[k]
+    const so = here && cur.length ? attitudeOf(cur) : null
+    if (so && here && Math.hypot(so[0] - here[0], so[1] - here[1], so[2] - here[2]) >= TILT_SHIFT_G) {
+      out.push(cur)
+      cur = []
+    }
+    cur.push(r)
+  })
+  if (cur.length) out.push(cur)
+  return out
+}
+
 /** Was the engine MEASURED off through these readings? */
 function engineOff(rows: readonly FallReading[]): boolean {
   const known = rows.filter(r => r.ignitionKnown)
@@ -164,7 +239,7 @@ function engineOff(rows: readonly FallReading[]): boolean {
  * level over the half hour before it, read only while the vehicle stood —
  * fuel goes in standing — and only if it left real fuel behind.
  */
-function refuelBefore(readings: readonly FallReading[], beforeT: number, afterMl: number): StandingTheft['refuel'] {
+function refuelBefore(readings: readonly FallReading[], beforeT: number, afterMl: number): StandingTheft['refuel'] | 'undone' {
   const w = readings.filter(r => r.fuelMl != null && r.t >= beforeT - REFUEL_WITHIN_MS && r.t <= beforeT
     && (r.speedKmh ?? 0) <= MOVE_KMH)
   if (w.length < 3) return null
@@ -177,7 +252,9 @@ function refuelBefore(readings: readonly FallReading[], beforeT: number, afterMl
     if (rise > 0 && (!best || rise > best.rise)) best = { low, j, rise }
   }
   if (!best || best.rise < REFUEL_MIN_RISE_ML) return null
-  if (afterMl - m[best.low]! < REFUEL_MIN_RISE_ML) return null
+  // The fall only took the level back to where it was before the rise: a probe
+  // jumping up and straight back down, not fuel in and then out.
+  if (afterMl - m[best.low]! < REFUEL_MIN_RISE_ML) return 'undone'
   let at = best.j
   for (let k = best.low + 1; k <= best.j; k++) if (m[k]! >= m[best.j]! - NOISE_ML) { at = k; break }
   return { fromMl: m[best.low]!, toMl: m[best.j]!, atT: w[at]!.t }
@@ -190,37 +267,53 @@ function refuelBefore(readings: readonly FallReading[], beforeT: number, afterMl
 export function standingTheft(readings: readonly FallReading[], input: StandingTheftInput): StandingTheft | null {
   let best: StandingTheft | null = null
   const near = (from: number, to: number) => to >= input.spanFrom - SPAN_MARGIN_MS && from <= input.spanTo + SPAN_MARGIN_MS
-  const floorMl = Math.max(STANDING_FALL_MIN_ML, STANDING_FALL_MIN_FRACTION * (input.tankCapacityL ?? 0) * 1000)
+  const tankShareMl = STANDING_FALL_MIN_FRACTION * (input.tankCapacityL ?? 0) * 1000
 
-  for (const stand of standsOf(readings)) {
+  for (const stand of standsOf(readings, { moveKmh: STAND_MOVE_KMH, sameSpotM: STAND_RADIUS_M })) {
     if (!near(stand.from, stand.to)) continue
-    const fall = biggestFall(stand.rows)
-    // It must be THIS drain's fall — the window reads three hours past it.
-    if (fall == null || fall.fallMl < floorMl || !near(fall.fromT, fall.toT)) continue
-    // A trough at empty is the probe losing contact.
-    if (probeReadsEmpty(fall.afterMl, input.tankCapacityL)) continue
+    for (const piece of levelPieces(stand.rows)) {
+      const fall = biggestFall(piece)
+      // It must be THIS drain's fall — the window reads three hours past it.
+      if (fall == null || !near(fall.fromT, fall.toT)) continue
+      // A trough at empty is the probe losing contact.
+      if (probeReadsEmpty(fall.afterMl, input.tankCapacityL)) continue
+      // Still down when the stand ended, at whatever angle it stood by then.
+      if (!stillDown(fall.afterMl, fall.fallMl, stand.rows.filter(r => r.fuelMl != null).slice(-3).map(r => r.fuelMl!))) continue
 
-    const before = attitudeOf(stand.rows.filter(r => r.t <= fall.fromT))
-    const after = attitudeOf(stand.rows.filter(r => r.t >= fall.toT))
-    const tilt = before && after ? Math.hypot(before[0] - after[0], before[1] - after[1], before[2] - after[2]) : null
-    // The angle changed where it stood: the reading moved with the machine.
-    if (tilt != null && tilt >= TILT_SHIFT_G) continue
-    const vib = vibrationOf(stand.rows.filter(r => r.t >= fall.fromT - VIB_MARGIN_MS && r.t <= fall.toT + VIB_MARGIN_MS))
-    const engine = engineOff(stand.rows.filter(r => r.t >= fall.fromT && r.t <= fall.toT)) ? 'off'
-      // Running, but only idling and holding its angle — both measured.
-      : vib != null && vib < WORKING_VIB_G && tilt != null ? 'idling-still'
-      : null
-    if (engine == null) continue
+      const before = attitudeOf(piece.filter(r => r.t <= fall.fromT))
+      const after = attitudeOf(piece.filter(r => r.t >= fall.toT))
+      const tilt = before && after ? Math.hypot(before[0] - after[0], before[1] - after[1], before[2] - after[2]) : null
+      // Pieces hold one angle by construction; a drift inside one still vetoes.
+      if (tilt != null && tilt >= TILT_SHIFT_G) continue
+      const vib = vibrationOf(piece.filter(r => r.t >= fall.fromT - VIB_MARGIN_MS && r.t <= fall.toT + VIB_MARGIN_MS))
+      const engine = engineOff(piece.filter(r => r.t >= fall.fromT && r.t <= fall.toT)) ? 'off'
+        // Running, but only idling and holding its angle — both measured.
+        : vib != null && vib < WORKING_VIB_G && tilt != null ? 'idling-still'
+        : null
+      if (engine == null) continue
 
-    const refuel = refuelBefore(readings, fall.fromT, fall.afterMl)
-    const rule: StandingTheftRule | null = refuel ? 'fell-after-refuel' : input.fuelRateOrDown ? 'fell-while-standing' : null
-    if (rule == null) continue
+      const before30 = refuelBefore(readings, fall.fromT, fall.afterMl)
+      if (before30 === 'undone') continue
+      const refuel = before30
+      const hours = Math.max(fall.toT - fall.fromT, 60_000) / 3_600_000
+      // Every floor below is judged on what LEFT, not on what the gauge fell.
+      const burnMl = engine === 'idling-still'
+        ? Math.round((input.idleLph ?? 0) * 1000 * (fall.toT - fall.fromT) / 3_600_000) : 0
+      const lostMl = fall.fallMl - burnMl
+      const steady = lostMl >= Math.max(STEADY_FALL_MIN_ML, tankShareMl)
+        && lostMl / 1000 / hours >= STEADY_FALL_MIN_LPH
+      const rule: StandingTheftRule | null =
+        refuel && lostMl >= Math.max(STANDING_FALL_MIN_ML, tankShareMl) ? 'fell-after-refuel'
+        : steady ? 'fell-while-standing'
+        : null
+      if (rule == null) continue
 
-    const call: StandingTheft = {
-      rule, engine, ...fall, refuel, tiltShiftG: tilt, vibrationG: vib,
-      confidence: Math.min(0.9, 0.6 + (engine === 'off' ? 0.15 : 0.05) + (refuel ? 0.1 : 0) + (tilt != null ? 0.05 : 0)),
+      const call: StandingTheft = {
+        rule, engine, ...fall, fallMl: lostMl, burnMl, refuel: rule === 'fell-after-refuel' ? refuel : null, tiltShiftG: tilt, vibrationG: vib,
+        confidence: Math.min(0.9, 0.6 + (engine === 'off' ? 0.15 : 0.05) + (refuel ? 0.1 : 0) + (tilt != null ? 0.05 : 0)),
+      }
+      if (best == null || call.fallMl > best.fallMl) best = call
     }
-    if (best == null || call.fallMl > best.fallMl) best = call
   }
   return best
 }
@@ -240,7 +333,10 @@ export function standingTheftText(plate: string, s: StandingTheft, where: string
     ? 'with its engine off'
     : 'with its engine idling, its accelerometer showing it still and level'
   const when = `between ${HHMM.format(s.fromT)} and ${HHMM.format(s.toT)}`
+  // The litres that left, once what the idling engine burnt is taken off; the
+  // levels either side stay as the gauge read them, so they can be checked.
+  const lost = s.burnMl > 0 ? `; ${L(s.fallMl)} left the tank beyond the ${L(s.burnMl)} the engine burnt idling` : ''
   return s.refuel
-    ? `POSSIBLE THEFT: ${plate} was refuelled to ${L(s.refuel.toMl)}, then its tank fell to ${L(s.afterMl)} ${when} while it stood ${how}${where}`
-    : `POSSIBLE THEFT: ${plate}'s tank fell from ${L(s.beforeMl)} to ${L(s.afterMl)} ${when} while it stood ${how}${where}`
+    ? `POSSIBLE THEFT: ${plate} was refuelled to ${L(s.refuel.toMl)}, then its tank fell to ${L(s.afterMl)} ${when} while it stood ${how}${where}${lost}`
+    : `POSSIBLE THEFT: ${plate}'s tank fell from ${L(s.beforeMl)} to ${L(s.afterMl)} ${when} while it stood ${how}${where}${lost}`
 }

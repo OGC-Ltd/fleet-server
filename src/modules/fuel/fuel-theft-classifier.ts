@@ -60,7 +60,7 @@
  */
 
 import { lerp, probeSwings, probeOverreads, type ProbeProfile } from './fuel-adjudication.js'
-import type { DropEvidence } from './fuel-drop-shape.js'
+import { MAX_ENGINE_GAP_SECONDS, type DropEvidence, type FallSample } from './fuel-drop-shape.js'
 
 export type { DropEvidence }
 
@@ -1481,4 +1481,59 @@ export function classifyDrain(
   // 7. Engine state unknown and no engine time to reason from. Half the ledger
   //    lands here, and it is accepted as a blind spot rather than papered over.
   return { cause: 'INDETERMINATE', reason: 'engine-state-unknown', confidence: 0.5, ...none }
+}
+
+/**
+ * Share of a band's low edge a standing, idling engine is taken to burn, and
+ * the most it is taken to burn whatever the band. Chosen, not measured: idle
+ * is a small fraction of working burn (a diesel at idle draws roughly a fifth
+ * to a third of its light-work rate), and both numbers err LOW because burn
+ * taken off a fall hides fuel that left. A large excavator (15 L/h low edge)
+ * idles at 3.75 L/h here; a generator or D11 is held to 4.
+ */
+export const IDLE_SHARE_OF_LOW = 0.25
+export const IDLE_LPH_MAX = 4
+
+/** What an engine idling standing still is taken to burn, L/h. */
+export function idleLphOf(band: BurnBand): number {
+  return Math.min(band.lowLph * IDLE_SHARE_OF_LOW, IDLE_LPH_MAX)
+}
+
+/**
+ * Litres the machine's own engine accounts for across a fall — what is taken
+ * off a drop so the figure stated is the fuel that LEFT, not the fuel burnt.
+ *
+ * Interval by interval, credited on the reading that opens it (as
+ * `engineOnSeconds` does) and capped at MAX_ENGINE_GAP_SECONDS:
+ *
+ *   moving, with a km/L       the distance at that km/L
+ *   moving, engine measured on  the time at the band's LOW edge (plant at work)
+ *   standing, engine measured on  the time at idleLphOf(band)
+ *   otherwise                 nothing
+ *
+ * The least the engine could have burnt, never more: this figure shrinks a
+ * possible theft. Standing is idling, and a band's low edge is a WORKING rate
+ * (15 L/h for a large excavator, a lorry's engine-on average for a derived
+ * band), so standing takes the idle rate. An unmeasured ignition
+ * burns nothing here — 78% of the fleet reports none, and guessing it on would
+ * hide fuel a parked machine lost.
+ *
+ * MUFINDI: FTT 05 (29 Oct): 20.5 L measured from 09:15 to ~10:03 took in 3.8 km
+ * of driving and half an hour of idling; this is the part of it the engine owns.
+ */
+export function burnDuringFallMl(fall: readonly FallSample[], band: BurnBand | null): number {
+  if (band == null) return 0
+  let litres = 0
+  for (let i = 0; i < fall.length - 1; i++) {
+    const a = fall[i]!, b = fall[i + 1]!
+    const hours = Math.min((b.capturedAt.getTime() - a.capturedAt.getTime()) / 1000, MAX_ENGINE_GAP_SECONDS) / 3600
+    if (hours <= 0) continue
+    const moving = (a.speedKmh ?? 0) > 0
+    if (moving && band.kmPerL != null && band.kmPerL > 0) {
+      litres += ((a.speedKmh! + (b.speedKmh ?? 0)) / 2) * hours / band.kmPerL
+    } else if (a.engineOn === true) {
+      litres += (moving ? band.lowLph : idleLphOf(band)) * hours
+    }
+  }
+  return Math.round(litres * 1000)
 }

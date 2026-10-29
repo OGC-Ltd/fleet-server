@@ -471,6 +471,90 @@ export interface DropEvidence {
 export const PLATEAU_TOLERANCE = 0.05
 
 /**
+ * Seconds after a reading in motion during which the level is still sloshing.
+ *
+ * A probe reads the surface, and a surface in a moving tank is not level: a
+ * creep, a brake or a bump throws it up one end and the gauge reads high or low
+ * until it settles. MUFINDI: FTT 05 (29 Oct) read 309.3 L creeping into its stop
+ * at 09:15 against ~300 L standing a minute later, and that spike became the top
+ * of a 20.5 L "drop" whose real loss was ~9 L. The median-of-3 smoothing cannot
+ * remove it: a slosh lasts several readings, not one.
+ */
+export const SLOSH_SETTLE_SECONDS = 60
+
+/**
+ * How long after the drain's reported end its fall may still be landing, in
+ * minutes — the provider's end lags the gauge. Matches `SETTLE_MINUTES`, the
+ * wait before a drain is judged at all.
+ *
+ * The bottom of a fall is searched no further than this, and never past the
+ * moment the vehicle drives away. Until 2026-10-29 it was searched across the
+ * whole three-hour lookahead, so the trough of a drain could be a stop hours
+ * and kilometres later: MUFINDI: FTT 05's drain ended 09:43, it drove off at
+ * 09:50, and re-measured over the full lookahead its "fall" reached 35.8 L.
+ */
+export const FALL_LAG_MINUTES = 20
+
+/**
+ * Kilometres a vehicle must cover, moving without a stop, for a fall to be
+ * over because it drove away. Not any reading with a speed: shuffles in a stop
+ * peak at 6–9 km/h and an excavator reports speed as its cab swings (fleet
+ * measurement, 22–28 Oct: plant made ~32 moves per stop). 500 m is the stop
+ * radius that measurement used.
+ */
+export const DRIVE_AWAY_KM = 0.5
+
+/**
+ * Minutes a settled bottom may sit before the lowest reading of the fall's own
+ * window and still be its bottom. A few minutes covers a slosh dip as the
+ * vehicle pulls away; more than that and the settled reading was a pause
+ * mid-fall. See measureFall.
+ */
+export const SETTLED_BOTTOM_LEEWAY_MINUTES = 5
+
+/**
+ * When the fall after `detectedMs` ends: FALL_LAG_MINUTES on, or the start of a
+ * drive away, if sooner. A drive away starts from a STAND: a vehicle already on
+ * the road when the drain was reported has not driven away from its fall, it is
+ * still in it, and the gauge's lag behind the provider is exactly what the lag
+ * window is for (a road drain cut at detection read 7.2 L of a 12 L fall).
+ */
+function fallEndMs(series: readonly FallSample[], detectedMs: number): number {
+  const lagEnd = detectedMs + FALL_LAG_MINUTES * 60_000
+  let startedAt: number | null = null, km = 0
+  let stood = (series[0]?.speedKmh ?? 0) <= 0
+  for (let i = 1; i < series.length; i++) {
+    const a = series[i - 1]!, b = series[i]!
+    const t = b.capturedAt.getTime()
+    if (t < detectedMs) { stood = (b.speedKmh ?? 0) <= 0; continue }
+    if ((startedAt ?? t) >= lagEnd) break
+    if ((b.speedKmh ?? 0) <= 0) { startedAt = null; km = 0; stood = true; continue }
+    if (!stood) continue
+    if (startedAt == null) startedAt = t
+    const dt = Math.min(t - a.capturedAt.getTime(), MAX_ENGINE_GAP_SECONDS * 1000) / 3_600_000
+    km += (((a.speedKmh ?? 0) + b.speedKmh!) / 2) * dt
+    if (km >= DRIVE_AWAY_KM) return startedAt
+  }
+  return lagEnd
+}
+
+/**
+ * Readings the tank's level can be READ from: standing, and not within
+ * `SLOSH_SETTLE_SECONDS` of a reading in motion. Readings with no speed count
+ * as standing — absence of evidence of motion is the parked case.
+ */
+function settledOf<T extends FallSample>(series: readonly T[]): T[] {
+  let lastMovingAt = -Infinity
+  const out: T[] = []
+  for (const s of series) {
+    const t = s.capturedAt.getTime()
+    if ((s.speedKmh ?? 0) > 0) { lastMovingAt = t; continue }
+    if (t - lastMovingAt >= SLOSH_SETTLE_SECONDS * 1000) out.push(s)
+  }
+  return out
+}
+
+/**
  * Measure the fall inside one drain claim.
  *
  * Takes RAW samples and smooths them here, so no caller has to reproduce the
@@ -521,13 +605,48 @@ export function measureFall(
   const after  = series.filter(s => s.capturedAt >= claim.detectedAt)
   if (before.length < 3 || after.length < 3) return null
 
-  const baseline = before.reduce((hi, s) => s.fuelLevelMl > hi.fuelLevelMl ? s : hi, before[0]!)
-  const post     = series.filter(s => s.capturedAt >= claim.beganAt)
+  // Top and bottom, cleanest first (2026-10-29). Each attempt that finds no
+  // fall hands over to the next, and the last is the geometry as it stood
+  // before — so cleaning can change a drain's figure but never take away a
+  // fall that was measurable:
+  //
+  //   1. settled readings only (SLOSH_SETTLE_SECONDS), bottom within the fall's
+  //      own end (fallEndMs)
+  //   2. every reading, bottom within the fall's own end
+  //   3. every reading, bottom anywhere in the lookahead
+  //
+  // An excavator reports speed as its cab swings, so a working machine can
+  // have almost no settled reading; that is what 2 and 3 are for.
+  const highOf = (xs: FallSample[]) => xs.reduce((hi, s) => s.fuelLevelMl > hi.fuelLevelMl ? s : hi, xs[0]!)
+  const lowOf  = (xs: FallSample[]) => xs.reduce((lo, s) => s.fuelLevelMl < lo.fuelLevelMl ? s : lo, xs[0]!)
+  const endMs   = fallEndMs(series, claim.detectedAt.getTime())
+  const settled = settledOf(series)
+  const post    = series.filter(s => s.capturedAt >= claim.beganAt)
   if (post.length < 3) return null
-  const lowest   = post.reduce((lo, s) => s.fuelLevelMl < lo.fuelLevelMl ? s : lo, post[0]!)
+  const own     = post.filter(s => s.capturedAt.getTime() <= endMs)
+  const attempts: Array<[FallSample[], FallSample[]]> = [
+    [settled.filter(s => s.capturedAt <= claim.beganAt), settled.filter(s => s.capturedAt >= claim.beganAt && s.capturedAt.getTime() <= endMs)],
+    [before, own],
+    [before, post],
+  ]
+  // A settled bottom must be where the fall ENDED, not a pause on the way down:
+  // an excavator that stood once mid-fall would otherwise be measured to that
+  // pause (a 20 L fall read as 6 L). So the settled readings must run on to
+  // within SETTLED_BOTTOM_LEEWAY_MINUTES of the lowest reading of the fall's
+  // own window; stopping short of it, they do not describe the bottom and the
+  // next attempt does.
+  const ownLowMs = own.length > 0 ? lowOf(own).capturedAt.getTime() : -Infinity
+  let baseline: FallSample | null = null, lowest: FallSample | null = null
+  for (const [k, [tops, bottoms]] of attempts.entries()) {
+    if (tops.length === 0 || bottoms.length === 0) continue
+    const hi = highOf(tops), lo = lowOf(bottoms)
+    const lastMs = bottoms[bottoms.length - 1]!.capturedAt.getTime()
+    if (k === 0 && lastMs < ownLowMs - SETTLED_BOTTOM_LEEWAY_MINUTES * 60_000) continue
+    if (lo.capturedAt > hi.capturedAt && hi.fuelLevelMl > lo.fuelLevelMl) { baseline = hi; lowest = lo; break }
+  }
+  if (baseline == null || lowest == null) return null
 
   const dropMl = baseline.fuelLevelMl - lowest.fuelLevelMl
-  if (dropMl <= 0) return null
 
   // Trim the plateau: the descent begins at the LAST reading still at the top.
   const top          = baseline.fuelLevelMl - dropMl * PLATEAU_TOLERANCE

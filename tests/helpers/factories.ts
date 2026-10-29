@@ -212,6 +212,7 @@ export function makeTheft(overrides: Partial<FuelTheft> = {}): FuelTheft {
     // placeholder — see the columns' note on why these are never back-computed.
     fallSeconds: null,
     measuredDropMl: null,
+    cleanDropMl: null,
     engineSeconds: null,
     engineEvidence: null,
     stepFraction: null,
