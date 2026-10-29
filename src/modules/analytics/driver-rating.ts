@@ -12,10 +12,10 @@ const DRIVER_RATING_CONFIG = {
 
   theftPenaltyPerCase: 6,
   overspeedPenaltyPerCase: 3,
-  // Each harsh acceleration or hard braking report (operator, 2026-10-28).
-  // Lighter than overspeeding: one is a moment, not a sustained choice.
-  harshAccelerationPenaltyPerCase: 1,
-  harshBrakingPenaltyPerCase: 1,
+  // Each harsh acceleration or hard braking report takes 0.2 off the rating
+  // out of 5 itself, not off the score (operator, 2026-10-29), and the rating
+  // stops at 0.
+  harshRatingPenaltyPerCase: 0.2,
 
   inactivityWindowDays: 30,
   inactiveScore: 0,
@@ -87,14 +87,12 @@ export function calculateDriverRating(input: DriverRatingInput): DriverRatingRes
   // incentives sheet.
   const incentiveScore = clamp(incentiveBonus, 0, DRIVER_RATING_CONFIG.incentivesWeight)
 
-  // Safety score: workbook safety scoring is a penalty model. Theft,
-  // overspeeding and harsh driving are treated as conduct risks and reduce the
-  // score directly, every recorded case.
+  // Safety score: workbook safety scoring is a penalty model. Theft and
+  // overspeeding are treated as conduct risks and reduce the score directly,
+  // every recorded case. Harsh driving comes off the rating below.
   const safetyPenalty =
     fuelTheftCases * DRIVER_RATING_CONFIG.theftPenaltyPerCase +
-    overspeedingCases * DRIVER_RATING_CONFIG.overspeedPenaltyPerCase +
-    harshAccelerationCases * DRIVER_RATING_CONFIG.harshAccelerationPenaltyPerCase +
-    harshBrakingCases * DRIVER_RATING_CONFIG.harshBrakingPenaltyPerCase
+    overspeedingCases * DRIVER_RATING_CONFIG.overspeedPenaltyPerCase
   const safetyScore = clamp(
     DRIVER_RATING_CONFIG.safetyWeight - safetyPenalty,
     0,
@@ -107,31 +105,28 @@ export function calculateDriverRating(input: DriverRatingInput): DriverRatingRes
     100,
   )
 
-  let rating = 0
-  let band: DriverRatingResult['band'] = 'Poor'
+  const banded =
+    score >= DRIVER_RATING_CONFIG.excellentMin ? 5
+    : score >= DRIVER_RATING_CONFIG.veryGoodMin ? 4.5
+    : score >= DRIVER_RATING_CONFIG.goodMin ? 4
+    : score >= DRIVER_RATING_CONFIG.fairMin ? 3.5
+    : score >= DRIVER_RATING_CONFIG.weakMin ? 3
+    : score >= DRIVER_RATING_CONFIG.poorMin ? 2.5
+    : 2
 
-  if (score >= DRIVER_RATING_CONFIG.excellentMin) {
-    rating = 5
-    band = 'Excellent'
-  } else if (score >= DRIVER_RATING_CONFIG.veryGoodMin) {
-    rating = 4.5
-    band = 'Very Good'
-  } else if (score >= DRIVER_RATING_CONFIG.goodMin) {
-    rating = 4
-    band = 'Good'
-  } else if (score >= DRIVER_RATING_CONFIG.fairMin) {
-    rating = 3.5
-    band = 'Fair'
-  } else if (score >= DRIVER_RATING_CONFIG.weakMin) {
-    rating = 3
-    band = 'Needs Improvement'
-  } else if (score >= DRIVER_RATING_CONFIG.poorMin) {
-    rating = 2.5
-    band = 'Poor'
-  } else {
-    rating = 2
-    band = 'Poor'
-  }
+  // Harsh driving, straight off the rating, never below 0. Tenths, so 0.2 a
+  // case adds up without float noise.
+  const harshCases = harshAccelerationCases + harshBrakingCases
+  const rating = Math.max(0, Math.round((banded - harshCases * DRIVER_RATING_CONFIG.harshRatingPenaltyPerCase) * 10) / 10)
+
+  // The band names where the rating landed, after harsh driving.
+  const band: DriverRatingResult['band'] =
+    rating >= 5 ? 'Excellent'
+    : rating >= 4.5 ? 'Very Good'
+    : rating >= 4 ? 'Good'
+    : rating >= 3.5 ? 'Fair'
+    : rating >= 3 ? 'Needs Improvement'
+    : 'Poor'
 
   return { score: Math.round(score), rating, band }
 }
