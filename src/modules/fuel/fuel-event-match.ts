@@ -52,9 +52,23 @@ const FILL_WINDOW_MS = 15 * 60_000
  */
 const FILL_BLIND_WINDOW_MS = 2 * 60_000
 
+/**
+ * How far after one drain ends a report of the SAME fall can start — see
+ * sameDrain's re-clamp rule. Wider than one sync cycle (KTCC 189M's two
+ * reports sat 15 min apart), far short of the gap between a machine's real
+ * drains.
+ */
+const DRAIN_RECLAMP_GAP_MS = 20 * 60_000
+
+/** How close two reports' tank levels must sit to describe one tank state. */
+const DRAIN_LEVEL_MATCH_ML = 2_000
+
 export interface DrainSpan {
   beganAt:    Date
   detectedAt: Date
+  /** The provider's levels either side of the fall, when it gave them. */
+  initialFuelLevelMl?: number | null
+  finalFuelLevelMl?:   number | null
 }
 
 export interface FillPoint {
@@ -72,10 +86,34 @@ export interface FillPoint {
  * INSTANTANEOUS drains working — Wialon emits those with `began == detected`,
  * a zero-length interval that a strict test could never match, not even
  * against itself.
+ *
+ * ## Re-clamped instants
+ *
+ * Overlap alone misses one case. Wialon also re-clamps an INSTANTANEOUS drain
+ * to a different minute between executions, and two zero-length intervals a few
+ * minutes apart never overlap. Each version became its own row, each was judged
+ * and announced, and the second usually arrived hours late from the settle
+ * pass. Measured 23–30 Oct:
+ *
+ *   KCX 795S   16:30 54→43 L and 16:38 54→43 L    our tank fell 10 L, two SIPHON calls
+ *   KTCC 189M  16:42 35→24 L and 16:58 37→24 L    the second posted 19 h late
+ *   EX 04      14:00 234→212 L and 14:04 222→212 L
+ *
+ * What the versions share is the tank state they end at. A report that starts
+ * shortly after another ends, finishes at the same level, and never starts
+ * above where the first started describes no fuel the first did not already
+ * account for: the same fall, seen from another window. A real second drain
+ * ends lower, and fuel that arrived in between starts the second report above
+ * the first. Needs both reports' levels; without them, overlap is the rule.
  */
 export function sameDrain(a: DrainSpan, b: DrainSpan): boolean {
-  return a.beganAt.getTime()  <= b.detectedAt.getTime()
-      && b.beganAt.getTime()  <= a.detectedAt.getTime()
+  if (a.beganAt.getTime() <= b.detectedAt.getTime() && b.beganAt.getTime() <= a.detectedAt.getTime()) return true
+  const [first, second] = a.beganAt <= b.beganAt ? [a, b] : [b, a]
+  if (second.beganAt.getTime() - first.detectedAt.getTime() > DRAIN_RECLAMP_GAP_MS) return false
+  if (first.finalFuelLevelMl == null || second.finalFuelLevelMl == null
+    || first.initialFuelLevelMl == null || second.initialFuelLevelMl == null) return false
+  return Math.abs(first.finalFuelLevelMl - second.finalFuelLevelMl) <= DRAIN_LEVEL_MATCH_ML
+      && second.initialFuelLevelMl <= first.initialFuelLevelMl + DRAIN_LEVEL_MATCH_ML
 }
 
 /**
