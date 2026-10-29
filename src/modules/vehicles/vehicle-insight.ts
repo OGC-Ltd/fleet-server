@@ -158,7 +158,7 @@ export async function collectSignals(orgId: string, onlyVehicleId?: string): Pro
        WHERE v.organisation_id = ${orgId} AND (${one}::text IS NULL OR v.id = ${one})
          AND t.day >= ${from} AND t.day < ${today}`,
     prisma.$queryRaw<Array<{ id: string; vehicle_id: string; began_at: Date; stolen_ml: number; drain_cause: string | null; review_status: string | null; dismissed_at: Date | null }>>`
-      SELECT f.id, f.vehicle_id, f.began_at, f.stolen_ml, f.drain_cause::text, f.review_status::text, f.dismissed_at
+      SELECT f.id, f.vehicle_id, f.began_at, coalesce(f.clean_drop_ml, f.stolen_ml) AS stolen_ml, f.drain_cause::text, f.review_status::text, f.dismissed_at
         FROM fuel_thefts f JOIN vehicles v ON v.id = f.vehicle_id
        WHERE v.organisation_id = ${orgId} AND (${one}::text IS NULL OR v.id = ${one})
          AND f.began_at >= ${from} AND f.drain_cause::text = ANY(${ANNOUNCED_CAUSES})`,

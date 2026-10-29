@@ -211,7 +211,7 @@ export async function collectToday(orgId: string) {
       // verdictReason comes along because confirmation is derived from it —
       // see isConfirmed. A DRAIN we watched happen and one we merely relayed
       // are the same verdict and a very different call on somebody's morning.
-      select: { verdict: true, stolenMl: true, verdictReason: true },
+      select: { verdict: true, stolenMl: true, cleanDropMl: true, verdictReason: true },
     }),
     // Today's Live Feed, by kind. Grouped rather than fetched: zone crossings
     // alone run to ~2,900 a day on Kasulu and no brief needs them individually.
@@ -338,7 +338,7 @@ export async function collectToday(orgId: string) {
       /** Reported as a fall we could not check. Counted, not chased. */
       notConfirmed:      drains.length - confirmedDrains.length,
       litresDrained: confirmedDrains.length
-        ? Math.round(confirmedDrains.reduce((s, t) => s + t.stolenMl, 0) / 100) / 10
+        ? Math.round(confirmedDrains.reduce((s, t) => s + (t.cleanDropMl ?? t.stolenMl), 0) / 100) / 10
         : 0,
     },
     /** Today's Live Feed by kind, plus the newest lines worth quoting. */

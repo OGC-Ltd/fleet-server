@@ -432,7 +432,7 @@ export async function fuelConsumption(
       // individually as `drains` — see the note there on why this is the query
       // that has to produce them.
       select: {
-        id: true, vehicleId: true, beganAt: true, stolenMl: true,
+        id: true, vehicleId: true, beganAt: true, stolenMl: true, cleanDropMl: true,
         initialLocation: true, drainCause: true, causeReason: true,
         verdict: true, fallSeconds: true,
         // The FSL either side of the fall — the tank level the probe actually
@@ -531,13 +531,16 @@ export async function fuelConsumption(
     totalFilledMl += f.filledMl
   }
   for (const t of thefts) {
-    const d = dayBucket(fleetDayKey(t.beganAt)); d.stolenMl += t.stolenMl; d.thefts += 1
-    const v = vehicleBucket(t.vehicleId, t.vehicle); v.stolenMl += t.stolenMl; v.thefts += 1
-    totalStolenMl += t.stolenMl
+    // Ours, cleaned (no slosh, less the engine's burn), where the drain has one
+    // (2026-10-29 on): the figure the alert stated. Else the provider's.
+    const ml = t.cleanDropMl ?? t.stolenMl
+    const d = dayBucket(fleetDayKey(t.beganAt)); d.stolenMl += ml; d.thefts += 1
+    const v = vehicleBucket(t.vehicleId, t.vehicle); v.stolenMl += ml; v.thefts += 1
+    totalStolenMl += ml
     if (isSuspectedTheft(t.drainCause)) {
-      d.suspectedTheftMl += t.stolenMl; d.suspectedThefts += 1
-      v.suspectedTheftMl += t.stolenMl; v.suspectedThefts += 1
-      totalSuspectedMl += t.stolenMl; totalSuspected += 1
+      d.suspectedTheftMl += ml; d.suspectedThefts += 1
+      v.suspectedTheftMl += ml; v.suspectedThefts += 1
+      totalSuspectedMl += ml; totalSuspected += 1
     }
   }
 
@@ -619,7 +622,7 @@ export async function fuelConsumption(
       registrationPlate: t.vehicle.registrationPlate,
       name:              t.vehicle.name,
       beganAt:           t.beganAt,
-      stolenMl:          t.stolenMl,
+      stolenMl:          t.cleanDropMl ?? t.stolenMl,
       // FSL, millilitres. Priced into litres on the way out like everything
       // else — see fuel-pricing.
       levelBeforeMl:     t.initialFuelLevelMl,
@@ -953,7 +956,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       select: {
         id: true, driverId: true, vehicleId: true,
         beganAt: true, detectedAt: true, fallSeconds: true,
-        stolenMl: true, initialFuelLevelMl: true, finalFuelLevelMl: true,
+        stolenMl: true, cleanDropMl: true, initialFuelLevelMl: true, finalFuelLevelMl: true,
         initialLocation: true,
         verdict: true, verdictReason: true,
         drainCause: true, causeConfidence: true, causeReason: true,
@@ -1080,7 +1083,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
       id:       th.id,
       at:       th.beganAt.toISOString(),
       plate:    th.vehicle?.registrationPlate ?? null,
-      litres:   Math.round((th.stolenMl / 1000) * 10) / 10,
+      litres:   Math.round(((th.cleanDropMl ?? th.stolenMl) / 1000) * 10) / 10,
       // Minutes the level was falling. 47 L over four hours and 47 L over four
       // minutes are different events with the same headline, so the rate is
       // carried rather than left to be inferred from a total.

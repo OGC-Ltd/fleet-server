@@ -413,7 +413,7 @@ export type Announcement = 'opened' | 'escalated' | 'deescalated' | 'assigned' |
 export function announce(orgId: string, row: FollowUpRow, what: Announcement) {
   const t = row.theft
   const plate = t.vehicle.registrationPlate
-  const incident = `${plate} fuel incident (${litres(t.stolenMl)})`
+  const incident = `${plate} fuel incident (${litres(t.cleanDropMl ?? t.stolenMl)})`
   const text = {
     opened:
       `FOLLOW-UP NEEDED: the ${incident} was deleted by ${row.dismissedBy?.fullName ?? 'an operator'}. ` +

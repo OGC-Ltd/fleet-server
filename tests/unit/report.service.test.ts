@@ -7,7 +7,7 @@ vi.mock('../../src/lib/prisma.ts', () => ({
   prisma: {
     trip: { groupBy: vi.fn().mockResolvedValue([]) },
     fuelFilling: { groupBy: vi.fn().mockResolvedValue([]) },
-    fuelTheft: { groupBy: vi.fn().mockResolvedValue([]) },
+    fuelTheft: { findMany: vi.fn().mockResolvedValue([]) },
   },
 }))
 

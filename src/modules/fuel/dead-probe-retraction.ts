@@ -47,7 +47,7 @@ export async function retractDeadProbeDrains(
       detectedAt:  { gte: new Date(now.getTime() - RETRACT_LOOKBACK_MS) },
     },
     select: {
-      id: true, vehicleId: true, beganAt: true, detectedAt: true, stolenMl: true, finalFuelLevelMl: true,
+      id: true, vehicleId: true, beganAt: true, detectedAt: true, stolenMl: true, cleanDropMl: true, finalFuelLevelMl: true,
       vehicle: { select: { organisationId: true, registrationPlate: true, tankCapacityLitres: true } },
     },
   })
@@ -104,7 +104,7 @@ export async function retractDeadProbeDrains(
         source:    'live',
         alertType: 'fuelInconsistency',
         severity:  'info',
-        text:      `Retracted: ${plate}'s ${L(t.stolenMl)} "possible theft" at ${clock.format(t.beganAt)} was the fuel probe ` +
+        text:      `Retracted: ${plate}'s ${L(t.cleanDropMl ?? t.stolenMl)} "possible theft" at ${clock.format(t.beganAt)} was the fuel probe ` +
                    `dropping out — the machine ran afterwards with the probe still reading empty. Check the probe.`,
         at:        now,
         plate:     t.vehicle.registrationPlate,

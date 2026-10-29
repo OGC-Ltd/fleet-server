@@ -59,14 +59,17 @@ export async function refreshSummaries(orgId: string, periodId: string) {
     _sum: { filledMl: true },
   })
 
-  const theftTotals = await prisma.fuelTheft.groupBy({
-    by: ['vehicleId'],
+  // Summed per row rather than grouped: each drain counts our cleaned figure
+  // (no slosh, less the engine's burn) where it has one, else the provider's,
+  // and a groupBy can only sum one column.
+  const thefts = await prisma.fuelTheft.findMany({
     where: { reportingPeriodId: periodId, vehicle: { organisationId: orgId } },
-    _sum: { stolenMl: true },
+    select: { vehicleId: true, stolenMl: true, cleanDropMl: true },
   })
 
   const fuelMap = new Map(fuelTotals.map((f) => [f.vehicleId, f._sum.filledMl]))
-  const theftMap = new Map(theftTotals.map((t) => [t.vehicleId, t._sum.stolenMl]))
+  const theftMap = new Map<string, number>()
+  for (const t of thefts) theftMap.set(t.vehicleId, (theftMap.get(t.vehicleId) ?? 0) + (t.cleanDropMl ?? t.stolenMl))
 
   const upserts = vehicleAggregates.map((agg) =>
     repo.upsertSummary(agg.vehicleId, periodId, {
