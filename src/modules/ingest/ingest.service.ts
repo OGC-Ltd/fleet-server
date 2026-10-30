@@ -7,6 +7,7 @@ import { logger } from '../../lib/logger.js'
 import type { TelemetryPayload } from './ingest.schema.js'
 import type { FenceGeometry } from '../../lib/geofence.js'
 import { NotFoundError } from '../../core/errors/errors.js'
+import { currentAssignmentWhere, CURRENT_ASSIGNMENT_ORDER } from '../vehicles/driver-assignment.js'
 
 // Bounds the fire-and-forget raw-payload writes below so a burst of frames
 // can't pile up unbounded connections against the pool.
@@ -94,8 +95,9 @@ export async function processTelemetry(
 
     // 2. Resolve active driver (point-in-time)
     const assignment = await prisma.vehicleAssignment.findFirst({
-      where: { vehicleId, unassignedAt: null },
-      select: { userId: true },
+      where:   { vehicleId, ...currentAssignmentWhere(dto.capturedAt) },
+      orderBy: CURRENT_ASSIGNMENT_ORDER,
+      select:  { userId: true },
     })
     driverId = assignment?.userId ?? null
   }

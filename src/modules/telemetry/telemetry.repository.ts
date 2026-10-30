@@ -745,6 +745,7 @@ export async function findLatest(vehicleId: string, orgId: string) {
  */
 import { ANNOUNCED_CAUSES, ANNOUNCED_REASON_SLUGS } from '../fuel/fuel-theft-classifier.js'
 import { env } from '../../config/env.js'
+import { currentAssignmentWhere, CURRENT_ASSIGNMENT_ORDER } from '../vehicles/driver-assignment.js'
 
 export const FUEL_INCIDENT_WINDOW_MS = 24 * 60 * 60 * 1000
 
@@ -871,10 +872,10 @@ export async function findFleetSnapshot(orgId: string) {
       // one, up to four, and some named a different person from the driver on
       // the current run. The dispatch driver overrides this entirely while a
       // run is open (see telemetry.service); this fixes what is shown the rest
-      // of the time.
+      // of the time. Stale runs no longer count — see vehicles/driver-assignment.
       assignments: {
-        where:   { unassignedAt: null },
-        orderBy: { assignedAt: 'desc' },
+        where:   currentAssignmentWhere(),
+        orderBy: CURRENT_ASSIGNMENT_ORDER,
         select:  { user: { select: { fullName: true, driverRatingScore: true } } },
         take:    1,
       },
