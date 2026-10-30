@@ -31,7 +31,7 @@ export const MAX_RANGE_DAYS = 31
 const DASHCAM_DAYS = 7
 /** A VSS search can queue behind another; past this the scorecard goes without. */
 const DASHCAM_WAIT_MS = 25_000
-/** Road speed: a day on which the vehicle went faster than this counts as driven. */
+/** Road speed: TODAY counts as driven once the vehicle went faster than this (past days: see drivenDays). */
 const DRIVEN_KMH = 20
 
 const DASHCAM_KIND = new Map<number, Exclude<ViolationKind, 'speeding' | 'harshBrake'>>([
@@ -75,6 +75,57 @@ export interface ScorecardAnswer {
   manual: string[]
 }
 
+/** Moving fixes (engine on, not idle) that make a past fleet day a driven one. */
+const MIN_MOVING_FIXES = 20
+
+/**
+ * The vehicles driven on each fleet day, and a moment on that day to ask
+ * "who held it" at.
+ *
+ * Past days come from `vehicle_daily_stats` — one row per vehicle per day,
+ * moving fixes = engine fixes − idle fixes — and the moment is midday. Days
+ * with an event are credited from the event's own time as well, so a
+ * handover is still seen where it matters. Today is not in that table, so
+ * today alone is read from the telemetry: when the vehicle first and last
+ * went faster than DRIVEN_KMH.
+ *
+ * Why not the telemetry for every day: a month of an organisation's frames in
+ * one aggregate ran past the pool's read timeout ("This month", 1–30 Oct,
+ * failed for MENENGAI and SUKARI on 2026-10-30), per-day queries took 2.5–3
+ * minutes for the month, and index probes per vehicle-day 37 s (MENENGAI) to
+ * 108 s (SUKARI). The rollup answers the month in about 25 ms.
+ */
+async function drivenDays(orgId: string, start: Date, end: Date) {
+  const todayStart = fleetDayStart(new Date())
+  const pastEnd = new Date(Math.min(end.getTime(), todayStart.getTime()))
+  const out: Array<{ vehicle_id: string; first_at: Date; last_at: Date }> = []
+
+  if (start < pastEnd) {
+    const rows = await prisma.$queryRaw<Array<{ vehicle_id: string; day: Date }>>`
+      SELECT s.vehicle_id, s.day
+        FROM vehicle_daily_stats s JOIN vehicles v ON v.id = s.vehicle_id
+       WHERE v.organisation_id = ${orgId}
+         AND s.day >= ${fleetDayKey(start)} AND s.day < ${fleetDayKey(pastEnd)}
+         AND coalesce(s.engine_fixes, 0) - coalesce(s.idle_fixes, 0) >= ${MIN_MOVING_FIXES}`
+    for (const r of rows) {
+      // `day` is the fleet day's date at UTC midnight; EAT noon is 09:00 UTC.
+      const noon = new Date(r.day.getTime() + 9 * 3_600_000)
+      out.push({ vehicle_id: r.vehicle_id, first_at: noon, last_at: noon })
+    }
+  }
+
+  if (end > todayStart) {
+    const from = new Date(Math.max(start.getTime(), todayStart.getTime()))
+    out.push(...await prisma.$queryRaw<Array<{ vehicle_id: string; first_at: Date; last_at: Date }>>`
+      SELECT t.vehicle_id, min(t.captured_at) AS first_at, max(t.captured_at) AS last_at
+        FROM vehicle_telemetries t JOIN vehicles v ON v.id = t.vehicle_id
+       WHERE v.organisation_id = ${orgId} AND t.captured_at >= ${from} AND t.captured_at < ${end}
+         AND t.speed_kmh > ${DRIVEN_KMH}
+       GROUP BY t.vehicle_id`)
+  }
+  return out
+}
+
 export async function getDriverScorecard(orgId: string, fromDay: string, toDay: string): Promise<ScorecardAnswer> {
   const start = fleetDayStart(new Date(`${fromDay}T12:00:00+03:00`))
   const end   = new Date(fleetDayStart(new Date(`${toDay}T12:00:00+03:00`)).getTime() + 86_400_000)
@@ -87,12 +138,7 @@ export async function getDriverScorecard(orgId: string, fromDay: string, toDay: 
       select: { vehicleId: true, userId: true, assignedAt: true, unassignedAt: true, notes: true,
                 user: { select: { fullName: true } } },
     }),
-    prisma.$queryRaw<Array<{ vehicle_id: string; first_at: Date; last_at: Date }>>`
-      SELECT t.vehicle_id, min(t.captured_at) AS first_at, max(t.captured_at) AS last_at
-        FROM vehicle_telemetries t JOIN vehicles v ON v.id = t.vehicle_id
-       WHERE v.organisation_id = ${orgId} AND t.captured_at >= ${start} AND t.captured_at < ${end}
-         AND t.speed_kmh > ${DRIVEN_KMH}
-       GROUP BY t.vehicle_id, date_trunc('day', t.captured_at + interval '3 hours')`,
+    drivenDays(orgId, start, end),
     prisma.speedingIncident.findMany({
       where:  { organisationId: orgId, startedAt: { gte: start, lt: end } },
       select: { vehicleId: true, startedAt: true, overByKmh: true },
