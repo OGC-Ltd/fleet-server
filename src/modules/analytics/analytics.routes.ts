@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission } from '../../middleware/authorize.js'
 import { validateQuery } from '../../middleware/validate.js'
-import { analyticsRangeSchema, speedingQuerySchema, deliveriesQuerySchema, fuelCostQuerySchema } from './analytics.schema.js'
+import { analyticsRangeSchema, speedingQuerySchema, deliveriesQuerySchema, fuelCostQuerySchema, driverScoresQuerySchema } from './analytics.schema.js'
 import * as ctrl from './analytics.controller.js'
 
 const router = Router({ mergeParams: true })
@@ -15,6 +15,8 @@ router.get('/drivers', requirePermission('driver:read'),              ctrl.drive
 // Batched roster + per-driver details in one response — must be registered
 // before the :driverId route or "overview" would be parsed as a driver id.
 router.get('/drivers/overview', requirePermission('driver:read'),     validateQuery(deliveriesQuerySchema), ctrl.driversOverview)
+// Speed and safety points per driver-day, from the driver pay proposal.
+router.get('/driver-scores', requirePermission('driver:read'),        validateQuery(driverScoresQuerySchema), ctrl.driverScores)
 router.get('/drivers/:driverId', requirePermission('driver:read'),    validateQuery(deliveriesQuerySchema), ctrl.driverAnalytics)
 router.get('/fuel-efficiency', requirePermission('analytics:read'),      validateQuery(analyticsRangeSchema), ctrl.fuelEfficiency)
 // Ledger-backed fuel + cost. Distinct from /fuel-efficiency above, which reads

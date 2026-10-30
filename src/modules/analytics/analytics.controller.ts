@@ -13,7 +13,8 @@ import { getDriversOverview, DEFAULT_DRIVER_WINDOW_DAYS } from './drivers-overvi
 import { getDeliveriesAnalytics } from './deliveries.cache.js'
 import { getFuelConsumption } from './fuel-cost.cache.js'
 import { priceFuelConsumption } from './fuel-pricing.js'
-import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery, FuelCostQuery } from './analytics.schema.js'
+import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery, FuelCostQuery, DriverScoresQuery } from './analytics.schema.js'
+import { getDriverScorecard } from '../driver-score/driver-score.service.js'
 import { vehicleIdsFromQuery, listCategories, parseCategories, parseVehicleIds } from './vehicle-filter.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -290,6 +291,14 @@ export const driversOverview: RequestHandler = async (req, res, next) => {
     const q = req.query as unknown as DeliveriesQuery
     const data = await getDriversOverview(p(req, 'orgId'), q.days)
     sendSuccess(res, data)
+  } catch (err) { next(err) }
+}
+
+/** Speed and safety points per driver-day — the pay proposal's scorecard. */
+export const driverScores: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as DriverScoresQuery
+    sendSuccess(res, await getDriverScorecard(p(req, 'orgId'), q.from, q.to))
   } catch (err) { next(err) }
 }
 

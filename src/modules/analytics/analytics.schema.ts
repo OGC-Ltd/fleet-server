@@ -44,7 +44,14 @@ export const fuelCostQuerySchema = deliveriesQuerySchema.extend({
   pricePerLitre: z.coerce.number().positive().optional(),
 })
 
+/** Fleet days, inclusive, at most 31 of them — see driver-score.service. */
+const fleetDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD')
+export const driverScoresQuerySchema = z.object({ from: fleetDay, to: fleetDay })
+  .refine(q => q.from <= q.to, { message: 'from must not be after to' })
+  .refine(q => (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000 < 31, { message: 'at most 31 days' })
+
 export type AnalyticsRange  = z.infer<typeof analyticsRangeSchema>
 export type SpeedingQuery   = z.infer<typeof speedingQuerySchema>
 export type DeliveriesQuery = z.infer<typeof deliveriesQuerySchema>
 export type FuelCostQuery   = z.infer<typeof fuelCostQuerySchema>
+export type DriverScoresQuery = z.infer<typeof driverScoresQuerySchema>
