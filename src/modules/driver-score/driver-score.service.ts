@@ -168,13 +168,13 @@ export async function getDriverScorecard(orgId: string, fromDay: string, toDay: 
   if (camFrom < end) {
     dashcam.checked = true
     dashcam.from = camFrom.toISOString()
-    if (camFrom > start) dashcam.note = `Dashcam alarms are kept for ${DASHCAM_DAYS} days; days before ${dayOf(camFrom)} have none.`
+    if (camFrom > start) dashcam.note = `Dashcam alarms are available for the last ${DASHCAM_DAYS} days only, so no dashcam violations are shown before ${dayOf(camFrom)}.`
     try {
       const answer = await Promise.race([
         getAlarms(orgId, null, camFrom.toISOString()),
         new Promise<null>(resolve => setTimeout(() => resolve(null), DASHCAM_WAIT_MS)),
       ])
-      if (!answer) { dashcam.complete = false; dashcam.note = 'The camera server did not answer in time; dashcam violations are missing.' }
+      if (!answer) { dashcam.complete = false; dashcam.note = 'The camera server did not respond in time, so dashcam violations are not included.' }
       else {
         dashcam.complete = !answer.partial && !answer.stale
         for (const inc of answer.incidents) {
@@ -191,13 +191,13 @@ export async function getDriverScorecard(orgId: string, fromDay: string, toDay: 
         }
         if (dashcam.untyped > 0) {
           dashcam.complete = false
-          dashcam.note = `${dashcam.untyped} dashcam alarms have no type yet (the camera server names them a few hundred at a time); reload later for a fuller count.`
+          dashcam.note = `${dashcam.untyped.toLocaleString('en-KE')} dashcam alarm${dashcam.untyped === 1 ? ' has' : 's have'} not yet been classified by the camera server, so the dashcam totals are incomplete. Refresh the page later for a more complete count.`
         }
       }
     } catch (err) {
       logger.warn({ err, orgId }, 'driver scorecard: dashcam alarms failed')
       dashcam.complete = false
-      dashcam.note = 'The camera server could not be reached; dashcam violations are missing.'
+      dashcam.note = 'The camera server could not be reached, so dashcam violations are not included.'
     }
   }
 
@@ -230,10 +230,12 @@ export async function getDriverScorecard(orgId: string, fromDay: string, toDay: 
     from: fromDay, to: toDay, rules: SCORE_RULES, drivers,
     coverage: { vehiclesDriven: drivenVehicles.size, vehiclesWithDriver: withDriver.size, unattributed, dashcam },
     manual: [
-      'Fuel efficiency (§3.1): probe km/L is not yet reliable enough to pay on.',
-      'Vehicle care (§3.3): mechanic inspection score.',
-      'Trip-wise pay, lunch allowance and attendance: trip and attendance records.',
-      'Running a red light, driving without headlights: no signal from trackers or cameras.',
+      // Clauses, not sentences: the page joins them into one ("The following
+      // are not scored here: a; b; and c.").
+      'fuel efficiency (§3.1), because fuel-probe readings are not yet reliable enough to base pay on',
+      'vehicle care (§3.3), which requires the mechanic’s inspection score',
+      'trip-wise pay, lunch allowance and attendance, which require trip and attendance records',
+      'running a red light or driving without headlights, which neither the trackers nor the cameras can detect',
     ],
   }
 }
