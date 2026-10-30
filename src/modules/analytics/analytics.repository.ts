@@ -15,6 +15,7 @@ import { vehicleSql } from './vehicle-filter.js'
 // here rather than re-derived on the client: a second copy of that rule would
 // drift from the alerts it is supposed to describe.
 import { announces, CAUSE_NO_FUEL_LEFT } from '../fuel/fuel-theft-classifier.js'
+import { currentAssignmentWhere } from '../vehicles/driver-assignment.js'
 
 // `NO_FUEL_LEFT` (drains) and `NO_FUEL_ARRIVED` (fillings) are imported rather
 // than declared here. They interpret a `Verdict`, so they live beside it in
@@ -988,7 +989,9 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     prisma.vehicleAssignment.findMany({
       where: {
         userId: { in: driverIds },
-        unassignedAt: null,
+        // Stale Control Tech runs no longer post a driver to a truck — see
+        // vehicles/driver-assignment.
+        ...currentAssignmentWhere(),
         vehicle: { organisationId: orgId },
       },
       select: {

@@ -40,6 +40,7 @@ import { warmSpeedPolicy } from './speed-policy.js'
 import { noteFuelFrame } from './fuel-drop-watch.js'
 import { noteFaultFrame, noteAlive } from './sensor-faults.js'
 import { deriveAlertFlags } from './derived-alerts.js'
+import { currentAssignmentWhere, CURRENT_ASSIGNMENT_ORDER } from '../modules/vehicles/driver-assignment.js'
 
 // Minimum gap before the SAME vehicle+alert is allowed to notify again. The
 // rising-edge map already suppresses a continuously-active flag; this stops a
@@ -134,10 +135,13 @@ async function refreshCache(): Promise<void> {
       registrationPlate:  true,
       tankCapacityLitres: true,
       vehicleType:        true,
+      // Who holds it now — see vehicles/driver-assignment. Stamped on every
+      // telemetry row and speeding incident until the next refresh.
       assignments: {
-        where: { unassignedAt: null },
-        select: { userId: true, user: { select: { fullName: true } } },
-        take: 1,
+        where:   currentAssignmentWhere(),
+        orderBy: CURRENT_ASSIGNMENT_ORDER,
+        select:  { userId: true, user: { select: { fullName: true } } },
+        take:    1,
       },
     },
   })

@@ -24,6 +24,7 @@ import { logger } from './logger.js'
 import { emitDashboardPosition } from './sse.js'
 import { deriveFeedEvents } from './feed-events.js'
 import type { DashboardPositionPayload } from './workers/telemetry.worker.js'
+import { currentAssignmentWhere, CURRENT_ASSIGNMENT_ORDER } from '../modules/vehicles/driver-assignment.js'
 
 const FOLLOW_INTERVAL_MS = 30_000        // matches the writer's poll cadence
 const META_TTL_MS        = 5 * 60_000    // same staleness budget as the poller's device cache
@@ -68,9 +69,10 @@ async function getMeta(): Promise<Map<string, VehicleMeta>> {
       tankCapacityLitres: true,
       vehicleType:        true,
       assignments: {
-        where: { unassignedAt: null },
-        select: { user: { select: { fullName: true } } },
-        take: 1,
+        where:   currentAssignmentWhere(),
+        orderBy: CURRENT_ASSIGNMENT_ORDER,
+        select:  { user: { select: { fullName: true } } },
+        take:    1,
       },
     },
   })
