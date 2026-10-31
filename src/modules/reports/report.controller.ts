@@ -81,7 +81,7 @@ export const downloadPdfReport: RequestHandler = async (req, res, next) => {
 
 // ── End-of-shift report ───────────────────────────────────────────────────────
 
-/** 06:00 Nairobi to now, for this organisation, as a PDF. */
+/** Today from midnight Nairobi up to now, for this organisation, as a PDF. */
 export const downloadEndOfShift: RequestHandler = async (req, res, next) => {
   try {
     const orgId = p(req, 'orgId')

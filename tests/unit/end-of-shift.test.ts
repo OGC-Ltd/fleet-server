@@ -5,7 +5,7 @@
  * lib/endOfShiftReport.test.js).
  */
 import { describe, it, expect } from 'vitest'
-import { buildEndOfShift, shiftStart, alarmKind, parseSale, exitZone, type ShiftInput, type ShiftUnit } from '../../src/modules/reports/end-of-shift.js'
+import { buildEndOfShift, shiftStart, shiftEnd, alarmKind, parseSale, exitZone, type ShiftInput, type ShiftUnit } from '../../src/modules/reports/end-of-shift.js'
 import { renderEndOfShiftPdf, reportNumber, endOfShiftFileName, dur } from '../../src/modules/reports/end-of-shift.pdf.js'
 import { toShiftUnit, daysOf, plateIn } from '../../src/modules/reports/end-of-shift.data.js'
 
@@ -92,10 +92,15 @@ const fixture: ShiftInput & { units: ShiftUnit[] } = {
 }
 
 describe('end of shift: helpers', () => {
-  it('the shift starts at 06:00 Nairobi, or yesterday 06:00 before six', () => {
-    expect(shiftStart(Date.parse('2026-10-31T14:00:00+03:00'))).toBe(FROM)
-    expect(shiftStart(Date.parse('2026-10-31T04:30:00+03:00'))).toBe(FROM - 24 * H)
-    expect(shiftStart(FROM)).toBe(FROM)
+  it('the shift is the Nairobi day: midnight to 23:59, whatever the hour it is made', () => {
+    const MIDNIGHT = Date.parse('2026-10-31T00:00:00+03:00')
+    expect(shiftStart(Date.parse('2026-10-31T14:00:00+03:00'))).toBe(MIDNIGHT)
+    expect(shiftStart(Date.parse('2026-10-31T04:30:00+03:00'))).toBe(MIDNIGHT)
+    expect(shiftStart(MIDNIGHT)).toBe(MIDNIGHT)
+    expect(shiftStart(Date.parse('2026-10-31T23:59:59+03:00'))).toBe(MIDNIGHT)
+    // The report the operator got at 01:24 on 1 November ran from 06:00 on the 31st.
+    expect(shiftStart(Date.parse('2026-11-01T01:24:00+03:00'))).toBe(Date.parse('2026-11-01T00:00:00+03:00'))
+    expect(shiftEnd(Date.parse('2026-10-31T14:00:00+03:00'))).toBe(Date.parse('2026-11-01T00:00:00+03:00') - 1)
   })
   it('reads the dashcam alarms the report counts', () => {
     expect([116, 264, 125, 51, 123, 3, 115].map((code) => alarmKind({ code }))).toEqual(['phone', 'phone', 'seatbelt', 'seatbelt', 'covered', 'covered', null])
@@ -131,7 +136,7 @@ describe('end of shift: snapshot rows', () => {
 describe('end of shift: buildEndOfShift', () => {
   const r = buildEndOfShift(fixture)
 
-  it('units reporting: any report since 06:00, engine on or not', () => {
+  it('units reporting: any report since the shift began, engine on or not', () => {
     expect(r.fleet).toEqual({ units: 6, reporting: 6 })
     const r3 = buildEndOfShift({ ...fixture, units: fixture.units.map((v, i) => ({ ...v, seenAt: i < 2 ? FROM - H : v.seenAt })) })
     expect(r3.fleet.reporting).toBe(4)
