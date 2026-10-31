@@ -1,4 +1,5 @@
-﻿import { prisma } from '../../lib/prisma.js'
+﻿import { workshopSpans, inSpans } from '../repairs/workshop-presence.js'
+import { prisma } from '../../lib/prisma.js'
 import { getSimFleetVehicleIds } from '../../lib/sim-fleet.js'
 import { env } from '../../config/env.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
@@ -1204,8 +1205,15 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
   // KCP 145P's harsh acceleration of 2026-10-28 among them.
   const harshByDriver = new Map<string, { accel: Date[]; brake: Date[] }>()
   const harshListByDriver = new Map<string, DriverHarsh[]>()
+  // Harsh accelerations while the unit was in the workshop are not driving.
+  const accels = harsh.filter(h => h.type === 'HARSH_ACCELERATION')
+  const shop = accels.length
+    ? await workshopSpans([...new Set(accels.map(h => h.vehicleId!))],
+        new Date(Math.min(...accels.map(h => h.createdAt.getTime()))), new Date(Math.max(...accels.map(h => h.createdAt.getTime()))))
+    : new Map()
   for (const h of harsh) {
     if (!h.vehicleId) continue
+    if (h.type === 'HARSH_ACCELERATION' && inSpans(shop, h.vehicleId, h.createdAt)) continue
     const hit = (tripsByVehicle.get(h.vehicleId) ?? []).find(t =>
       t.driverId && h.createdAt >= t.beganAt && (t.endedAt == null || h.createdAt <= t.endedAt),
     )
@@ -1466,7 +1474,7 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
   const vehicleIds = [...new Set(trips.map(t => t.vehicleId))]
   let overspeedingCases = 0, harshAccelerationCases = 0, harshBrakingCases = 0
   if (vehicleIds.length > 0) {
-    const [alerts, harsh] = await Promise.all([
+    const [alerts, harsh, shop] = await Promise.all([
       prisma.vehicleAlert.findMany({
         where:  { organisationId: orgId, vehicleId: { in: vehicleIds }, type: 'overspeeding', triggeredAt: { gte: from, lte: to } },
         select: { vehicleId: true, triggeredAt: true },
@@ -1475,12 +1483,15 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
         where:  { organisationId: orgId, vehicleId: { in: vehicleIds }, type: { in: ['HARSH_ACCELERATION', 'HARSH_BRAKING'] }, createdAt: { gte: from, lte: to } },
         select: { vehicleId: true, type: true, createdAt: true },
       }),
+      workshopSpans(vehicleIds, from, to),
     ])
     // Every alert during one of their trips — matches driversOverview.
     const onTrip = (vehicleId: string | null, at: Date) =>
       trips.some(t => t.vehicleId === vehicleId && at >= t.beganAt && at <= t.endedAt)
     overspeedingCases = alerts.filter(a => onTrip(a.vehicleId, a.triggeredAt)).length
-    harshAccelerationCases = harsh.filter(h => h.type === 'HARSH_ACCELERATION' && onTrip(h.vehicleId, h.createdAt)).length
+    // Not while the unit was in the workshop: that is not driving.
+    harshAccelerationCases = harsh.filter(h => h.type === 'HARSH_ACCELERATION' && onTrip(h.vehicleId, h.createdAt)
+      && !inSpans(shop, h.vehicleId, h.createdAt)).length
     harshBrakingCases = harsh.filter(h => h.type === 'HARSH_BRAKING' && onTrip(h.vehicleId, h.createdAt)).length
   }
 
