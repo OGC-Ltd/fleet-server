@@ -46,7 +46,18 @@ export const fuelCostQuerySchema = deliveriesQuerySchema.extend({
 
 /** Fleet days, inclusive, at most 31 of them — see driver-score.service. */
 const fleetDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD')
-export const driverScoresQuerySchema = z.object({ from: fleetDay, to: fleetDay })
+const driverScoresRange = z.object({ from: fleetDay, to: fleetDay })
+export const driverScoresQuerySchema = driverScoresRange
+  .refine(q => q.from <= q.to, { message: 'from must not be after to' })
+  .refine(q => (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000 < 31, { message: 'at most 31 days' })
+
+/** The scorecard PDF: the same range, and `drivers=id,id` for some of them (all when absent). */
+export const driverScoresPdfQuerySchema = driverScoresRange
+  .extend({
+    drivers: z.string().optional()
+      .transform(v => (v ? [...new Set(v.split(',').map(s => s.trim()).filter(Boolean))] : null))
+      .refine(v => v == null || (v.length > 0 && v.length <= 500), { message: 'drivers: 1 to 500 ids, comma-separated' }),
+  })
   .refine(q => q.from <= q.to, { message: 'from must not be after to' })
   .refine(q => (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000 < 31, { message: 'at most 31 days' })
 
@@ -55,3 +66,4 @@ export type SpeedingQuery   = z.infer<typeof speedingQuerySchema>
 export type DeliveriesQuery = z.infer<typeof deliveriesQuerySchema>
 export type FuelCostQuery   = z.infer<typeof fuelCostQuerySchema>
 export type DriverScoresQuery = z.infer<typeof driverScoresQuerySchema>
+export type DriverScoresPdfQuery = z.infer<typeof driverScoresPdfQuerySchema>
