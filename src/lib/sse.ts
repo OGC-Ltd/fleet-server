@@ -486,6 +486,17 @@ export function emitDashboardRepairChanged(orgId: string) {
   broadcastDashboard(orgId, 'repair_changed', { at: new Date().toISOString() })
 }
 
+/**
+ * A unit's open fuel incident changed: raised, retracted, reviewed, or aged
+ * out. `fuelIncident` is the snapshot's own shape for the unit (null when it
+ * has none), so the client applies it exactly as it applies the snapshot:
+ * the map marker, the unit card and the CRITICAL count move together, without
+ * a page reload. Carries `vehicleId`, so a scoped client hears only its units.
+ */
+export function emitDashboardFuelIncident(orgId: string, data: { vehicleId: string; fuelIncident: unknown }) {
+  broadcastDashboard(orgId, 'fuel_incident', data)
+}
+
 /** Alert notification — powers the alert feed and banner toasts. */
 export function emitDashboardAlert(orgId: string, data: unknown) {
   broadcastDashboard(orgId, 'alert', data)
