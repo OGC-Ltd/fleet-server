@@ -10,7 +10,7 @@
  * `src/modules/fuel/fuel-rate.ts`.
  *
  * Run ON THE BOX directly, not through an npm wrapper that points
- * DOTENV_CONFIG_PATH at .env.example, whose DATABASE_URL is the dev SSH tunnel.
+ * DOTENV_CONFIG_PATH at .env, whose DATABASE_URL is the dev SSH tunnel.
  *
  *   npx tsx prisma/fuel-rates.ts
  *   npx tsx prisma/fuel-rates.ts --apply

@@ -41,7 +41,7 @@
  * reviewers disagreeing is the most interesting row in the output and the one
  * worth reading before any threshold is moved.
  *
- *     npx cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/score-fuel-labels.ts
+ *     npx cross-env DOTENV_CONFIG_PATH=.env tsx prisma/score-fuel-labels.ts
  */
 
 import { prisma } from '../src/lib/prisma.js'

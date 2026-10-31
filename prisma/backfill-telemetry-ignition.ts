@@ -63,7 +63,7 @@
  *
  * ## Usage
  *
- *     npx cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/backfill-telemetry-ignition.ts
+ *     npx cross-env DOTENV_CONFIG_PATH=.env tsx prisma/backfill-telemetry-ignition.ts
  *     ...                                                                       --apply
  *     ...                                                     --days 30 --batch 2000 --apply
  *

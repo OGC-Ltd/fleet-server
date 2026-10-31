@@ -13,7 +13,7 @@
  * It answers the CTR question directly: at 4.4 km per engine hour a cane
  * tractor belongs with the graders, not the buses, so it stays on hours.
  *
- *     npx cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/measure-travel-categories.ts
+ *     npx cross-env DOTENV_CONFIG_PATH=.env tsx prisma/measure-travel-categories.ts
  */
 
 import { prisma } from '../src/lib/prisma.js'

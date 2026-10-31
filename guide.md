@@ -20,13 +20,13 @@ still starts but every Prisma query fails with `ECONNREFUSED` (e.g. the
 > database, not a copy of this one. If you find those values anywhere, they are
 > stale, not an alternative route.
 
-> **A working tunnel is not enough — check the password too.** The committed
-> `.env.example` still carries the us-east-1 password, so the usual failure is
+> **A working tunnel is not enough — check the password too.** A stale local
+> `.env` (copied from an old template) may carry the us-east-1 password, so the usual failure is
 > a tunnel that connects and then `password authentication failed for user
 > "fleet_app"`. Compare fingerprints without printing either secret:
 >
 > ```bash
-> grep -m1 '^DATABASE_URL=' .env.example | sed -E 's#.*://[^:]+:([^@]+)@.*#\1#' | tr -d '"' | sha256sum | cut -c1-8
+> grep -m1 '^DATABASE_URL=' .env | sed -E 's#.*://[^:]+:([^@]+)@.*#\1#' | tr -d '"' | sha256sum | cut -c1-8
 > ssh -i <key> ubuntu@13.247.178.217 "grep -m1 '^DIRECT_URL=' ~/prod/fleet-server/.env | sed -E 's#.*://[^:]+:([^@]+)@.*#\1#' | tr -d \"'\\\"\" | sha256sum | cut -c1-8"
 > ```
 >
@@ -143,7 +143,7 @@ Everything below needs the **AWS console** (EC2, region af-south-1 / Cape Town):
 2. **The public IP changes on restart** unless an Elastic IP is attached.
    After a restart, get the new public DNS/IP from the console and update:
    - the tunnel commands above,
-   - the comment in `.env.example`,
+   - your local `.env` / tunnel command,
    - anything pointing at the remote API by address.
 3. **Security group:** SSH (22) is restricted to your IP only. If your ISP
    rotated your address, update the inbound rule to `<your-current-ip>/32`.
