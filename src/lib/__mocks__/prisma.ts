@@ -1,6 +1,6 @@
 import { vi } from 'vitest'
 import { mockDeep, mockReset } from 'vitest-mock-extended'
-import type { PrismaClient } from '../../../generated/prisma/client.js'
+import { Prisma, type PrismaClient } from '../../../generated/prisma/client.js'
 
 export const prismaMock = mockDeep<PrismaClient>()
 
@@ -32,4 +32,14 @@ export function resetPrismaMock() {
   ;(prismaMock.$queryRaw as any).mockResolvedValue([])
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(prismaMock.$queryRawUnsafe as any).mockResolvedValue([])
+  // Same reasoning for `findMany`: the real client always answers with an
+  // array. Without this, every query a test did not think to stub came back
+  // undefined and surfaced as a 500 from some unrelated `.map` — which is how
+  // newer authorisation reads (user.authz, authz/subject) broke whole suites
+  // whose subject had nothing to do with them.
+  for (const model of Object.values(Prisma.ModelName)) {
+    const delegate = model.charAt(0).toLowerCase() + model.slice(1)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;((prismaMock as any)[delegate].findMany as any).mockResolvedValue([])
+  }
 }

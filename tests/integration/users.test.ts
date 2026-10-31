@@ -16,12 +16,25 @@ let app: Express
 
 beforeAll(async () => { app = await buildApp() })
 
+// The user routes also check the caller's role slugs directly
+// (modules/users/user.authz): run as an organisation admin.
+beforeEach(() => {
+  // Only the slug lookup (user.authz roleSlugsFor) is answered; the subject's
+  // permission query on the same table is the auth mock's business.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  prismaMock.userRole.findMany.mockImplementation((async (args: any) =>
+    args?.select?.role?.select?.slug ? [{ role: { slug: 'admin' } }] : []) as never)
+})
+
+/** A user row as the roster selects it: with the (empty) group list. */
+const listed = (u: ReturnType<typeof makeUser>) => ({ ...u, groups: [] })
+
 
 const BASE = `/api/v1/organisations/${TEST_ORG_ID}/users`
 
 describe('GET /organisations/:orgId/users', () => {
   it('returns paginated user list', async () => {
-    const users = [makeUser(), makeUser()]
+    const users = [listed(makeUser()), listed(makeUser())]
     prismaMock.user.findMany.mockResolvedValue(users)
     prismaMock.user.count.mockResolvedValue(2)
 
@@ -35,8 +48,8 @@ describe('GET /organisations/:orgId/users', () => {
 
 describe('POST /organisations/:orgId/users', () => {
   it('creates user and returns 201', async () => {
-    const user = makeUser({ email: 'new@fleet.dev', fullName: 'New User' })
-    prismaMock.user.create.mockResolvedValue(user)
+    const user = listed(makeUser({ email: 'new@fleet.dev', fullName: 'New User' }))
+    prismaMock.user.create.mockResolvedValue(user as never)
 
     const res = await request(app)
       .post(BASE)
@@ -57,6 +70,15 @@ describe('POST /organisations/:orgId/users', () => {
 })
 
 describe('DELETE /organisations/:orgId/users/:userId', () => {
+  // Deletion has its own gate (user.authz canDeleteUser: deleter role,
+  // membership, shared group). A platform super admin passes the first and
+  // last, so these reach the route's own behaviour.
+  beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    prismaMock.userRole.findMany.mockImplementation((async (args: any) =>
+      args?.select?.role?.select?.slug ? [{ role: { slug: 'super_admin' } }] : []) as never)
+  })
+
   it('soft-deletes user and returns 204', async () => {
     const user = makeUser({ id: 'u1' })
     prismaMock.user.findFirst.mockResolvedValue(user as never)
@@ -67,11 +89,13 @@ describe('DELETE /organisations/:orgId/users/:userId', () => {
     expect(res.status).toBe(204)
   })
 
-  it('returns 404 when user not found', async () => {
+  it('refuses an id that is not a member, without saying whether it exists', async () => {
     prismaMock.user.findFirst.mockResolvedValue(null)
 
     const res = await request(app).delete(`${BASE}/ghost`)
 
-    expect(res.status).toBe(404)
+    // The delete gate answers "not in this organisation" before any lookup,
+    // so a missing account and somebody else's look the same from outside.
+    expect(res.status).toBe(403)
   })
 })
