@@ -128,3 +128,48 @@ describe('recordHarshEvent', () => {
     expect(prismaMock.providerAlert.create).not.toHaveBeenCalled()
   })
 })
+
+describe('recordHarshEvent — a unit in the workshop', () => {
+  const event = (kind: HarshDrivingEvent['kind']): HarshDrivingEvent => ({
+    deviceId: 'wialon:42', unitName: 'MUFINDI - FT 13', at: new Date('2026-10-21T08:15:30Z'),
+    kind, ms2: 3.1, lat: -4.9, lng: 30.1, speedKmh: 38,
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.providerAlert.findUnique as any).mockResolvedValue(null)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.providerAlert.findFirst as any).mockResolvedValue(null)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.providerAlert.create as any).mockResolvedValue({ id: 'pa_9' })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.vehicle.findUnique as any).mockResolvedValue({ id: 'veh_1', registrationPlate: 'FT 13', organisationId: 'org_k' })
+    // Booked in through the escalation workflow and arrived: in the workshop.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.workshopBooking.findFirst as any).mockResolvedValue({ id: 'wb_1' })
+    vi.spyOn(eventBus, 'publish').mockImplementation(() => undefined as never)
+  })
+
+  it('records no harsh acceleration, and tells the feed nothing', async () => {
+    await recordHarshEvent(event('ACCELERATION'))
+    expect(prismaMock.providerAlert.create).not.toHaveBeenCalled()
+    expect(eventBus.publish).not.toHaveBeenCalled()
+    const where = (prismaMock.workshopBooking.findFirst.mock.calls[0]![0] as { where: Record<string, unknown> }).where
+    expect(where).toMatchObject({ status: 'arrived', repairItem: expect.objectContaining({ vehicleId: 'veh_1' }) })
+  })
+
+  it('still records a harsh brake', async () => {
+    await recordHarshEvent(event('BRAKING'))
+    expect(prismaMock.providerAlert.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.workshopBooking.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('records the acceleration once the unit is out of the workshop', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.workshopBooking.findFirst as any).mockResolvedValue(null)
+    await recordHarshEvent(event('ACCELERATION'))
+    expect(prismaMock.providerAlert.create).toHaveBeenCalledTimes(1)
+  })
+})
+
