@@ -196,6 +196,7 @@ export function publishNotification(input: PublishNotificationInput): Notificati
   const item = buildItem(input)
 
   if (!admit(input)) return item
+  refreshIncidentsIfFuelVerdict(input)
 
   // A routine crossing waits up to five minutes for the vehicle's related ones
   // and reaches the feed as one line — see movement-window. The ROW is written
@@ -222,6 +223,20 @@ export function publishNotification(input: PublishNotificationInput): Notificati
   void cacheNotification(orgId, item)
 
   return item
+}
+
+/**
+ * A fuel alert raised, retracted or decided may change which units are red on
+ * the map: have the fleet snapshot rebuilt so open dashboards are told
+ * (telemetry/fleet-snapshot.cache, `fuel_incident`). Imported lazily: the
+ * snapshot cache sits in a module that itself publishes notifications.
+ */
+function refreshIncidentsIfFuelVerdict(input: PublishNotificationInput): void {
+  const t = input.alertType
+  if (t !== 'fuelInconsistency' && !t?.startsWith('FUEL_ALERT_')) return
+  void import('../../modules/telemetry/fleet-snapshot.cache.js')
+    .then((m) => m.refreshFleetSnapshotIncidents(input.orgId))
+    .catch((err) => logger.warn({ err, orgId: input.orgId }, 'fleet-snapshot refresh after a fuel alert failed'))
 }
 
 /** What a closed movement window does with its one line: SSE, then the hot cache. */
@@ -274,6 +289,7 @@ export async function publishNotificationDurable(input: PublishNotificationInput
   // An exact republish costs a pooler round trip for an upsert that changes
   // nothing, which on this connection is about a second. Skip the whole call.
   if (!admit(input)) return { item, published: false }
+  refreshIncidentsIfFuelVerdict(input)
 
   emitDashboardFeed(input.orgId, item)
   await writeNotification(input)
