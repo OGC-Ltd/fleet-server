@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { authLimiter, refreshLimiter, refreshIpLimiter } from '../../middleware/rateLimiter.js'
+import { authLimiter, loginAccountLimiter, refreshLimiter, refreshIpLimiter } from '../../middleware/rateLimiter.js'
 import { deviceId } from '../../middleware/device-id.js'
 import { validateBody } from '../../middleware/validate.js'
 import { loginSchema, refreshSchema } from './auth.schema.js'
@@ -8,7 +8,7 @@ import { loginHandler, refreshHandler, logoutHandler, meHandler } from './auth.c
 
 const router = Router()
 
-router.post('/login', authLimiter, validateBody(loginSchema), loginHandler)
+router.post('/login', authLimiter, loginAccountLimiter, validateBody(loginSchema), loginHandler)
 // Address, then machine — see account.routes.ts.
 //
 // `deviceId` is on THIS route and not on `login`, and that is the whole of the

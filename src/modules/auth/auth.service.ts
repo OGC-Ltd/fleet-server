@@ -99,6 +99,12 @@ export async function issueSession(
   }
 }
 
+/**
+ * Compared against when no account matches, so both paths cost one bcrypt.
+ * A fixed hash of a throwaway string, at the cost factor real hashes use.
+ */
+const DUMMY_HASH = '$2b$12$eQdtLJ.ZskfeseIFkD1Y2ugtMZio/no3C6BIM4OKYxzHvNr9IivKm'
+
 export async function login(dto: LoginDto, ctx: SessionContext = {}) {
   const user = await prisma.user.findFirst({
     where: { email: dto.email, deletedAt: null },
@@ -106,8 +112,13 @@ export async function login(dto: LoginDto, ctx: SessionContext = {}) {
   })
 
   // One generic message for unknown email / no password set / wrong password —
-  // a distinct "no such account" reply would let callers enumerate emails.
-  if (!user?.passwordHash) throw new UnauthorizedError('Invalid credentials')
+  // a distinct "no such account" reply would let callers enumerate emails. The
+  // dummy compare keeps the TIME the same too: skipping bcrypt answered a
+  // missing account tens of milliseconds sooner than a wrong password.
+  if (!user?.passwordHash) {
+    await bcrypt.compare(dto.password, DUMMY_HASH)
+    throw new UnauthorizedError('Invalid credentials')
+  }
   const valid = await bcrypt.compare(dto.password, user.passwordHash)
   if (!valid) throw new UnauthorizedError('Invalid credentials')
 
@@ -115,6 +126,26 @@ export async function login(dto: LoginDto, ctx: SessionContext = {}) {
 
   const { passwordHash: _ph, ...safeUser } = user
   return { ...(await issueSession(user, ctx)), user: safeUser as SafeUser }
+}
+
+/**
+ * Revoke the entire family rather than the presented row: the honest client's
+ * current token is a descendant of this one, and leaving it live would leave
+ * the thief's next rotation working too. Always throws.
+ */
+async function revokeFamilyForReuse(
+  session: { userId: string; familyId: string },
+  ctx: SessionContext,
+): Promise<never> {
+  await prisma.authSession.updateMany({
+    where: { familyId: session.familyId, revokedAt: null },
+    data:  { revokedAt: new Date(), revokedReason: 'refresh token reuse detected' },
+  })
+  logger.warn(
+    { userId: session.userId, familyId: session.familyId, ip: ctx.ip },
+    'auth: refresh token reuse — session family revoked',
+  )
+  throw new UnauthorizedError('Invalid refresh token')
 }
 
 export async function refresh(rawToken: string, ctx: SessionContext = {}) {
@@ -135,20 +166,7 @@ export async function refresh(rawToken: string, ctx: SessionContext = {}) {
   if (session.revokedAt) throw new UnauthorizedError('Invalid refresh token')
 
   // REUSE. This token was already exchanged, so a copy of it is in circulation.
-  // Revoke the entire family rather than this row: the honest client's current
-  // token is a descendant of this one, and leaving it live would leave the
-  // thief's next rotation working too.
-  if (session.rotatedAt) {
-    await prisma.authSession.updateMany({
-      where: { familyId: session.familyId, revokedAt: null },
-      data:  { revokedAt: new Date(), revokedReason: 'refresh token reuse detected' },
-    })
-    logger.warn(
-      { userId: session.userId, familyId: session.familyId, ip: ctx.ip },
-      'auth: refresh token reuse — session family revoked',
-    )
-    throw new UnauthorizedError('Invalid refresh token')
-  }
+  if (session.rotatedAt) await revokeFamilyForReuse(session, ctx)
 
   if (session.expiresAt.getTime() <= Date.now()) {
     throw new UnauthorizedError('Invalid refresh token')
@@ -164,10 +182,16 @@ export async function refresh(rawToken: string, ctx: SessionContext = {}) {
   if (user.status !== 'ACTIVE') throw new UnauthorizedError(`Account ${user.status.toLowerCase()}`)
 
   // Spend the presented token, then mint its successor in the same family.
-  await prisma.authSession.update({
-    where: { id: session.id },
+  //
+  // Conditional, so exactly one caller can spend it. Two requests carrying the
+  // same token both pass the `rotatedAt` check above; an unconditional update
+  // let both rotate, forking the family past reuse detection. The loser here is
+  // treated exactly as a reuse.
+  const { count } = await prisma.authSession.updateMany({
+    where: { id: session.id, rotatedAt: null, revokedAt: null },
     data:  { rotatedAt: new Date() },
   })
+  if (count === 0) await revokeFamilyForReuse(session, ctx)
 
   return { ...(await issueSession(user, ctx, session.familyId)), user: user as SafeUser }
 }
