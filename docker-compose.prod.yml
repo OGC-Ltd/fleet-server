@@ -1,32 +1,52 @@
 name: fleet-server-prod
 
+# Production runs under pm2 today (see docs/ci-deploy.md); this file is the
+# container alternative. It is split in two on purpose: exactly ONE process may
+# poll the providers, because two pollers write the same telemetry into the
+# shared database. Scale `api`, never `poller`.
+
+x-app: &app
+  build:
+    context: .
+    target: runner        # minimal production image
+  env_file: .env.prod     # separate prod env — never commit this file (.gitignore covers .env*)
+  restart: always
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 15s
+
 services:
-  app:
-    build:
-      context: .
-      target: runner        # minimal production image
-    ports:
-      - "3000:3000"
-    env_file: .env.prod     # separate prod env — never commit this file
-    restart: always
+  # The single writer: polls the providers and runs the background jobs.
+  poller:
+    <<: *app
+    environment:
+      POLL_ENABLED: "true"
     deploy:
-      replicas: 2
-      update_config:
-        parallelism: 1
-        delay: 10s
-        order: start-first  # zero-downtime rolling deploy
+      replicas: 1         # must stay 1
       resources:
         limits:
           cpus: "1"
           memory: 512M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+
+  # Serves the API from the database. Safe to scale; put a proxy in front
+  # (deploy/nginx) rather than publishing a fixed host port per replica.
+  api:
+    <<: *app
+    environment:
+      POLL_ENABLED: "false"
+    ports:
+      - "3000:3000"
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
