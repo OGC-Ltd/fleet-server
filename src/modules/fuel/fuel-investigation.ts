@@ -474,12 +474,15 @@ export async function homeSites(orgId: string, now: number): Promise<TripPlace[]
 /** When the unit was last inside any of `sites` (7 days), and which. */
 async function lastInside(vehicleId: string, sites: TripPlace[], now: number): Promise<{ site: TripPlace; at: number } | null> {
   if (!/^[a-z0-9]{20,32}$/i.test(vehicleId)) return null
-  const since = new Date(now - TRIP_SEEN_MS)
+  // Naive UTC text cast to TIMESTAMP, as dispatch.repository does: captured_at
+  // is `timestamp without time zone` holding UTC, and a bound Date would be
+  // re-read through the session time zone — hours off on a non-UTC session.
+  const since = new Date(now - TRIP_SEEN_MS).toISOString().replace('T', ' ').replace('Z', '')
   const deg = (YARD_RADIUS_M * 1.5) / 111_320
   const found = await Promise.all(sites.map(async (site) => {
     const rows = await prisma.$queryRawUnsafe<{ at: Date | null }[]>(
       `SELECT max(captured_at) AS at FROM vehicle_telemetries
-        WHERE vehicle_id = $1 AND captured_at >= $2
+        WHERE vehicle_id = $1 AND captured_at >= $2::timestamp
           AND lat BETWEEN $3::float8 - $5::float8 AND $3::float8 + $5::float8
           AND lng BETWEEN $4::float8 - $5::float8 AND $4::float8 + $5::float8
           AND 2 * 6371000 * asin(sqrt(power(sin(radians(lat - $3::float8) / 2), 2)
