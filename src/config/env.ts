@@ -130,10 +130,8 @@ const schema = z.object({
   // APP_BASE_URL counts toward "configured" on purpose: every mail this system
   // sends carries a link, and a mail with a broken link is worse than no mail.
   //
-  // NOTE: `npm run dev` loads .env.example, not .env, so the token belongs in
-  // BOTH if you want to exercise mail locally — or run with
-  // DOTENV_CONFIG_PATH=.env. The real token never belongs in .env.example,
-  // which is committed.
+  // The real token belongs in .env (git-ignored), never in .env.example,
+  // which is a committed template.
   // SMTP rather than the HTTP send API: the HTTP route needs the sending
   // domain verified, and SMTP works against the demo domain today. The token
   // is the SMTP PASSWORD — Mailtrap uses one credential for both.
@@ -257,7 +255,14 @@ const schema = z.object({
   /** The per-IP ceiling over the setup routes. Pure DoS bound; see above. */
   SETUP_IP_RATE_LIMIT_MAX: z.coerce.number().int().positive().optional().default(300),
 
-  CORS_ORIGIN: z.string().default('*'),
+  // Browser origins allowed to call the API, comma-separated
+  // (e.g. `https://logistics.raioperations.com,http://localhost:5173`).
+  // `*` is accepted for development only: browsers refuse credentialed
+  // requests under a wildcard anyway, and app.ts warns when production uses it.
+  CORS_ORIGIN: z.string().default('*').transform((v) => {
+    const list = v.split(',').map((o) => o.trim()).filter(Boolean)
+    return list.length === 0 || list.includes('*') ? '*' as const : list
+  }),
   // 100 requests per SECOND, per client IP.
   //
   // These two were 100 per 60_000 ms — 1.7 a second — which is less than one
@@ -272,6 +277,10 @@ const schema = z.object({
   // Sign-in attempts per 15 minutes. NOT scaled with the global limit — this
   // one is brute-force defence, not capacity, and is meant to be tight.
   LOGIN_RATE_LIMIT_MAX: z.coerce.number().default(20),
+
+  // FAILED sign-ins per ACCOUNT per 15 minutes, from any number of addresses.
+  // The per-IP limit above does nothing against guesses spread across many IPs.
+  LOGIN_ACCOUNT_RATE_LIMIT_MAX: z.coerce.number().default(10),
 
   // Token refreshes per 15 minutes. Separate from LOGIN because a refresh is
   // not a credential guess: a browser refreshes on load and again on expiry, so
@@ -587,10 +596,10 @@ const schema = z.object({
 })
 
 /**
- * `npm run dev` loads .env.example, which is committed with live secrets, so
- * the VSS password cannot go there. When the loaded file is not .env, take the
- * VSS_* keys (and only those) from .env, which git ignores. Nothing already set
- * is overwritten, and no other key is read: .env still holds old database URLs.
+ * The VSS password lives only in .env, which git ignores. When some OTHER file
+ * was loaded (DOTENV_CONFIG_PATH pointing elsewhere, e.g. the tests' template),
+ * take the VSS_* keys (and only those) from .env. Nothing already set is
+ * overwritten, and no other key is read.
  */
 function loadVssFromDotEnv(): void {
   const loaded = process.env['DOTENV_CONFIG_PATH']
@@ -611,19 +620,17 @@ const isLocalDbUrl = (url: string) => /@(localhost|127\.0\.0\.1)[:/]/.test(url)
 const guarded = schema.superRefine((cfg, ctx) => {
   if (cfg.NODE_ENV !== 'production') return
   // AUTH_BYPASS attaches a user with no token at all, so in production it is an
-  // open door rather than a convenience.
+  // open door rather than a convenience: every request, from anyone who can
+  // reach the host, runs as a platform account. Fatal on its own.
   //
-  // This is FATAL only once AUTHZ_ENFORCE is on, because the two together are
-  // incoherent - enforcing permissions on a request that skipped authentication
-  // decides nothing. It is deliberately NOT fatal on its own: the live box runs
-  // AUTH_BYPASS=true today, and a deploy that refused to boot would take the
-  // fleet down to fix a door that has been open for months. app.ts warns about
-  // it on every start until it is closed.
-  if (cfg.AUTH_BYPASS && cfg.AUTHZ_ENFORCE) {
+  // DEPLOY NOTE: this used to be fatal only together with AUTHZ_ENFORCE,
+  // because the live box ran AUTH_BYPASS=true and a refusal to boot would take
+  // the fleet down. Set AUTH_BYPASS=false on the box BEFORE deploying this.
+  if (cfg.AUTH_BYPASS) {
     ctx.addIssue({
       code: 'custom',
       path: ['AUTH_BYPASS'],
-      message: 'cannot be true when AUTHZ_ENFORCE is true - authorising a request that skipped authentication is meaningless',
+      message: 'must be false in production - it authenticates every request as a fixed account with no token',
     })
   }
   for (const key of ['DATABASE_URL', 'DIRECT_URL'] as const) {

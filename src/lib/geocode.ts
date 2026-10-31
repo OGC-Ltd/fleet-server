@@ -24,10 +24,17 @@ const CACHE_FILE     = path.resolve(process.cwd(), '.cache', 'geocode.json')
 const SEED_FILE      = path.resolve(process.cwd(), '.geocode-cache.json')
 const FETCH_GAP_MS   = 1_100     // Nominatim policy: max 1 req/s
 const BREAKER_MS     = 60_000    // back off this long after a fetch failure
+// A fetch that never answers would hold the serial queue forever, and every
+// later lookup with it. Ten seconds is generous for one Nominatim round trip.
+const FETCH_TIMEOUT_MS = 10_000
+// At FETCH_GAP_MS apiece this is ~4 minutes of backlog. Past it a new cell
+// answers null now rather than joining a wait nobody is still around for.
+const MAX_PENDING    = 200
 
 const memory = new Map<string, string>()
 let breakerUntil = 0
 let queue: Promise<void> = Promise.resolve()   // serialises external fetches
+let pending = 0                                 // lookups queued or in flight
 
 // ~1.1 km grid — a place label doesn't change meaningfully within a cell, and
 // coarse keys are what make the cache converge for vehicles moving on roads.
@@ -134,16 +141,20 @@ export async function reverseGeocode(lat: number, lng: number): Promise<string |
   if (hit !== undefined) return hit || null   // '' caches a "no name here" answer
 
   if (Date.now() < breakerUntil) return null
+  if (!(Math.abs(lat) <= 90 && Math.abs(lng) <= 180)) return null
+  if (pending >= MAX_PENDING) return null
+  pending++
 
   // Serialise + pace all external lookups; concurrent callers for the same
   // cell resolve off the cache once the first fetch lands.
   const result = queue.then(async () => {
-    const again = memory.get(key)
-    if (again !== undefined) return again || null
     try {
+      const again = memory.get(key)
+      if (again !== undefined) return again || null
       const url = `${NOMINATIM_BASE}?lat=${lat}&lon=${lng}&format=jsonv2&zoom=16&addressdetails=1`
       const res = await fetch(url, {
         headers: { 'User-Agent': 'fleet-server/1.0 (dashboard location labels)' },
+        signal:  AbortSignal.timeout(FETCH_TIMEOUT_MS),
       })
       if (!res.ok) throw new Error(`Nominatim HTTP ${res.status}`)
       const body = await res.json() as { address?: NominatimAddress }
@@ -155,6 +166,8 @@ export async function reverseGeocode(lat: number, lng: number): Promise<string |
       breakerUntil = Date.now() + BREAKER_MS
       logger.warn({ err, lat, lng }, 'reverse geocode failed — breaker engaged')
       return null
+    } finally {
+      pending--
     }
   })
   // Keep the chain alive for pacing regardless of this lookup's outcome.

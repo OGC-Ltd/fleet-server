@@ -23,10 +23,11 @@ npm run dev          # tsx watch on src/index.ts, port 3000
 curl http://localhost:3000/health
 ```
 
-> **`npm run dev` loads `.env.example`, not `.env`.** The dev script sets
-> `DOTENV_CONFIG_PATH=.env.example`, so a flag changed only in `.env` has no
-> effect in dev. Several `prisma/*` scripts read `.env` instead; check the
-> script's `DOTENV_CONFIG_PATH` in `package.json`.
+> **Configuration lives in `.env`, which git ignores.** Start from the
+> template: `cp .env.example .env`, then fill in real values. `.env.example`
+> is committed to a public repo and must only ever hold placeholders. `npm run
+> dev` and the `prisma/*` scripts all load `.env`; `npm test` loads the
+> template.
 
 Local dev needs the production database (private RDS in af-south-1) through an
 SSH tunnel on `localhost:15432`. See **[guide.md](guide.md)** for starting and
@@ -105,7 +106,7 @@ is the authoritative copy; never paste values into issues or chat.
 
 | Command | What it does |
 |---|---|
-| `npm run dev` | Watch mode on port 3000 (reads `.env.example`) |
+| `npm run dev` | Watch mode on port 3000 (reads `.env`) |
 | `npm run build` | `prisma generate` + `tsc` into `dist/` |
 | `npm start` | Run the compiled server (`dist/src/index.js`) |
 | `npm test` | Vitest, all suites |
@@ -189,7 +190,7 @@ and [docs/ec2-devops-setup.md](docs/ec2-devops-setup.md).
 |---|---|
 | Every Prisma query fails with `ECONNREFUSED` locally | DB tunnel is down: [guide.md](guide.md) |
 | `password authentication failed for user "fleet_app"` | Tunnel works, but the local env file holds an old password; the box's `.env` is authoritative |
-| A flag change has no effect in dev | Dev reads `.env.example`; change it there too |
+| A flag change has no effect in dev | Dev reads `.env`; restart `npm run dev` after editing it |
 | Deploy step "push to box" refused | Someone edited files on the box; resolve those first |
 | Deploy finished but old behaviour persists | pm2 restarted the wrong app or `dist/` was not rebuilt; check `pm2 logs server` |
 | Wialon calls fail with error 8 | Token rejected; replace `WIALON_TOKEN` (setting `access_token` alone is ignored) |

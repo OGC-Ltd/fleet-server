@@ -111,14 +111,17 @@ describe('Repair overhaul: spare parts', () => {
 })
 
 describe('Repair overhaul: sign-off', () => {
-  it('cannot be signed off fixed while a spare is outstanding', async () => {
+  // 'Fixed' is the Control Room's verdict, given in Workshop after somebody
+  // else completed the job (repairs.workflow verify, which is also where
+  // outstanding spare parts block it: assertNoOutstandingParts). The old
+  // sign-off route only closes a job unsuccessfully now.
+  it('refuses a fixed verdict on the old sign-off route', async () => {
     prismaMock.repairReportItem.findFirst.mockResolvedValue(null)
-    prismaMock.repairSparePart.findMany.mockResolvedValue([{ name: 'FLS probe', status: 'received' }] as never)
 
     const res = await request(app).post(`${BASE}/ri1/resolve`).send({ fixNote: 'Done', verdict: 'fixed' })
 
     expect(res.status).toBe(409)
-    expect(res.body.message ?? res.body.error?.message).toMatch(/FLS probe \(not fitted\)/)
+    expect(res.body.message ?? res.body.error?.message).toMatch(/Control Room verifies it fixed/)
     expect(prismaMock.repairReportItem.updateMany).not.toHaveBeenCalled()
   })
 })
@@ -139,8 +142,13 @@ describe('Repair overhaul: inspection checklist', () => {
   })
 
   it('knows only the checklist components', async () => {
+    // requireWorkableJob runs first and 404s a job it cannot find.
+    prismaMock.repairReportItem.findFirst.mockResolvedValue(job('fixing') as never)
     const res = await request(app).post(`${BASE}/ri1/inspections`).send({ component: 'engine', verdict: 'ok' })
-    expect(res.status).toBe(400)
+    // Checked against the job's own category checklist (repairs.overhaul),
+    // not the schema, so it is refused as unprocessable rather than malformed.
+    expect(res.status).toBe(422)
+    expect(prismaMock.repairInspection.upsert).not.toHaveBeenCalled()
   })
 })
 
@@ -185,7 +193,9 @@ describe('Repair jobs: a technician works only an accepted job of their own', ()
   it('refuses a job assigned to somebody else', async () => {
     setTestSubject({ permissions: TECH })
     prismaMock.repairReportItem.findFirst.mockResolvedValue({ assignedToId: 'someone-else', assignmentStatus: 'accepted' } as never)
-    const res = await request(app).post(`${BASE}/ri1/stage`).send({ stage: 'fixing' })
+    // /stage is retired (the job moves through Workshop now); /parts sits
+    // behind the same requireWorkableJob gate.
+    const res = await request(app).post(`${BASE}/ri1/parts`).send({ name: 'FLS probe', quantity: 1 })
     expect(res.status).toBe(403)
     expect(JSON.stringify(res.body)).toMatch(/not assigned to you/)
   })

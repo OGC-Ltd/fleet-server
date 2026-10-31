@@ -6,7 +6,7 @@
  * our telemetry actually saw, so the two can always be compared.
  *
  * Run ON THE BOX directly, not through an npm wrapper — those point
- * DOTENV_CONFIG_PATH at .env.example, whose DATABASE_URL is the dev SSH tunnel.
+ * DOTENV_CONFIG_PATH at .env, whose DATABASE_URL is the dev SSH tunnel.
  *
  *   npx tsx prisma/adjudicate-fillings.ts
  *   npx tsx prisma/adjudicate-fillings.ts --apply

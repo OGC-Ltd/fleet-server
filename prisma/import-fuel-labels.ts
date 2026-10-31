@@ -24,7 +24,7 @@
  * accumulating, which is what the unique key is for. Two reviewers importing
  * their own sheets both keep their answers.
  *
- *     npx cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/import-fuel-labels.ts reviewed.xlsx
+ *     npx cross-env DOTENV_CONFIG_PATH=.env tsx prisma/import-fuel-labels.ts reviewed.xlsx
  *     ...                                                                           reviewed.xlsx --apply
  */
 

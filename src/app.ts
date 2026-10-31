@@ -57,6 +57,12 @@ import { trustProxy, parseProxyList } from './lib/trust-proxy.js'
 import * as alertsCtrl from './modules/alerts/alerts.controller.js'
 import { listAlertsQuery, markReadSchema } from './modules/alerts/alerts.schema.js'
 
+/** A query value as a number, or NaN when absent or blank (`Number('')` is 0). */
+const coord = (v: unknown): number =>
+  typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN
+const isLat = (n: number) => Number.isFinite(n) && Math.abs(n) <= 90
+const isLng = (n: number) => Number.isFinite(n) && Math.abs(n) <= 180
+
 export function createApp() {
   const app = express()
 
@@ -65,6 +71,9 @@ export function createApp() {
   // each is silence: nothing misbehaves, requests simply are not being judged.
   if (env.AUTH_BYPASS) {
     logger.warn('AUTH_BYPASS=true — every request is authenticated as a fixed account, with no token')
+  }
+  if (env.CORS_ORIGIN === '*' && env.NODE_ENV === 'production') {
+    logger.warn('CORS_ORIGIN=* in production — set it to the dashboard origin(s); credentialed browser requests are refused under a wildcard')
   }
   if (!env.AUTHZ_ENFORCE) {
     logger.warn('AUTHZ_ENFORCE=false — permission checks run and log, but nothing is denied')
@@ -111,24 +120,28 @@ export function createApp() {
 
   // Road polyline between two points — powers the map's dashed A→B route
   // line so it hugs the actual roads the vehicle drives (same cache the
-  // simulator moves vehicles along; see lib/road-routes). No auth: public
-  // OpenStreetMap-derived geometry, no org or user data.
-  app.get(`${v1}/road-path`, async (req, res) => {
-    const num = (k: string) => Number(req.query[k])
-    const [aLat, aLng, bLat, bLng] = [num('fromLat'), num('fromLng'), num('toLat'), num('toLng')]
-    if ([aLat, aLng, bLat, bLng].some(Number.isNaN)) return sendError(res, 400, 'fromLat/fromLng/toLat/toLng required')
+  // simulator moves vehicles along; see lib/road-routes). Public
+  // OpenStreetMap-derived geometry, but signed-in only: every new pair costs a
+  // paced call to a shared upstream, and an anonymous caller could fill that
+  // queue and the on-disk cache with points nobody will ever look at.
+  app.get(`${v1}/road-path`, authenticate, async (req, res) => {
+    const [aLat, aLng, bLat, bLng] = ['fromLat', 'fromLng', 'toLat', 'toLng'].map(k => coord(req.query[k]))
+    if (!isLat(aLat) || !isLng(aLng) || !isLat(bLat) || !isLng(bLng)) {
+      return sendError(res, 400, 'fromLat/fromLng/toLat/toLng required, as valid coordinates')
+    }
     const path = await getRoadPathAsync(aLat, aLng, bLat, bLng)
     sendSuccess(res, { coords: path?.coords ?? null, totalKm: path?.totalKm ?? null })
   })
 
   // Nearest named place for a coordinate — powers the dashboard's human
-  // location labels (e.g. the driver card's 📍 line). No auth: public
-  // OpenStreetMap-derived data, no org or user data. Cached server-side per
-  // ~1.1 km grid cell — see lib/geocode.
-  app.get(`${v1}/reverse-geocode`, async (req, res) => {
-    const lat = Number(req.query.lat)
-    const lng = Number(req.query.lng)
-    if (Number.isNaN(lat) || Number.isNaN(lng)) return sendError(res, 400, 'lat/lng required')
+  // location labels (e.g. the driver card's 📍 line). Cached server-side per
+  // ~1.1 km grid cell — see lib/geocode. Signed-in only for the same reason as
+  // road-path: lookups are serialised at ~1/s, so anonymous traffic would
+  // starve the dashboard's own labels.
+  app.get(`${v1}/reverse-geocode`, authenticate, async (req, res) => {
+    const lat = coord(req.query.lat)
+    const lng = coord(req.query.lng)
+    if (!isLat(lat) || !isLng(lng)) return sendError(res, 400, 'lat/lng required, as valid coordinates')
     const place = await reverseGeocode(lat, lng)
     sendSuccess(res, { place })
   })
@@ -139,10 +152,10 @@ export function createApp() {
   //
   // NO AUTH, and the shape is the justification: two integers, a percentage and
   // a timestamp. No organisation, no vehicle, no position, nothing attributable
-  // to a customer. It sits beside sim-clock, road-path and reverse-geocode,
-  // which are public for the same reason — and deliberately NOT beside
-  // /bootstrap, which was open once, returned every tenant's id and code, and
-  // is authenticated now. This must never grow a breakdown.
+  // to a customer. It sits beside sim-clock, which is public for the same
+  // reason — and deliberately NOT beside /bootstrap, which was open once,
+  // returned every tenant's id and code, and is authenticated now. This must
+  // never grow a breakdown.
   //
   // The service caches it for 30s and collapses concurrent recomputes into one,
   // so polling this cannot reach the database more than twice a minute however

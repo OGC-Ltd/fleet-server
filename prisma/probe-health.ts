@@ -5,7 +5,7 @@
  * rule and the reasoning are in `src/modules/fuel/fuel-probe-health.ts`.
  *
  * Run ON THE BOX directly, not through an npm wrapper that points
- * DOTENV_CONFIG_PATH at .env.example, whose DATABASE_URL is the dev SSH tunnel.
+ * DOTENV_CONFIG_PATH at .env, whose DATABASE_URL is the dev SSH tunnel.
  *
  *   npx tsx prisma/probe-health.ts
  *   npx tsx prisma/probe-health.ts --notify

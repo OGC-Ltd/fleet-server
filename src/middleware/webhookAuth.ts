@@ -100,7 +100,7 @@ export const webhookAuth: RequestHandler = (req, _res, next) => {
     // A present-but-wrong signature is a hard failure: don't fall through to
     // the weaker shared-secret path, or a bad signature could be bypassed by
     // also sending the secret in the clear.
-    logRejection(req, secret)
+    logRejection(req)
     return next(new UnauthorizedError('Invalid webhook signature'))
   }
 
@@ -117,17 +117,22 @@ export const webhookAuth: RequestHandler = (req, _res, next) => {
     if (safeEqual(secret, token)) return next()
   }
 
-  logRejection(req, secret)
+  logRejection(req)
   return next(new UnauthorizedError('Missing or invalid webhook credentials'))
 }
 
 /**
  * Diagnostic for a rejected delivery: which auth-ish headers the caller sent
- * and what we would have accepted. Values are truncated — enough to identify
+ * and how large the body was. Values are truncated — enough to identify
  * the scheme (hex vs base64 HMAC, bearer token, custom header name) without
  * writing a credential to the log.
+ *
+ * Replay: nothing here binds a delivery to a time, because the provider sends
+ * no timestamp to sign. What limits a replayed delivery today is downstream —
+ * every event is upserted on the provider's own id. A signed timestamp header
+ * (rejecting anything outside a few minutes) needs the provider to send one.
  */
-function logRejection(req: { headers: Record<string, unknown>; rawBody?: Buffer }, secret: string): void {
+function logRejection(req: { headers: Record<string, unknown>; rawBody?: Buffer }): void {
   const raw  = req.rawBody ?? Buffer.alloc(0)
   const clip = (v: unknown) => {
     const s = String(v ?? '')
@@ -141,7 +146,7 @@ function logRejection(req: { headers: Record<string, unknown>; rawBody?: Buffer 
     headerNames: Object.keys(req.headers),
     authHeaders: authish.length > 0 ? authish : '(none)',
     bodyBytes:   raw.length,
-    expectedHex:    clip(createHmac('sha256', secret).update(raw).digest('hex')),
-    expectedBase64: clip(createHmac('sha256', secret).update(raw).digest('base64')),
+    // Not the expected signature, not even a prefix of it: for a body the
+    // caller chose, that is signature material handed to whoever is probing.
   }, 'Webhook delivery REJECTED — no accepted credential matched')
 }

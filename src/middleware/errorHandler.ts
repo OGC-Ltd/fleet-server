@@ -23,6 +23,15 @@ function isPrismaError(err: unknown): err is PrismaClientKnownRequestError {
   )
 }
 
+/** A 4xx status set by body-parser (http-errors), or null for anything else. */
+function clientErrorStatus(err: unknown): number | null {
+  if (typeof err !== 'object' || err === null) return null
+  const e = err as { status?: unknown; statusCode?: unknown; type?: unknown }
+  if (typeof e.type !== 'string' || !e.type.startsWith('entity.') && e.type !== 'charset.unsupported' && e.type !== 'encoding.unsupported') return null
+  const status = typeof e.status === 'number' ? e.status : e.statusCode
+  return typeof status === 'number' && status >= 400 && status < 500 ? status : null
+}
+
 export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof ZodError) {
     return void sendError(res, 400, 'Validation failed', err.flatten().fieldErrors as Record<string, string[]>)
@@ -53,6 +62,14 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     if (err.name === 'JsonWebTokenError') return void sendError(res, 401, 'Invalid token')
     if (err.name === 'TokenExpiredError') return void sendError(res, 401, 'Token expired')
     if (err.name === 'NotBeforeError') return void sendError(res, 401, 'Token not yet valid')
+  }
+
+  // The body parser's own failures (malformed JSON, a body over the size
+  // limit, an unsupported charset) carry the client-error status they mean.
+  // Without this they fell through to a 500 and were logged as system errors.
+  const status = clientErrorStatus(err)
+  if (status !== null) {
+    return void sendError(res, status, status === 413 ? 'Request body too large' : 'Malformed request body')
   }
 
   logger.error({ err }, 'Unhandled system error')

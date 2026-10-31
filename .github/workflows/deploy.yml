@@ -39,7 +39,7 @@ env:
 
 jobs:
   build:
-    name: compile and unit-test
+    name: compile and test
     runs-on: ubuntu-latest
     env:
       # `postinstall` runs `prisma generate`, and prisma.config.ts THROWS unless
@@ -78,10 +78,12 @@ jobs:
       - name: compile
         run: npm run build
 
-      # Unit tests only. tests/integration expects a reachable database; this
-      # job deliberately has no credentials for one.
-      - name: unit tests
-        run: npm run test:unit
+      # Unit AND integration suites. The integration suites mock Prisma and run
+      # the Express app in-process, so they need no database either; the one
+      # that does (track-sql.db.test.ts) skips itself without TEST_DATABASE_URL.
+      # Running only tests/unit is how 25 broken integration tests went unseen.
+      - name: tests
+        run: npm test
 
   deploy:
     name: deploy to the box

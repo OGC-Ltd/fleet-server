@@ -34,7 +34,7 @@
  * box. `--days` and `--limit` scope it further.
  *
  * Usage:
- *   npx cross-env DOTENV_CONFIG_PATH=.env.example npx tsx prisma/fuel-cause-measure.ts [--days 30] [--limit 500] [--org KASULU]
+ *   npx cross-env DOTENV_CONFIG_PATH=.env npx tsx prisma/fuel-cause-measure.ts [--days 30] [--limit 500] [--org KASULU]
  */
 
 import { prisma } from '../src/lib/prisma.js'
