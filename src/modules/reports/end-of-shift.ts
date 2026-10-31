@@ -1,5 +1,7 @@
-// The end-of-shift report for one organisation (operator, 2026-10-31): from
-// 06:00 to the moment it is made, what the control room hands over. Fuel at
+// The end-of-shift report for one organisation (operator, 2026-10-31): the
+// fleet day, midnight to 23:59 Nairobi, up to the moment it is made while the
+// day is still running (operator, 2026-11-01), what the control room hands
+// over. Fuel at
 // the top, theft as the one critical section, policy breaches as counts with
 // the top five units for each kind, every unit still outside a geofence with
 // when it left, then the weighbridge and the products ferried.
@@ -10,7 +12,6 @@
 // browser from eight separate reads.
 
 const H = 3_600_000
-export const SHIFT_START_HOUR = 6
 /** Out longer than this, or with no dispatch, is marked red. */
 export const LONG_OUT_MS = 12 * H
 export const TOP = 5
@@ -23,11 +24,21 @@ const ms = (v: When): number =>
 const round1 = (n: number) => Math.round(n * 10) / 10
 const eatHour = (t: number) => new Date(t + 3 * H).getUTCHours()
 
-/** 06:00 Nairobi today, or yesterday when it is not yet six. */
+/**
+ * Midnight Nairobi of the day `now` falls on. The report covers that day,
+ * 00:00 to 23:59, and stops at `now` while the day is still running.
+ *
+ * It used to be 06:00, with the shift running on into the next morning, so a
+ * report made at 01:24 read "31/10, 06:00 to 01:24" (operator, 2026-11-01).
+ */
 export function shiftStart(now = Date.now()): number {
   const day = new Date(now + 3 * H).toISOString().slice(0, 10)
-  const six = Date.parse(`${day}T0${SHIFT_START_HOUR}:00:00+03:00`)
-  return now >= six ? six : six - 24 * H
+  return Date.parse(`${day}T00:00:00+03:00`)
+}
+
+/** 23:59:59.999 Nairobi of the day `now` falls on. */
+export function shiftEnd(now = Date.now()): number {
+  return shiftStart(now) + 24 * H - 1
 }
 
 // ── inputs ────────────────────────────────────────────────────────────────────
@@ -254,9 +265,9 @@ export function buildEndOfShift({
 
   // ── out of geofence during the shift ──
   // Only what happened in the shift (operator, 2026-10-31): a unit that left a
-  // geofence after 06:00 and is still outside is listed; one that left and
+  // geofence after midnight and is still outside is listed; one that left and
   // came back is counted, with how long it was out. A unit already outside at
-  // 06:00 is neither.
+  // midnight is neither.
   const zoneEvents = zones
     .map((e) => ({ t: ms(e.ts ?? e.time), v: unitOf(e.vehicleId, e.plate), exit: e.alertType === 'ZONE_EXIT', text: e.text }))
     .filter((e): e is typeof e & { v: ShiftUnit } => e.v != null && inShift(e.t))
