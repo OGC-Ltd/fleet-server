@@ -9,23 +9,10 @@
 // page to fit; here the remaining sections continue on a second page instead,
 // so the type never drops below what prints legibly.
 
-import fs from 'node:fs'
-import path from 'node:path'
 import PDFDocument from 'pdfkit'
 import type { TripReport } from './trip-report.build.js'
 
-const MM = 72 / 25.4
-const PAGE_W = 595.28, PAGE_H = 841.89
-const SIDE = 13 * MM
-const BODY_W = PAGE_W - 2 * SIDE
-const FOOT_H = 11 * MM
-const BOTTOM = PAGE_H - FOOT_H
-
-const C = {
-  ink: '#1c1c1c', mut: '#5c5c5c', rule: '#bfbfbf', soft: '#e6e6e6', shade: '#f3f3f3',
-  hd: '#1f3a5f', flag: '#b42318', route: '#1f3a5f', dz: '#e4edf3', band: '#212121', paper: '#ffffff',
-}
-const F = { reg: 'Helvetica', bold: 'Helvetica-Bold', ital: 'Helvetica-Oblique' }
+import { MM, PAGE_W, PAGE_H, SIDE, BODY_W, FOOT_H, BOTTOM, C, F, DASH, num, drawLetterhead } from '../../lib/pdf/letterhead.js'
 
 const TZ = 'Africa/Nairobi'
 const fmtHM = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false })
@@ -34,9 +21,6 @@ const fmtDate = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: '2-digit',
 const fmtDM = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 const dayOf = new Intl.DateTimeFormat('en-CA', { timeZone: TZ })
 
-const DASH = '–'
-const num = (v: number | null | undefined, dp = 0) =>
-  v == null || !Number.isFinite(v) ? DASH : v.toLocaleString('en-GB', { minimumFractionDigits: dp, maximumFractionDigits: dp })
 export function dur(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return DASH
   const m = Math.round(ms / 60_000)
@@ -48,14 +32,6 @@ const coords = (lat: number | null | undefined, lng: number | null | undefined) 
   lat != null && lng != null ? `${lat.toFixed(4)}, ${lng.toFixed(4)}` : DASH
 const placeOf = (x: { place?: string | null; lat?: number | null; lng?: number | null }) => x.place ?? coords(x.lat, x.lng)
 const t2 = (kg: number | null | undefined) => (kg != null ? `${num(kg / 1000, 2)} t` : DASH)
-
-const logoCache = new Map<string, Buffer | null>()
-function logo(file: string): Buffer | null {
-  if (!logoCache.has(file)) {
-    try { logoCache.set(file, fs.readFileSync(path.resolve(process.cwd(), 'assets', 'report', file))) } catch { logoCache.set(file, null) }
-  }
-  return logoCache.get(file) ?? null
-}
 
 /** The file name the browser saves it under. */
 export function reportFileName(r: TripReport): string {
@@ -181,16 +157,7 @@ export async function renderTripReportPdf(r: TripReport): Promise<Buffer> {
   }
 
   // ── letterhead ──
-  const bandH = 21 * MM
-  doc.rect(0, 0, PAGE_W, bandH).fill(C.band)
-  const rai = logo('rai-group-logo.jpeg')
-  const ogc = logo('ogc-logo.png')
-  if (rai) doc.image(rai, 12 * MM, (bandH - 15.5 * MM) / 2, { height: 15.5 * MM })
-  if (ogc) {
-    const h = 9.5 * MM, wd = h * (733 / 315)
-    doc.save().opacity(0.78).image(ogc, PAGE_W - 12 * MM - wd, (bandH - h) / 2, { height: h }).restore()
-  }
-  y = bandH + 5 * MM
+  y = drawLetterhead(doc)
 
   // ── title ──
   const tripDate = fmtDate.format(w.from)
