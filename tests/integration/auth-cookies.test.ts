@@ -128,7 +128,7 @@ describe('POST /auth/refresh', () => {
       expiresAt: new Date(Date.now() + 86_400_000), rotatedAt: null, revokedAt: null,
     })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ;(prismaMock.authSession.update as any).mockResolvedValue({})
+    ;(prismaMock.authSession.updateMany as any).mockResolvedValue({ count: 1 })
 
     const res = await request(app).post('/api/v1/auth/refresh')
       .set('Cookie', 'fleet_rt=some-opaque-token')
