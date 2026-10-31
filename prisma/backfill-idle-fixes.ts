@@ -27,7 +27,7 @@
  *
  * ## Usage
  *
- *     npx cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/backfill-idle-fixes.ts
+ *     npx cross-env DOTENV_CONFIG_PATH=.env tsx prisma/backfill-idle-fixes.ts
  *     ...                                                                 --apply
  *     ...                                                     --days 45 --apply
  *

@@ -7,7 +7,7 @@
  * tomorrow.
  *
  * Run ON THE BOX directly, not through an npm wrapper — those point
- * DOTENV_CONFIG_PATH at .env.example, whose DATABASE_URL is the dev SSH tunnel.
+ * DOTENV_CONFIG_PATH at .env, whose DATABASE_URL is the dev SSH tunnel.
  *
  *   npx tsx prisma/fuel-trends.ts              # yesterday
  *   npx tsx prisma/fuel-trends.ts --days 14    # the last 14 complete days

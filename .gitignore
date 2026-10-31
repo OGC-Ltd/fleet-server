@@ -1,6 +1,9 @@
 /node_modules
 /generated/prisma
+# Every env file (.env, .env.prod, .env.local, …) except the placeholder template.
 **/*.env
+.env*
+!.env.example
 /dist
 # Surveyor source documents — the estate CAD drawing and its plot. 8 MB of
 # binary that never changes and is not built from; the georeferenced extract
