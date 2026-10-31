@@ -13,8 +13,10 @@ import { getDriversOverview, DEFAULT_DRIVER_WINDOW_DAYS } from './drivers-overvi
 import { getDeliveriesAnalytics } from './deliveries.cache.js'
 import { getFuelConsumption } from './fuel-cost.cache.js'
 import { priceFuelConsumption } from './fuel-pricing.js'
-import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery, FuelCostQuery, DriverScoresQuery } from './analytics.schema.js'
+import type { AnalyticsRange, SpeedingQuery, DeliveriesQuery, FuelCostQuery, DriverScoresQuery, DriverScoresPdfQuery } from './analytics.schema.js'
 import { getDriverScorecard } from '../driver-score/driver-score.service.js'
+import { renderScorecardPdf, scorecardFileName } from '../driver-score/driver-score.pdf.js'
+import { NotFoundError } from '../../core/errors/errors.js'
 import { vehicleIdsFromQuery, listCategories, parseCategories, parseVehicleIds } from './vehicle-filter.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -299,6 +301,29 @@ export const driverScores: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as DriverScoresQuery
     sendSuccess(res, await getDriverScorecard(p(req, 'orgId'), q.from, q.to))
+  } catch (err) { next(err) }
+}
+
+/**
+ * The scorecard as a PDF: one driver, a chosen few (`drivers=id,id`) or all of
+ * them, made here in the letterhead style of the trip report.
+ */
+export const driverScoresPdf: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as DriverScoresPdfQuery
+    const answer = await getDriverScorecard(p(req, 'orgId'), q.from, q.to)
+    if (q.drivers) {
+      const want = new Set(q.drivers)
+      answer.drivers = answer.drivers.filter(d => want.has(d.driverId))
+      if (!answer.drivers.length) throw new NotFoundError('None of the selected drivers drove in this period')
+    }
+    const buffer = await renderScorecardPdf(answer, { allDrivers: !q.drivers })
+    const name = scorecardFileName(answer)
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition',
+      `attachment; filename="${name.replace(/[^\x20-\x7e]|"/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`)
+    res.setHeader('Content-Length', String(buffer.length))
+    res.send(buffer)
   } catch (err) { next(err) }
 }
 
