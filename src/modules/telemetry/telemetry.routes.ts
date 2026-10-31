@@ -4,7 +4,7 @@ import { requirePermission, requireVehicleInScope } from '../../middleware/autho
 import { validateQuery } from '../../middleware/validate.js'
 import { telemetryListQuerySchema, trackQuerySchema, playbackQuerySchema, daySeriesQuerySchema } from './telemetry.schema.js'
 import * as ctrl from './telemetry.controller.js'
-import { getTripReportHandler } from '../trips/trip-report.controller.js'
+import { getTripReportHandler, getTripReportPdfHandler, getDayTripsHandler, getDayReportPdfHandler } from '../trips/trip-report.controller.js'
 
 const router = Router({ mergeParams: true })
 
@@ -25,6 +25,11 @@ router.get('/vehicles/:vehicleId/track', requirePermission('telemetry:read'), re
 router.get('/vehicles/:vehicleId/playback', requirePermission('map:playback'), requireVehicleInScope, validateQuery(playbackQuerySchema), ctrl.getVehiclePlaybackHandler)
 // One dispatch's printable trip report: track, fuel, breaches, zones, weighbridge.
 router.get('/vehicles/:vehicleId/trip-report', requirePermission('telemetry:read'), requireVehicleInScope, getTripReportHandler)
+// The same report as a finished PDF, made here; the dashboard only downloads it.
+router.get('/vehicles/:vehicleId/trip-report.pdf', requirePermission('telemetry:read'), requireVehicleInScope, getTripReportPdfHandler)
+// A fleet day cut into trips, for the report picker; and the report for the day or one of its trips.
+router.get('/vehicles/:vehicleId/day-trips', requirePermission('telemetry:read'), requireVehicleInScope, getDayTripsHandler)
+router.get('/vehicles/:vehicleId/day-report.pdf', requirePermission('telemetry:read'), requireVehicleInScope, getDayReportPdfHandler)
 router.get('/vehicles/:vehicleId/live', requirePermission('telemetry:read'), requireVehicleInScope, ctrl.liveVehicleFeed)
 router.get('/vehicles/:vehicleId/maintenance/services', requirePermission('vehicle:read'), requireVehicleInScope, ctrl.getVehicleServiceHistoryHandler)
 router.get('/vehicles/:vehicleId/maintenance/garage-visits', requirePermission('vehicle:read'), requireVehicleInScope, ctrl.getVehicleGarageVisitsHandler)
