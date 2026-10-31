@@ -15,7 +15,7 @@
 // nothing after the unit is back does.
 
 import { prisma } from '../../lib/prisma.js'
-import { NotFoundError } from '../../core/errors/errors.js'
+import { BadRequestError, NotFoundError } from '../../core/errors/errors.js'
 import { knownDestination } from '../dispatches/known-destinations.js'
 import { factoryOf, bagsFromTonnes } from '../webhooks/factory-map.js'
 import { arrivalRadiusM, haversineM, type Point } from '../../lib/dispatch-trip.js'
@@ -24,6 +24,8 @@ import { fleetDayStart } from '../../lib/provider-time.js'
 import { getAlarms } from '../dashcam/dashcam.service.js'
 import { tile, lon2x, lat2y } from '../usage-review/usage-review.pdf.js'
 import { logger } from '../../lib/logger.js'
+import { cachedPlace, reverseGeocode } from '../../lib/geocode.js'
+import { splitTrips } from './day-trips.js'
 
 const MAX_WINDOW_MS = 7 * 86_400_000
 /** Points sent for stops and distance; a day at one fix per 15 s is ~5,800. */
@@ -78,12 +80,78 @@ function weighedAt(w: { tokenAt: Date; grossAt: Date | null; tareAt: Date | null
   return w.tokenAt.getTime()
 }
 
-export async function getTripReportData(orgId: string, vehicleId: string, dispatchExternalId?: string) {
-  const vehicle = await prisma.vehicle.findFirst({
+type ReportVehicle = NonNullable<Awaited<ReturnType<typeof loadVehicle>>>
+type DispatchRow = NonNullable<Awaited<ReturnType<typeof prisma.dispatch.findFirst>>>
+type Place = Point & { name: string }
+
+/**
+ * What one report covers. A dispatch's report, a whole fleet day, and one trip
+ * cut from a day are all this: a window of fixes, the span the driver's
+ * conduct and the weighbridge are read over, and whatever is known about where
+ * the run started and was going. One gatherer serves all three, so a day's
+ * trip and a dispatch read the same tables in the same way.
+ */
+interface ReportScope {
+  mode: 'trip' | 'day'
+  from: Date
+  to: Date
+  dayFrom: Date
+  dayTo: Date
+  /** The window was cut short to MAX_WINDOW_MS. */
+  clipped: boolean
+  dispatch: DispatchRow | null
+  yard: Place | null
+  dest: (Place & { spreadM: number }) | null
+  /** Names for the ends when no yard or destination point is known. */
+  fromName?: string | null
+  toName?: string | null
+  /** Where no destination point exists: when the run is taken to have arrived. */
+  arrivedAt?: number | null
+  /** The driver when there is no dispatch to name one (a whole day). */
+  driverName?: string | null
+  /**
+   * Fetch OpenStreetMap tiles for the route box. Only the JSON answer wants
+   * them (the dashboard's own HTML page drew on them); the PDF draws the route
+   * on plain white (operator, 2026-10-31), so it skips the download.
+   */
+  withMap?: boolean
+}
+
+function loadVehicle(orgId: string, vehicleId: string) {
+  return prisma.vehicle.findFirst({
     where:  { id: vehicleId, organisationId: orgId },
     select: { id: true, registrationPlate: true, vehicleType: true, model: true, makeModel: true,
               organisation: { select: { name: true, hubLat: true, hubLng: true } } },
   })
+}
+
+/**
+ * Where a dispatch left from and where it was going — the same anchors as the
+ * trip card: the gate it was signed out at, else the organisation's hub; a
+ * stated destination point before a measured one.
+ */
+async function anchorsOf(orgId: string, vehicle: ReportVehicle, dispatch: DispatchRow) {
+  const gate = dispatch.factoryCode ? factoryOf(dispatch.factoryCode) : null
+  const org = vehicle.organisation
+  const yard: Place | null = gate ? { lat: gate.lat, lng: gate.lng, name: gate.label }
+    : org.hubLat != null && org.hubLng != null ? { lat: org.hubLat, lng: org.hubLng, name: org.name }
+    : null
+  const destName = dispatch.destination?.trim().toUpperCase() ?? null
+  let dest: (Place & { spreadM: number }) | null = null
+  if (destName) {
+    const stated = knownDestination(destName)
+    const measured = stated ? null : await prisma.dispatchDestination.findUnique({
+      where:  { organisationId_name: { organisationId: orgId, name: destName } },
+      select: { lat: true, lng: true, spreadM: true },
+    })
+    const p = stated ?? measured
+    if (p) dest = { lat: p.lat, lng: p.lng, spreadM: p.spreadM, name: dispatch.destination!.trim() }
+  }
+  return { yard, dest }
+}
+
+export async function getTripReportData(orgId: string, vehicleId: string, dispatchExternalId?: string, { withMap = true } = {}) {
+  const vehicle = await loadVehicle(orgId, vehicleId)
   if (!vehicle) throw new NotFoundError('Vehicle not found')
 
   const dispatch = await prisma.dispatch.findFirst({
@@ -97,29 +165,177 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
   const now = Date.now()
   const end = Math.min(dispatch.actualReturnAt?.getTime() ?? now, now)
   const begin = Math.max(dispatch.dispatchedAt.getTime(), end - MAX_WINDOW_MS)
-  const from = new Date(begin), to = new Date(Math.max(end, begin + 60_000))
-  const dayFrom = fleetDayStart(dispatch.dispatchedAt)
-  const dayTo = to
+  const to = new Date(Math.max(end, begin + 60_000))
+  return gatherReportData(orgId, vehicle, {
+    mode: 'trip',
+    from: new Date(begin),
+    to,
+    dayFrom: fleetDayStart(dispatch.dispatchedAt),
+    dayTo: to,
+    clipped: begin > dispatch.dispatchedAt.getTime(),
+    dispatch,
+    ...(await anchorsOf(orgId, vehicle, dispatch)),
+    withMap,
+  })
+}
 
-  // Where it left from and where it was going — the same anchors as the trip
-  // card: the gate it was signed out at, else the organisation's hub; a stated
-  // destination point before a measured one.
-  const gate = dispatch.factoryCode ? factoryOf(dispatch.factoryCode) : null
-  const org = vehicle.organisation
-  const yard = gate ? { lat: gate.lat, lng: gate.lng, name: gate.label }
-    : org.hubLat != null && org.hubLng != null ? { lat: org.hubLat, lng: org.hubLng, name: org.name }
-    : null
-  const destName = dispatch.destination?.trim().toUpperCase() ?? null
-  let dest: (Point & { name: string; spreadM: number }) | null = null
-  if (destName) {
-    const stated = knownDestination(destName)
-    const measured = stated ? null : await prisma.dispatchDestination.findUnique({
-      where:  { organisationId_name: { organisationId: orgId, name: destName } },
-      select: { lat: true, lng: true, spreadM: true },
-    })
-    const p = stated ?? measured
-    if (p) dest = { lat: p.lat, lng: p.lng, spreadM: p.spreadM, name: dispatch.destination!.trim() }
+// ── a fleet day, and the trips in it ─────────────────────────────────────────
+
+const DAY_MS = 86_400_000
+/** A gate sign-out this long before the wheels turned (or a little after) belongs to the trip. */
+const DISPATCH_LEAD_MS = 60 * 60_000
+const DISPATCH_LAG_MS = 30 * 60_000
+/** Reverse lookups for unnamed trip ends: Nominatim answers one a second. */
+const MAX_PLACE_LOOKUPS = 6
+const PLACE_LOOKUP_WAIT_MS = 10_000
+
+/** A fleet day, "2026-10-30", as the instants it runs between (Africa/Nairobi, UTC+3). */
+export function fleetDayBounds(day: string): { from: Date; to: Date } {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(Date.parse(`${day}T00:00:00+03:00`))) {
+    throw new BadRequestError('day must be a date, YYYY-MM-DD')
   }
+  const from = Date.parse(`${day}T00:00:00+03:00`)
+  if (from > Date.now()) throw new BadRequestError('day is in the future')
+  return { from: new Date(from), to: new Date(from + DAY_MS) }
+}
+
+export interface DayTrip {
+  n: number
+  from: number
+  to: number
+  distanceM: number
+  fromName: string | null
+  toName: string | null
+  start: Point | null
+  end: Point | null
+  /** The gate sign-out this trip belongs to, by its externalId. */
+  dispatch: string | null
+}
+
+/** The day's trips with their dispatches and zone names, before any place lookup. */
+async function dayTripsRaw(orgId: string, vehicleId: string, from: Date, to: Date) {
+  const [fixes, dispatches, zones] = await Promise.all([
+    prisma.vehicleTelemetry.findMany({
+      where:   { vehicleId, capturedAt: { gte: from, lt: to }, lat: { not: null }, lng: { not: null } },
+      orderBy: { capturedAt: 'asc' },
+      select:  { capturedAt: true, lat: true, lng: true },
+    }),
+    prisma.dispatch.findMany({
+      where:   { organisationId: orgId, vehicleId, dispatchedAt: { gte: new Date(from.getTime() - DISPATCH_LEAD_MS), lt: to } },
+      orderBy: { dispatchedAt: 'asc' },
+    }),
+    findZoneTimeline(vehicleId, orgId, from, to).catch((err) => {
+      logger.warn({ err, vehicleId }, 'day trips: zone timeline failed')
+      return null
+    }),
+  ])
+  const pings = fixes.map(f => ({ t: f.capturedAt.getTime(), lat: f.lat!, lng: f.lng! }))
+  const visits = (zones?.rows ?? []).filter(v => v.zone_id !== null)
+    .map(v => ({ name: v.zone_name, enteredAt: v.entered_at.getTime(), leftAt: v.left_at.getTime() }))
+  const zoneAt = (t: number) => visits.find(v => t >= v.enteredAt && t <= v.leftAt)?.name ?? null
+  const used = new Set<DispatchRow>()
+  const at = (t: number) => pings.reduce((b, p) => (Math.abs(p.t - t) < Math.abs(b.t - t) ? p : b), pings[0]!)
+  return splitTrips(pings).map((tr, i) => {
+    const d = dispatches.find(x => !used.has(x)
+      && x.dispatchedAt.getTime() >= tr.from - DISPATCH_LEAD_MS && x.dispatchedAt.getTime() <= tr.from + DISPATCH_LAG_MS) ?? null
+    if (d) used.add(d)
+    const gate = d?.factoryCode ? factoryOf(d.factoryCode) : null
+    const a = at(tr.from), b = at(tr.to)
+    return {
+      n: i + 1,
+      ...tr,
+      fromName: zoneAt(tr.from) ?? gate?.label ?? null,
+      toName: d?.destination?.trim() || zoneAt(tr.to),
+      start: { lat: a.lat, lng: a.lng },
+      end: { lat: b.lat, lng: b.lng },
+      dispatchRow: d,
+    }
+  })
+}
+
+const coordsName = (p: Point) => `${p.lat.toFixed(4)}, ${p.lng.toFixed(4)}`
+
+/**
+ * Names for trip ends no zone or sign-out names: the place cache first, then a
+ * few paced lookups (Nominatim allows one a second), then the coordinates. The
+ * lookups are bounded in number and in time, so a cold cache costs seconds,
+ * not a minute.
+ */
+async function nameEnds<T extends { fromName: string | null; toName: string | null; start: Point | null; end: Point | null }>(trips: T[]) {
+  const want: [T, 'fromName' | 'toName', Point][] = []
+  for (const t of trips) {
+    if (!t.fromName && t.start) want.push([t, 'fromName', t.start])
+    if (!t.toName && t.end) want.push([t, 'toName', t.end])
+  }
+  for (const [t, key, p] of want) t[key] = cachedPlace(p.lat, p.lng)
+  const miss = want.filter(([t, key]) => !t[key]).slice(0, MAX_PLACE_LOOKUPS)
+  if (miss.length) {
+    await Promise.race([
+      Promise.all(miss.map(async ([t, key, p]) => { t[key] = await reverseGeocode(p.lat, p.lng) })),
+      new Promise(resolve => setTimeout(resolve, PLACE_LOOKUP_WAIT_MS).unref?.()),
+    ])
+  }
+  for (const [t, key, p] of want) t[key] ??= coordsName(p)
+  return trips
+}
+
+/** The day's trips, named, for the picker. A trip ends after a stop of 30 min or more. */
+export async function getDayTrips(orgId: string, vehicleId: string, day: string): Promise<DayTrip[]> {
+  const vehicle = await loadVehicle(orgId, vehicleId)
+  if (!vehicle) throw new NotFoundError('Vehicle not found')
+  const { from, to } = fleetDayBounds(day)
+  const trips = await nameEnds(await dayTripsRaw(orgId, vehicleId, from, new Date(Math.min(to.getTime(), Date.now()))))
+  return trips.map(({ dispatchRow, ...t }) => ({ ...t, dispatch: dispatchRow?.externalId ?? null }))
+}
+
+/**
+ * A whole fleet day (`trip` null), or one trip of it, numbered as
+ * getDayTrips lists them. Same data as a dispatch's report: a trip that
+ * belongs to a sign-out carries that dispatch, its yard and its destination.
+ */
+export async function getDayReportData(orgId: string, vehicleId: string, day: string, trip: number | null) {
+  const vehicle = await loadVehicle(orgId, vehicleId)
+  if (!vehicle) throw new NotFoundError('Vehicle not found')
+  const bounds = fleetDayBounds(day)
+  const dayFrom = bounds.from
+  const dayTo = new Date(Math.min(bounds.to.getTime(), Date.now()))
+
+  if (trip == null) {
+    // A whole day is driven by whoever signed the unit out that day, if anyone did.
+    const first = await prisma.dispatch.findFirst({
+      where:   { organisationId: orgId, vehicleId, dispatchedAt: { gte: dayFrom, lt: dayTo }, driverName: { not: '' } },
+      orderBy: { dispatchedAt: 'asc' },
+      select:  { driverName: true },
+    })
+    return gatherReportData(orgId, vehicle, {
+      mode: 'day', from: dayFrom, to: dayTo, dayFrom, dayTo, clipped: false,
+      dispatch: null, yard: null, dest: null, arrivedAt: null, driverName: first?.driverName ?? null,
+    })
+  }
+
+  const trips = await dayTripsRaw(orgId, vehicleId, dayFrom, dayTo)
+  const t = trips.find(x => x.n === trip)
+  if (!t) throw new NotFoundError(`No trip ${trip} on ${day}`)
+  await nameEnds([t])
+  const anchors = t.dispatchRow ? await anchorsOf(orgId, vehicle, t.dispatchRow) : { yard: null, dest: null }
+  return gatherReportData(orgId, vehicle, {
+    mode: 'trip', from: new Date(t.from), to: new Date(t.to), dayFrom, dayTo: new Date(t.to), clipped: false,
+    dispatch: t.dispatchRow, ...anchors,
+    fromName: t.fromName, toName: t.toName,
+    // A trip cut from the day has arrived where it stopped.
+    arrivedAt: anchors.dest ? undefined : t.to,
+  })
+}
+
+// ── the gatherer ─────────────────────────────────────────────────────────────
+
+async function gatherReportData(orgId: string, vehicle: ReportVehicle, scope: ReportScope) {
+  const { from, to, dayFrom, dayTo, dispatch, yard, dest } = scope
+  const vehicleId = vehicle.id
+  const org = vehicle.organisation
+  const now = Date.now()
+  const begin = from.getTime()
+  const gate = dispatch?.factoryCode ? factoryOf(dispatch.factoryCode) : null
 
   const legFrom = new Date(begin - LEG_BEFORE_MS)
   const legTo = new Date(Math.min(now, to.getTime() + LEG_AFTER_MS))
@@ -128,7 +344,7 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
       where:   { vehicleId, capturedAt: { gte: from, lte: to } },
       orderBy: { capturedAt: 'asc' },
       select:  { capturedAt: true, lat: true, lng: true, speedKmh: true, engineOn: true,
-                 ignitionKnown: true, fuelLevelMl: true, fuelUsedMl: true },
+                 ignitionKnown: true, fuelLevelMl: true, fuelUsedMl: true, altitudeM: true },
     }),
     prisma.fuelFilling.findMany({
       where:   { vehicleId, filledAt: { gte: from, lte: to } },
@@ -179,7 +395,7 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
       return null
     }),
     dashcamConduct(orgId, vehicleId, dayFrom, dayTo),
-    routeMap([...located0.map(f => [f.lat!, f.lng!] as [number, number]),
+    !scope.withMap ? null : routeMap([...located0.map(f => [f.lat!, f.lng!] as [number, number]),
               ...[yard, dest].filter(Boolean).map(p => [p!.lat, p!.lng] as [number, number])]).catch((err) => {
       logger.warn({ err, vehicleId }, 'trip report: map tiles failed')
       return null
@@ -191,7 +407,7 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
   const located = fixes.filter(f => f.lat != null && f.lng != null)
   const track = thin(located, MAX_TRACK_POINTS).map(f => [
     f.capturedAt.getTime(), f.lat!, f.lng!, f.speedKmh ?? null, f.ignitionKnown === false ? null : f.engineOn ? 1 : 0,
-  ])
+  ] as [number, number, number, number | null, number | null])
   const levels = fixes.filter(f => f.fuelLevelMl != null && f.fuelLevelMl > 0)
   const counters = fixes.filter(f => f.fuelUsedMl != null && f.fuelUsedMl > 0)
   const usedByCounter = counters.length > 1
@@ -199,7 +415,8 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
     : null
 
   // Arrival: the first fix inside the destination's radius after departure.
-  let arrivedAt: number | null = null
+  // Without a destination point, the scope says (a day's trip: where it stopped).
+  let arrivedAt: number | null = scope.arrivedAt ?? null
   if (dest) {
     const r = arrivalRadiusM(dest.spreadM)
     const hit = located.find(f => haversineM(dest!, { lat: f.lat!, lng: f.lng! }) <= r)
@@ -207,6 +424,7 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
   }
 
   return {
+    mode: scope.mode,
     generatedAt: now,
     companyName: org.name,
     vehicle: {
@@ -215,7 +433,7 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
       // UNSPECIFIED / UNKNOWN are the registry's placeholders, not a type.
       type: vehicle.makeModel ?? vehicle.model ?? (/^(UNSPECIFIED|UNKNOWN|OTHER)$/i.test(vehicle.vehicleType) ? null : vehicle.vehicleType),
     },
-    dispatch: {
+    dispatch: dispatch ? {
       externalId:   dispatch.externalId,
       serialNumber: dispatch.serialNumber,
       kind:         dispatch.kind,
@@ -227,15 +445,25 @@ export async function getTripReportData(orgId: string, vehicleId: string, dispat
       tonnageT:     dispatch.tonnageT,
       bags:         dispatch.kind === 'SALES' ? bagsFromTonnes(dispatch.tonnageT) : null,
       cargoName:    dispatch.kind === 'SALES' ? gate?.commodity ?? null : null,
+    } : {
+      // A whole day, or a trip no sign-out covers: no paperwork, only the run.
+      externalId: null, serialNumber: null, kind: null, status: null,
+      driverName: scope.driverName ?? null, destination: null,
+      dispatchedAt: begin, returnedAt: null, tonnageT: null, bags: null, cargoName: null,
     },
-    window: { from: begin, to: to.getTime(), clipped: begin > dispatch.dispatchedAt.getTime() },
+    fromName: scope.fromName ?? null,
+    toName: scope.toName ?? null,
+    window: { from: begin, to: to.getTime(), clipped: scope.clipped },
     day: { from: dayFrom.getTime(), to: dayTo.getTime() },
     yard,
     dest,
     arrivedAt,
     track,
-    legTrack: thin(legFixes, MAX_LEG_POINTS).map(f => [f.capturedAt.getTime(), f.lat!, f.lng!]),
+    legTrack: thin(legFixes, MAX_LEG_POINTS).map(f => [f.capturedAt.getTime(), f.lat!, f.lng!] as [number, number, number]),
     map,
+    // Metres above sea level along the run: a climb explains a higher burn.
+    altitude: thin(fixes.filter(f => f.altitudeM != null && Number.isFinite(f.altitudeM)), MAX_FUEL_POINTS)
+      .map(f => [f.capturedAt.getTime(), f.altitudeM!]),
     fuel: {
       hasProbe: levels.length > 1,
       series: thin(levels, MAX_FUEL_POINTS).map(f => [f.capturedAt.getTime(), Math.round(f.fuelLevelMl! / 100) / 10]),
