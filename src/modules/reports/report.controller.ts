@@ -3,6 +3,8 @@ import { sendSuccess } from '../../core/response/response.js'
 import { BadRequestError } from '../../core/errors/errors.js'
 import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
+import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
+import { renderEndOfShiftPdf, reportNumber, endOfShiftFileName } from './end-of-shift.pdf.js'
 import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery } from './report.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -73,6 +75,26 @@ export const downloadPdfReport: RequestHandler = async (req, res, next) => {
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
     res.setHeader('Content-Length', String(buffer.length))
+    res.send(buffer)
+  } catch (err) { next(err) }
+}
+
+// ── End-of-shift report ───────────────────────────────────────────────────────
+
+/** 06:00 Nairobi to now, for this organisation, as a PDF. */
+export const downloadEndOfShift: RequestHandler = async (req, res, next) => {
+  try {
+    const orgId = p(req, 'orgId')
+    const now = Date.now()
+    const [org, { report }] = await Promise.all([
+      orgHeading(orgId),
+      loadEndOfShift({ orgId, vehicleIds: req.authz?.vehicleIds ?? null, userId: req.authz?.userId ?? null, now }),
+    ])
+    const buffer = await renderEndOfShiftPdf(report, { orgName: org.name, reportNo: reportNumber(org.short, now), generatedAt: now })
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `attachment; filename="${endOfShiftFileName(org.name, now)}"`)
+    res.setHeader('Content-Length', String(buffer.length))
+    res.setHeader('Cache-Control', 'no-store')
     res.send(buffer)
   } catch (err) { next(err) }
 }
