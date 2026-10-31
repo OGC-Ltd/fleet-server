@@ -26,7 +26,7 @@ import { cameraCount, getAlarms } from '../dashcam/dashcam.service.js'
 import { getWeighmentDay } from '../weighments/weighment.service.js'
 import { getWeighbridges } from '../weighments/weighbridge.service.js'
 import {
-  buildEndOfShift, shiftStart, type EndOfShift, type ShiftAlarm, type ShiftFilling, type ShiftSpeeding,
+  buildEndOfShift, shiftStart, shiftEnd, type EndOfShift, type ShiftAlarm, type ShiftFilling, type ShiftSpeeding,
   type ShiftTheft, type ShiftTicket, type ShiftUnit,
 } from './end-of-shift.js'
 
@@ -104,10 +104,10 @@ export interface LoadOptions {
   now?: number
 }
 
-/** Everything the report is made from, for one organisation, 06:00 to now. */
+/** Everything the report is made from, for one organisation: today from midnight, up to now. */
 export async function loadEndOfShift({ orgId, vehicleIds, userId = null, now = Date.now() }: LoadOptions): Promise<{ report: EndOfShift; failed: string[] }> {
   const from = shiftStart(now)
-  const to = now
+  const to = Math.min(now, shiftEnd(now))
   const fromDate = new Date(from), toDate = new Date(to)
   const days = daysOf(from, to)
   const inScope = (id: string | null | undefined) => !vehicleIds || (id != null && vehicleIds.has(id))
