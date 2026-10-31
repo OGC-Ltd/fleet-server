@@ -134,6 +134,30 @@ export const authLimiter = rateLimit({
 })
 
 /**
+ * The per-ACCOUNT lockout the note on `authLimiter` asks for: failed sign-ins
+ * against one email, wherever they come from. Keyed on the address the caller
+ * typed, normalised, because the account is the one identifier an attacker
+ * spreading guesses over many IPs cannot vary. Successful sign-ins do not
+ * count, so the owner is only locked out while someone is guessing.
+ *
+ * A request with no usable email falls back to the IP key and is then turned
+ * away by validation anyway.
+ */
+export const loginAccountLimiter = rateLimit({
+  ...shared,
+  store:    createRateLimitStore('rl:login-account:'),
+  keyGenerator: (req: Request) => {
+    const email = (req.body as { email?: unknown } | undefined)?.email
+    return typeof email === 'string' && email.trim() !== ''
+      ? `acct:${email.trim().toLowerCase()}`
+      : ipOf(req)
+  },
+  skipSuccessfulRequests: true,
+  windowMs: 15 * 60_000,
+  limit:    env.LOGIN_ACCOUNT_RATE_LIMIT_MAX,
+})
+
+/**
  * Password-reset requests, on their own budget.
  *
  * Same reasoning as the refresh limiter below: asking for a reset link is not

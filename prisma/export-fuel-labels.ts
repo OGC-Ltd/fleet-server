@@ -37,7 +37,7 @@
  * blank rather than zero — most of the evidence columns are null on rows judged
  * before 2026-08-28, which is worth seeing rather than papering over.
  *
- *     npx cross-env DOTENV_CONFIG_PATH=.env.example tsx prisma/export-fuel-labels.ts
+ *     npx cross-env DOTENV_CONFIG_PATH=.env tsx prisma/export-fuel-labels.ts
  *     ...                                        --days 30 --per-cause 6 --out review.xlsx
  */
 

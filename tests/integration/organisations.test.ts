@@ -48,10 +48,17 @@ describe('POST /organisations', () => {
   it('creates org and returns 201', async () => {
     const org = makeOrg({ name: 'New Corp', code: 'NC' })
     prismaMock.organisation.create.mockResolvedValue(org)
+    // A new organisation is given the standard roles (roles/role.catalogue).
+    prismaMock.role.findMany.mockResolvedValue([])
+    prismaMock.permission.findMany.mockResolvedValue([])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.$transaction as any).mockImplementation(async (fn: (tx: unknown) => unknown) => fn(prismaMock))
+    prismaMock.role.create.mockResolvedValue({ id: 'role_1' } as never)
 
     const res = await request(app).post(BASE).send({ name: 'New Corp', code: 'NC' })
 
     expect(res.status).toBe(201)
+    expect(prismaMock.role.create).toHaveBeenCalled()
     expect(res.body.data.code).toBe('NC')
   })
 

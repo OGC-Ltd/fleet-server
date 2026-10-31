@@ -7,7 +7,7 @@
  * full week, instead of each judging every unit on today alone.
  *
  * Run ON THE BOX directly, not through an npm wrapper — those point
- * DOTENV_CONFIG_PATH at .env.example, whose DATABASE_URL is the dev SSH tunnel.
+ * DOTENV_CONFIG_PATH at .env, whose DATABASE_URL is the dev SSH tunnel.
  *
  *   npx tsx prisma/vehicle-daily-stats.ts              # yesterday
  *   npx tsx prisma/vehicle-daily-stats.ts --days 30    # the last 30 complete days

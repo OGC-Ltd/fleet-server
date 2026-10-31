@@ -32,7 +32,7 @@
  * and per-vehicle gaps exist regardless of the global span.
  *
  * Run ON THE BOX directly, not through the npm script: the wrapper sets
- * DOTENV_CONFIG_PATH=.env.example, whose DATABASE_URL is the dev SSH tunnel.
+ * DOTENV_CONFIG_PATH=.env, whose DATABASE_URL is the dev SSH tunnel.
  *
  *   npx tsx prisma/readjudicate-fuel.ts --days 45
  *   npx tsx prisma/readjudicate-fuel.ts --days 45 --apply

@@ -26,7 +26,7 @@ const TEST_LIMIT = 5
 
 vi.mock('../../src/config/env.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/config/env.js')>()
-  return { env: { ...actual.env, RATE_LIMIT_MAX: TEST_LIMIT, RATE_LIMIT_WINDOW_MS: 60_000 } }
+  return { env: { ...actual.env, RATE_LIMIT_MAX: TEST_LIMIT, RATE_LIMIT_WINDOW_MS: 60_000, LOGIN_ACCOUNT_RATE_LIMIT_MAX: TEST_LIMIT } }
 })
 
 vi.mock('../../src/lib/prisma.js')
@@ -113,3 +113,25 @@ describe('sign-in is limited separately from everything else', () => {
     expect((await hit(ip)).status).toBe(200)
   })
 })
+
+describe('failed sign-ins are also limited per account', () => {
+  const attempt = (ip: string, email: string) =>
+    request(app).post('/api/v1/auth/login')
+      .set('X-Forwarded-For', ip)
+      .send({ email, password: 'not-the-password' })
+
+  it('refuses one account after the limit, even from a fresh IP each time', async () => {
+    const email = 'target@example.com'
+    for (let i = 0; i < TEST_LIMIT; i++) {
+      expect((await attempt(`192.0.2.${i + 1}`, email)).status).toBe(401)
+    }
+    expect((await attempt('192.0.2.200', email)).status).toBe(429)
+    // The same address typed differently is the same account.
+    expect((await attempt('192.0.2.201', '  TARGET@example.com')).status).toBe(429)
+  })
+
+  it('leaves other accounts alone', async () => {
+    expect((await attempt('192.0.2.210', 'someone-else@example.com')).status).toBe(401)
+  })
+})
+

@@ -6,6 +6,10 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     setupFiles: ['./tests/setup.ts'],
+    // The committed placeholder template, so `npm test` runs on a clean
+    // checkout. config/env.ts exits the process when a required key is
+    // missing, which used to kill most suites at import.
+    env: { DOTENV_CONFIG_PATH: '.env.example', NODE_ENV: 'test' },
     include: ['tests/**/*.test.ts'],
     coverage: {
       provider: 'v8',

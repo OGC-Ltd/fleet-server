@@ -246,9 +246,12 @@ describe('POST /fuel/thefts/:id/review', () => {
 
     await request(app).post(`${BASE}/th1/review`).send({ outcome: 'DEESCALATED', note: 'Slosh on a slope' })
 
-    expect(prismaMock.fuelTheft.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ beganAt: expect.objectContaining({ lte: beganAt }) }),
-    }))
+    // The cap sits inside every arm of the sibling query (fuel.repository
+    // sweepUnitSiblings): no arm may reach a newer alert.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const arms = (prismaMock.fuelTheft.findMany.mock.calls[0]![0] as any).where.OR as { beganAt: { lte?: Date } }[]
+    expect(arms.length).toBeGreaterThan(0)
+    for (const arm of arms) expect(arm.beganAt.lte).toEqual(beganAt)
   })
 
   it('scopes the alert to the path organisation', async () => {

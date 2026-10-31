@@ -100,9 +100,27 @@ describe('rotation', () => {
     await authService.refresh('abc123')
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const call = (prismaMock.authSession.update as any).mock.calls[0][0]
-    expect(call.where).toEqual({ id: 'ses_1' })
+    const call = (prismaMock.authSession.updateMany as any).mock.calls[0][0]
+    expect(call.where).toEqual({ id: 'ses_1', rotatedAt: null, revokedAt: null })
     expect(call.data.rotatedAt).toBeInstanceOf(Date)
+  })
+
+  it('lets only ONE of two concurrent refreshes spend the token, and treats the other as reuse', async () => {
+    arrange(session({ familyId: 'fam_race' }))
+    // The conditional spend finds nothing to update: another request got there first.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.authSession.updateMany as any)
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 2 })
+
+    await expect(authService.refresh('abc123')).rejects.toThrow('Invalid refresh token')
+
+    // No successor minted, and the family revoked.
+    expect(prismaMock.authSession.create).not.toHaveBeenCalled()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const revoke = (prismaMock.authSession.updateMany as any).mock.calls[1][0]
+    expect(revoke.where).toEqual({ familyId: 'fam_race', revokedAt: null })
+    expect(revoke.data.revokedReason).toBe('refresh token reuse detected')
   })
 
   it('issues the successor into the SAME family', async () => {
