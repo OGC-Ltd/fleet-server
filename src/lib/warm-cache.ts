@@ -112,6 +112,15 @@ export interface WarmCache<T> {
    * rather than living in memory until restart.
    */
   peek(key: string): T | undefined
+  /**
+   * Rebuild this key now, for a caller that knows the data has just changed
+   * and cannot wait for the sweep.
+   *
+   * If a build is already running it may have read the database before the
+   * change landed, so this does not simply join it: it waits for it and then
+   * builds once more. Callers that fire together share that one extra build.
+   */
+  rebuild(key: string): Promise<T>
 }
 
 export function createWarmCache<T>(opts: {
@@ -237,8 +246,24 @@ export function createWarmCache<T>(opts: {
 
   const peek = (key: string): T | undefined => store.get(key)?.data
 
+  // One follow-up build per key at most, however many callers ask during the
+  // build that is already running.
+  const queued = new Map<string, Promise<T>>()
+  const rebuild = (key: string): Promise<T> => {
+    const running = inflight.get(key)
+    if (!running) return refresh(key)
+    const waiting = queued.get(key)
+    if (waiting) return waiting
+    const next = running.catch(() => undefined).then(() => {
+      queued.delete(key)
+      return refresh(key)
+    })
+    queued.set(key, next)
+    return next
+  }
+
   if (opts.warmKeysFor) registry.push({ name: opts.name, keysFor: opts.warmKeysFor, refreshIfStale })
-  return { get, peek }
+  return { get, peek, rebuild }
 }
 
 /**
