@@ -26,6 +26,7 @@ import { tile, lon2x, lat2y } from '../usage-review/usage-review.pdf.js'
 import { logger } from '../../lib/logger.js'
 import { cachedPlace, reverseGeocode } from '../../lib/geocode.js'
 import { splitTrips } from './day-trips.js'
+import { workshopSpans, inSpans } from '../repairs/workshop-presence.js'
 
 const MAX_WINDOW_MS = 7 * 86_400_000
 /** Points sent for stops and distance; a day at one fix per 15 s is ~5,800. */
@@ -389,7 +390,7 @@ async function gatherReportData(orgId: string, vehicle: ReportVehicle, scope: Re
   // Best-effort, both: a slow PostGIS timeline or a busy VSS server must not
   // cost the operator the page.
   const located0 = fixes.filter(f => f.lat != null && f.lng != null)
-  const [zones, dashcam, map] = await Promise.all([
+  const [zones, dashcam, map, shop] = await Promise.all([
     findZoneTimeline(vehicleId, orgId, from, to).catch((err) => {
       logger.warn({ err, vehicleId }, 'trip report: zone timeline failed')
       return null
@@ -400,6 +401,8 @@ async function gatherReportData(orgId: string, vehicle: ReportVehicle, scope: Re
       logger.warn({ err, vehicleId }, 'trip report: map tiles failed')
       return null
     }),
+    // Harsh accelerations while the unit was in the workshop are not driving.
+    workshopSpans([vehicleId], dayFrom, dayTo),
   ])
   const inTrip = (d: Date) => d >= from && d <= to
   const inDay = (d: Date) => d >= dayFrom && d <= dayTo
@@ -480,7 +483,7 @@ async function gatherReportData(orgId: string, vehicle: ReportVehicle, scope: Re
       .map(t => ({ t: t.beganAt.getTime(), litres: (t.cleanDropMl ?? t.stolenMl) / 1000, place: t.initialLocation })),
     speeding: speeding.map(s => ({ t: s.startedAt.getTime(), durationSec: s.durationSec, distanceM: s.distanceM, peakKmh: s.peakKmh, limitKmh: s.limitKmh,
                                    lat: s.peakLat, lng: s.peakLng })),
-    harsh: harsh.map(h => {
+    harsh: harsh.filter(h => !(h.type === 'HARSH_ACCELERATION' && inSpans(shop, vehicleId, h.createdAt))).map(h => {
       const raw = (h.raw ?? {}) as Record<string, unknown>
       const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
       return { t: h.createdAt.getTime(), type: h.type === 'HARSH_BRAKING' ? 'brake' : 'accel', lat: num(raw.lat), lng: num(raw.lng),
