@@ -33,7 +33,7 @@ type MailArgs = [string, string | null | undefined, { text: string; html: string
 const sendMail = vi.fn(async (..._args: MailArgs) => ({ sent: true }) as { sent: boolean; reason?: string })
 vi.mock('../../src/lib/mailer/mailer.js', () => ({ sendMail: (...a: unknown[]) => sendMail(...(a as unknown as MailArgs)) }))
 
-import { TEST_ORG_ID } from '../helpers/factories.js'
+import { TEST_ORG_ID, testAuthUser } from '../helpers/factories.js'
 import { authMock, authorizeMock, setTestSubject, resetTestSubject } from '../helpers/auth-mock.js'
 vi.mock('../../src/middleware/auth.ts', () => ({ ...authMock(), forgetUser: vi.fn() }))
 vi.mock('../../src/middleware/authorize.ts', () => authorizeMock())
@@ -81,12 +81,32 @@ const NEW_USER = {
 
 const BODY = { fullName: 'New Person', email: 'newbie@fleet.dev', roleSlugs: ['dispatcher'] }
 
+/**
+ * Role grants as user.authz reads them (prisma.userRole, not the subject).
+ * The caller is an organisation admin, or super_admin when asPlatformAdmin is
+ * on; anyone else holds nothing unless a test says so.
+ */
+function callerGrants() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  prismaMock.userRole.findMany.mockImplementation((async (args: any) =>
+    args?.where?.userId === testAuthUser.id
+      ? [{ role: { slug: asPlatformAdmin.on ? 'super_admin' : 'admin' } }]
+      : []) as never)
+}
+
 /** Enough doubles for provisionUser to run end to end. */
 function happyPath({ existing = null as null | { id: string; deletedAt: null }, hadPassword = false } = {}) {
-  prismaMock.user.findFirst.mockResolvedValue(existing as never)
-  prismaMock.user.findUnique.mockResolvedValue(
-    (existing ? { passwordHash: hadPassword ? '$2a$x' : null } : NEW_USER) as never,
-  )
+  // Caller and target share one group: a non-platform administrator may only
+  // manage people in a group of theirs (users/user-group.scope).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  prismaMock.user.findFirst.mockImplementation((async (args: any) =>
+    args?.select?.groups ? (existing ? { groups: [{ groupId: 'grp_1' }] } : null) : existing) as never)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  prismaMock.user.findUnique.mockImplementation((async (args: any) =>
+    // The caller's own group lookup (users/user-group.scope) selects `groups`.
+    args?.select?.groups
+      ? { groups: [{ groupId: 'grp_1' }] }
+      : existing ? { passwordHash: hadPassword ? '$2a$x' : null } : NEW_USER) as never)
   prismaMock.user.create.mockResolvedValue({ id: NEW_USER.id } as never)
   prismaMock.organisation.findUnique.mockResolvedValue({ id: TEST_ORG_ID, name: 'Sukari Industries' } as never)
   prismaMock.role.findMany.mockResolvedValue([
@@ -95,7 +115,7 @@ function happyPath({ existing = null as null | { id: string; deletedAt: null }, 
   prismaMock.orgMembership.upsert.mockResolvedValue({ id: 'mem_1' } as never)
   prismaMock.membershipVehicleScope.deleteMany.mockResolvedValue({ count: 0 } as never)
   prismaMock.userRole.updateMany.mockResolvedValue({ count: 0 } as never)
-  prismaMock.userRole.findMany.mockResolvedValue([] as never)
+  callerGrants()
   prismaMock.userRole.createMany.mockResolvedValue({ count: 1 } as never)
   prismaMock.orgMembership.findMany.mockResolvedValue([] as never)
   prismaMock.passwordToken.updateMany.mockResolvedValue({ count: 0 } as never)
@@ -105,6 +125,7 @@ function happyPath({ existing = null as null | { id: string; deletedAt: null }, 
 beforeEach(() => {
   vi.clearAllMocks()
   resetTestSubject()
+  callerGrants()
 })
 
 describe('the hard gate', () => {
@@ -230,7 +251,9 @@ describe('granting more than one organisation', () => {
     // The multi-org path has to drop restrictToOrgId, and the platform-role
     // guard used to be inferred from exactly that — so this combination
     // silently permitted a super_admin grant from an organisation route.
-    expect(res.status).toBe(400)
+    // Refused by the role ceiling (an organisation administrator assigns
+    // only roles below admin) before the platform-role check is reached.
+    expect(res.status).toBe(403)
   })
 
   it('ignores the path organisation repeated in the extras', async () => {
@@ -301,19 +324,22 @@ describe('GET / — who counts as a user', () => {
     // AND of two ORs rather than one flat OR: reachable-from-this-organisation
     // and invited-to-the-system. Flattening them would list an invited person
     // from another tenant.
+    // The group narrowing (users/user-group.scope) is a third clause of the
+    // same AND; it is not what this test is about.
     const and = whereOf()['AND'] as Record<string, unknown>[]
-    expect(and).toHaveLength(2)
-    expect(and[0]!['OR']).toEqual([
+    expect(and).toContainEqual({ OR: [
       { organisationId: TEST_ORG_ID },
       { memberships: { some: { organisationId: TEST_ORG_ID, revokedAt: null } } },
-    ])
+    ] })
     // An invitation counts however it ended — expired, consumed or revoked.
     // Somebody invited three weeks ago who never opened the link is exactly
     // who the roster exists to surface.
-    expect(and[1]!['OR']).toEqual([
+    expect(and).toContainEqual({ OR: [
       { passwordTokens: { some: { purpose: 'INVITE' } } },
       { passwordHash: { not: null } },
-    ])
+    ] })
+    // Never one flat OR at the top level.
+    expect(whereOf()['OR']).toBeUndefined()
   })
 
   it('scopes by membership, not just the employer column, in every mode', async () => {
@@ -326,10 +352,10 @@ describe('GET / — who counts as a user', () => {
     // somebody and never changes. Scoping to it alone meant an administrator
     // could grant a person from another site access to their organisation and
     // then never see them in their own roster — so never take it back.
-    expect(whereOf()['OR']).toEqual([
+    expect(whereOf()['AND']).toContainEqual({ OR: [
       { organisationId: TEST_ORG_ID },
       { memberships: { some: { organisationId: TEST_ORG_ID, revokedAt: null } } },
-    ])
+    ] })
   })
 
   it('never filters suspended accounts out on its own', async () => {
@@ -408,10 +434,7 @@ describe('GET /assignable-roles', () => {
     const res = await request(app).get(`${BASE}/assignable-roles`)
 
     const slugs = res.body.data.roles.map((r: { slug: string }) => r.slug)
-    // A role somebody holds must be offered even though it is not on the
-    // operator's list. The edit form sends the COMPLETE set of roles a person
-    // should have and the server revokes the rest, so a held role missing from
-    // the picker would be stripped the moment anyone saved that row.
+    // Whatever the in-use query returns is merged into the offer.
     expect(slugs).toContain('weighbridge_clerk')
     // ...but the named catalogue leads, in the order it was named.
     expect(slugs[0]).toBe('dispatcher')
@@ -420,7 +443,10 @@ describe('GET /assignable-roles', () => {
     // filters by live grants instead, which is what lets it find the rest.
     const first  = prismaMock.role.findMany.mock.calls[0]![0]!.where as Record<string, unknown>
     const second = prismaMock.role.findMany.mock.calls[1]![0]!.where as Record<string, unknown>
-    expect(first['slug']).toEqual({ in: expect.arrayContaining(['hr', 'admin', 'operator']) })
+    expect(first['slug']).toEqual({ in: expect.arrayContaining(['hr', 'operator']) })
+    // Nor `admin`: an administrator assigns only roles ranked below admin
+    // (lib/permissions ASSIGNABLE_ROLE_SLUGS), so the picker never offers it.
+    expect(first['slug']).not.toEqual({ in: expect.arrayContaining(['admin']) })
     // `super_admin` is deliberately NOT on this list any more. It is a PLATFORM
     // role, and the platform arm of this handler queries `organisationId: null`
     // filtered by the same array — so its presence here is what put "System
@@ -428,7 +454,10 @@ describe('GET /assignable-roles', () => {
     // ABSENCE is what stops it being added back by someone reading the list as
     // an inventory of roles rather than as a per-organisation offer.
     expect(first['slug']).not.toEqual({ in: expect.arrayContaining(['super_admin']) })
-    expect(second['slug']).toBeUndefined()
+    // An organisation administrator is offered held roles only from the same
+    // assignable list: a person holds one role per organisation, so saving
+    // replaces it anyway, and the server refuses any role above the ceiling.
+    expect(second['slug']).toEqual(first['slug'])
     expect(second['userRoles']).toEqual({ some: { revokedAt: null, user: { deletedAt: null } } })
   })
 })
