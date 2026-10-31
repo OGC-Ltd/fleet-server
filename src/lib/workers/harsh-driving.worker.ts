@@ -13,6 +13,10 @@
  * Harsh cornering is reported by the same trackers but is not recorded: it was
  * not asked for, and it is the noisiest of the three on rough estate roads.
  *
+ * A harsh ACCELERATION from a unit in the workshop is not recorded at all
+ * (operator, 2026-10-31): the workshop revs and road-tests it, and that is not
+ * driving. Harsh braking is kept. See repairs/workshop-presence.
+ *
  * Idempotent: repeated reports of one kind from one unit within a minute share
  * one `externalId`. Trackers can repeat the event across several messages, so
  * second-level identity turned one manoeuvre into a burst of feed alerts.
@@ -23,6 +27,7 @@ import { eventBus, type HarshDrivingEvent } from '../event-bus.js'
 import { logger }        from '../logger.js'
 import { createLimiter } from '../concurrency.js'
 import { resolveEstatePlaces } from '../zone-presence.js'
+import { inWorkshopAt } from '../../modules/repairs/workshop-presence.js'
 
 const limit = createLimiter(2)
 
@@ -70,6 +75,9 @@ export async function recordHarshEvent(e: HarshDrivingEvent): Promise<void> {
   })
   // A unit we do not hold has no organisation to tell.
   if (!vehicle) return
+  // Booked into the workshop through the escalation workflow: its revving and
+  // road tests are not driving.
+  if (e.kind === 'ACCELERATION' && await inWorkshopAt(vehicle.id, e.at)) return
   // Minute bucket IDs handle the common case and the database uniqueness race.
   // This indexed time-range check also catches reports that straddle a minute
   // boundary, and older second-keyed rows already in the database.
