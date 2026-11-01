@@ -25,8 +25,8 @@ export type WindowHours = (typeof WINDOW_HOURS)[number]
 
 /** A change in distance to MORL smaller than this is not a direction. */
 const DIRECTION_MIN_KM = 1
-/** Moving, for a unit whose direction is not yet clear. */
-const MOVING_KMH = 5
+/** Moving: this fast or faster. A moving unit's location is printed green. */
+export const MOVING_KMH = 5
 /** Reverse lookups for places not yet cached: Nominatim answers one a second. */
 const MAX_PLACE_LOOKUPS = 15
 const PLACE_LOOKUP_WAIT_MS = 15_000
@@ -113,6 +113,8 @@ export interface MovementReport {
   morl: string | null
   groups: Array<{ name: string; rows: MovementRow[] }>
   counts: Record<MovementState, number> & { stale: number; total: number }
+  /** Set when the operator edited the table before the PDF: printed on it, so a reader knows. */
+  edited?: { by: string; at: number; changed: number; removed: number }
 }
 
 /** The organisation's MORL fence: by name, as drawn on the map. */
@@ -205,7 +207,32 @@ export async function getMovementReport(orgId: string, hours: WindowHours, vehic
       || a.plate.localeCompare(b.plate))
   }
 
-  const counts = { to: 0, from: 0, at: 0, moving: 0, stopped: 0, 'no-fix': 0, stale: 0, total: rows.length }
-  for (const r of rows) { counts[r.state]++; if (r.stale) counts.stale++ }
-  return { organisation: org?.name ?? '', orgCode: org?.code ?? '', hours, from, to, morl: morl?.name ?? null, groups, counts }
+  return { organisation: org?.name ?? '', orgCode: org?.code ?? '', hours, from, to, morl: morl?.name ?? null, groups, counts: countRows(groups) }
+}
+
+/** The overview's figures, from whatever rows the report holds. Pure. */
+export function countRows(groups: MovementReport['groups']): MovementReport['counts'] {
+  const counts = { to: 0, from: 0, at: 0, moving: 0, stopped: 0, 'no-fix': 0, stale: 0, total: 0 }
+  for (const g of groups) for (const r of g.rows) { counts[r.state]++; counts.total++; if (r.stale) counts.stale++ }
+  return counts
+}
+
+/**
+ * The report as the operator edited it on the Reports page (2026-11-02):
+ * their rows, locations and directions, with the organisation's name taken
+ * from the database rather than the request, empty groups dropped and the
+ * overview counted again from what is left. `by` is the signed-in user, from
+ * the session: the PDF says who edited it and how much.
+ */
+export async function editedMovementReport(
+  orgId: string,
+  edited: Pick<MovementReport, 'hours' | 'from' | 'to' | 'morl' | 'groups'> & { edits: { changed: number; removed: number } },
+  by: string,
+  now = Date.now(),
+): Promise<MovementReport> {
+  const org = await prisma.organisation.findUnique({ where: { id: orgId }, select: { name: true, code: true } })
+  const groups = edited.groups.filter(g => g.rows.length)
+  return { organisation: org?.name ?? '', orgCode: org?.code ?? '', hours: edited.hours, from: edited.from, to: edited.to,
+           morl: edited.morl, groups, counts: countRows(groups),
+           edited: { by, at: now, changed: edited.edits.changed, removed: edited.edits.removed } }
 }

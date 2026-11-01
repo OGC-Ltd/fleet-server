@@ -3,7 +3,7 @@
  * operator's sheet: CPO tankers on the Mombasa road to MORL, some leaving it,
  * some parked at it, one that stopped reporting.
  */
-import { describe, it, expect, vi, beforeAll } from 'vitest'
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import fs from 'node:fs'
 
 vi.mock('../../src/lib/prisma.js')
@@ -15,8 +15,9 @@ vi.mock('../../src/lib/geocode.js', () => ({
 }))
 
 import { prismaMock } from '../helpers/prisma.mock.js'
-import { getMovementReport, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
-import { renderMovementReportPdf, movementReportNo, movementFileName, DIRECTION } from '../../src/modules/reports/movement-report.pdf.js'
+import { getMovementReport, editedMovementReport, countRows, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
+import { editedMovementReportSchema } from '../../src/modules/reports/report.schema.js'
+import { renderMovementReportPdf, movementReportNo, movementFileName, DIRECTION, isMoving } from '../../src/modules/reports/movement-report.pdf.js'
 
 const NOW = Date.now()
 const MORL = { lat: -4.05, lng: 39.65 }
@@ -83,6 +84,14 @@ describe('the movement report', () => {
     expect(DIRECTION).toMatchObject({ to: 'To MORL', from: 'From MORL', at: 'At MORL', moving: 'Moving', stopped: 'Stopped' })
   })
 
+  it('prints the location of a moving unit green: 5 km/h or more on a fix inside the window', () => {
+    const byPlate = Object.fromEntries(report.groups.flatMap(g => g.rows).map(r => [r.plate, r]))
+    expect(isMoving(byPlate['KCV 039A']!)).toBe(true)
+    expect(isMoving(byPlate['KCN 914F']!)).toBe(true)
+    expect(isMoving(byPlate['KCT 510W']!)).toBe(false)
+    expect(isMoving({ ...byPlate['KCV 039A']!, stale: true })).toBe(false)
+  })
+
   it('puts CPO before the other groupings', () => {
     expect(report.groups.map(g => g.name)).toEqual(['CPO - Menengai', 'FG - Menengai'])
   })
@@ -108,5 +117,75 @@ describe('the movement report', () => {
     const scoped = await getMovementReport('org1', 4, new Set(['KCV039A']))
     expect(scoped.counts.total).toBe(1)
     expect(scoped.hours).toBe(4)
+  })
+})
+
+describe('the movement report as edited on the Reports page', () => {
+  beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ name: 'Menengai Oil Refineries Ltd', code: 'MENENGAI' })
+  })
+
+  const EDITS = { changed: 1, removed: 1 }
+  const request = (r: MovementReport) => ({ ...JSON.parse(JSON.stringify(r)), edits: EDITS })
+
+  it('round-trips through the request schema as the server answered it', () => {
+    expect(editedMovementReportSchema.safeParse(request(report)).success).toBe(true)
+  })
+
+  it('counts the overview again from the rows kept, and drops a group left empty', async () => {
+    const cpo = report.groups[0]!
+    const edited = {
+      ...report,
+      organisation: 'Someone Else Ltd',
+      groups: [
+        { ...cpo, rows: cpo.rows.filter(r => r.plate !== 'KCN 910F').map(r => (r.plate === 'KCT 510W' ? { ...r, state: 'to' as const } : r)) },
+        { name: 'FG - Menengai', rows: [] },
+      ],
+      edits: EDITS,
+    }
+    const out = await editedMovementReport('org1', edited, 'Jane Operator')
+    expect(out.organisation).toBe('Menengai Oil Refineries Ltd')
+    expect(out.groups.map(g => g.name)).toEqual(['CPO - Menengai'])
+    expect(out.counts).toEqual(countRows(out.groups))
+    expect(out.counts).toMatchObject({ total: 6, to: 4, stopped: 0, stale: 0 })
+  })
+
+  it('prints the location the operator typed, at MORL included', async () => {
+    const at = report.groups[0]!.rows.find(r => r.state === 'at')!
+    const edited = { ...report, groups: [{ name: 'CPO - Menengai', rows: [{ ...at, location: 'MORL gate 2, offloading' }] }], edits: EDITS }
+    const buf = await renderMovementReportPdf(await editedMovementReport('org1', edited, 'Jane Operator'))
+    expect(buf.subarray(0, 5).toString()).toBe('%PDF-')
+    expect(pages(buf)).toBe(1)
+  })
+
+  it('refuses a request that is not a movement report', () => {
+    expect(editedMovementReportSchema.safeParse({ ...request(report), hours: 3 }).success).toBe(false)
+    expect(editedMovementReportSchema.safeParse({ ...request(report), groups: [{ name: 'x', rows: [{ plate: 'K' }] }] }).success).toBe(false)
+    expect(editedMovementReportSchema.safeParse({ ...request(report), edits: undefined }).success).toBe(false)
+  })
+
+  it('says who edited it and how much, from the session rather than the request', async () => {
+    const out = await editedMovementReport('org1', { ...report, edits: { changed: 3, removed: 2 } }, 'Jane Operator', 1_000)
+    expect(out.edited).toEqual({ by: 'Jane Operator', at: 1_000, changed: 3, removed: 2 })
+    const buf = await renderMovementReportPdf(out)
+    if (process.env.OUT3) fs.writeFileSync(process.env.OUT3, buf)
+    expect(pages(buf)).toBe(1)
+    expect((await getMovementReport('org1', 2)).edited).toBeUndefined()
+  })
+
+  it('refuses a window it did not answer: old, in the future, or not the hours asked for', () => {
+    const shift = (ms: number) => ({ ...request(report), from: report.from + ms, to: report.to + ms })
+    expect(editedMovementReportSchema.safeParse(shift(-25 * 3_600_000)).success).toBe(false)
+    expect(editedMovementReportSchema.safeParse(shift(2 * 3_600_000)).success).toBe(false)
+    expect(editedMovementReportSchema.safeParse(shift(-3 * 3_600_000)).success).toBe(true)
+    expect(editedMovementReportSchema.safeParse({ ...request(report), from: report.to - 4 * 3_600_000 }).success).toBe(false)
+  })
+
+  it('does not print green a unit the operator set to Stopped', () => {
+    const fast = report.groups[0]!.rows.find(r => r.plate === 'KCV 039A')!
+    expect(isMoving(fast)).toBe(true)
+    expect(isMoving({ ...fast, state: 'stopped' })).toBe(false)
+    expect(isMoving({ ...fast, state: 'no-fix' })).toBe(false)
   })
 })
