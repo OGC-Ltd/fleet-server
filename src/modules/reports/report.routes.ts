@@ -9,6 +9,7 @@ import {
   listPeriodQuerySchema,
   listEngineSessionQuerySchema,
   listSummaryQuerySchema,
+  movementReportQuerySchema,
 } from './report.schema.js'
 import * as ctrl from './report.controller.js'
 
@@ -27,6 +28,10 @@ router.post('/engine-sessions', requirePermission('report:create'), ingestLimite
 
 // Vehicle Period Summaries (dashboards)
 router.get('/summaries', requirePermission('report:read'), validateQuery(listSummaryQuerySchema), ctrl.listSummaries)
+
+// Where every unit is now and which way it is going relative to MORL, as a PDF
+// (the header's temporary Movements button). Positions, so telemetry:read.
+router.get('/reports/movements.pdf', requirePermission('telemetry:read'), validateQuery(movementReportQuerySchema), ctrl.downloadMovementReport)
 router.post('/summaries/refresh/:periodId', requirePermission('report:create'), ctrl.refreshSummaries)
 
 // Branded PDF reports — the downloadable counterparts of the dashboard pages,
