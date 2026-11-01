@@ -113,6 +113,8 @@ export interface MovementReport {
   morl: string | null
   groups: Array<{ name: string; rows: MovementRow[] }>
   counts: Record<MovementState, number> & { stale: number; total: number }
+  /** Set when the operator edited the table before the PDF: printed on it, so a reader knows. */
+  edited?: { by: string; at: number; changed: number; removed: number }
 }
 
 /** The organisation's MORL fence: by name, as drawn on the map. */
@@ -219,14 +221,18 @@ export function countRows(groups: MovementReport['groups']): MovementReport['cou
  * The report as the operator edited it on the Reports page (2026-11-02):
  * their rows, locations and directions, with the organisation's name taken
  * from the database rather than the request, empty groups dropped and the
- * overview counted again from what is left.
+ * overview counted again from what is left. `by` is the signed-in user, from
+ * the session: the PDF says who edited it and how much.
  */
 export async function editedMovementReport(
   orgId: string,
-  edited: Pick<MovementReport, 'hours' | 'from' | 'to' | 'morl' | 'groups'>,
+  edited: Pick<MovementReport, 'hours' | 'from' | 'to' | 'morl' | 'groups'> & { edits: { changed: number; removed: number } },
+  by: string,
+  now = Date.now(),
 ): Promise<MovementReport> {
   const org = await prisma.organisation.findUnique({ where: { id: orgId }, select: { name: true, code: true } })
   const groups = edited.groups.filter(g => g.rows.length)
   return { organisation: org?.name ?? '', orgCode: org?.code ?? '', hours: edited.hours, from: edited.from, to: edited.to,
-           morl: edited.morl, groups, counts: countRows(groups) }
+           morl: edited.morl, groups, counts: countRows(groups),
+           edited: { by, at: now, changed: edited.edits.changed, removed: edited.edits.removed } }
 }

@@ -128,11 +128,13 @@ export const getMovementReportData: RequestHandler = async (req, res, next) => {
 /**
  * POST /organisations/:orgId/reports/movements.pdf — the report as edited on
  * the Reports page, drawn as the PDF. The organisation's name comes from the
- * database and the overview is counted from the rows sent.
+ * database, the overview is counted from the rows sent, and the PDF names the
+ * signed-in user as its editor.
  */
 export const downloadEditedMovementReport: RequestHandler = async (req, res, next) => {
   try {
-    const report = await editedMovementReport(p(req, 'orgId'), req.body as EditedMovementReport)
+    const by = req.user?.fullName || req.user?.email || 'Unknown user'
+    const report = await editedMovementReport(p(req, 'orgId'), req.body as EditedMovementReport, by)
     await sendMovementPdf(res, report)
   } catch (err) { next(err) }
 }
