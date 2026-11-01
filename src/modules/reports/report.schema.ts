@@ -71,3 +71,31 @@ export const movementReportQuerySchema = z.object({
   hours: z.coerce.number().refine(h => h === 2 || h === 4, { message: 'hours must be 2 or 4' }).default(2),
 })
 export type MovementReportQuery = z.infer<typeof movementReportQuerySchema>
+
+/**
+ * The movement report as edited on the Reports page, sent back to be drawn as
+ * the PDF: the rows the operator kept, with their locations and directions.
+ * Bounded so a request cannot ask for an unbounded document.
+ */
+const movementRowSchema = z.object({
+  vehicleId: z.string().max(80),
+  plate: z.string().max(40),
+  grouping: z.string().max(160),
+  lastAt: z.number().nullable(),
+  lat: z.number().nullable(),
+  lng: z.number().nullable(),
+  location: z.string().trim().max(200).nullable(),
+  speedKmh: z.number().nullable(),
+  state: z.enum(['to', 'from', 'at', 'moving', 'stopped', 'no-fix']),
+  kmToMorl: z.number().nullable(),
+  closerKm: z.number().nullable(),
+  stale: z.boolean(),
+})
+export const editedMovementReportSchema = z.object({
+  hours: z.number().refine(h => h === 2 || h === 4, { message: 'hours must be 2 or 4' }),
+  from: z.number(),
+  to: z.number(),
+  morl: z.string().max(120).nullable(),
+  groups: z.array(z.object({ name: z.string().max(160), rows: z.array(movementRowSchema).max(5000) })).max(200),
+})
+export type EditedMovementReport = z.infer<typeof editedMovementReportSchema>
