@@ -6,7 +6,9 @@
 // One section per grouping (CPO first), in the operator's sheet's columns —
 // grouping, last coordinates, location, speed, direction — with the sheet's
 // colours as light tints: green heading to MORL, orange leaving it, yellow at
-// MORL. A unit that has not reported in the window has its name in red.
+// MORL. A unit that has not reported in the window has its name in red. The
+// Direction column always says where the unit stands: To MORL, From MORL,
+// At MORL, Moving or Stopped.
 //
 // Pure drawing: takes what movement-report.service answers and returns the file.
 
@@ -27,8 +29,9 @@ const longDay = (ms: number) => new Intl.DateTimeFormat('en-GB', { timeZone: TZ,
 /** The sheet's colours, as tints light enough to print on. */
 const TINT: Partial<Record<MovementState, string>> = { to: '#e3f1dc', from: '#fbe4d3', at: '#fdf3c9' }
 
-const DIRECTION: Record<MovementState, string> = {
-  to: 'To MORL', from: 'From MORL', at: '', moving: 'Moving', stopped: '', 'no-fix': '',
+/** Every row carries a status in the Direction column (operator, 2026-11-01). */
+export const DIRECTION: Record<MovementState, string> = {
+  to: 'To MORL', from: 'From MORL', at: 'At MORL', moving: 'Moving', stopped: 'Stopped', 'no-fix': 'No fix',
 }
 
 /** "MV-MENENGAI-20261101-1943": what the report is, whose, and when. */
@@ -108,14 +111,6 @@ export async function renderMovementReportPdf(r: MovementReport): Promise<Buffer
     w.table(cols, ['Grouping', 'Last coordinates', 'Location', 'Speed', 'Direction'], g.rows.map(cell),
       { size: 7.6, fills: g.rows.map(x => TINT[x.state] ?? null) })
   })
-
-  // ── how to read it ──
-  w.y += 2 * MM
-  w.note([
-    `Direction compares each unit's distance to the ${r.morl ?? 'MORL'} geofence at the start of the window with its distance now: a kilometre or more closer is "To MORL", further is "From MORL", inside the fence is "At MORL". Less change than that gives no direction; a unit doing ${5} km/h or more is then shown as moving.`,
-    'Rows: green heading to MORL, orange leaving it, yellow at MORL. A name in red has not reported in this window; its last coordinates are older.',
-    'Location is the nearest named place to the last fix; where none has been looked up yet, the coordinates are given instead.',
-  ].join('\n'))
 
   w.footers(`${r.organisation} · Movement Report · ${windowText}`)
   doc.end()
