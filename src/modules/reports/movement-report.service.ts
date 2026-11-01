@@ -117,15 +117,24 @@ export interface MovementReport {
   edited?: { by: string; at: number; changed: number; removed: number }
 }
 
-/** The organisation's MORL fence: by name, as drawn on the map. */
+/**
+ * The organisation's MORL fence: by name, as drawn on the map. Without one,
+ * the HQ yard ("Menengai Yard - Nakuru HQ") is read as MORL HQ, even with its
+ * alerts switched off (operator, 2026-11-02): the refinery is there.
+ */
 async function findMorl(orgId: string): Promise<MorlFence | null> {
+  const select = { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true }
   const fences = await prisma.geofence.findMany({
     where:  { organisationId: orgId, isActive: true, name: { contains: 'MORL', mode: 'insensitive' } },
-    select: { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true },
-    orderBy: { name: 'asc' },
+    select, orderBy: { name: 'asc' },
   })
   // The one named MORL itself, before "MORL Farm" and the like.
-  const pick = fences.find(f => /^\s*MORL\s*$/i.test(f.name)) ?? fences.find(f => /\bMORL\b/i.test(f.name) && !/farm/i.test(f.name)) ?? fences[0]
+  const named = fences.find(f => /^\s*MORL\s*$/i.test(f.name)) ?? fences.find(f => /\bMORL\b/i.test(f.name) && !/farm/i.test(f.name)) ?? fences[0]
+  const hq = named ? undefined : (await prisma.geofence.findMany({
+    where: { organisationId: orgId, name: { contains: 'HQ', mode: 'insensitive' } },
+    select, orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
+  })).find(f => /\bHQ\b/i.test(f.name))
+  const pick = named ?? (hq && { ...hq, name: 'MORL HQ' })
   if (!pick) return null
   if (pick.type === 'CIRCLE' && pick.centerLat != null && pick.centerLng != null && pick.radiusM != null) {
     return { name: pick.name, geometry: { type: 'CIRCLE', centerLat: pick.centerLat, centerLng: pick.centerLng, radiusM: pick.radiusM },
