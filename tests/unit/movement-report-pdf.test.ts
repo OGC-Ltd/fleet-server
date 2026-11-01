@@ -204,3 +204,17 @@ describe('the movement report as edited on the Reports page', () => {
     expect(isMoving({ ...fast, state: 'no-fix' })).toBe(false)
   })
 })
+
+describe('without a MORL fence', () => {
+  it('reads the HQ yard as MORL HQ, even with its alerts switched off', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const findMany = prismaMock.geofence.findMany as any
+    findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      { name: 'Menengai Yard - Nakuru HQ', type: 'CIRCLE', centerLat: MORL.lat, centerLng: MORL.lng, radiusM: 800, polygonCoords: null, widthM: null },
+    ])
+    const r = await getMovementReport('org1', 2)
+    expect(r.morl).toBe('MORL HQ')
+    const at = r.groups.flatMap(g => g.rows).find(x => x.plate === 'KCF 180A')!
+    expect(at).toMatchObject({ state: 'at', location: 'MORL HQ' })
+  })
+})
