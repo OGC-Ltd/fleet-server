@@ -56,6 +56,12 @@ export interface Cell { text: string; bold?: boolean; color?: string }
 /** Ruled-document primitives over one pdfkit document, with a running cursor. */
 export class ReportWriter {
   y = 0
+  /**
+   * Repeated at the top of every page after the first, as the behaviour
+   * report carries it: the report's title on the left, its reference on the
+   * right, over a rule. Null for none.
+   */
+  runningHead: { title: string; right: string } | null = null
   /** Repeated at the top of a table that continues on a new page. */
   private continuing: (() => void) | null = null
 
@@ -86,9 +92,21 @@ export class ReportWriter {
   /** Room for `h` below the cursor, or a fresh page. Returns whether a page was added. */
   room(h: number): boolean {
     if (this.y + h <= BOTTOM) return false
+    this.newPage()
+    return true
+  }
+
+  /** A fresh page, under the running head when there is one. */
+  newPage() {
     this.doc.addPage({ size: 'A4', margin: 0 })
     this.y = 12 * MM
-    return true
+    if (this.runningHead) {
+      this.line(this.runningHead.title.toUpperCase(), SIDE, this.y, BODY_W / 2, { font: F.bold, size: 9.4 })
+      this.line(this.runningHead.right, SIDE + BODY_W / 2, this.y + 1, BODY_W / 2, { size: 7.4, color: C.mut, align: 'right' })
+      this.y += 13
+      this.hr(SIDE, SIDE + BODY_W, this.y, C.ink, 0.9)
+      this.y += 4 * MM
+    }
   }
 
   /** A section heading, with an aside on the right. */
@@ -137,7 +155,7 @@ export class ReportWriter {
    * A ruled list: muted bold heads, soft rules between rows, a firm one under
    * the last. Runs onto new pages as needed, repeating its heads there.
    */
-  table(cols: Col[], head: string[], rows: Cell[][], o: { x?: number; width?: number; size?: number } = {}) {
+  table(cols: Col[], head: string[], rows: Cell[][], o: { x?: number; width?: number; size?: number; fills?: Array<string | null> } = {}) {
     const x = o.x ?? SIDE, width = o.width ?? BODY_W, size = o.size ?? 8.2
     const fixed = cols.reduce((a, c) => a + c.w, 0)
     const flex = cols.filter(c => c.w === 0).length
@@ -164,6 +182,8 @@ export class ReportWriter {
     heads()
     rows.forEach((row, ri) => {
       if (this.room(rowH)) heads()
+      const fill = o.fills?.[ri]
+      if (fill) this.doc.save().rect(x, this.y, width, rowH).fill(fill).restore()
       cellsAt(this.y + 2, row, { size })
       this.y += rowH
       const last = ri === rows.length - 1
@@ -177,8 +197,9 @@ export class ReportWriter {
     for (let i = range.start; i < range.start + range.count; i++) {
       this.doc.switchToPage(i)
       this.hr(SIDE, SIDE + BODY_W, PAGE_H - FOOT_H + 2 * MM, C.rule, 0.6)
-      this.line(generated, SIDE, PAGE_H - FOOT_H + 4 * MM, BODY_W / 2, { size: 7, color: C.mut })
-      this.line(`Page ${i - range.start + 1} of ${range.count}`, SIDE + BODY_W / 2, PAGE_H - FOOT_H + 4 * MM, BODY_W / 2,
+      // Three quarters for the left text: a report names itself and its period there.
+      this.line(generated, SIDE, PAGE_H - FOOT_H + 4 * MM, BODY_W * 0.75, { size: 7, color: C.mut })
+      this.line(`Page ${i - range.start + 1} of ${range.count}`, SIDE + BODY_W * 0.75, PAGE_H - FOOT_H + 4 * MM, BODY_W * 0.25,
         { size: 7, color: C.mut, align: 'right' })
     }
   }

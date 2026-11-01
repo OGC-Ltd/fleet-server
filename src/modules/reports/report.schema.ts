@@ -65,3 +65,9 @@ export type CreateEngineSessionDto = z.infer<typeof createEngineSessionSchema>
 export type ListPeriodQuery = z.infer<typeof listPeriodQuerySchema>
 export type ListEngineSessionQuery = z.infer<typeof listEngineSessionQuerySchema>
 export type ListSummaryQuery = z.infer<typeof listSummaryQuerySchema>
+
+/** The movement report's window: the last 2 or the last 4 hours. */
+export const movementReportQuerySchema = z.object({
+  hours: z.coerce.number().refine(h => h === 2 || h === 4, { message: 'hours must be 2 or 4' }).default(2),
+})
+export type MovementReportQuery = z.infer<typeof movementReportQuerySchema>
