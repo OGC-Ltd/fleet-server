@@ -17,7 +17,7 @@ vi.mock('../../src/lib/geocode.js', () => ({
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { getMovementReport, editedMovementReport, countRows, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
 import { editedMovementReportSchema } from '../../src/modules/reports/report.schema.js'
-import { renderMovementReportPdf, movementReportNo, movementFileName, DIRECTION, isMoving } from '../../src/modules/reports/movement-report.pdf.js'
+import { renderMovementReportPdf, movementReportNo, movementFileName, DIRECTION, isMoving, isLoading, locationFill, AT_MORL_FILL, MOVING_FILL, LOADING_FILL } from '../../src/modules/reports/movement-report.pdf.js'
 
 const NOW = Date.now()
 const MORL = { lat: -4.05, lng: 39.65 }
@@ -180,6 +180,21 @@ describe('the movement report as edited on the Reports page', () => {
     expect(editedMovementReportSchema.safeParse(shift(2 * 3_600_000)).success).toBe(false)
     expect(editedMovementReportSchema.safeParse(shift(-3 * 3_600_000)).success).toBe(true)
     expect(editedMovementReportSchema.safeParse({ ...request(report), from: report.to - 4 * 3_600_000 }).success).toBe(false)
+  })
+
+  it('reads a fresh fix within 1 km of the Mombasa loading point as loading', () => {
+    const fast = report.groups[0]!.rows.find(r => r.plate === 'KCV 039A')!
+    expect(isLoading({ ...fast, lat: -4.0535, lng: 39.65165 })).toBe(true)
+    expect(isLoading({ ...fast, lat: -4.0558, lng: 39.65165 })).toBe(false)
+    expect(isLoading({ ...fast, lat: -4.04579, lng: 39.65165, stale: true })).toBe(false)
+  })
+
+  it('fills a unit at MORL yellow, stale or not; Mombasa orange; moving green', () => {
+    const fast = report.groups[0]!.rows.find(r => r.plate === 'KCV 039A')!
+    expect(locationFill({ ...fast, state: 'at' })).toBe(AT_MORL_FILL)
+    expect(locationFill({ ...fast, state: 'at', stale: true, speedKmh: 0 })).toBe(AT_MORL_FILL)
+    expect(locationFill({ ...fast, lat: -4.04579, lng: 39.65165 })).toBe(LOADING_FILL)
+    expect(locationFill(fast)).toBe(MOVING_FILL)
   })
 
   it('does not print green a unit the operator set to Stopped', () => {

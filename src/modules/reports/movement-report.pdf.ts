@@ -14,6 +14,7 @@
 
 import PDFDocument from 'pdfkit'
 import { MM, SIDE, BODY_W, C, F, DASH, num, drawLetterhead, ReportWriter, type Cell, type Col } from '../../lib/pdf/letterhead.js'
+import { haversineM } from '../../lib/geofence.js'
 import { MOVING_KMH, type MovementReport, type MovementRow, type MovementState } from './movement-report.service.js'
 
 const TZ = 'Africa/Nairobi'
@@ -36,6 +37,25 @@ export const isMoving = (row: MovementRow) => row.lastAt != null && !row.stale
 
 /** A moving unit's Location cell: a green fill, stronger than the To MORL row tint so it shows on any row. */
 export const MOVING_FILL = '#b5dfa6'
+
+/** The Mombasa loading point and its radius (operator, 2026-11-02). */
+export const MOMBASA_LOADING = { lat: -4.04579, lng: 39.65165, radiusM: 1000 }
+
+/**
+ * A unit loading in Mombasa: its last fix, inside the window, within 1 km of
+ * the loading point. Its Location cell is filled orange, ahead of green.
+ */
+export const isLoading = (row: MovementRow) => row.lastAt != null && !row.stale && row.lat != null && row.lng != null
+  && haversineM(row.lat, row.lng, MOMBASA_LOADING.lat, MOMBASA_LOADING.lng) <= MOMBASA_LOADING.radiusM
+
+/** A loading unit's Location cell: an orange fill, stronger than the From MORL row tint. */
+export const LOADING_FILL = '#f8c08a'
+
+/** A unit at MORL: its Location cell filled yellow, as the operator's sheet has it (2026-11-02), stale or not. */
+export const AT_MORL_FILL = '#fbe36b'
+
+export const locationFill = (row: MovementRow) =>
+  isLoading(row) ? LOADING_FILL : row.state === 'at' ? AT_MORL_FILL : isMoving(row) ? MOVING_FILL : undefined
 
 /** The sheet's colours, as tints light enough to print on. */
 const TINT: Partial<Record<MovementState, string>> = { to: '#e3f1dc', from: '#fbe4d3', at: '#fdf3c9' }
@@ -107,7 +127,7 @@ export async function renderMovementReportPdf(r: MovementReport): Promise<Buffer
   const cell = (row: MovementRow): Cell[] => [
     { text: row.grouping, bold: true, color: row.stale || row.state === 'no-fix' ? C.flag : undefined },
     { text: row.lastAt != null ? stamp(row.lastAt) : 'No fix', color: row.stale ? C.flag : undefined },
-    { text: row.location ?? (row.state === 'at' ? r.morl ?? 'MORL' : DASH), fill: isMoving(row) ? MOVING_FILL : undefined },
+    { text: row.location ?? (row.state === 'at' ? r.morl ?? 'MORL' : DASH), fill: locationFill(row) },
     { text: row.speedKmh != null ? `${row.speedKmh} km/h` : DASH },
     { text: DIRECTION[row.state], bold: row.state === 'to' || row.state === 'from' },
   ]
