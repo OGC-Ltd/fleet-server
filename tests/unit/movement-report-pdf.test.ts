@@ -126,8 +126,11 @@ describe('the movement report as edited on the Reports page', () => {
     ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ name: 'Menengai Oil Refineries Ltd', code: 'MENENGAI' })
   })
 
+  const EDITS = { changed: 1, removed: 1 }
+  const request = (r: MovementReport) => ({ ...JSON.parse(JSON.stringify(r)), edits: EDITS })
+
   it('round-trips through the request schema as the server answered it', () => {
-    expect(editedMovementReportSchema.safeParse(JSON.parse(JSON.stringify(report))).success).toBe(true)
+    expect(editedMovementReportSchema.safeParse(request(report)).success).toBe(true)
   })
 
   it('counts the overview again from the rows kept, and drops a group left empty', async () => {
@@ -139,8 +142,9 @@ describe('the movement report as edited on the Reports page', () => {
         { ...cpo, rows: cpo.rows.filter(r => r.plate !== 'KCN 910F').map(r => (r.plate === 'KCT 510W' ? { ...r, state: 'to' as const } : r)) },
         { name: 'FG - Menengai', rows: [] },
       ],
+      edits: EDITS,
     }
-    const out = await editedMovementReport('org1', edited)
+    const out = await editedMovementReport('org1', edited, 'Jane Operator')
     expect(out.organisation).toBe('Menengai Oil Refineries Ltd')
     expect(out.groups.map(g => g.name)).toEqual(['CPO - Menengai'])
     expect(out.counts).toEqual(countRows(out.groups))
@@ -149,14 +153,39 @@ describe('the movement report as edited on the Reports page', () => {
 
   it('prints the location the operator typed, at MORL included', async () => {
     const at = report.groups[0]!.rows.find(r => r.state === 'at')!
-    const edited = { ...report, groups: [{ name: 'CPO - Menengai', rows: [{ ...at, location: 'MORL gate 2, offloading' }] }] }
-    const buf = await renderMovementReportPdf(await editedMovementReport('org1', edited))
+    const edited = { ...report, groups: [{ name: 'CPO - Menengai', rows: [{ ...at, location: 'MORL gate 2, offloading' }] }], edits: EDITS }
+    const buf = await renderMovementReportPdf(await editedMovementReport('org1', edited, 'Jane Operator'))
     expect(buf.subarray(0, 5).toString()).toBe('%PDF-')
     expect(pages(buf)).toBe(1)
   })
 
   it('refuses a request that is not a movement report', () => {
-    expect(editedMovementReportSchema.safeParse({ ...report, hours: 3 }).success).toBe(false)
-    expect(editedMovementReportSchema.safeParse({ ...report, groups: [{ name: 'x', rows: [{ plate: 'K' }] }] }).success).toBe(false)
+    expect(editedMovementReportSchema.safeParse({ ...request(report), hours: 3 }).success).toBe(false)
+    expect(editedMovementReportSchema.safeParse({ ...request(report), groups: [{ name: 'x', rows: [{ plate: 'K' }] }] }).success).toBe(false)
+    expect(editedMovementReportSchema.safeParse({ ...request(report), edits: undefined }).success).toBe(false)
+  })
+
+  it('says who edited it and how much, from the session rather than the request', async () => {
+    const out = await editedMovementReport('org1', { ...report, edits: { changed: 3, removed: 2 } }, 'Jane Operator', 1_000)
+    expect(out.edited).toEqual({ by: 'Jane Operator', at: 1_000, changed: 3, removed: 2 })
+    const buf = await renderMovementReportPdf(out)
+    if (process.env.OUT3) fs.writeFileSync(process.env.OUT3, buf)
+    expect(pages(buf)).toBe(1)
+    expect((await getMovementReport('org1', 2)).edited).toBeUndefined()
+  })
+
+  it('refuses a window it did not answer: old, in the future, or not the hours asked for', () => {
+    const shift = (ms: number) => ({ ...request(report), from: report.from + ms, to: report.to + ms })
+    expect(editedMovementReportSchema.safeParse(shift(-25 * 3_600_000)).success).toBe(false)
+    expect(editedMovementReportSchema.safeParse(shift(2 * 3_600_000)).success).toBe(false)
+    expect(editedMovementReportSchema.safeParse(shift(-3 * 3_600_000)).success).toBe(true)
+    expect(editedMovementReportSchema.safeParse({ ...request(report), from: report.to - 4 * 3_600_000 }).success).toBe(false)
+  })
+
+  it('does not print green a unit the operator set to Stopped', () => {
+    const fast = report.groups[0]!.rows.find(r => r.plate === 'KCV 039A')!
+    expect(isMoving(fast)).toBe(true)
+    expect(isMoving({ ...fast, state: 'stopped' })).toBe(false)
+    expect(isMoving({ ...fast, state: 'no-fix' })).toBe(false)
   })
 })
