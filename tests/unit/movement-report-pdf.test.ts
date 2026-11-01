@@ -16,7 +16,7 @@ vi.mock('../../src/lib/geocode.js', () => ({
 
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { getMovementReport, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
-import { renderMovementReportPdf, movementReportNo, movementFileName } from '../../src/modules/reports/movement-report.pdf.js'
+import { renderMovementReportPdf, movementReportNo, movementFileName, DIRECTION } from '../../src/modules/reports/movement-report.pdf.js'
 
 const NOW = Date.now()
 const MORL = { lat: -4.05, lng: 39.65 }
@@ -78,12 +78,18 @@ describe('the movement report', () => {
     expect(report.groups[0]!.rows[0]!.speedKmh).toBe(62)
   })
 
+  it('gives every row a status in the Direction column, never a blank', () => {
+    expect(Object.values(DIRECTION).every(Boolean)).toBe(true)
+    expect(DIRECTION).toMatchObject({ to: 'To MORL', from: 'From MORL', at: 'At MORL', moving: 'Moving', stopped: 'Stopped' })
+  })
+
   it('puts CPO before the other groupings', () => {
     expect(report.groups.map(g => g.name)).toEqual(['CPO - Menengai', 'FG - Menengai'])
   })
 
   it('draws the report, and names it for the fleet and the window', async () => {
     const buf = await renderMovementReportPdf(report)
+
     if (process.env.OUT) fs.writeFileSync(process.env.OUT, buf)
     expect(buf.subarray(0, 5).toString()).toBe('%PDF-')
     expect(pages(buf)).toBe(1)
