@@ -51,7 +51,8 @@ export function drawLetterhead(doc: Doc): number {
 
 export type Align = 'left' | 'right' | 'center'
 export interface Col { w: number; align?: Align }
-export interface Cell { text: string; bold?: boolean; color?: string }
+/** A table cell; `fill` paints that cell alone, over any fill the row has. */
+export interface Cell { text: string; bold?: boolean; color?: string; fill?: string }
 
 /** Ruled-document primitives over one pdfkit document, with a running cursor. */
 export class ReportWriter {
@@ -184,6 +185,11 @@ export class ReportWriter {
       if (this.room(rowH)) heads()
       const fill = o.fills?.[ri]
       if (fill) this.doc.save().rect(x, this.y, width, rowH).fill(fill).restore()
+      let fx = x
+      row.forEach((c, i) => {
+        if (c.fill) this.doc.save().rect(fx, this.y, widths[i]!, rowH).fill(c.fill).restore()
+        fx += widths[i]!
+      })
       cellsAt(this.y + 2, row, { size })
       this.y += rowH
       const last = ri === rows.length - 1

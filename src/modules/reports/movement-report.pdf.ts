@@ -27,12 +27,15 @@ const dateOf = (ms: number) => { const p = parts(ms); return `${p.day}/${p.month
 const longDay = (ms: number) => new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: 'numeric', month: 'short', year: 'numeric' }).format(ms)
 
 /**
- * A unit moving now, on a fix inside the window: its location in green
+ * A unit moving now, on a fix inside the window: its Location cell filled green
  * (operator, 2026-11-02). A row the operator set to Stopped or No fix is not
  * moving, whatever the last speed said.
  */
 export const isMoving = (row: MovementRow) => row.lastAt != null && !row.stale
   && row.state !== 'stopped' && row.state !== 'no-fix' && (row.speedKmh ?? 0) >= MOVING_KMH
+
+/** A moving unit's Location cell: a green fill, stronger than the To MORL row tint so it shows on any row. */
+export const MOVING_FILL = '#b5dfa6'
 
 /** The sheet's colours, as tints light enough to print on. */
 const TINT: Partial<Record<MovementState, string>> = { to: '#e3f1dc', from: '#fbe4d3', at: '#fdf3c9' }
@@ -84,17 +87,6 @@ export async function renderMovementReportPdf(r: MovementReport): Promise<Buffer
     w.line(bv, SIDE + half + 23 * MM, w.y, half - 23 * MM, { font: F.bold })
     w.y += 12
   }
-  // An edited report says so, and by whom, under the details and at every page's foot.
-  const editedText = r.edited ? `Edited by ${r.edited.by}, ${longDay(r.edited.at)}, ${hm(r.edited.at)}` : null
-  if (r.edited) {
-    const e = r.edited
-    const what = [`${num(e.changed)} row${e.changed === 1 ? '' : 's'} changed`, `${num(e.removed)} left out`].join(', ')
-    w.line('Edited', SIDE, w.y, 23 * MM, { color: C.mut })
-    w.line(`${e.by}, ${longDay(e.at)}, ${hm(e.at)}`, SIDE + 23 * MM, w.y, half - 26 * MM, { font: F.bold, color: C.flag })
-    w.line('Changes', SIDE + half, w.y, 23 * MM, { color: C.mut })
-    w.line(`${what} by hand`, SIDE + half + 23 * MM, w.y, half - 23 * MM, { font: F.bold, color: C.flag })
-    w.y += 12
-  }
   w.runningHead = { title: 'Movement Report', right: `${r.organisation} · ${reportNo}` }
 
   // ── 1. overview ──
@@ -109,14 +101,13 @@ export async function renderMovementReportPdf(r: MovementReport): Promise<Buffer
     ['Stopped elsewhere', num(n.stopped)],
     ['Not reporting', num(n.stale + n['no-fix']), n.stale + n['no-fix'] ? C.flag : undefined],
   ])
-  if (!r.morl) w.more('No geofence named MORL was found for this fleet, so no direction is given. Draw one on the map named "MORL" and the next report will use it.', SIDE, BODY_W, C.flag)
 
   // ── one section per grouping ──
   const cols: Col[] = [{ w: 54 * MM }, { w: 30 * MM }, { w: 0 }, { w: 15 * MM, align: 'right' }, { w: 20 * MM }]
   const cell = (row: MovementRow): Cell[] => [
     { text: row.grouping, bold: true, color: row.stale || row.state === 'no-fix' ? C.flag : undefined },
     { text: row.lastAt != null ? stamp(row.lastAt) : 'No fix', color: row.stale ? C.flag : undefined },
-    { text: row.location ?? (row.state === 'at' ? r.morl ?? 'MORL' : DASH), color: isMoving(row) ? C.good : undefined, bold: isMoving(row) },
+    { text: row.location ?? (row.state === 'at' ? r.morl ?? 'MORL' : DASH), fill: isMoving(row) ? MOVING_FILL : undefined },
     { text: row.speedKmh != null ? `${row.speedKmh} km/h` : DASH },
     { text: DIRECTION[row.state], bold: row.state === 'to' || row.state === 'from' },
   ]
@@ -131,7 +122,7 @@ export async function renderMovementReportPdf(r: MovementReport): Promise<Buffer
       { size: 7.6, fills: g.rows.map(x => TINT[x.state] ?? null) })
   })
 
-  w.footers(`${r.organisation} · Movement Report · ${windowText}${editedText ? ` · ${editedText}` : ''}`)
+  w.footers(`${r.organisation} · Movement Report · ${windowText}`)
   doc.end()
   return done
 }
