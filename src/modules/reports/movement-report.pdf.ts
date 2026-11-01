@@ -14,7 +14,7 @@
 
 import PDFDocument from 'pdfkit'
 import { MM, SIDE, BODY_W, C, F, DASH, num, drawLetterhead, ReportWriter, type Cell, type Col } from '../../lib/pdf/letterhead.js'
-import type { MovementReport, MovementRow, MovementState } from './movement-report.service.js'
+import { MOVING_KMH, type MovementReport, type MovementRow, type MovementState } from './movement-report.service.js'
 
 const TZ = 'Africa/Nairobi'
 const parts = (ms: number) => Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
@@ -25,6 +25,9 @@ const stamp = (ms: number) => { const p = parts(ms); return `${p.day}.${p.month}
 const hm = (ms: number) => { const p = parts(ms); return `${p.hour}:${p.minute}hrs` }
 const dateOf = (ms: number) => { const p = parts(ms); return `${p.day}/${p.month}/${p.year}` }
 const longDay = (ms: number) => new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: 'numeric', month: 'short', year: 'numeric' }).format(ms)
+
+/** A unit moving now, on a fix inside the window: its location in green (operator, 2026-11-02). */
+export const isMoving = (row: MovementRow) => row.lastAt != null && !row.stale && (row.speedKmh ?? 0) >= MOVING_KMH
 
 /** The sheet's colours, as tints light enough to print on. */
 const TINT: Partial<Record<MovementState, string>> = { to: '#e3f1dc', from: '#fbe4d3', at: '#fdf3c9' }
@@ -97,7 +100,7 @@ export async function renderMovementReportPdf(r: MovementReport): Promise<Buffer
   const cell = (row: MovementRow): Cell[] => [
     { text: row.grouping, bold: true, color: row.stale || row.state === 'no-fix' ? C.flag : undefined },
     { text: row.lastAt != null ? stamp(row.lastAt) : 'No fix', color: row.stale ? C.flag : undefined },
-    { text: row.state === 'at' ? (r.morl ?? 'MORL') : row.location ?? DASH },
+    { text: row.location ?? (row.state === 'at' ? r.morl ?? 'MORL' : DASH), color: isMoving(row) ? C.good : undefined, bold: isMoving(row) },
     { text: row.speedKmh != null ? `${row.speedKmh} km/h` : DASH },
     { text: DIRECTION[row.state], bold: row.state === 'to' || row.state === 'from' },
   ]

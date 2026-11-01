@@ -5,8 +5,8 @@ import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
 import { renderEndOfShiftPdf, reportNumber, endOfShiftFileName } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery } from './report.schema.js'
-import { getMovementReport, type WindowHours } from './movement-report.service.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, EditedMovementReport } from './report.schema.js'
+import { getMovementReport, editedMovementReport, type WindowHours, type MovementReport } from './movement-report.service.js'
 import { renderMovementReportPdf, movementFileName } from './movement-report.pdf.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -110,12 +110,39 @@ export const downloadMovementReport: RequestHandler = async (req, res, next) => 
   try {
     const q = req.query as unknown as MovementReportQuery
     const report = await getMovementReport(p(req, 'orgId'), q.hours as WindowHours, req.authz?.vehicleIds ?? null)
-    const buffer = await renderMovementReportPdf(report)
-    const name = movementFileName(report)
-    res.setHeader('Content-Type', 'application/pdf')
-    res.setHeader('Content-Disposition',
-      `attachment; filename="${name.replace(/[^\x20-\x7e]|"/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`)
-    res.setHeader('Content-Length', String(buffer.length))
-    res.send(buffer)
+    await sendMovementPdf(res, report)
   } catch (err) { next(err) }
+}
+
+/**
+ * GET /organisations/:orgId/reports/movements?hours=2|4 — the same report as
+ * data, for the Reports page to show as a table and let the operator edit.
+ */
+export const getMovementReportData: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as MovementReportQuery
+    sendSuccess(res, await getMovementReport(p(req, 'orgId'), q.hours as WindowHours, req.authz?.vehicleIds ?? null))
+  } catch (err) { next(err) }
+}
+
+/**
+ * POST /organisations/:orgId/reports/movements.pdf — the report as edited on
+ * the Reports page, drawn as the PDF. The organisation's name comes from the
+ * database and the overview is counted from the rows sent.
+ */
+export const downloadEditedMovementReport: RequestHandler = async (req, res, next) => {
+  try {
+    const report = await editedMovementReport(p(req, 'orgId'), req.body as EditedMovementReport)
+    await sendMovementPdf(res, report)
+  } catch (err) { next(err) }
+}
+
+async function sendMovementPdf(res: Parameters<RequestHandler>[1], report: MovementReport) {
+  const buffer = await renderMovementReportPdf(report)
+  const name = movementFileName(report)
+  res.setHeader('Content-Type', 'application/pdf')
+  res.setHeader('Content-Disposition',
+    `attachment; filename="${name.replace(/[^\x20-\x7e]|"/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`)
+  res.setHeader('Content-Length', String(buffer.length))
+  res.send(buffer)
 }
