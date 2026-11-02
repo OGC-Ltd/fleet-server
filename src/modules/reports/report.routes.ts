@@ -12,6 +12,7 @@ import {
   movementReportQuerySchema,
   editedMovementReportSchema,
   endOfShiftQuerySchema,
+  shiftDocSchema,
 } from './report.schema.js'
 import * as ctrl from './report.controller.js'
 
@@ -68,6 +69,22 @@ router.get(
   requirePermission('analytics:read'),
   validateQuery(endOfShiftQuerySchema),
   ctrl.downloadEndOfShift,
+)
+// The same report as a document the Reports page shows and lets the operator
+// edit (operator, 2026-11-02), and that document, edited, drawn as the PDF.
+router.get(
+  '/reports/end-of-shift',
+  requirePermission('weighbridge:read'),
+  requirePermission('analytics:read'),
+  validateQuery(endOfShiftQuerySchema),
+  ctrl.getEndOfShiftDoc,
+)
+router.post(
+  '/reports/end-of-shift.pdf',
+  requirePermission('weighbridge:read'),
+  requirePermission('analytics:read'),
+  validateBody(shiftDocSchema),
+  ctrl.downloadEditedEndOfShift,
 )
 
 router.get(
