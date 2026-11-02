@@ -9,10 +9,15 @@
  * prefix ("CPO - Menengai"), CPO first.
  *
  * Direction is measured, not guessed: the unit's distance to the MORL
- * geofence at the start of the window (2 or 4 hours ago) against now. Closer
+ * geofence at the start of the window against its end. Closer
  * by a kilometre or more is "to MORL", further is "from MORL"; inside the
  * fence is "at MORL". MORL is the organisation's geofence whose name says
  * MORL, so the report needs nothing configured beyond that fence.
+ *
+ * Any window, not only the last hours (operator, 2026-11-02: hourly reports,
+ * and a range of days between set hours): a window ending now reads where the
+ * units are from the live snapshot; one in the past reads each unit's last
+ * fix at or before its end from the stored telemetry.
  */
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
@@ -20,8 +25,13 @@ import { haversineM, isInsideFence, type FenceGeometry } from '../../lib/geofenc
 import { cachedPlace, reverseGeocode } from '../../lib/geocode.js'
 import { getFleetSnapshotCached } from '../telemetry/fleet-snapshot.cache.js'
 
-export const WINDOW_HOURS = [2, 4] as const
-export type WindowHours = (typeof WINDOW_HOURS)[number]
+export type WindowHours = number
+/** A report's window, epoch ms. */
+export interface Window { from: number; to: number }
+/** A window ending this close to now is read from the live snapshot. */
+const LIVE_WITHIN_MS = 120_000
+/** How far before a past window's end a unit's last fix is looked for. */
+const LAST_FIX_LOOKBACK_MS = 7 * 24 * 3_600_000
 
 /** A change in distance to MORL smaller than this is not a direction. */
 const DIRECTION_MIN_KM = 1
@@ -162,9 +172,29 @@ async function nameRows(rows: MovementRow[]) {
   for (const r of rows) if (!r.location && r.lat != null && r.lng != null && r.state !== 'at') r.location = `${r.lat.toFixed(4)}, ${r.lng.toFixed(4)}`
 }
 
-export async function getMovementReport(orgId: string, hours: WindowHours, vehicleIds: Set<string> | null = null): Promise<MovementReport> {
-  const to = Date.now()
-  const from = to - hours * 3_600_000
+/** Each unit's last fix at or before `to`, from the stored telemetry: where it stood when a past window ended. */
+async function lastFixesAt(ids: string[], to: number, orgId: string): Promise<Map<string, { lat: number; lng: number; speedKmh: number | null; at: number }>> {
+  if (!ids.length) return new Map()
+  const rows = await prisma.$queryRaw<Array<{ vehicle_id: string; lat: number; lng: number; speed_kmh: number | null; captured_at: Date }>>`
+      SELECT DISTINCT ON (vehicle_id) vehicle_id, lat, lng, speed_kmh, captured_at
+        FROM vehicle_telemetries
+       WHERE vehicle_id = ANY(${ids}::text[]) AND captured_at <= ${new Date(to)} AND captured_at > ${new Date(to - LAST_FIX_LOOKBACK_MS)}
+         AND lat IS NOT NULL AND lng IS NOT NULL
+       ORDER BY vehicle_id, captured_at DESC`.catch((err) => {
+        logger.warn({ err, orgId }, 'movement report: last fixes for a past window failed — units shown without a fix')
+        return []
+      })
+  return new Map(rows.map(r => [r.vehicle_id, { lat: r.lat, lng: r.lng, speedKmh: r.speed_kmh, at: r.captured_at.getTime() }]))
+}
+
+/**
+ * The report for a window: the last `hours` up to now, or any window (a
+ * past one reads the stored telemetry rather than the live snapshot).
+ */
+export async function getMovementReport(orgId: string, window: WindowHours | Window, vehicleIds: Set<string> | null = null, now = Date.now()): Promise<MovementReport> {
+  const { from, to } = typeof window === 'number' ? { from: now - window * 3_600_000, to: now } : window
+  const hours = (to - from) / 3_600_000
+  const live = to >= now - LIVE_WITHIN_MS
   const [org, snapshot, morl] = await Promise.all([
     prisma.organisation.findUnique({ where: { id: orgId }, select: { name: true, code: true } }),
     getFleetSnapshotCached(orgId),
@@ -186,15 +216,21 @@ export async function getMovementReport(orgId: string, hours: WindowHours, vehic
         })
     : []
   const startOf = new Map(starts.map(s => [s.vehicle_id, { lat: s.lat, lng: s.lng }]))
+  // Where each unit stood when the window ended: now from the snapshot, or its last stored fix.
+  const past = live ? null : await lastFixesAt(ids, to, orgId)
 
   const rows: MovementRow[] = units.map(u => {
-    const lastAt = u.capturedAt ? Date.parse(u.capturedAt) : null
-    const last: Fix | null = u.lat != null && u.lng != null && lastAt != null ? { lat: u.lat, lng: u.lng, at: lastAt, speedKmh: u.speedKmh } : null
+    const at = past ? past.get(u.vehicleId) ?? null : null
+    const lastAt = past ? at?.at ?? null : u.capturedAt ? Date.parse(u.capturedAt) : null
+    const lat = past ? at?.lat ?? null : u.lat
+    const lng = past ? at?.lng ?? null : u.lng
+    const speed = past ? at?.speedKmh ?? null : u.speedKmh
+    const last: Fix | null = lat != null && lng != null && lastAt != null ? { lat, lng, at: lastAt, speedKmh: speed } : null
     const c = classify(last, startOf.get(u.vehicleId) ?? null, morl)
     return {
       vehicleId: u.vehicleId, plate: u.plate, grouping: u.name?.trim() || u.plate,
-      lastAt, lat: u.lat, lng: u.lng, location: c.state === 'at' ? (morl?.name ?? 'MORL') : null,
-      speedKmh: u.speedKmh != null ? Math.round(u.speedKmh) : null,
+      lastAt, lat, lng, location: c.state === 'at' ? (morl?.name ?? 'MORL') : null,
+      speedKmh: speed != null ? Math.round(speed) : null,
       state: c.state, kmToMorl: c.kmToMorl, closerKm: c.closerKm,
       stale: lastAt != null && lastAt < from,
     }

@@ -67,9 +67,34 @@ export type ListEngineSessionQuery = z.infer<typeof listEngineSessionQuerySchema
 export type ListSummaryQuery = z.infer<typeof listSummaryQuerySchema>
 
 /** The movement report's window: the last 2 or the last 4 hours. */
+/** A movement report covers a day at most, ending within the last month (telemetry is kept). */
+export const MOVEMENT_MAX_WINDOW_H = 24
+export const MOVEMENT_MAX_AGE_DAYS = 31
+const H = 3_600_000
+function movementWindowIssues(from: number, to: number, ctx: z.RefinementCtx) {
+  const now = Date.now()
+  if (to <= from) ctx.addIssue({ code: 'custom', path: ['to'], message: 'The window ends before it starts' })
+  if (to - from > MOVEMENT_MAX_WINDOW_H * H) ctx.addIssue({ code: 'custom', path: ['from'], message: `${MOVEMENT_MAX_WINDOW_H} hours at most` })
+  if (to > now + 60_000) ctx.addIssue({ code: 'custom', path: ['to'], message: 'The window cannot end in the future' })
+  if (to < now - MOVEMENT_MAX_AGE_DAYS * 24 * H) ctx.addIssue({ code: 'custom', path: ['to'], message: `The window must end within the last ${MOVEMENT_MAX_AGE_DAYS} days` })
+}
+
+/**
+ * The last `hours` up to now (1 to 24, 2 when neither is given), or a window
+ * from–to (epoch ms, a day at most, within the last month): hourly reports
+ * and a range of days between set hours (operator, 2026-11-02).
+ */
 export const movementReportQuerySchema = z.object({
-  hours: z.coerce.number().refine(h => h === 2 || h === 4, { message: 'hours must be 2 or 4' }).default(2),
-})
+  hours: z.coerce.number().int().min(1).max(MOVEMENT_MAX_WINDOW_H).optional(),
+  from: z.coerce.number().int().positive().optional(),
+  to: z.coerce.number().int().positive().optional(),
+}).superRefine((q, ctx) => {
+  if ((q.from == null) !== (q.to == null)) {
+    ctx.addIssue({ code: 'custom', path: [q.from == null ? 'from' : 'to'], message: 'Give both from and to, or neither' })
+    return
+  }
+  if (q.from != null && q.to != null) movementWindowIssues(q.from, q.to, ctx)
+}).transform(q => ({ ...q, hours: q.hours ?? 2 }))
 export type MovementReportQuery = z.infer<typeof movementReportQuerySchema>
 
 /** The longest period an end-of-shift report may cover: it reads the feeds and the weighbridge day by day. */
@@ -141,11 +166,11 @@ export type ShiftDocBody = z.infer<typeof shiftDocSchema>
  * and how many rows they changed or left out (printed on the PDF). Bounded so
  * a request cannot ask for an unbounded document.
  *
- * The window is the one the server answered: it ends no later than now and
- * within the last day, and is exactly the hours asked for. The report number,
- * date and "Generated" on the PDF come from it, so it cannot be set freely.
+ * The window is one the server answers: it ends no later than now and within
+ * the last month, lasts a day at most, and is exactly the hours it says. The
+ * report number, date and "Generated" on the PDF come from it.
  */
-export const EDITED_REPORT_MAX_AGE_MS = 24 * 3_600_000
+export const EDITED_REPORT_MAX_AGE_MS = MOVEMENT_MAX_AGE_DAYS * 24 * 3_600_000
 const movementRowSchema = z.object({
   vehicleId: z.string().max(80),
   plate: z.string().max(40),
@@ -161,19 +186,25 @@ const movementRowSchema = z.object({
   stale: z.boolean(),
 })
 export const editedMovementReportSchema = z.object({
-  hours: z.number().refine(h => h === 2 || h === 4, { message: 'hours must be 2 or 4' }),
+  hours: z.number().positive().max(MOVEMENT_MAX_WINDOW_H),
   from: z.number(),
   to: z.number(),
   morl: z.string().max(120).nullable(),
   groups: z.array(z.object({ name: z.string().max(160), rows: z.array(movementRowSchema).max(5000) })).max(200),
   edits: z.object({ changed: z.number().int().min(0).max(100_000), removed: z.number().int().min(0).max(100_000) }),
 }).superRefine((r, ctx) => {
-  const now = Date.now()
-  if (r.to > now + 60_000 || r.to < now - EDITED_REPORT_MAX_AGE_MS) {
-    ctx.addIssue({ code: 'custom', path: ['to'], message: 'The report is more than a day old or in the future: run it again' })
-  }
-  if (r.to - r.from !== r.hours * 3_600_000) {
+  movementWindowIssues(r.from, r.to, ctx)
+  if (Math.abs(r.to - r.from - r.hours * 3_600_000) > 1_000) {
     ctx.addIssue({ code: 'custom', path: ['from'], message: 'The window does not match the hours of the report' })
   }
 })
 export type EditedMovementReport = z.infer<typeof editedMovementReportSchema>
+
+/** One window a day over a range of days (a week at most: the request stays under the 1 MB body limit), edited, for one PDF. */
+export const MOVEMENT_MAX_REPORTS = 7
+export const editedMovementReportsSchema = z.object({
+  reports: z.array(editedMovementReportSchema).min(1).max(MOVEMENT_MAX_REPORTS),
+})
+/** The PDF of one edited report, or of several (a window a day over a range of days). */
+export const movementPdfBodySchema = z.union([editedMovementReportsSchema, editedMovementReportSchema])
+export type MovementPdfBody = z.infer<typeof movementPdfBodySchema>
