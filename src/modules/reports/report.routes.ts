@@ -11,6 +11,7 @@ import {
   listSummaryQuerySchema,
   movementReportQuerySchema,
   editedMovementReportSchema,
+  endOfShiftQuerySchema,
 } from './report.schema.js'
 import * as ctrl from './report.controller.js'
 
@@ -55,8 +56,8 @@ const PDF_PERMISSION: Record<string, string> = {
   maintenance: 'report:export',
   plant:       'report:export',
 }
-// The end-of-shift report: today from midnight (Nairobi) up to now,
-// downloaded from the dashboard's sidebar. Made here rather than in the
+// The end-of-shift report: today from midnight (Nairobi) up to now, or the
+// period picked on the Reports page (?from&to, epoch ms, a week at most). Made here rather than in the
 // browser (operator, 2026-10-31). It carries the weighbridge AND the fleet's
 // fuel, breaches and geofence exits, so it takes both permissions the
 // dashboard's button used to need.
@@ -65,6 +66,7 @@ router.get(
   '/reports/end-of-shift.pdf',
   requirePermission('weighbridge:read'),
   requirePermission('analytics:read'),
+  validateQuery(endOfShiftQuerySchema),
   ctrl.downloadEndOfShift,
 )
 

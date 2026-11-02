@@ -102,12 +102,14 @@ export interface LoadOptions {
   /** The caller, for which feed sources they may read. */
   userId?: string | null
   now?: number
+  /** A period picked on the Reports page; without it, today from midnight up to now. */
+  period?: { from: number; to: number }
 }
 
-/** Everything the report is made from, for one organisation: today from midnight, up to now. */
-export async function loadEndOfShift({ orgId, vehicleIds, userId = null, now = Date.now() }: LoadOptions): Promise<{ report: EndOfShift; failed: string[] }> {
-  const from = shiftStart(now)
-  const to = Math.min(now, shiftEnd(now))
+/** Everything the report is made from, for one organisation: today from midnight up to now, or the period given. */
+export async function loadEndOfShift({ orgId, vehicleIds, userId = null, now = Date.now(), period }: LoadOptions): Promise<{ report: EndOfShift; failed: string[] }> {
+  const from = period?.from ?? shiftStart(now)
+  const to = period ? Math.min(period.to, now) : Math.min(now, shiftEnd(now))
   const fromDate = new Date(from), toDate = new Date(to)
   const days = daysOf(from, to)
   const inScope = (id: string | null | undefined) => !vehicleIds || (id != null && vehicleIds.has(id))
