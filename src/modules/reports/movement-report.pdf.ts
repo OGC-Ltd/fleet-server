@@ -66,8 +66,11 @@ const TINT: Partial<Record<MovementState, string>> = { to: '#e3f1dc', from: '#fb
  * elsewhere ("To Sukari").
  */
 export const directionWords = (site = 'MORL'): Record<MovementState, string> => ({
-  to: `To ${site}`, from: `From ${site}`, at: `At ${site}`, moving: 'Moving', stopped: 'Stopped', 'no-fix': 'No fix',
+  to: `To ${site}`, from: `From ${site}`, at: `At ${site}`, moving: 'Moving', stopped: 'Stopped',
+  // Menengai's silent units stand at RAIMDF (operator, 2026-11-02: "remove no fix")
+  'no-fix': site === 'MORL' ? NO_FIX_MENENGAI : 'No fix',
 })
+export const NO_FIX_MENENGAI = 'At RAIMDF'
 export const DIRECTION = directionWords('MORL')
 
 /** "MV-MENENGAI-20261101-1943": what the report is, whose, and when. */
@@ -170,7 +173,7 @@ function drawReport(w: ReportWriter, doc: InstanceType<typeof PDFDocument>, r: M
   const cols: Col[] = [{ w: 54 * MM }, { w: 30 * MM }, { w: 0 }, { w: 15 * MM, align: 'right' }, { w: 20 * MM }]
   const cell = (row: MovementRow): Cell[] => [
     { text: row.grouping, bold: true, color: row.stale || row.state === 'no-fix' ? C.flag : undefined },
-    { text: row.lastAt != null ? stamp(row.lastAt) : 'No fix', color: row.stale ? C.flag : undefined },
+    { text: row.lastAt != null ? stamp(row.lastAt) : site === 'MORL' ? DASH : 'No fix', color: row.stale ? C.flag : undefined },
     { text: row.location ?? (row.state === 'at' ? r.morl ?? site : DASH), fill: locationFill(row) },
     { text: row.speedKmh != null ? `${row.speedKmh} km/h` : DASH },
     { text: words[row.state], bold: row.state === 'to' || row.state === 'from' },
