@@ -41,6 +41,9 @@ export const MOVING_KMH = 5
 const MAX_PLACE_LOOKUPS = 15
 const PLACE_LOOKUP_WAIT_MS = 15_000
 
+/** Plates A–Z, numbers in order: "KCA 9" before "KCA 10". */
+export const byPlate = (a: string, b: string) => String(a ?? '').localeCompare(String(b ?? ''), 'en', { numeric: true, sensitivity: 'base' })
+
 export type MovementState = 'to' | 'from' | 'at' | 'moving' | 'stopped' | 'no-fix'
 
 export interface Fix { lat: number; lng: number; at: number; speedKmh: number | null }
@@ -115,9 +118,6 @@ export function groupOrder(a: string, b: string): number {
   const cpo = (s: string) => (/^CPO\b/i.test(s) ? 0 : 1)
   return cpo(a) - cpo(b) || a.localeCompare(b)
 }
-
-/** Within a group: heading to MORL, leaving it, moving, stopped, at MORL, then no fix. */
-const STATE_RANK: Record<MovementState, number> = { to: 0, from: 1, moving: 2, stopped: 3, at: 4, 'no-fix': 5 }
 
 export interface MovementRow {
   vehicleId: string
@@ -332,9 +332,8 @@ export async function getMovementReport(orgId: string, window: WindowHours | Win
     ? (a, b) => Number(a.name === 'Other') - Number(b.name === 'Other') || b.rows.length - a.rows.length || a.name.localeCompare(b.name)
     : (a, b) => groupOrder(a.name, b.name))
   for (const g of groups) {
-    g.rows.sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state]
-      || (a.state === 'to' || a.state === 'from' ? (b.speedKmh ?? 0) - (a.speedKmh ?? 0) : (a.lastAt ?? 0) - (b.lastAt ?? 0))
-      || a.plate.localeCompare(b.plate))
+    // A–Z by plate (operator, 2026-11-02: "organize the nodes in ascending order")
+    g.rows.sort((a, b) => byPlate(a.plate, b.plate))
   }
 
   return { organisation: org?.name ?? '', orgCode: org?.code ?? '', hours, from, to, morl: morl?.name ?? null, site, groups, counts: countRows(groups) }

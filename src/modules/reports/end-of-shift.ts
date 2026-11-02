@@ -22,6 +22,8 @@ const plateKey = (s: unknown) => String(s ?? '').toUpperCase().replace(/[^A-Z0-9
 const ms = (v: When): number =>
   v == null ? NaN : typeof v === 'number' ? v : v instanceof Date ? v.getTime() : Date.parse(v)
 const round1 = (n: number) => Math.round(n * 10) / 10
+/** Plates A–Z, numbers in order: "KCA 9" before "KCA 10" (operator, 2026-11-02). */
+const plateOrder = (a: string, b: string) => String(a ?? '').localeCompare(String(b ?? ''), 'en', { numeric: true, sensitivity: 'base' })
 const eatHour = (t: number) => new Date(t + 3 * H).getUTCHours()
 
 /**
@@ -259,8 +261,10 @@ export function buildEndOfShift({
     const rank = b.key === 'speed'
       ? (x: BreachRow, y: BreachRow) => (y.overSec ?? 0) - (x.overSec ?? 0) || (y.peak ?? 0) - (x.peak ?? 0)
       : (x: BreachRow, y: BreachRow) => y.times - x.times
-    const rows = [...per[b.key].values()].sort((x, y) => rank(x, y) || x.plate.localeCompare(y.plate))
-    return { ...b, total: rows.reduce((n, r) => n + r.times, 0), units: rows.length, top: rows.slice(0, TOP), fromDashcam: FROM_DASHCAM.has(b.key) }
+    const rows = [...per[b.key].values()].sort((x, y) => rank(x, y) || plateOrder(x.plate, y.plate))
+    // The worst TOP, listed A–Z by plate (operator, 2026-11-02)
+    const top = rows.slice(0, TOP).sort((x, y) => plateOrder(x.plate, y.plate))
+    return { ...b, total: rows.reduce((n, r) => n + r.times, 0), units: rows.length, top, fromDashcam: FROM_DASHCAM.has(b.key) }
   })
 
   // ── out of geofence during the shift ──
@@ -300,7 +304,7 @@ export function buildEndOfShift({
         dispatch: v.dispatch, noDispatch: !v.dispatch, long: forMs > LONG_OUT_MS,
       }
     })
-    .sort((a, b) => Number(b.noDispatch) - Number(a.noDispatch) || a.since - b.since)
+    .sort((a, b) => plateOrder(a.plate, b.plate) || a.since - b.since)
   const totalOutMs = trips.reduce((n, x) => n + x.ms, 0)
   const outAndBack = {
     units: new Set(trips.map((x) => x.plate)).size, times: trips.length, totalMs: totalOutMs,
@@ -339,7 +343,7 @@ export function buildEndOfShift({
     }
     const multi = [...byUnit.values()].filter((u) => u.trips > 1)
       .map((u) => ({ plate: u.plate, driver: driverOfPlate(u.plate) ?? (titleName(mostCommon(u.names)) || null), trips: u.trips, tonnes: round1(u.kg / 1000), bridges: [...u.bridges].map(titleName) }))
-      .sort((a, b) => b.trips - a.trips || b.tonnes - a.tonnes)
+      .sort((a, b) => plateOrder(a.plate, b.plate))
     const hh = (h: number) => String(h).padStart(2, '0')
     weighbridge = {
       tickets: loads.length,

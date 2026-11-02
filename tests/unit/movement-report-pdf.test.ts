@@ -15,7 +15,7 @@ vi.mock('../../src/lib/geocode.js', () => ({
 }))
 
 import { prismaMock } from '../helpers/prisma.mock.js'
-import { getMovementReport, editedMovementReport, countRows, typeHeading, siteNameOf, findHomeFence, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
+import { getMovementReport, editedMovementReport, countRows, byPlate, typeHeading, siteNameOf, findHomeFence, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
 import { editedMovementReportSchema, movementPdfBodySchema, movementReportQuerySchema, MOVEMENT_MAX_REPORTS } from '../../src/modules/reports/report.schema.js'
 import { directionWords, renderMovementReportPdf, renderMovementReportsPdf, movementReportsFileName, movementReportNo, movementFileName, DIRECTION, isMoving, isLoading, locationFill, AT_MORL_FILL, MOVING_FILL, LOADING_FILL } from '../../src/modules/reports/movement-report.pdf.js'
 
@@ -74,9 +74,12 @@ describe('the movement report', () => {
     expect(report.counts.stale).toBe(1)
   })
 
-  it('orders a group to MORL first, fastest first, then leaving, stopped and at MORL', () => {
-    expect(report.groups[0]!.rows.map(r => r.state)).toEqual(['to', 'to', 'to', 'from', 'stopped', 'at', 'at'])
-    expect(report.groups[0]!.rows[0]!.speedKmh).toBe(62)
+  it('lists a group A–Z by plate', () => {
+    for (const g of report.groups) {
+      const plates = g.rows.map(r => r.plate)
+      expect(plates).toEqual([...plates].sort((a, b) => byPlate(a, b)))
+    }
+    expect(byPlate('KCA 9X', 'KCA 10X')).toBeLessThan(0)
   })
 
   it('gives every row a status in the Direction column, never a blank', () => {
