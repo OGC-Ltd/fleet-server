@@ -15,9 +15,9 @@ vi.mock('../../src/lib/geocode.js', () => ({
 }))
 
 import { prismaMock } from '../helpers/prisma.mock.js'
-import { getMovementReport, editedMovementReport, countRows, typeHeading, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
+import { getMovementReport, editedMovementReport, countRows, typeHeading, siteNameOf, findHomeFence, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
 import { editedMovementReportSchema, movementPdfBodySchema, movementReportQuerySchema, MOVEMENT_MAX_REPORTS } from '../../src/modules/reports/report.schema.js'
-import { renderMovementReportPdf, renderMovementReportsPdf, movementReportsFileName, movementReportNo, movementFileName, DIRECTION, isMoving, isLoading, locationFill, AT_MORL_FILL, MOVING_FILL, LOADING_FILL } from '../../src/modules/reports/movement-report.pdf.js'
+import { directionWords, renderMovementReportPdf, renderMovementReportsPdf, movementReportsFileName, movementReportNo, movementFileName, DIRECTION, isMoving, isLoading, locationFill, AT_MORL_FILL, MOVING_FILL, LOADING_FILL } from '../../src/modules/reports/movement-report.pdf.js'
 
 const NOW = Date.now()
 const MORL = { lat: -4.05, lng: 39.65 }
@@ -135,6 +135,24 @@ describe('the movement report', () => {
     expect(sukari.groups.find(g => g.name === 'Trucks')!.rows.map(r => r.plate).sort()).toEqual(['KCN 912F', 'KCV 039A'])
   })
 
+  it('outside Menengai reads directions against the organisation site, not MORL', async () => {
+    expect(siteNameOf('Sukari Industries Limited')).toBe('Sukari')
+    expect(siteNameOf('Mufindi Paper Mills Ltd')).toBe('Mufindi')
+    expect(siteNameOf('West Kenya Sugar Ltd')).toBe('West Kenya')
+    expect(siteNameOf('Aquamist Ltd')).toBe('Aquamist')
+    expect(directionWords('Sukari')).toMatchObject({ to: 'To Sukari', from: 'From Sukari', at: 'At Sukari' })
+    // Its factory fence with its name first, switched off or not; then any factory
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const findMany = prismaMock.geofence.findMany as any
+    const circle = (name: string, isActive = false) => ({ name, type: 'CIRCLE', centerLat: -0.8, centerLng: 34.4, radiusM: 500, polygonCoords: null, widthM: null, isActive })
+    findMany.mockResolvedValueOnce([circle('NO GO ZONES -SUKARI'), circle('Sukari industries'), circle('SUKARI INDURSTRIES FACTORY')])
+    expect((await findHomeFence('org2', 'Sukari'))?.name).toBe('SUKARI INDURSTRIES FACTORY')
+    findMany.mockResolvedValueOnce([circle('Kitale town'), circle('Naitiri Factory'), circle('Selia Region', true)])
+    expect((await findHomeFence('org3', 'West Kenya'))?.name).toBe('Naitiri Factory')
+    findMany.mockResolvedValueOnce([])
+    expect(await findHomeFence('org4', 'Timsales')).toBeNull()
+  })
+
   it('names the types for a heading', () => {
     expect(typeHeading('TRUCK')).toBe('Trucks')
     expect(typeHeading('COMPANY_VEHICLE')).toBe('Company vehicles')
@@ -150,6 +168,8 @@ describe('the movement report', () => {
   })
 
   it('reads a past window from the stored fixes at its end, not from the live snapshot', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ name: 'Menengai Oil Refineries Ltd', code: 'MENENGAI' })
     const to = NOW - 3 * 24 * 3_600_000
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const raw = prismaMock.$queryRaw as any
@@ -277,6 +297,8 @@ describe('the movement report as edited on the Reports page', () => {
 
 describe('without a MORL fence', () => {
   it('reads the HQ yard as MORL HQ, even with its alerts switched off', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ name: 'Menengai Oil Refineries Ltd', code: 'MENENGAI' })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const findMany = prismaMock.geofence.findMany as any
     findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([
