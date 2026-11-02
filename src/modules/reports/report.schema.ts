@@ -200,8 +200,12 @@ export const editedMovementReportSchema = z.object({
 })
 export type EditedMovementReport = z.infer<typeof editedMovementReportSchema>
 
-/** One window a day over a range of days (a week at most: the request stays under the 1 MB body limit), edited, for one PDF. */
-export const MOVEMENT_MAX_REPORTS = 7
+/**
+ * One report a day over a range of days (a week at most), or, outside
+ * Menengai, one a vehicle type a day: a week of up to 8 types. The rows are a
+ * day's units either way, so the request stays under the 1 MB body limit.
+ */
+export const MOVEMENT_MAX_REPORTS = 7 * 8
 export const editedMovementReportsSchema = z.object({
   reports: z.array(editedMovementReportSchema).min(1).max(MOVEMENT_MAX_REPORTS),
 })
