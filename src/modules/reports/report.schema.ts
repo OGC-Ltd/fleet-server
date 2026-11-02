@@ -72,6 +72,31 @@ export const movementReportQuerySchema = z.object({
 })
 export type MovementReportQuery = z.infer<typeof movementReportQuerySchema>
 
+/** The longest period an end-of-shift report may cover: it reads the feeds and the weighbridge day by day. */
+export const END_OF_SHIFT_MAX_DAYS = 7
+
+/**
+ * The end-of-shift report's period, picked on the Reports page (operator,
+ * 2026-11-02): epoch ms. Neither given: today from midnight up to now, as
+ * before. Both: from before to, no later than now, at most a week.
+ */
+export const endOfShiftQuerySchema = z.object({
+  from: z.coerce.number().int().positive().optional(),
+  to: z.coerce.number().int().positive().optional(),
+}).superRefine((q, ctx) => {
+  if ((q.from == null) !== (q.to == null)) {
+    ctx.addIssue({ code: 'custom', path: [q.from == null ? 'from' : 'to'], message: 'Give both from and to, or neither' })
+    return
+  }
+  if (q.from == null || q.to == null) return
+  if (q.from >= q.to) ctx.addIssue({ code: 'custom', path: ['to'], message: 'The period ends before it starts' })
+  if (q.to > Date.now() + 60_000) ctx.addIssue({ code: 'custom', path: ['to'], message: 'The period cannot end in the future' })
+  if (q.to - q.from > END_OF_SHIFT_MAX_DAYS * 86_400_000) {
+    ctx.addIssue({ code: 'custom', path: ['from'], message: `${END_OF_SHIFT_MAX_DAYS} days at most` })
+  }
+})
+export type EndOfShiftQuery = z.infer<typeof endOfShiftQuerySchema>
+
 /**
  * The movement report as edited on the Reports page, sent back to be drawn as
  * the PDF: the rows the operator kept, with their locations and directions,

@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest'
 import { buildEndOfShift, shiftStart, shiftEnd, alarmKind, parseSale, exitZone, type ShiftInput, type ShiftUnit } from '../../src/modules/reports/end-of-shift.js'
 import { renderEndOfShiftPdf, reportNumber, endOfShiftFileName, dur } from '../../src/modules/reports/end-of-shift.pdf.js'
 import { toShiftUnit, daysOf, plateIn } from '../../src/modules/reports/end-of-shift.data.js'
+import { endOfShiftQuerySchema } from '../../src/modules/reports/report.schema.js'
 
 const H = 3_600_000
 const FROM = Date.parse('2026-10-31T06:00:00+03:00')
@@ -199,5 +200,25 @@ describe('end of shift: the PDF', () => {
     const buf = await renderEndOfShiftPdf(buildEndOfShift({ from: FROM, to: NOW }), { orgName: 'X', reportNo: 'R' })
     expect(buf.subarray(0, 5).toString()).toBe('%PDF-')
     expect(pages(buf)).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('end of shift: a picked period', () => {
+  const ok = (q: Record<string, unknown>) => endOfShiftQuerySchema.safeParse(q).success
+  const now = Date.now()
+
+  it('takes neither (today up to now) or both, from before to, ending by now, a week at most', () => {
+    expect(ok({})).toBe(true)
+    expect(ok({ from: String(now - 30 * H), to: String(now - H) })).toBe(true)
+    expect(ok({ from: now - H })).toBe(false)
+    expect(ok({ from: now - H, to: now - 2 * H })).toBe(false)
+    expect(ok({ from: now - H, to: now + 2 * H })).toBe(false)
+    expect(ok({ from: now - 8 * 24 * H, to: now })).toBe(false)
+  })
+
+  it('draws a period over several days', async () => {
+    const r = buildEndOfShift({ ...fixture, from: FROM - 48 * H, to: NOW })
+    const buf = await renderEndOfShiftPdf(r, { orgName: 'West Sugar', reportNo: 'R', generatedAt: NOW })
+    expect(buf.subarray(0, 5).toString()).toBe('%PDF-')
   })
 })

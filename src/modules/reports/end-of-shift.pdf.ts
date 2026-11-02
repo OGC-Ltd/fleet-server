@@ -35,8 +35,11 @@ export function endOfShiftFileName(orgName: string, at: number): string {
 
 export async function renderEndOfShiftPdf(r: EndOfShift, o: { orgName: string; reportNo: string; generatedAt?: number }): Promise<Buffer> {
   const generatedAt = o.generatedAt ?? Date.now()
+  // One day reads "2 Nov 2026, 00:00 to 14:05"; a period over days names both.
   const date = fmtDate.format(r.from)
-  const span = `${fmtHM.format(r.from)} to ${fmtHM.format(r.to)}`
+  const oneDay = date === fmtDate.format(r.to)
+  const since = oneDay ? fmtHM.format(r.from) : `${date}, ${fmtHM.format(r.from)}`
+  const span = oneDay ? `${fmtHM.format(r.from)} to ${fmtHM.format(r.to)}` : `${fmtHM.format(r.from)} to ${fmtDate.format(r.to)}, ${fmtHM.format(r.to)}`
   const doc = new PDFDocument({ size: 'A4', margin: 0, bufferPages: true,
     info: { Title: `End of shift report ${o.orgName} ${date}`, Author: 'Off-Grid Consulting Ltd.' } })
   const chunks: Buffer[] = []
@@ -74,7 +77,7 @@ export async function renderEndOfShiftPdf(r: EndOfShift, o: { orgName: string; r
     ['Fuel drains', `${num(r.fuel.drains.length)} · ${num(r.fuel.drainL, 1)} L`],
     ['Escalated thefts', num(theftN), theftN ? C.flag : undefined],
     ['Policy breaches', num(r.breachTotal)],
-    [`Reporting since ${fmtHM.format(r.from)}`, `${num(r.fleet.reporting)} of ${num(r.fleet.units)}`],
+    [`Reporting since ${since}`, `${num(r.fleet.reporting)} of ${num(r.fleet.units)}`],
   ])
 
   // ── 2. escalated thefts ──
@@ -133,7 +136,7 @@ export async function renderEndOfShiftPdf(r: EndOfShift, o: { orgName: string; r
   if (r.dashcam) note('On phone, no seatbelt and camera covered come from the dashcams, so only units with a camera are counted.')
 
   // ── 4. out of geofence ──
-  w.h2('4. Out of geofence', `Left a geofence since ${fmtHM.format(r.from)}`)
+  w.h2('4. Out of geofence', `Left a geofence since ${since}`)
   if (!r.zonesKnown) w.none('No geofences are set up for this fleet.')
   else {
     const ob = r.outAndBack

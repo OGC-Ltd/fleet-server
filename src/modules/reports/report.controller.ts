@@ -5,7 +5,7 @@ import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
 import { renderEndOfShiftPdf, reportNumber, endOfShiftFileName } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, EditedMovementReport } from './report.schema.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, EditedMovementReport, EndOfShiftQuery } from './report.schema.js'
 import { getMovementReport, editedMovementReport, type WindowHours, type MovementReport } from './movement-report.service.js'
 import { renderMovementReportPdf, movementFileName } from './movement-report.pdf.js'
 
@@ -83,14 +83,16 @@ export const downloadPdfReport: RequestHandler = async (req, res, next) => {
 
 // ── End-of-shift report ───────────────────────────────────────────────────────
 
-/** Today from midnight Nairobi up to now, for this organisation, as a PDF. */
+/** Today from midnight Nairobi up to now, or the period asked for, for this organisation, as a PDF. */
 export const downloadEndOfShift: RequestHandler = async (req, res, next) => {
   try {
     const orgId = p(req, 'orgId')
     const now = Date.now()
+    const q = req.query as unknown as EndOfShiftQuery
+    const period = q.from != null && q.to != null ? { from: q.from, to: q.to } : undefined
     const [org, { report }] = await Promise.all([
       orgHeading(orgId),
-      loadEndOfShift({ orgId, vehicleIds: req.authz?.vehicleIds ?? null, userId: req.authz?.userId ?? null, now }),
+      loadEndOfShift({ orgId, vehicleIds: req.authz?.vehicleIds ?? null, userId: req.authz?.userId ?? null, now, period }),
     ])
     const buffer = await renderEndOfShiftPdf(report, { orgName: org.name, reportNo: reportNumber(org.short, now), generatedAt: now })
     res.setHeader('Content-Type', 'application/pdf')
