@@ -593,6 +593,8 @@ const schema = z.object({
   // The clock VSS writes its alarm times in (its server's own, no zone given):
   // the dashcam alarms (modules/dashcam) read them in this zone.
   VSS_TIMEZONE: z.string().optional().default('Africa/Nairobi'),
+  // Where the VSS login token is kept between restarts. Empty = the OS temp dir.
+  VSS_SESSION_FILE: z.string().optional().default(''),
 })
 
 /**

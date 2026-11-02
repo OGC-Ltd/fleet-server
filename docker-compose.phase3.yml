@@ -1,0 +1,12 @@
+# Phase 3 only: the host's nginx still owns 80/443 and proxies `/` to the web
+# container on loopback. The base file keeps `web` on an internal network,
+# which cannot publish a port, so this adds a second, ordinary one.
+# Delete this file at phase 4, when the edge reaches web:8080 itself.
+services:
+  web:
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-8081}:8080"
+    networks: [frontend, web-host]
+
+networks:
+  web-host: {}

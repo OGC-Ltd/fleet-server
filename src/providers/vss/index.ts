@@ -182,7 +182,9 @@ function postNow<T>(path: string, body: Record<string, unknown>): Promise<Envelo
  */
 const LOGIN_TOO_FREQUENT = VSS_LOGIN_LIMITED
 const LOGIN_BACKOFF_MS = 5 * 60_000
-const SESSION_FILE = path.join(os.tmpdir(), 'fleet-server-vss-session.json')
+// A container's /tmp is wiped on every restart, so containers point this into
+// their cache volume; a lost session means a fresh login and VSS's rate limit.
+const SESSION_FILE = env.VSS_SESSION_FILE || path.join(os.tmpdir(), 'fleet-server-vss-session.json')
 
 let session: { token: string } | null = readSession()
 let loggingIn: Promise<string> | null = null
