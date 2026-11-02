@@ -71,7 +71,7 @@ export interface ShiftDoc {
 const toneOf = (t: Tone): DocTone | undefined => (t === 'c' ? 'flag' : t === 'm' ? 'mut' : undefined)
 
 /** The report laid out as a document. */
-export function endOfShiftDoc(r: EndOfShift, o: { orgName: string; reportNo: string; generatedAt?: number }): ShiftDoc {
+export function endOfShiftDoc(r: EndOfShift, o: { orgName: string; reportNo: string; generatedAt?: number; category?: string }): ShiftDoc {
   const generatedAt = o.generatedAt ?? Date.now()
   // One day reads "2 Nov 2026, 00:00 to 14:05"; a period over days names both.
   const date = fmtDate.format(r.from)
@@ -197,7 +197,7 @@ export function endOfShiftDoc(r: EndOfShift, o: { orgName: string; reportNo: str
 
   return {
     title: 'END OF SHIFT REPORT', reportNo: o.reportNo, date,
-    meta: [{ label: 'Fleet', value: o.orgName }, { label: 'Shift', value: `${date}, ${span}` }],
+    meta: [{ label: 'Fleet', value: o.orgName }, ...(o.category ? [{ label: 'Category', value: o.category }] : []), { label: 'Shift', value: `${date}, ${span}` }],
     blocks: b,
     footer: endOfShiftDoc.made(o.orgName, date, generatedAt),
   }
