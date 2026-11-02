@@ -87,6 +87,29 @@ export function groupingOf(name: string | null, plate: string | null): string | 
   return rest || null
 }
 
+/**
+ * Outside Menengai the report is split by the vehicle type each unit is
+ * registered with, and units not reporting are left out (operator, 2 Nov
+ * 2026: "with an exception of Menengai all other orgs ... pull out the
+ * offline units. Split the report into the various types of vehicles").
+ * Menengai's units are all UNSPECIFIED and its sheet goes by the grouping in
+ * the unit's name, so it keeps that, offline units included.
+ */
+export const BY_NAME_ORGS = new Set(['MENENGAI'])
+
+/** A vehicle type as a report's heading: TRUCK → Trucks; UNSPECIFIED → Other. */
+const TYPE_HEADING: Record<string, string> = {
+  TRUCK: 'Trucks', LORRY: 'Lorries', TRACTOR: 'Tractors', TRAILER: 'Trailers', PLANT: 'Plant',
+  SALOON: 'Saloons', BUS: 'Buses', COMPANY_VEHICLE: 'Company vehicles', UNSPECIFIED: 'Other',
+}
+export function typeHeading(type: string | null | undefined): string {
+  const t = String(type ?? 'UNSPECIFIED').toUpperCase()
+  return TYPE_HEADING[t] ?? t.charAt(0) + t.slice(1).toLowerCase().replace(/_/g, ' ')
+}
+
+/** A unit that is not reporting: no position in the window, or its last one from before it. */
+export const isOffline = (r: Pick<MovementRow, 'state' | 'stale'>) => r.state === 'no-fix' || r.stale
+
 /** Groups in report order: CPO first, then by name. */
 export function groupOrder(a: string, b: string): number {
   const cpo = (s: string) => (/^CPO\b/i.test(s) ? 0 : 1)
@@ -237,15 +260,25 @@ export async function getMovementReport(orgId: string, window: WindowHours | Win
   })
   await nameRows(rows)
 
+  // Menengai by the grouping in the name; everyone else by vehicle type, reporting units only
+  const byName = BY_NAME_ORGS.has(String(org?.code ?? '').toUpperCase())
+  const typeOf = byName ? null : new Map((await prisma.vehicle.findMany({
+    where: { id: { in: ids } }, select: { id: true, vehicleType: true },
+  })).map(v => [v.id, v.vehicleType]))
+  const kept = byName ? rows : rows.filter(r => !isOffline(r))
+
   const byGroup = new Map<string, { name: string; rows: MovementRow[] }>()
-  for (const r of rows) {
-    const label = groupingOf(r.grouping, r.plate) ?? 'Other'
+  for (const r of kept) {
+    const label = typeOf ? typeHeading(typeOf.get(r.vehicleId)) : groupingOf(r.grouping, r.plate) ?? 'Other'
     const key = label.toUpperCase().replace(/\s+/g, ' ')
     const g = byGroup.get(key) ?? { name: label, rows: [] }
     g.rows.push(r)
     byGroup.set(key, g)
   }
-  const groups = [...byGroup.values()].sort((a, b) => groupOrder(a.name, b.name))
+  // Types: the largest first, Other last
+  const groups = [...byGroup.values()].sort(typeOf
+    ? (a, b) => Number(a.name === 'Other') - Number(b.name === 'Other') || b.rows.length - a.rows.length || a.name.localeCompare(b.name)
+    : (a, b) => groupOrder(a.name, b.name))
   for (const g of groups) {
     g.rows.sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state]
       || (a.state === 'to' || a.state === 'from' ? (b.speedKmh ?? 0) - (a.speedKmh ?? 0) : (a.lastAt ?? 0) - (b.lastAt ?? 0))

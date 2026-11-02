@@ -15,8 +15,8 @@ vi.mock('../../src/lib/geocode.js', () => ({
 }))
 
 import { prismaMock } from '../helpers/prisma.mock.js'
-import { getMovementReport, editedMovementReport, countRows, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
-import { editedMovementReportSchema, movementPdfBodySchema, movementReportQuerySchema } from '../../src/modules/reports/report.schema.js'
+import { getMovementReport, editedMovementReport, countRows, typeHeading, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
+import { editedMovementReportSchema, movementPdfBodySchema, movementReportQuerySchema, MOVEMENT_MAX_REPORTS } from '../../src/modules/reports/report.schema.js'
 import { renderMovementReportPdf, renderMovementReportsPdf, movementReportsFileName, movementReportNo, movementFileName, DIRECTION, isMoving, isLoading, locationFill, AT_MORL_FILL, MOVING_FILL, LOADING_FILL } from '../../src/modules/reports/movement-report.pdf.js'
 
 const NOW = Date.now()
@@ -111,6 +111,36 @@ describe('the movement report', () => {
     const buf = await renderMovementReportPdf(long)
     if (process.env.OUT2) fs.writeFileSync(process.env.OUT2, buf)
     expect(pages(buf)).toBe(2)
+  })
+
+  it('outside Menengai, leaves out units not reporting and splits by vehicle type', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ name: 'Sukari Industries', code: 'SUKARI' })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.vehicle.findMany as any).mockResolvedValue([
+      { id: 'KCV039A', vehicleType: 'TRUCK' }, { id: 'KCN912F', vehicleType: 'TRUCK' }, { id: 'KCN910F', vehicleType: 'TRUCK' },
+      { id: 'KCA227M', vehicleType: 'TRACTOR' }, { id: 'KCT510W', vehicleType: 'UNSPECIFIED' },
+    ])
+    const sukari = await getMovementReport('org2', 2)
+    const all = sukari.groups.flatMap(g => g.rows)
+    // KCN 910F last reported a day ago: not in it
+    expect(all.some(r => r.plate === 'KCN 910F')).toBe(false)
+    expect(all.every(r => r.state !== 'no-fix' && !r.stale)).toBe(true)
+    expect(sukari.counts.stale + sukari.counts['no-fix']).toBe(0)
+    // Grouped by type, largest first, Other last
+    const names = sukari.groups.map(g => g.name)
+    expect(names[names.length - 1]).toBe('Other')
+    expect(names).toContain('Trucks')
+    expect(names).toContain('Tractors')
+    expect(sukari.groups.find(g => g.name === 'Trucks')!.rows.map(r => r.plate).sort()).toEqual(['KCN 912F', 'KCV 039A'])
+  })
+
+  it('names the types for a heading', () => {
+    expect(typeHeading('TRUCK')).toBe('Trucks')
+    expect(typeHeading('COMPANY_VEHICLE')).toBe('Company vehicles')
+    expect(typeHeading('UNSPECIFIED')).toBe('Other')
+    expect(typeHeading(null)).toBe('Other')
+    expect(typeHeading('DOZER_LARGE')).toBe('Dozer large')
   })
 
   it('takes only the units a scoped caller may see', async () => {
@@ -208,7 +238,8 @@ describe('the movement report as edited on the Reports page', () => {
 
   it('takes several edited reports for one PDF, a week at most', () => {
     expect(movementPdfBodySchema.safeParse({ reports: [request(report), request(report)] }).success).toBe(true)
-    expect(movementPdfBodySchema.safeParse({ reports: Array(8).fill(request(report)) }).success).toBe(false)
+    expect(movementPdfBodySchema.safeParse({ reports: Array(MOVEMENT_MAX_REPORTS + 1).fill(request(report)) }).success).toBe(false)
+    expect(movementPdfBodySchema.safeParse({ reports: Array(MOVEMENT_MAX_REPORTS).fill(request(report)) }).success).toBe(true)
     expect(movementPdfBodySchema.safeParse(request(report)).success).toBe(true)
   })
 
