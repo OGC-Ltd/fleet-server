@@ -109,7 +109,7 @@ export const isTractorTicket = (row: { vehicleNo: string; vehiclePlate: string }
 
 export interface WeighmentDayResult {
   day:      string
-  centres:  { code: number; name: string; count: number; netKg: number; trucks: KindTotal; tractors: KindTotal }[]
+  centres:  { code: number; name: string; count: number; netKg: number; trucks: KindTotal; tractors: KindTotal; fromCentres: KindTotal }[]
   stats:    WeighmentDayStats
   rows:     WeighmentDto[]
   /** Rows in the day before the centre and search filters — so the page can
@@ -272,7 +272,7 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
   // and a tab that vanishes on a quiet day cannot tell them apart.
   // Each centre's own tonnage, and its trucks and tractors (operator,
   // 2026-11-02: "compute the total tonnage of these individually")
-  const blank = () => ({ count: 0, netKg: 0, trucks: { tickets: 0, netKg: 0 }, tractors: { tickets: 0, netKg: 0 } })
+  const blank = () => ({ count: 0, netKg: 0, trucks: { tickets: 0, netKg: 0 }, tractors: { tickets: 0, netKg: 0 }, fromCentres: { tickets: 0, netKg: 0 } })
   const counts = new Map<number, ReturnType<typeof blank>>()
   const names  = new Map<number, string>()
   for (const c of orgCentres) { counts.set(c.code, blank()); names.set(c.code, c.name) }
@@ -284,6 +284,24 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
     if (row.netWeightKg != null) { c.netKg += row.netWeightKg; kind.netKg += row.netWeightKg }
     counts.set(row.centerCode, c)
     names.set(row.centerCode, row.centerName)
+  }
+  // The cane the centres send on to the mill is weighed again at the Factory
+  // (a CANE_TRANSFER's factory pair). Those trucks are the Factory's cane in
+  // too (operator, 2026-11-03), at the Factory's weight; the ticket stays its
+  // centre's, so `count` and the grid are unchanged and the day's totals
+  // never count it twice.
+  const factoryCode = [...names.entries()].find(([, n]) => /FACTORY/i.test(n))?.[0]
+  const factory = factoryCode != null ? counts.get(factoryCode) : undefined
+  if (factory) {
+    for (const row of all) {
+      if (row.category !== 'CANE_TRANSFER' || row.centerCode === factoryCode || row.factoryNetWeightKg == null) continue
+      const kind = isTractorTicket(row) ? factory.tractors : factory.trucks
+      kind.tickets += 1
+      kind.netKg += row.factoryNetWeightKg
+      factory.netKg += row.factoryNetWeightKg
+      factory.fromCentres.tickets += 1
+      factory.fromCentres.netKg += row.factoryNetWeightKg
+    }
   }
   const centres = [...counts.entries()]
     .map(([code, c]) => ({ code, name: names.get(code) ?? `Centre ${code}`, ...c }))
