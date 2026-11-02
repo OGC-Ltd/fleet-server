@@ -105,10 +105,7 @@ export const END_OF_SHIFT_MAX_DAYS = 7
  * 2026-11-02): epoch ms. Neither given: today from midnight up to now, as
  * before. Both: from before to, no later than now, at most a week.
  */
-export const endOfShiftQuerySchema = z.object({
-  from: z.coerce.number().int().positive().optional(),
-  to: z.coerce.number().int().positive().optional(),
-}).superRefine((q, ctx) => {
+function checkShiftPeriod(q: { from?: number; to?: number }, ctx: z.RefinementCtx) {
   if ((q.from == null) !== (q.to == null)) {
     ctx.addIssue({ code: 'custom', path: [q.from == null ? 'from' : 'to'], message: 'Give both from and to, or neither' })
     return
@@ -119,8 +116,26 @@ export const endOfShiftQuerySchema = z.object({
   if (q.to - q.from > END_OF_SHIFT_MAX_DAYS * 86_400_000) {
     ctx.addIssue({ code: 'custom', path: ['from'], message: `${END_OF_SHIFT_MAX_DAYS} days at most` })
   }
-})
+}
+export const endOfShiftQuerySchema = z.object({
+  from: z.coerce.number().int().positive().optional(),
+  to: z.coerce.number().int().positive().optional(),
+}).superRefine(checkShiftPeriod)
 export type EndOfShiftQuery = z.infer<typeof endOfShiftQuerySchema>
+
+/**
+ * The same report for one category of the fleet (Menengai's fleet list:
+ * Tankers, Finished Goods, …; operator, 2026-11-02): the category's units as
+ * the Reports page matched them, and its name for the heading. Sent in a body,
+ * as a category of a hundred units is too long for a query string.
+ */
+export const endOfShiftBodySchema = z.object({
+  from: z.number().int().positive().optional(),
+  to: z.number().int().positive().optional(),
+  vehicleIds: z.array(z.string().max(80)).max(5000).optional(),
+  category: z.string().trim().min(1).max(80).optional(),
+}).superRefine(checkShiftPeriod)
+export type EndOfShiftBody = z.infer<typeof endOfShiftBodySchema>
 
 /**
  * The end-of-shift report as edited on the Reports page (operator,

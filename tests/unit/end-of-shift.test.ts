@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest'
 import { buildEndOfShift, shiftStart, shiftEnd, alarmKind, parseSale, exitZone, type ShiftInput, type ShiftUnit } from '../../src/modules/reports/end-of-shift.js'
 import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, dur } from '../../src/modules/reports/end-of-shift.pdf.js'
 import { toShiftUnit, daysOf, plateIn } from '../../src/modules/reports/end-of-shift.data.js'
-import { endOfShiftQuerySchema, shiftDocSchema } from '../../src/modules/reports/report.schema.js'
+import { endOfShiftQuerySchema, shiftDocSchema, endOfShiftBodySchema } from '../../src/modules/reports/report.schema.js'
 
 const H = 3_600_000
 const FROM = Date.parse('2026-10-31T06:00:00+03:00')
@@ -227,6 +227,15 @@ describe('end of shift: a picked period', () => {
 describe('end of shift: the document the page edits', () => {
   const pages = (buf: Buffer) => (buf.toString('latin1').match(/\/Type \/Page\b/g) ?? []).length
   const doc = () => endOfShiftDoc(buildEndOfShift(fixture), { orgName: 'West Sugar', reportNo: 'R', generatedAt: NOW })
+
+  it('names the category a report was made for, under the fleet', () => {
+    const d = endOfShiftDoc(buildEndOfShift(fixture), { orgName: 'Menengai', reportNo: 'R', generatedAt: NOW, category: 'Tankers' })
+    expect(d.meta.map((m) => m.label)).toEqual(['Fleet', 'Category', 'Shift'])
+    expect(d.meta[1]!.value).toBe('Tankers')
+    expect(doc().meta.map((m) => m.label)).toEqual(['Fleet', 'Shift'])
+    expect(endOfShiftBodySchema.safeParse({ vehicleIds: ['a', 'b'], category: 'Tankers' }).success).toBe(true)
+    expect(endOfShiftBodySchema.safeParse({ from: NOW - 1000 }).success).toBe(false)
+  })
 
   it('round-trips through the request schema as the server answered it', () => {
     expect(shiftDocSchema.safeParse(JSON.parse(JSON.stringify(doc()))).success).toBe(true)

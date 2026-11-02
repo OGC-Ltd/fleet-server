@@ -12,6 +12,7 @@ import {
   movementReportQuerySchema,
   movementPdfBodySchema,
   endOfShiftQuerySchema,
+  endOfShiftBodySchema,
   shiftDocSchema,
 } from './report.schema.js'
 import * as ctrl from './report.controller.js'
@@ -99,6 +100,14 @@ router.get(
   requirePermission('analytics:read'),
   validateQuery(endOfShiftQuerySchema),
   ctrl.getEndOfShiftDoc,
+)
+// The same, for one category of the fleet (Menengai's fleet list)
+router.post(
+  '/reports/end-of-shift',
+  requirePermission('weighbridge:read'),
+  requirePermission('analytics:read'),
+  validateBody(endOfShiftBodySchema),
+  ctrl.getEndOfShiftDocFor,
 )
 router.post(
   '/reports/end-of-shift.pdf',

@@ -81,6 +81,10 @@ export interface WeighmentDayStats {
    *  — a number with no ticket behind it cannot be checked. */
   heaviestNetKg:  number | null
   heaviest:       { token: string; vehicleNo: string; centerName: string; netWeightKg: number; at: string } | null
+  /** The smallest net load that day (operator, 2026-11-02), with its ticket.
+   *  A ticket weighing nothing yet (one crossing only, net 0) is not a load. */
+  lightestNetKg:  number | null
+  lightest:       { token: string; vehicleNo: string; centerName: string; netWeightKg: number; at: string } | null
   /** Everything weighed in, for the strip's tooltip. */
   totalNetKg:     number
 }
@@ -193,13 +197,18 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
 
   // ── the day's stats, every bridge ─────────────────────────────────────────
   let heaviest: WeighmentRow | null = null
+  let lightest: WeighmentRow | null = null
   let totalNetKg = 0
   for (const row of all) {
     const net = row.netWeightKg
     if (net == null) continue
     totalNetKg += net
     if (!heaviest || net > (heaviest.netWeightKg ?? -Infinity)) heaviest = row
+    if (net > 0 && (!lightest || net < (lightest.netWeightKg ?? Infinity))) lightest = row
   }
+  const ticket = (row: WeighmentRow | null) => (row && row.netWeightKg != null
+    ? { token: row.tokenNumber.toString(), vehicleNo: row.vehicleNo, centerName: row.centerName, netWeightKg: row.netWeightKg, at: row.tokenAt.toISOString() }
+    : null)
 
   const stats: WeighmentDayStats = {
     weighments:     all.length,
@@ -214,6 +223,8 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
           at:          heaviest.tokenAt.toISOString(),
         }
       : null,
+    lightestNetKg:  lightest?.netWeightKg ?? null,
+    lightest:       ticket(lightest),
     totalNetKg,
   }
 

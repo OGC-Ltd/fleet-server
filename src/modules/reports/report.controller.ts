@@ -5,7 +5,7 @@ import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
 import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, ShiftDocBody } from './report.schema.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody } from './report.schema.js'
 import { getMovementReport, editedMovementReport, type MovementReport } from './movement-report.service.js'
 import { renderMovementReportsPdf, movementFileName, movementReportsFileName } from './movement-report.pdf.js'
 
@@ -84,13 +84,15 @@ export const downloadPdfReport: RequestHandler = async (req, res, next) => {
 // ── End-of-shift report ───────────────────────────────────────────────────────
 
 /** The report for the period asked (today up to now by default), made for this caller. */
-async function endOfShiftFor(req: Parameters<RequestHandler>[0], now: number) {
+async function endOfShiftFor(req: Parameters<RequestHandler>[0], now: number, q: EndOfShiftQuery | EndOfShiftBody = req.query as unknown as EndOfShiftQuery) {
   const orgId = p(req, 'orgId')
-  const q = req.query as unknown as EndOfShiftQuery
   const period = q.from != null && q.to != null ? { from: q.from, to: q.to } : undefined
+  // One category: its units, and never past the caller's own scope
+  const scope = req.authz?.vehicleIds ?? null
+  const only = 'vehicleIds' in q && q.vehicleIds ? new Set(q.vehicleIds.filter((id) => !scope || scope.has(id))) : null
   const [org, { report }] = await Promise.all([
     orgHeading(orgId),
-    loadEndOfShift({ orgId, vehicleIds: req.authz?.vehicleIds ?? null, userId: req.authz?.userId ?? null, now, period }),
+    loadEndOfShift({ orgId, vehicleIds: only ?? scope, userId: req.authz?.userId ?? null, now, period }),
   ])
   return { org, report }
 }
@@ -122,6 +124,16 @@ export const getEndOfShiftDoc: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+/** POST /organisations/:orgId/reports/end-of-shift {from, to, vehicleIds, category} — the document for one category of the fleet. */
+export const getEndOfShiftDocFor: RequestHandler = async (req, res, next) => {
+  try {
+    const now = Date.now()
+    const body = req.body as EndOfShiftBody
+    const { org, report } = await endOfShiftFor(req, now, body)
+    sendSuccess(res, endOfShiftDoc(report, { orgName: org.name, reportNo: reportNumber(org.short, now), generatedAt: now, category: body.category }))
+  } catch (err) { next(err) }
+}
+
 /**
  * POST /organisations/:orgId/reports/end-of-shift.pdf — the document as the
  * operator edited it on the Reports page, drawn as the PDF. The report number
@@ -134,7 +146,9 @@ export const downloadEditedEndOfShift: RequestHandler = async (req, res, next) =
     const body = req.body as ShiftDocBody
     const made = endOfShiftDoc.made(org.name, body.date, now)
     const doc: ShiftDoc = { ...body, reportNo: reportNumber(org.short, now), footer: made }
-    sendShiftPdf(res, await renderShiftDoc(doc), org.name, now)
+    // A category's report is named for it: "… Menengai Tankers 2026-11-02 …"
+    const category = body.meta.find((m) => m.label === 'Category')?.value
+    sendShiftPdf(res, await renderShiftDoc(doc), category ? `${org.name} ${category}` : org.name, now)
   } catch (err) { next(err) }
 }
 

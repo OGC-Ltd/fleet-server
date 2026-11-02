@@ -139,6 +139,20 @@ describe('the day s stats describe every bridge, not the one on screen', () => {
     expect(res.stats.totalNetKg).toBe(6160 + 27400 + 11680)
   })
 
+  it('names the lightest load, never a ticket weighing nothing yet', async () => {
+    vi.mocked(findDay).mockResolvedValue([
+      ticket({ netWeightKg: 0 }),
+      ticket({ netWeightKg: 6160, vehicleNo: 'KCB 101A', vehiclePlate: 'KCB101A' }),
+      ticket({ netWeightKg: 27400 }),
+      ticket({ netWeightKg: null }),
+    ] as never)
+
+    const res = await getWeighmentDay(ORG, { day: DAY })
+
+    expect(res.stats.lightestNetKg).toBe(6160)
+    expect(res.stats.lightest?.vehicleNo).toBe('KCB 101A')
+  })
+
   it('lists a centre that weighed nothing rather than dropping its tab', async () => {
     vi.mocked(findDay).mockResolvedValue([ticket()] as never)
 
