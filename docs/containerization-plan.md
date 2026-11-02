@@ -148,9 +148,34 @@ Each of these is tested locally with `docker compose` first:
 **Before phase 1: disk.**
 - On 2026-11-03 a test build and image scan **filled the root disk to 99%** (263 MB free) for about a minute. The live site was not affected: there were no disk errors in the logs, and every report request in that window succeeded.
 - The cause was the images (server 0.9 GB, migrate 1.3 GB, web 0.1 GB), their build cache and Trivy's database, on a 19 GB disk with 12 GB already used.
-- **Grow the EBS volume to at least 40 GB first** (online resize, then `growpart` + `resize2fs`; no reboot).
+- **Decision (2026-11-03): stay on the 20 GiB volume for the rollout**, and grow it once containers are live. The no-downtime resize runbook is ready for then.
 - **Never build images on the box again.** It pulls finished images only.
-- The deploy script refuses to pull when less than 4 GB is free, keeps only the current and previous tags, and prunes everything else.
+
+**Disk budget on 20 GiB.** Free space was 6.7 GiB on 2026-11-03. This is where the room comes from:
+
+| Reclaim first | Size | How (safe while live) |
+| --- | --- | --- |
+| `~/.pm2/logs/server-out.log`, never rotated since 2 Sep, about 19 MB/day | 1.18 GiB | Gzip a dated archive, then truncate the live file in place; pm2 keeps writing. Add `pm2-logrotate` so it cannot grow back. |
+| `~/.npm` cache | 1.1 GiB | `npm cache clean --force`. The next deploy refills only what it needs. |
+| apt cache | 0.2 GiB | `apt-get clean` |
+| Three disabled snap revisions | about 0.15 GiB | `snap remove --revision` |
+| systemd journal | 0.1 GiB | `journalctl --vacuum-size=50M` |
+
+That would bring free space to about 9 GiB. **Decision (2026-11-03): the cleanup waits until after go-live** (phase 4b below). Without it the rollout still fits: 6.7 GiB free, minus about 1.5 GiB of images, leaves about 5 GiB, above the 3 GiB deploy guard. The pm2 log grows about 19 MB/day only until phase 2 moves the server into a container, whose logs are capped. What the containers take:
+
+| Use | Size |
+| --- | --- |
+| Server image, current and previous (base layers shared) | about 1.2 GiB |
+| Web image, current and previous | 0.2 GiB |
+| nginx-unprivileged + certbot | about 0.15 GiB |
+| Migrate image | 0: pulled for a migration, removed straight after |
+| Container logs | capped at 30 MB each |
+
+That leaves about 7 GiB free during the rollout, with the old pm2 setup still installed as the rollback. Rules that keep it that way:
+- The deploy script refuses to pull when less than **3 GiB** is free.
+- It keeps only the current and previous tags, and prunes everything else, including dangling layers.
+- The migrate image is never left on the box.
+- Phase 4's cleanup (old checkouts, nvm, pm2) returns about 1.5 GiB. Grow the volume after that, using the runbook.
 
 **Phase 1: shadow container on the box.**
 - Run `server` from the image on `127.0.0.1:3001` with **all fourteen background switches off**:
@@ -195,6 +220,24 @@ Each of these is tested locally with `docker compose` first:
 
 The containers' 127.0.0.1 port publishing becomes unnecessary here, since only the edge publishes.
 - *Undo, before the cleanup:* stop `edge` and start host nginx.
+
+**Phase 4b: disk cleanup, logs to AWS, then the resize** (after go-live; decided 2026-11-03).
+1. **Clean up.**
+   - Archive the old pm2 `server-out.log` (1.18 GiB, 2 Sep onwards): gzip it, then copy the archive to S3 or keep it locally. Truncate the file only after that.
+   - Clear the npm cache, the apt cache, the disabled snaps and the journal (see the disk budget above).
+   - Once pm2 is retired, its logs stop growing for good.
+2. **Ship container logs to CloudWatch Logs** in af-south-1 with Docker's `awslogs` driver. It runs in the daemon, so no agent needs installing.
+   - **Log groups:** one per service (`/fleet/server`, `/fleet/report-worker`, `/fleet/edge`, `/fleet/web`, `/fleet/certbot`).
+     - Created by a person beforehand, with **retention set**, e.g. 90 days for the app and 30 for edge access logs. CloudWatch keeps logs forever by default.
+     - **Encrypted** with a KMS key.
+   - **Instance role `fleet-app`:** add only `logs:CreateLogStream` and `logs:PutLogEvents` on those groups' ARNs, nothing wider, and no `CreateLogGroup`.
+   - **Compose:** `logging: { driver: awslogs, options: { awslogs-region: af-south-1, awslogs-group: /fleet/<svc>, mode: non-blocking, max-buffer-size: 8m } }`.
+     - `non-blocking` means a CloudWatch outage drops log lines instead of stalling the app.
+     - Docker's dual logging keeps a local copy, so `docker logs` still works.
+   - **Personal data:** edge access logs hold client IP addresses, and the app logs hold user and vehicle identifiers. Retention and access belong under the POPIA plan (`docs/FleetDashPOPIACapeTownPlan.pdf`). Before shipping, add pino `redact` rules for authorization headers, cookies, passwords and tokens. Today the logger has no redaction configured.
+   - **Cost:** CloudWatch charges per GB ingested and per GB-month stored, so check the af-south-1 price list. The app writes about 19 MB/day today, so expect well under 1 GB a month for the app, plus the access logs.
+   - **Alarms** can follow on top: a metric filter on error lines, or on `/health` failures from the edge.
+3. **Grow the volume to 40 GiB** with the no-downtime runbook (snapshot, `ModifyVolume`, `growpart`, `resize2fs`).
 
 **Phase 5: further hardening** (each one is independent).
 - Secrets in SSM Parameter Store.
