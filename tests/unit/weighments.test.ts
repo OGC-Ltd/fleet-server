@@ -169,6 +169,9 @@ describe('the day s stats describe every bridge, not the one on screen', () => {
 
     expect(res.stats.lightestNetKg).toBe(6160)
     expect(res.stats.lightest?.vehicleNo).toBe('KCB 101A')
+    // The whole ticket travels with it, for the side panel
+    expect(res.stats.lightest?.row).toMatchObject({ vehicleNo: 'KCB 101A', netWeightKg: 6160 })
+    expect(res.stats.heaviest?.row.netWeightKg).toBe(27400)
   })
 
   it('lists a centre that weighed nothing rather than dropping its tab', async () => {

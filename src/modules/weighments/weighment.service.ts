@@ -81,17 +81,20 @@ export interface WeighmentDayStats {
   /** The largest net load recorded anywhere that day, and which ticket it was
    *  — a number with no ticket behind it cannot be checked. */
   heaviestNetKg:  number | null
-  heaviest:       { token: string; vehicleNo: string; centerName: string; netWeightKg: number; at: string } | null
+  heaviest:       StatTicket | null
   /** The smallest net load that day (operator, 2026-11-02), with its ticket.
    *  A ticket weighing nothing yet (one crossing only, net 0) is not a load. */
   lightestNetKg:  number | null
-  lightest:       { token: string; vehicleNo: string; centerName: string; netWeightKg: number; at: string } | null
+  lightest:       StatTicket | null
   /** Everything weighed in, for the strip's tooltip. */
   totalNetKg:     number
   /** The day split by kind of unit, every bridge: trucks (cane coming in) and tractors (going out). */
   trucks:         KindTotal
   tractors:       KindTotal
 }
+
+/** The ticket behind a figure on the strip, and the whole row for its side panel. */
+export interface StatTicket { token: string; vehicleNo: string; centerName: string; netWeightKg: number; at: string; row: WeighmentDto }
 
 /** Tickets and net weight of one kind of unit. */
 export interface KindTotal { tickets: number; netKg: number }
@@ -226,23 +229,18 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
     if (!heaviest || net > (heaviest.netWeightKg ?? -Infinity)) heaviest = row
     if (net > 0 && (!lightest || net < (lightest.netWeightKg ?? Infinity))) lightest = row
   }
+  // With the whole ticket, so a click on the figure opens its side panel
+  // whichever bridge it was weighed on (operator, 2026-11-03)
   const ticket = (row: WeighmentRow | null) => (row && row.netWeightKg != null
-    ? { token: row.tokenNumber.toString(), vehicleNo: row.vehicleNo, centerName: row.centerName, netWeightKg: row.netWeightKg, at: row.tokenAt.toISOString() }
+    ? { token: row.tokenNumber.toString(), vehicleNo: row.vehicleNo, centerName: row.centerName, netWeightKg: row.netWeightKg, at: row.tokenAt.toISOString(),
+        row: toDto(row, seqOf.get(row.id) ?? 1, ticketsOf.get(row.id) ?? 1, gapOf.get(row.id) ?? null) }
     : null)
 
   const stats: WeighmentDayStats = {
     weighments:     all.length,
     uniqueVehicles: byVehicle.size,
     heaviestNetKg:  heaviest?.netWeightKg ?? null,
-    heaviest: heaviest && heaviest.netWeightKg != null
-      ? {
-          token:       heaviest.tokenNumber.toString(),
-          vehicleNo:   heaviest.vehicleNo,
-          centerName:  heaviest.centerName,
-          netWeightKg: heaviest.netWeightKg,
-          at:          heaviest.tokenAt.toISOString(),
-        }
-      : null,
+    heaviest:       ticket(heaviest),
     lightestNetKg:  lightest?.netWeightKg ?? null,
     lightest:       ticket(lightest),
     totalNetKg,
