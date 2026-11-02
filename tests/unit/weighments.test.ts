@@ -139,6 +139,24 @@ describe('the day s stats describe every bridge, not the one on screen', () => {
     expect(res.stats.totalNetKg).toBe(6160 + 27400 + 11680)
   })
 
+  it('totals each centre, and trucks (cane in) apart from tractors (out)', async () => {
+    vi.mocked(findDay).mockResolvedValue([
+      ticket({ netWeightKg: 6000, vehicleNo: 'KTCC 849B', vehiclePlate: 'KTCC849B' }),
+      ticket({ netWeightKg: 27000, vehicleNo: 'KDL 182X', vehiclePlate: 'KDL182X' }),
+      ticket({ netWeightKg: 25000, vehicleNo: 'KCB 101A', vehiclePlate: 'KCB101A', centerCode: 102, centerName: 'OPAPO' }),
+      ticket({ netWeightKg: null, vehicleNo: 'KTCB 358X', vehiclePlate: 'KTCB358X', centerCode: 102, centerName: 'OPAPO' }),
+    ] as never)
+
+    const res = await getWeighmentDay(ORG, { day: DAY })
+
+    expect(res.stats.trucks).toEqual({ tickets: 2, netKg: 52000 })
+    expect(res.stats.tractors).toEqual({ tickets: 2, netKg: 6000 })
+    const factory = res.centres.find(c => c.name === 'FACTORY')!
+    const opapo = res.centres.find(c => c.name === 'OPAPO')!
+    expect(factory).toMatchObject({ count: 2, netKg: 33000, trucks: { tickets: 1, netKg: 27000 }, tractors: { tickets: 1, netKg: 6000 } })
+    expect(opapo).toMatchObject({ count: 2, netKg: 25000, trucks: { tickets: 1, netKg: 25000 }, tractors: { tickets: 1, netKg: 0 } })
+  })
+
   it('names the lightest load, never a ticket weighing nothing yet', async () => {
     vi.mocked(findDay).mockResolvedValue([
       ticket({ netWeightKg: 0 }),
@@ -195,7 +213,7 @@ describe('an organisation with no weighbridges at all', () => {
 
     const res = await getWeighmentDay(ORG, { day: DAY })
 
-    expect(res.centres).toEqual([{ code: 201, name: 'NAITIRI', count: 0 }])
+    expect(res.centres).toMatchObject([{ code: 201, name: 'NAITIRI', count: 0, netKg: 0 }])
   })
 
   it('counts a centre that appears in the day but not yet in the history read', async () => {
@@ -209,7 +227,7 @@ describe('an organisation with no weighbridges at all', () => {
 
     const res = await getWeighmentDay(ORG, { day: DAY })
 
-    expect(res.centres).toEqual([
+    expect(res.centres).toMatchObject([
       { code: 101, name: 'FACTORY', count: 0 },
       { code: 105, name: 'RANGWE',  count: 1 },
     ])
