@@ -155,8 +155,9 @@ describe('end of shift: buildEndOfShift', () => {
     const b = Object.fromEntries(r.breaches.map((x) => [x.key, x]))
     expect(b.speed).toMatchObject({ total: 13, units: 2 })
     // Ranked by time over the limit; the average over is weighted by cases.
-    expect(b.speed!.top[0]).toMatchObject({ plate: 'KDL 715E', overSec: 900, peak: 96, limit: 60, avgOver: 19 })
-    expect(b.speed!.top[1]).toMatchObject({ plate: 'KCU 512T', overSec: 300, avgOver: 12, driver: 'Moses Kibet' })
+    // The worst units, listed A–Z by plate
+    expect(b.speed!.top[0]).toMatchObject({ plate: 'KCU 512T', overSec: 300, avgOver: 12, driver: 'Moses Kibet' })
+    expect(b.speed!.top[1]).toMatchObject({ plate: 'KDL 715E', overSec: 900, peak: 96, limit: 60, avgOver: 19 })
     expect([b.phone!.total, b.seatbelt!.total, b.brake!.total, b.accel!.total, b.covered!.total]).toEqual([1, 2, 1, 1, 1])
     expect(b.seatbelt!.top[0]).toMatchObject({ plate: 'KDL 713E', times: 2 })
     expect(r.breachTotal).toBe(19)
