@@ -93,8 +93,7 @@
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
     "vitest": "^4.1.9",
-    "vitest-mock-extended": "^4.0.0",
-    "xlsx": "^0.18.5"
+    "vitest-mock-extended": "^4.0.0"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",
@@ -116,6 +115,7 @@
     "pino": "^10.3.1",
     "rate-limit-redis": "^6.0.1",
     "web-push": "^3.6.7",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^4.4.3"
   }
 }
