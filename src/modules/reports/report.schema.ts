@@ -190,6 +190,8 @@ export const editedMovementReportSchema = z.object({
   from: z.number(),
   to: z.number(),
   morl: z.string().max(120).nullable(),
+  /** The site the directions read against ("MORL", "Sukari"); MORL when an older page leaves it out. */
+  site: z.string().max(60).optional(),
   groups: z.array(z.object({ name: z.string().max(160), rows: z.array(movementRowSchema).max(5000) })).max(200),
   edits: z.object({ changed: z.number().int().min(0).max(100_000), removed: z.number().int().min(0).max(100_000) }),
 }).superRefine((r, ctx) => {

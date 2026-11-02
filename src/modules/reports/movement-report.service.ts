@@ -144,6 +144,8 @@ export interface MovementReport {
   from: number
   to: number
   morl: string | null
+  /** The site directions are read against: MORL for Menengai, the organisation's own name elsewhere ("Sukari"). */
+  site: string
   groups: Array<{ name: string; rows: MovementRow[] }>
   counts: Record<MovementState, number> & { stale: number; total: number }
   /** Set when the operator edited the table before the PDF: printed on it, so a reader knows. */
@@ -168,7 +170,55 @@ async function findMorl(orgId: string): Promise<MorlFence | null> {
     select, orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
   })).find(f => /\bHQ\b/i.test(f.name))
   const pick = named ?? (hq && { ...hq, name: 'MORL HQ' })
-  if (!pick) return null
+  return pick ? fenceOf(pick) : null
+}
+
+type FenceRow = { name: string; type: string; centerLat: number | null; centerLng: number | null; radiusM: number | null; polygonCoords: unknown; widthM: number | null }
+
+/**
+ * The name directions are read against outside Menengai (operator, 2 Nov
+ * 2026: "from Sukari to Sukari", not MORL): the organisation's name without
+ * its legal and trade endings. "Sukari Industries Limited" → "Sukari",
+ * "Mufindi Paper Mills Ltd" → "Mufindi", "West Kenya Sugar Ltd" → "West Kenya".
+ */
+export function siteNameOf(orgName: string | null | undefined): string {
+  const ENDINGS = /\b(limited|ltd|plc|company|co|industries|industry|sugar|paper|mills?|group|holdings)\b\.?/gi
+  const short = String(orgName ?? '').replace(ENDINGS, ' ').replace(/[\s,.-]+/g, ' ').trim()
+  return short || String(orgName ?? '').trim() || 'Site'
+}
+
+/**
+ * An organisation's own site, outside Menengai: its factory fence, one that
+ * carries its name first ("SUKARI INDURSTRIES FACTORY"), then any factory
+ * ("Naitiri Factory", "Factory site Location"), then any fence with its name.
+ * Switched-off fences count, as Menengai's HQ does: most were drawn once and
+ * left off. Null when it has none: the report then gives no direction.
+ */
+export async function findHomeFence(orgId: string, site: string): Promise<MorlFence | null> {
+  const fences = await prisma.geofence.findMany({
+    where: { organisationId: orgId },
+    select: { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true, isActive: true },
+  })
+  const word = site.split(' ')[0]!.toLowerCase()
+  const score = (n: string) => {
+    const name = n.toLowerCase()
+    const factory = /factory/.test(name)
+    const ours = word.length >= 3 && name.includes(word)
+    return factory && ours ? 3 : factory ? 2 : ours ? 1 : 0
+  }
+  const best = fences
+    .map(f => ({ f, s: score(f.name) }))
+    .filter(x => x.s > 0)
+    .sort((a, b) => b.s - a.s || Number(b.f.isActive) - Number(a.f.isActive) || a.f.name.localeCompare(b.f.name))
+  for (const { f } of best) {
+    const fence = fenceOf(f)
+    if (fence) return fence
+  }
+  return null
+}
+
+/** A geofence row as the shape directions are measured against, or null when it has no usable geometry. */
+function fenceOf(pick: FenceRow): MorlFence | null {
   if (pick.type === 'CIRCLE' && pick.centerLat != null && pick.centerLng != null && pick.radiusM != null) {
     return { name: pick.name, geometry: { type: 'CIRCLE', centerLat: pick.centerLat, centerLng: pick.centerLng, radiusM: pick.radiusM },
              centre: { lat: pick.centerLat, lng: pick.centerLng } }
@@ -218,11 +268,14 @@ export async function getMovementReport(orgId: string, window: WindowHours | Win
   const { from, to } = typeof window === 'number' ? { from: now - window * 3_600_000, to: now } : window
   const hours = (to - from) / 3_600_000
   const live = to >= now - LIVE_WITHIN_MS
-  const [org, snapshot, morl] = await Promise.all([
+  const [org, snapshot] = await Promise.all([
     prisma.organisation.findUnique({ where: { id: orgId }, select: { name: true, code: true } }),
     getFleetSnapshotCached(orgId),
-    findMorl(orgId),
   ])
+  // Menengai reads directions against MORL; everyone else against its own site
+  const byName = BY_NAME_ORGS.has(String(org?.code ?? '').toUpperCase())
+  const site = byName ? 'MORL' : siteNameOf(org?.name)
+  const morl = byName ? await findMorl(orgId) : await findHomeFence(orgId, site)
   const units = snapshot.filter(v => !vehicleIds || vehicleIds.has(v.vehicleId))
 
   // Each unit's first fix in the window: where it was when the window began.
@@ -252,7 +305,7 @@ export async function getMovementReport(orgId: string, window: WindowHours | Win
     const c = classify(last, startOf.get(u.vehicleId) ?? null, morl)
     return {
       vehicleId: u.vehicleId, plate: u.plate, grouping: u.name?.trim() || u.plate,
-      lastAt, lat, lng, location: c.state === 'at' ? (morl?.name ?? 'MORL') : null,
+      lastAt, lat, lng, location: c.state === 'at' ? (byName ? morl?.name ?? 'MORL' : site) : null,
       speedKmh: speed != null ? Math.round(speed) : null,
       state: c.state, kmToMorl: c.kmToMorl, closerKm: c.closerKm,
       stale: lastAt != null && lastAt < from,
@@ -261,7 +314,6 @@ export async function getMovementReport(orgId: string, window: WindowHours | Win
   await nameRows(rows)
 
   // Menengai by the grouping in the name; everyone else by vehicle type, reporting units only
-  const byName = BY_NAME_ORGS.has(String(org?.code ?? '').toUpperCase())
   const typeOf = byName ? null : new Map((await prisma.vehicle.findMany({
     where: { id: { in: ids } }, select: { id: true, vehicleType: true },
   })).map(v => [v.id, v.vehicleType]))
@@ -285,7 +337,7 @@ export async function getMovementReport(orgId: string, window: WindowHours | Win
       || a.plate.localeCompare(b.plate))
   }
 
-  return { organisation: org?.name ?? '', orgCode: org?.code ?? '', hours, from, to, morl: morl?.name ?? null, groups, counts: countRows(groups) }
+  return { organisation: org?.name ?? '', orgCode: org?.code ?? '', hours, from, to, morl: morl?.name ?? null, site, groups, counts: countRows(groups) }
 }
 
 /** The overview's figures, from whatever rows the report holds. Pure. */
@@ -304,13 +356,13 @@ export function countRows(groups: MovementReport['groups']): MovementReport['cou
  */
 export async function editedMovementReport(
   orgId: string,
-  edited: Pick<MovementReport, 'hours' | 'from' | 'to' | 'morl' | 'groups'> & { edits: { changed: number; removed: number } },
+  edited: Pick<MovementReport, 'hours' | 'from' | 'to' | 'morl' | 'groups'> & { site?: string; edits: { changed: number; removed: number } },
   by: string,
   now = Date.now(),
 ): Promise<MovementReport> {
   const org = await prisma.organisation.findUnique({ where: { id: orgId }, select: { name: true, code: true } })
   const groups = edited.groups.filter(g => g.rows.length)
   return { organisation: org?.name ?? '', orgCode: org?.code ?? '', hours: edited.hours, from: edited.from, to: edited.to,
-           morl: edited.morl, groups, counts: countRows(groups),
+           morl: edited.morl, site: edited.site || 'MORL', groups, counts: countRows(groups),
            edited: { by, at: now, changed: edited.edits.changed, removed: edited.edits.removed } }
 }

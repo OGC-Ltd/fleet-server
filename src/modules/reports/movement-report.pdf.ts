@@ -60,10 +60,15 @@ export const locationFill = (row: MovementRow) =>
 /** The sheet's colours, as tints light enough to print on. */
 const TINT: Partial<Record<MovementState, string>> = { to: '#e3f1dc', from: '#fbe4d3', at: '#fdf3c9' }
 
-/** Every row carries a status in the Direction column (operator, 2026-11-01). */
-export const DIRECTION: Record<MovementState, string> = {
-  to: 'To MORL', from: 'From MORL', at: 'At MORL', moving: 'Moving', stopped: 'Stopped', 'no-fix': 'No fix',
-}
+/**
+ * Every row carries a status in the Direction column (operator, 2026-11-01),
+ * read against the report's site: MORL for Menengai, the organisation's own
+ * elsewhere ("To Sukari").
+ */
+export const directionWords = (site = 'MORL'): Record<MovementState, string> => ({
+  to: `To ${site}`, from: `From ${site}`, at: `At ${site}`, moving: 'Moving', stopped: 'Stopped', 'no-fix': 'No fix',
+})
+export const DIRECTION = directionWords('MORL')
 
 /** "MV-MENENGAI-20261101-1943": what the report is, whose, and when. */
 export function movementReportNo(r: MovementReport): string {
@@ -119,6 +124,9 @@ export async function renderMovementReportsPdf(rs: MovementReport[]): Promise<Bu
 function drawReport(w: ReportWriter, doc: InstanceType<typeof PDFDocument>, r: MovementReport) {
   const reportNo = movementReportNo(r)
   const when = windowText(r)
+  // The site its directions read against: MORL, or the organisation's own ("Sukari")
+  const site = r.site || 'MORL'
+  const words = directionWords(site)
 
   // ── letterhead, title, who and when ──
   w.y = drawLetterhead(doc)
@@ -134,7 +142,7 @@ function drawReport(w: ReportWriter, doc: InstanceType<typeof PDFDocument>, r: M
   const info: [string, string, string, string][] = [
     ['Fleet', r.organisation || DASH, 'Window', when],
     ['Groups', `${r.groups.length} (${r.groups.slice(0, 3).map(g => g.name).join(', ')}${r.groups.length > 3 ? ', …' : ''})`, 'Vehicles', `${num(r.counts.total)} listed`],
-    ['As at', `${longDay(r.to)}, ${hm(r.to)}`, 'Reference', r.morl ? `${r.morl} geofence` : 'No MORL geofence'],
+    ['As at', `${longDay(r.to)}, ${hm(r.to)}`, 'Reference', r.morl ? `${r.morl} geofence` : `No ${site} geofence`],
   ]
   for (const [a, av, b, bv] of info) {
     w.line(a, SIDE, w.y, 23 * MM, { color: C.mut })
@@ -150,9 +158,9 @@ function drawReport(w: ReportWriter, doc: InstanceType<typeof PDFDocument>, r: M
   w.h2('1. Overview', when)
   w.cells([
     ['Vehicles', num(n.total)],
-    ['Heading to MORL', num(n.to), n.to ? C.good : undefined],
-    ['Leaving MORL', num(n.from), n.from ? '#b45309' : undefined],
-    ['At MORL', num(n.at)],
+    [`Heading to ${site}`, num(n.to), n.to ? C.good : undefined],
+    [`Leaving ${site}`, num(n.from), n.from ? '#b45309' : undefined],
+    [`At ${site}`, num(n.at)],
     ['Moving, no direction', num(n.moving)],
     ['Stopped elsewhere', num(n.stopped)],
     ['Not reporting', num(n.stale + n['no-fix']), n.stale + n['no-fix'] ? C.flag : undefined],
@@ -163,15 +171,15 @@ function drawReport(w: ReportWriter, doc: InstanceType<typeof PDFDocument>, r: M
   const cell = (row: MovementRow): Cell[] => [
     { text: row.grouping, bold: true, color: row.stale || row.state === 'no-fix' ? C.flag : undefined },
     { text: row.lastAt != null ? stamp(row.lastAt) : 'No fix', color: row.stale ? C.flag : undefined },
-    { text: row.location ?? (row.state === 'at' ? r.morl ?? 'MORL' : DASH), fill: locationFill(row) },
+    { text: row.location ?? (row.state === 'at' ? r.morl ?? site : DASH), fill: locationFill(row) },
     { text: row.speedKmh != null ? `${row.speedKmh} km/h` : DASH },
-    { text: DIRECTION[row.state], bold: row.state === 'to' || row.state === 'from' },
+    { text: words[row.state], bold: row.state === 'to' || row.state === 'from' },
   ]
   r.groups.forEach((g, i) => {
     const tally = (s: MovementState) => g.rows.filter(x => x.state === s).length
     const aside = [`${g.rows.length} vehicle${g.rows.length === 1 ? '' : 's'}`,
-      tally('to') ? `${tally('to')} to MORL` : null, tally('from') ? `${tally('from')} from MORL` : null,
-      tally('at') ? `${tally('at')} at MORL` : null].filter(Boolean).join(' · ')
+      tally('to') ? `${tally('to')} to ${site}` : null, tally('from') ? `${tally('from')} from ${site}` : null,
+      tally('at') ? `${tally('at')} at ${site}` : null].filter(Boolean).join(' · ')
     w.room(60)
     w.h2(`${i + 2}. ${g.name}`, aside)
     w.table(cols, ['Grouping', 'Last coordinates', 'Location', 'Speed', 'Direction'], g.rows.map(cell),
