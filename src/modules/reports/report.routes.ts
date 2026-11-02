@@ -15,6 +15,11 @@ import {
   shiftDocSchema,
 } from './report.schema.js'
 import * as ctrl from './report.controller.js'
+import * as conduct from './driver-conduct.controller.js'
+import {
+  foundCasesSchema, importCasesSchema, caseActionSchema, listCasesQuerySchema,
+  incidentSchema, importIncidentsSchema,
+} from './driver-conduct.schema.js'
 
 const router = Router({ mergeParams: true })
 
@@ -39,6 +44,22 @@ router.get('/reports/movements.pdf', requirePermission('telemetry:read'), valida
 router.get('/reports/movements', requirePermission('telemetry:read'), validateQuery(movementReportQuerySchema), ctrl.getMovementReportData)
 router.post('/reports/movements.pdf', requirePermission('telemetry:read'), validateBody(movementPdfBodySchema), ctrl.downloadEditedMovementReport)
 router.post('/summaries/refresh/:periodId', requirePermission('report:create'), ctrl.refreshSummaries)
+
+// Driver conduct follow-up: the cases a report run finds and what was done on
+// each, and the incidents operators log by hand. Kept here so every machine
+// sees the same (operator, 2 Nov 2026); before, each browser kept its own.
+// analytics:read, as the Reports page itself: whoever runs the report records
+// the follow-up.
+const conductRead = requirePermission('analytics:read')
+router.get('/driver-conduct/cases', conductRead, validateQuery(listCasesQuerySchema), conduct.listCases)
+router.get('/driver-conduct/cases/pending-count', conductRead, conduct.pendingCount)
+router.post('/driver-conduct/cases/found', conductRead, validateBody(foundCasesSchema), conduct.mergeFound)
+router.post('/driver-conduct/cases/import', conductRead, validateBody(importCasesSchema), conduct.importCases)
+router.put('/driver-conduct/cases/:caseKey/action', conductRead, validateBody(caseActionSchema), conduct.recordAction)
+router.get('/driver-conduct/incidents', conductRead, conduct.listIncidents)
+router.post('/driver-conduct/incidents/import', conductRead, validateBody(importIncidentsSchema), conduct.importIncidents)
+router.put('/driver-conduct/incidents/:incidentId', conductRead, validateBody(incidentSchema), conduct.saveIncident)
+router.delete('/driver-conduct/incidents/:incidentId', conductRead, conduct.deleteIncident)
 
 // Branded PDF reports — the downloadable counterparts of the dashboard pages,
 // drawn server-side.

@@ -235,9 +235,9 @@ model UserGroup {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  organisation Organisation          @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  organisation  Organisation            @relation(fields: [organisationId], references: [id], onDelete: Cascade)
   organisations UserGroupOrganisation[]
-  users        UserGroupMembership[]
+  users         UserGroupMembership[]
 
   @@unique([organisationId, slug])
   @@index([organisationId])
@@ -327,10 +327,12 @@ model Organisation {
   repairReportItems    RepairReportItem[]
   workshops            Workshop[]
   fuelTheftFollowUps   FuelTheftFollowUp[]
+  driverConductCases   DriverConductCase[]
+  operatorIncidents    OperatorIncident[]
   alertDecisions       AlertDecision[]
+  vehicleInsights      VehicleInsight[]
 
   @@map("organisations")
-  vehicleInsights VehicleInsight[]
 }
 
 /// Named role scoped to an organisation (e.g. "fleet_manager", "driver", "mechanic").
@@ -439,7 +441,7 @@ model User {
   // "driver" role.
   driverRatingScore Float @default(5.0) @map("driver_rating_score")
 
-  organisation Organisation @relation(fields: [organisationId], references: [id])
+  organisation Organisation          @relation(fields: [organisationId], references: [id])
   groups       UserGroupMembership[]
 
   // IAM
@@ -480,12 +482,12 @@ model User {
   // Repairs: what they filed, what they are assigned, and what they later
   // signed off. The assignment is distinct from the author because triage often
   // puts the task onto a different technician than the person who logged it.
-  repairReportsFiled    RepairReport[]     @relation("RepairReportsFiled")
-  repairItemsAssigned   RepairReportItem[] @relation("RepairItemsAssigned")
-  repairItemsAssignedBy RepairReportItem[] @relation("RepairItemsAssignedBy")
-  repairItemsResolved   RepairReportItem[] @relation("RepairItemsResolved")
+  repairReportsFiled             RepairReport[]          @relation("RepairReportsFiled")
+  repairItemsAssigned            RepairReportItem[]      @relation("RepairItemsAssigned")
+  repairItemsAssignedBy          RepairReportItem[]      @relation("RepairItemsAssignedBy")
+  repairItemsResolved            RepairReportItem[]      @relation("RepairItemsResolved")
   /// Workflow: jobs this person works in the workshop, and investigations they hold.
-  repairItemsWorkshop   RepairReportItem[] @relation("RepairItemsWorkshopTech")
+  repairItemsWorkshop            RepairReportItem[]      @relation("RepairItemsWorkshopTech")
   securityInvestigationsAssigned SecurityInvestigation[] @relation("SecurityInvestigationsAssigned")
 
   @@index([organisationId])
@@ -705,18 +707,18 @@ model VehicleGroup {
 
 /// A physical vehicle tracked by a GPS/FLS device.
 model Vehicle {
-  id                 String   @id @default(cuid())
-  organisationId     String   @map("organisation_id")
-  vehicleGroupId     String   @map("vehicle_group_id")
+  id                 String  @id @default(cuid())
+  organisationId     String  @map("organisation_id")
+  vehicleGroupId     String  @map("vehicle_group_id")
   name               String
-  registrationPlate  String   @unique @map("registration_plate")
+  registrationPlate  String  @unique @map("registration_plate")
   // Telemetry ingest key. There is no on-prem GPS hardware — vehicles are
   // provisioned by the RaiFactorySuite API and polled per-vehicle, so this
   // holds the provider's vehicle UUID (same value as externalId).
-  deviceId           String   @unique @map("device_id")
+  deviceId           String  @unique @map("device_id")
   // RaiFactorySuite vehicle UUID — the stable upsert key for sync:vehicles.
-  externalId         String?  @unique @map("external_id")
-  vehicleType        String   @map("vehicle_type") // TRACTOR, TRUCK, COMPANY_VEHICLE, …
+  externalId         String? @unique @map("external_id")
+  vehicleType        String  @map("vehicle_type") // TRACTOR, TRUCK, COMPANY_VEHICLE, …
   /// Manufacturer model, e.g. "CAT D8T", "KOMATSU D155A", "JOHN DEERE 6110B".
   ///
   /// Free text, and nullable because almost nothing has it yet. It exists
@@ -734,16 +736,16 @@ model Vehicle {
   /// Read by `modules/fuel/fuel-theft-classifier` to pick a burn band. A
   /// vehicle without one falls back to its derived rate, and a vehicle with
   /// neither cannot be judged on consumption at all.
-  model              String?  @map("model")
+  model              String? @map("model")
   // Registry status as reported by the provider (AVAILABLE / DISPATCHED /
   // DECOMMISSIONED). Operational status (moving, idling, …) comes from
   // telemetry, not this column.
   status             String?
   // False when the provider decommissions or drops the vehicle — kept as a row
   // for history (trips/alerts FK it) but excluded from the live fleet.
-  isActive           Boolean  @default(true) @map("is_active")
-  fuelEfficiencyKmpl Float?   @map("fuel_efficiency_kmpl")
-  tankCapacityLitres Float?   @map("tank_capacity_litres")
+  isActive           Boolean @default(true) @map("is_active")
+  fuelEfficiencyKmpl Float?  @map("fuel_efficiency_kmpl")
+  tankCapacityLitres Float?  @map("tank_capacity_litres")
 
   // ── RaiFactorySuite machine register (`GET /machines`) ──────────────────
   // Mufindi Paper Mills' plant register, matched to our Wialon-keyed KASULU
@@ -754,43 +756,43 @@ model Vehicle {
 
   /// The register's machine UUID — distinct from `externalId`, which stays the
   /// Wialon key for this fleet.
-  machineId             String?           @unique @map("machine_id")
+  machineId                 String?           @unique @map("machine_id")
   /// What the machine IS, as the register names it, cleaned of the contractor
   /// prefix and spelling drift: "Backhoe", "Concrete Mixer", "Case Puma".
   /// `vehicleType` is left alone — it is the coarse class the dashboard colours
   /// and the fuel tables key on.
-  equipmentType         String?           @map("equipment_type")
+  equipmentType             String?           @map("equipment_type")
   /// The register's category exactly as sent ("Concret Mixer", "FES - LMV").
-  equipmentCategory     String?           @map("equipment_category")
+  equipmentCategory         String?           @map("equipment_category")
   /// The operator's fleet number, e.g. "BH-01", "CM-03".
-  equipmentReference    String?           @map("equipment_reference")
+  equipmentReference        String?           @map("equipment_reference")
   /// The register's machine name exactly as sent — "Excavator", "Bull Dozer".
   /// (Equal to its category on every GPS-linked row, 2026-10-01.)
-  machineName           String?           @map("machine_name")
+  machineName               String?           @map("machine_name")
   /// The registration number the REGISTER holds ("T876DZB"). Kept apart from
   /// `registrationPlate`, which is our unique Wialon-derived key and is used
   /// for matching elsewhere. Null on 21 of the 183 GPS-linked rows.
-  machineRegistrationNumber String?       @map("machine_registration_number")
+  machineRegistrationNumber String?           @map("machine_registration_number")
   /// "JCB", "XCMG", "CASE" — a make, not the `model` column's manufacturer model.
-  makeModel             String?           @map("make_model")
+  makeModel                 String?           @map("make_model")
   /// KSP (in-house), FES or Hired.
-  contractor            String?
-  fuelType              String?           @map("fuel_type")
+  contractor                String?
+  fuelType                  String?           @map("fuel_type")
   /// The operator's stated consumption, in the unit `ratedConsumptionBasis`
   /// names: HOURS → litres per engine-hour, DISTANCE → kilometres per litre
   /// (as the register states it; NOT litres per km). Null where the register
   /// leaves it blank — never inferred.
-  ratedConsumption      Float?            @map("rated_consumption")
-  ratedConsumptionBasis ConsumptionBasis? @map("rated_consumption_basis")
+  ratedConsumption          Float?            @map("rated_consumption")
+  ratedConsumptionBasis     ConsumptionBasis? @map("rated_consumption_basis")
   /// The register's unit of measure for the standard rate, as sent: "Ltrs/Hr"
   /// (also "Ltr/Hr") or "Kms/Ltr". Set only alongside `ratedConsumption`, so a
   /// unit never stands without its number.
-  ratedConsumptionUnit  String?           @map("rated_consumption_unit")
-  fuelSensorFitted      Boolean?          @map("fuel_sensor_fitted")
-  machineSyncedAt       DateTime?         @map("machine_synced_at")
+  ratedConsumptionUnit      String?           @map("rated_consumption_unit")
+  fuelSensorFitted          Boolean?          @map("fuel_sensor_fitted")
+  machineSyncedAt           DateTime?         @map("machine_synced_at")
 
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
   vehicleGroup VehicleGroup @relation(fields: [vehicleGroupId], references: [id])
@@ -810,20 +812,20 @@ model Vehicle {
   garageVisits       VehicleGarageVisit[]
 
   // Live telemetry relations
-  sensors            VehicleSensor[]
-  telemetry          VehicleTelemetry[]
-  geofences          VehicleGeofence[]
-  geofenceViolations GeofenceViolation[]
-  alerts             VehicleAlert[]
-  speedingIncidents  SpeedingIncident[]
-  sensorFaults       SensorFaultEpisode[]
-  incidentDailyStats VehicleIncidentDailyStat[]
-  insights           VehicleInsight[]
-  providerAlerts     ProviderAlert[]
-  notifications      Notification[]
-  dispatches         Dispatch[]
-  weighments         Weighment[]
-  repairReportItems  RepairReportItem[]
+  sensors                VehicleSensor[]
+  telemetry              VehicleTelemetry[]
+  geofences              VehicleGeofence[]
+  geofenceViolations     GeofenceViolation[]
+  alerts                 VehicleAlert[]
+  speedingIncidents      SpeedingIncident[]
+  sensorFaults           SensorFaultEpisode[]
+  incidentDailyStats     VehicleIncidentDailyStat[]
+  insights               VehicleInsight[]
+  providerAlerts         ProviderAlert[]
+  notifications          Notification[]
+  dispatches             Dispatch[]
+  weighments             Weighment[]
+  repairReportItems      RepairReportItem[]
   securityInvestigations SecurityInvestigation[]
 
   @@index([organisationId])
@@ -1314,19 +1316,19 @@ model ParkedFuelFall {
   vehicleId      String @map("vehicle_id")
 
   /// First reading at the new low.
-  settledAt  DateTime @map("settled_at")
+  settledAt      DateTime @map("settled_at")
   /// The reading that found it still down STILL_DOWN_CONFIRM_MS later — when
   /// stage one raised it.
-  flaggedAt  DateTime @map("flagged_at")
-  baselineMl Int      @map("baseline_ml")
-  troughMl   Int      @map("trough_ml")
-  droppedMl  Int      @map("dropped_ml")
-  stillForMs Int      @map("still_for_ms")
-  engineOnMs Int      @map("engine_on_ms")
+  flaggedAt      DateTime @map("flagged_at")
+  baselineMl     Int      @map("baseline_ml")
+  troughMl       Int      @map("trough_ml")
+  droppedMl      Int      @map("dropped_ml")
+  stillForMs     Int      @map("still_for_ms")
+  engineOnMs     Int      @map("engine_on_ms")
   /// 'sensor' (the ignition line) or 'counter' (the engine-hours counter).
-  engineEvidence String @map("engine_evidence")
+  engineEvidence String   @map("engine_evidence")
   /// How far the counter moved across stage one's window, where it reported.
-  meterAdvanceH  Float? @map("meter_advance_h")
+  meterAdvanceH  Float?   @map("meter_advance_h")
 
   verdict       ParkedFallVerdict @default(PENDING)
   verdictAt     DateTime?         @map("verdict_at")
@@ -1562,13 +1564,13 @@ model RepairReportItem {
   workEntries           RepairWorkEntry[]
   securityInvestigation SecurityInvestigation?
 
-  report       RepairReport        @relation(fields: [reportId], references: [id], onDelete: Cascade)
-  organisation Organisation        @relation(fields: [organisationId], references: [id])
-  vehicle      Vehicle             @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
-  assignedTo   User?               @relation("RepairItemsAssigned", fields: [assignedToId], references: [id])
-  assignedBy   User?               @relation("RepairItemsAssignedBy", fields: [assignedById], references: [id])
-  resolvedBy   User?               @relation("RepairItemsResolved", fields: [resolvedById], references: [id])
-  faultEpisode SensorFaultEpisode? @relation(fields: [faultEpisodeId], references: [id], onDelete: SetNull)
+  report        RepairReport        @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  organisation  Organisation        @relation(fields: [organisationId], references: [id])
+  vehicle       Vehicle             @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  assignedTo    User?               @relation("RepairItemsAssigned", fields: [assignedToId], references: [id])
+  assignedBy    User?               @relation("RepairItemsAssignedBy", fields: [assignedById], references: [id])
+  resolvedBy    User?               @relation("RepairItemsResolved", fields: [resolvedById], references: [id])
+  faultEpisode  SensorFaultEpisode? @relation(fields: [faultEpisodeId], references: [id], onDelete: SetNull)
   /// Fuel cases that found this probe faulty (Fuel Audit). Signing the job
   /// off fixed closes them.
   fuelFollowUps FuelTheftFollowUp[]
@@ -3365,18 +3367,18 @@ model VehicleInsight {
   vehicleId      String   @map("vehicle_id")
   generatedAt    DateTime @default(now()) @map("generated_at")
   /// 'model' when the model wrote it, 'facts' when the server did.
-  source   String
-  model    String?
-  headline String
+  source         String
+  model          String?
+  headline       String
   /// [{ kind, text, refs: [{ kind, id }] }]
-  findings Json
-  action   String?
+  findings       Json
+  action         String?
   /// 'low' | 'medium' | 'high'
-  risk     String
+  risk           String
   /// The measured signals it was written from, and their hash: a unit is
   /// rewritten only when these change (or the last is old).
-  signals     Json
-  signalsHash String @map("signals_hash")
+  signals        Json
+  signalsHash    String   @map("signals_hash")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
   vehicle      Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
@@ -3384,4 +3386,74 @@ model VehicleInsight {
   @@index([vehicleId, generatedAt(sort: Desc)])
   @@index([organisationId, generatedAt])
   @@map("vehicle_insights")
+}
+
+/// A Driver conduct follow-up case: one vehicle on one fleet day that had a
+/// no-seatbelt, on-phone or camera-covered incident, or enough harsh events
+/// (new-ui lib/followUp opensCase). The Reports page finds them when it runs
+/// the report and sends them here; what an operator recorded on a case
+/// (status, action, note, who, when) is never overwritten by a later run.
+/// Kept in each browser until 2 Nov 2026, when the operator asked for the
+/// count to be the same on every machine.
+model DriverConductCase {
+  id             String    @id @default(cuid())
+  organisationId String    @map("organisation_id")
+  /// "<unit key>|<fleet day>", the page's case id.
+  caseKey        String    @map("case_key")
+  /// The fleet day, YYYY-MM-DD (Nairobi).
+  day            String
+  unitKey        String    @map("unit_key")
+  plate          String
+  groupName      String?   @map("group_name")
+  driver         String    @default("")
+  accel          Int       @default(0)
+  brake          Int       @default(0)
+  seatbelt       Int       @default(0)
+  phone          Int       @default(0)
+  covered        Int       @default(0)
+  /// The first incident of the day: "open for" runs from here.
+  openedAt       DateTime  @map("opened_at")
+  /// pending | done
+  status         String    @default("pending")
+  action         String?
+  note           String    @default("")
+  actedBy        String    @default("") @map("acted_by")
+  actedAt        DateTime? @map("acted_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@unique([organisationId, caseKey])
+  /// The sidebar's pending count.
+  @@index([organisationId, status])
+  @@map("driver_conduct_cases")
+}
+
+/// An incident an operator saw on a live camera with no alarm behind it,
+/// logged by hand and counted in the Driver conduct report (new-ui
+/// lib/operatorLog). The id is the page's own, so an entry imported from a
+/// browser keeps it.
+model OperatorIncident {
+  id             String   @id
+  organisationId String   @map("organisation_id")
+  /// phone | seatbelt | covered | other
+  kind           String
+  other          String   @default("")
+  at             DateTime
+  vehicleId      String?  @map("vehicle_id")
+  plate          String
+  driver         String   @default("")
+  location       String   @default("")
+  /// Online | Offline: the unit's link when it was seen.
+  status         String   @default("Online")
+  details        String   @default("")
+  loggedBy       String   @default("") @map("logged_by")
+  loggedAt       DateTime @map("logged_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@index([organisationId, at])
+  @@map("operator_incidents")
 }
