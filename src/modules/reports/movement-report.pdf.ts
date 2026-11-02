@@ -1,4 +1,4 @@
-// The movement report as a PDF, in the Driver Behaviour Report's style: the
+// The movement report as a PDF, in the Driver Conduct Report's style: the
 // RAI Group / OGC letterhead, a report number and date, the fleet and window
 // at the top, numbered sections and ruled tables, a running head from the
 // second page and the page count at the foot.
@@ -71,18 +71,54 @@ export function movementReportNo(r: MovementReport): string {
   return `MV-${(r.orgCode || 'ORG').toUpperCase()}-${p.year}${p.month}${p.day}-${p.hour}${p.minute}`
 }
 
+/** "2 hours", "1 hour", "1.5 hours". */
+const hoursWords = (h: number) => `${Number.isInteger(h) ? h : h.toFixed(1)} hour${h === 1 ? '' : 's'}`
+
+/** "1 hour, 2 Nov 2026, 07:00hrs – 08:00hrs"; a window over midnight names both days. */
+export function windowText(r: Pick<MovementReport, 'hours' | 'from' | 'to'>): string {
+  const sameDay = longDay(r.from) === longDay(r.to - 1)
+  return `${hoursWords(r.hours)}, ${longDay(r.from)}, ${hm(r.from)} – ${sameDay ? '' : `${longDay(r.to)}, `}${hm(r.to)}`
+}
+
 export function movementFileName(r: MovementReport): string {
-  return `Movement Report ${r.organisation || r.orgCode} ${movementReportNo(r).slice(-13)} last ${r.hours} hours.pdf`
+  return `Movement Report ${r.organisation || r.orgCode} ${movementReportNo(r).slice(-13)} ${hoursWords(r.hours)}.pdf`
+}
+
+/** A window a day over a range of days: "Movement Report Menengai 20261101 to 20261103 0700-0800.pdf". */
+export function movementReportsFileName(rs: MovementReport[]): string {
+  const day = (ms: number) => { const p = parts(ms); return `${p.year}${p.month}${p.day}` }
+  const at = (ms: number) => { const p = parts(ms); return `${p.hour}${p.minute}` }
+  const first = rs[0]!, last = rs[rs.length - 1]!
+  return `Movement Report ${first.organisation || first.orgCode} ${day(first.from)} to ${day(last.from)} ${at(first.from)}-${at(first.to)}.pdf`
 }
 
 export async function renderMovementReportPdf(r: MovementReport): Promise<Buffer> {
-  const reportNo = movementReportNo(r)
-  const windowText = `Last ${r.hours} hours, ${longDay(r.from)}, ${hm(r.from)} – ${hm(r.to)}`
-  const doc = new PDFDocument({ size: 'A4', margin: 0, bufferPages: true, info: { Title: `Movement Report ${reportNo}`, Author: 'Off-Grid Consulting Ltd.' } })
+  return renderMovementReportsPdf([r])
+}
+
+/** One report, or several (a window a day over a range of days), each from a new page, in one file. */
+export async function renderMovementReportsPdf(rs: MovementReport[]): Promise<Buffer> {
+  const first = rs[0]!
+  const doc = new PDFDocument({ size: 'A4', margin: 0, bufferPages: true, info: { Title: `Movement Report ${movementReportNo(first)}`, Author: 'Off-Grid Consulting Ltd.' } })
   const chunks: Buffer[] = []
   doc.on('data', (c: Buffer) => chunks.push(c))
   const done = new Promise<Buffer>(res => doc.on('end', () => res(Buffer.concat(chunks))))
   const w = new ReportWriter(doc)
+  rs.forEach((r, i) => {
+    if (i) { w.runningHead = null; doc.addPage({ size: 'A4', margin: 0 }) }
+    drawReport(w, doc, r)
+  })
+  const last = rs[rs.length - 1]!
+  w.footers(rs.length === 1
+    ? `${first.organisation} · Movement Report · ${windowText(first)}`
+    : `${first.organisation} · Movement Report · ${rs.length} days, ${longDay(first.from)} – ${longDay(last.from)}, ${hm(first.from)} – ${hm(first.to)}`)
+  doc.end()
+  return done
+}
+
+function drawReport(w: ReportWriter, doc: InstanceType<typeof PDFDocument>, r: MovementReport) {
+  const reportNo = movementReportNo(r)
+  const when = windowText(r)
 
   // ── letterhead, title, who and when ──
   w.y = drawLetterhead(doc)
@@ -96,9 +132,9 @@ export async function renderMovementReportPdf(r: MovementReport): Promise<Buffer
   w.y += 2.2 * MM
   const half = BODY_W / 2
   const info: [string, string, string, string][] = [
-    ['Fleet', r.organisation || DASH, 'Window', windowText],
+    ['Fleet', r.organisation || DASH, 'Window', when],
     ['Groups', `${r.groups.length} (${r.groups.slice(0, 3).map(g => g.name).join(', ')}${r.groups.length > 3 ? ', …' : ''})`, 'Vehicles', `${num(r.counts.total)} listed`],
-    ['Generated', `${longDay(r.to)}, ${hm(r.to)}`, 'Reference', r.morl ? `${r.morl} geofence` : 'No MORL geofence'],
+    ['As at', `${longDay(r.to)}, ${hm(r.to)}`, 'Reference', r.morl ? `${r.morl} geofence` : 'No MORL geofence'],
   ]
   for (const [a, av, b, bv] of info) {
     w.line(a, SIDE, w.y, 23 * MM, { color: C.mut })
@@ -111,7 +147,7 @@ export async function renderMovementReportPdf(r: MovementReport): Promise<Buffer
 
   // ── 1. overview ──
   const n = r.counts
-  w.h2('1. Overview', windowText)
+  w.h2('1. Overview', when)
   w.cells([
     ['Vehicles', num(n.total)],
     ['Heading to MORL', num(n.to), n.to ? C.good : undefined],
@@ -141,8 +177,4 @@ export async function renderMovementReportPdf(r: MovementReport): Promise<Buffer
     w.table(cols, ['Grouping', 'Last coordinates', 'Location', 'Speed', 'Direction'], g.rows.map(cell),
       { size: 7.6, fills: g.rows.map(x => TINT[x.state] ?? null) })
   })
-
-  w.footers(`${r.organisation} · Movement Report · ${windowText}`)
-  doc.end()
-  return done
 }

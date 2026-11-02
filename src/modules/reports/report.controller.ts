@@ -5,9 +5,9 @@ import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
 import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, EditedMovementReport, EndOfShiftQuery, ShiftDocBody } from './report.schema.js'
-import { getMovementReport, editedMovementReport, type WindowHours, type MovementReport } from './movement-report.service.js'
-import { renderMovementReportPdf, movementFileName } from './movement-report.pdf.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, ShiftDocBody } from './report.schema.js'
+import { getMovementReport, editedMovementReport, type MovementReport } from './movement-report.service.js'
+import { renderMovementReportsPdf, movementFileName, movementReportsFileName } from './movement-report.pdf.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -138,27 +138,32 @@ export const downloadEditedEndOfShift: RequestHandler = async (req, res, next) =
   } catch (err) { next(err) }
 }
 
+/** The window a movement-report query asks for: from–to, or the last `hours` up to now. */
+const movementWindow = (q: MovementReportQuery) => (q.from != null && q.to != null ? { from: q.from, to: q.to } : q.hours)
+
 /**
- * GET /organisations/:orgId/reports/movements.pdf?hours=2|4 — where every unit
- * is now, and whether it is heading to MORL or away from it over the window.
- * A permission-scoped caller gets only the units they may see.
+ * GET /organisations/:orgId/reports/movements.pdf?hours=N | ?from&to — where
+ * every unit was when the window ended, and whether it was heading to MORL or
+ * away from it over the window. A permission-scoped caller gets only the
+ * units they may see.
  */
 export const downloadMovementReport: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as MovementReportQuery
-    const report = await getMovementReport(p(req, 'orgId'), q.hours as WindowHours, req.authz?.vehicleIds ?? null)
-    await sendMovementPdf(res, report)
+    const report = await getMovementReport(p(req, 'orgId'), movementWindow(q), req.authz?.vehicleIds ?? null)
+    await sendMovementPdf(res, [report])
   } catch (err) { next(err) }
 }
 
 /**
- * GET /organisations/:orgId/reports/movements?hours=2|4 — the same report as
- * data, for the Reports page to show as a table and let the operator edit.
+ * GET /organisations/:orgId/reports/movements?hours=N | ?from&to — the same
+ * report as data, for the Reports page to show as a table and let the
+ * operator edit.
  */
 export const getMovementReportData: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as MovementReportQuery
-    sendSuccess(res, await getMovementReport(p(req, 'orgId'), q.hours as WindowHours, req.authz?.vehicleIds ?? null))
+    sendSuccess(res, await getMovementReport(p(req, 'orgId'), movementWindow(q), req.authz?.vehicleIds ?? null))
   } catch (err) { next(err) }
 }
 
@@ -171,14 +176,17 @@ export const getMovementReportData: RequestHandler = async (req, res, next) => {
 export const downloadEditedMovementReport: RequestHandler = async (req, res, next) => {
   try {
     const by = req.user?.fullName || req.user?.email || 'Unknown user'
-    const report = await editedMovementReport(p(req, 'orgId'), req.body as EditedMovementReport, by)
-    await sendMovementPdf(res, report)
+    const body = req.body as MovementPdfBody
+    const asked = 'reports' in body ? body.reports : [body]
+    const reports = await Promise.all(asked.map(r => editedMovementReport(p(req, 'orgId'), r, by)))
+    await sendMovementPdf(res, reports)
   } catch (err) { next(err) }
 }
 
-async function sendMovementPdf(res: Parameters<RequestHandler>[1], report: MovementReport) {
-  const buffer = await renderMovementReportPdf(report)
-  const name = movementFileName(report)
+/** One report, or a window a day over a range of days, as one PDF. */
+async function sendMovementPdf(res: Parameters<RequestHandler>[1], reports: MovementReport[]) {
+  const buffer = await renderMovementReportsPdf(reports)
+  const name = reports.length === 1 ? movementFileName(reports[0]!) : movementReportsFileName(reports)
   res.setHeader('Content-Type', 'application/pdf')
   res.setHeader('Content-Disposition',
     `attachment; filename="${name.replace(/[^\x20-\x7e]|"/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`)

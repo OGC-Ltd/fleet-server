@@ -16,8 +16,8 @@ vi.mock('../../src/lib/geocode.js', () => ({
 
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { getMovementReport, editedMovementReport, countRows, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
-import { editedMovementReportSchema } from '../../src/modules/reports/report.schema.js'
-import { renderMovementReportPdf, movementReportNo, movementFileName, DIRECTION, isMoving, isLoading, locationFill, AT_MORL_FILL, MOVING_FILL, LOADING_FILL } from '../../src/modules/reports/movement-report.pdf.js'
+import { editedMovementReportSchema, movementPdfBodySchema, movementReportQuerySchema } from '../../src/modules/reports/report.schema.js'
+import { renderMovementReportPdf, renderMovementReportsPdf, movementReportsFileName, movementReportNo, movementFileName, DIRECTION, isMoving, isLoading, locationFill, AT_MORL_FILL, MOVING_FILL, LOADING_FILL } from '../../src/modules/reports/movement-report.pdf.js'
 
 const NOW = Date.now()
 const MORL = { lat: -4.05, lng: 39.65 }
@@ -103,7 +103,7 @@ describe('the movement report', () => {
     expect(buf.subarray(0, 5).toString()).toBe('%PDF-')
     expect(pages(buf)).toBe(1)
     expect(movementReportNo(report)).toMatch(/^MV-MENENGAI-\d{8}-\d{4}$/)
-    expect(movementFileName(report)).toMatch(/^Movement Report Menengai Oil Refineries Ltd \d{8}-\d{4} last 2 hours\.pdf$/)
+    expect(movementFileName(report)).toMatch(/^Movement Report Menengai Oil Refineries Ltd \d{8}-\d{4} 2 hours\.pdf$/)
   })
 
   it('runs onto a second page under the running head when the fleet is long', async () => {
@@ -117,6 +117,29 @@ describe('the movement report', () => {
     const scoped = await getMovementReport('org1', 4, new Set(['KCV039A']))
     expect(scoped.counts.total).toBe(1)
     expect(scoped.hours).toBe(4)
+  })
+
+  it('reads a past window from the stored fixes at its end, not from the live snapshot', async () => {
+    const to = NOW - 3 * 24 * 3_600_000
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const raw = prismaMock.$queryRaw as any
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.geofence.findMany as any).mockResolvedValue([
+      { name: 'MORL', type: 'CIRCLE', centerLat: MORL.lat, centerLng: MORL.lng, radiusM: 800, polygonCoords: null, widthM: null },
+    ])
+    raw.mockResolvedValueOnce([{ vehicle_id: 'KCV039A', lat: -1.90, lng: 39.65 }])
+       .mockResolvedValueOnce([{ vehicle_id: 'KCV039A', lat: -2.6, lng: 39.65, speed_kmh: 0, captured_at: new Date(to - 10 * 60_000) }])
+    const past = await getMovementReport('org1', { from: to - 3_600_000, to }, new Set(['KCV039A']))
+    const row = past.groups[0]!.rows[0]!
+    expect(past).toMatchObject({ from: to - 3_600_000, to, hours: 1 })
+    expect(row).toMatchObject({ lat: -2.6, lastAt: to - 10 * 60_000, speedKmh: 0, stale: false, state: 'to' })
+  })
+
+  it('draws a window a day over several days in one file, each from a new page', async () => {
+    const days = [0, 1, 2].map(d => ({ ...report, from: report.from - d * 86_400_000, to: report.to - d * 86_400_000 })).reverse()
+    const buf = await renderMovementReportsPdf(days)
+    expect(pages(buf)).toBe(3)
+    expect(movementReportsFileName(days)).toMatch(/^Movement Report Menengai Oil Refineries Ltd \d{8} to \d{8} \d{4}-\d{4}\.pdf$/)
   })
 })
 
@@ -176,10 +199,26 @@ describe('the movement report as edited on the Reports page', () => {
 
   it('refuses a window it did not answer: old, in the future, or not the hours asked for', () => {
     const shift = (ms: number) => ({ ...request(report), from: report.from + ms, to: report.to + ms })
-    expect(editedMovementReportSchema.safeParse(shift(-25 * 3_600_000)).success).toBe(false)
+    expect(editedMovementReportSchema.safeParse(shift(-32 * 24 * 3_600_000)).success).toBe(false)
     expect(editedMovementReportSchema.safeParse(shift(2 * 3_600_000)).success).toBe(false)
-    expect(editedMovementReportSchema.safeParse(shift(-3 * 3_600_000)).success).toBe(true)
+    expect(editedMovementReportSchema.safeParse(shift(-25 * 3_600_000)).success).toBe(true)
     expect(editedMovementReportSchema.safeParse({ ...request(report), from: report.to - 4 * 3_600_000 }).success).toBe(false)
+    expect(editedMovementReportSchema.safeParse({ ...request(report), hours: 25, from: report.to - 25 * 3_600_000 }).success).toBe(false)
+  })
+
+  it('takes several edited reports for one PDF, a week at most', () => {
+    expect(movementPdfBodySchema.safeParse({ reports: [request(report), request(report)] }).success).toBe(true)
+    expect(movementPdfBodySchema.safeParse({ reports: Array(8).fill(request(report)) }).success).toBe(false)
+    expect(movementPdfBodySchema.safeParse(request(report)).success).toBe(true)
+  })
+
+  it('asks for the last hours or a window: a day at most, ending by now', () => {
+    const q = (o: Record<string, unknown>) => movementReportQuerySchema.safeParse(o)
+    expect(q({}).data?.hours).toBe(2)
+    expect(q({ hours: '1' }).success).toBe(true)
+    expect(q({ from: String(NOW - 13 * 3_600_000), to: String(NOW - 3_600_000) }).success).toBe(true)
+    expect(q({ from: NOW - 26 * 3_600_000, to: NOW - 3_600_000 }).success).toBe(false)
+    expect(q({ from: NOW - 3_600_000 }).success).toBe(false)
   })
 
   it('reads a fresh fix within 1 km of the Mombasa loading point as loading', () => {

@@ -10,7 +10,7 @@ import {
   listEngineSessionQuerySchema,
   listSummaryQuerySchema,
   movementReportQuerySchema,
-  editedMovementReportSchema,
+  movementPdfBodySchema,
   endOfShiftQuerySchema,
   shiftDocSchema,
 } from './report.schema.js'
@@ -33,11 +33,11 @@ router.post('/engine-sessions', requirePermission('report:create'), ingestLimite
 router.get('/summaries', requirePermission('report:read'), validateQuery(listSummaryQuerySchema), ctrl.listSummaries)
 
 // Where every unit is now and which way it is going relative to MORL, as a PDF
-// or as data for the Reports page's CPO movements table, and the PDF of that
+// or as data for the Reports page's Movements table, and the PDF of that
 // table as the operator edited it. Positions, so telemetry:read.
 router.get('/reports/movements.pdf', requirePermission('telemetry:read'), validateQuery(movementReportQuerySchema), ctrl.downloadMovementReport)
 router.get('/reports/movements', requirePermission('telemetry:read'), validateQuery(movementReportQuerySchema), ctrl.getMovementReportData)
-router.post('/reports/movements.pdf', requirePermission('telemetry:read'), validateBody(editedMovementReportSchema), ctrl.downloadEditedMovementReport)
+router.post('/reports/movements.pdf', requirePermission('telemetry:read'), validateBody(movementPdfBodySchema), ctrl.downloadEditedMovementReport)
 router.post('/summaries/refresh/:periodId', requirePermission('report:create'), ctrl.refreshSummaries)
 
 // Branded PDF reports — the downloadable counterparts of the dashboard pages,
