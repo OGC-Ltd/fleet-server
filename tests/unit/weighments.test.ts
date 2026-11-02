@@ -157,6 +157,26 @@ describe('the day s stats describe every bridge, not the one on screen', () => {
     expect(opapo).toMatchObject({ count: 2, netKg: 25000, trucks: { tickets: 1, netKg: 25000 }, tractors: { tickets: 1, netKg: 0 } })
   })
 
+  it("counts the trucks the centres send on as the Factory's cane in, at the Factory's weight", async () => {
+    vi.mocked(findDay).mockResolvedValue([
+      ticket({ netWeightKg: 6000 }),                                       // a tractor at the Factory
+      ticket({ category: 'CANE_TRANSFER', netWeightKg: 25000, factoryNetWeightKg: 24800,
+               vehicleNo: 'KCB 101A', vehiclePlate: 'KCB101A', centerCode: 102, centerName: 'OPAPO' }),
+      ticket({ category: 'CANE_TRANSFER', netWeightKg: 21000, factoryNetWeightKg: null,  // not at the mill yet
+               vehicleNo: 'KCC 202B', vehiclePlate: 'KCC202B', centerCode: 103, centerName: 'OYANI' }),
+    ] as never)
+
+    const res = await getWeighmentDay(ORG, { day: DAY })
+    const factory = res.centres.find(c => c.name === 'FACTORY')!
+
+    expect(factory.count).toBe(1)                                         // its own tickets only
+    expect(factory.trucks).toEqual({ tickets: 1, netKg: 24800 })
+    expect(factory.fromCentres).toEqual({ tickets: 1, netKg: 24800 })
+    expect(factory.netKg).toBe(30800)
+    expect(res.centres.find(c => c.name === 'OPAPO')!.netKg).toBe(25000)
+    expect(res.stats.totalNetKg).toBe(52000)                              // never twice
+  })
+
   it('names the lightest load, never a ticket weighing nothing yet', async () => {
     vi.mocked(findDay).mockResolvedValue([
       ticket({ netWeightKg: 0 }),
