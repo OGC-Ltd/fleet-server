@@ -1,12 +1,22 @@
+# Only what the Dockerfile copies matters; everything else stays out of the
+# build context so secrets, caches and local junk can never reach an image.
 node_modules
 dist
 coverage
 generated
+.cache
 .env
 .env.*
-!.env.example
+*.pem
 *.log
+*.patch
+*.pdf
 .git
-.gitignore
+.github
+.claude
+.hallmark
+bench
+docs
+tests
+prod
 **/*.test.ts
-tests/

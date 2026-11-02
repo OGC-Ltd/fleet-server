@@ -1,52 +1,160 @@
-name: fleet-server-prod
+# Production on the af-south-1 box. Plan and phases: docs/containerization-plan.md.
+#
+# ONE `server`, never more. The live map's event bus is in-process
+# (src/lib/event-bus.ts): the SSE stream only carries what the poller in the
+# SAME process publishes. An earlier version of this file split `poller` and
+# `api`; that would have left every map silent. Scaling needs the bus on Redis
+# first.
+#
+# Images are named by commit, never `latest`, and passed in by the deploy:
+#   FLEET_SERVER_IMAGE=ghcr.io/ogc-ltd/fleet-server:<sha>
+#   RAITRACK_IMAGE=ghcr.io/ogc-ltd/raitrack:<sha>          (profile: web, edge)
+# Secrets come from FLEET_ENV_FILE (default /etc/fleet/server.env, root 600).
+#
+# Profiles follow the rollout:
+#   (none)    phase 1-2: server + report-worker; the host's nginx proxies to
+#             127.0.0.1:${SERVER_HOST_PORT}
+#   web       phase 3:   + web, published on 127.0.0.1:8081 by adding
+#             -f docker-compose.phase3.yml
+#   edge      phase 4:   + edge (owns host 80/443) + certbot; host nginx stopped
+#   migrate   one-off:   docker compose run --rm migrate
+#
+# Every container: non-root, read-only root fs, no capabilities, no new
+# privileges, memory/CPU/pids limits, logs capped. The daemon also binds any
+# published port without an address to 127.0.0.1 (/etc/docker/daemon.json).
+name: fleet
 
-# Production runs under pm2 today (see docs/ci-deploy.md); this file is the
-# container alternative. It is split in two on purpose: exactly ONE process may
-# poll the providers, because two pollers write the same telemetry into the
-# shared database. Scale `api`, never `poller`.
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  init: true
+  restart: unless-stopped
+  logging:
+    driver: local
+    options: { max-size: "10m", max-file: "3" }
 
 x-app: &app
-  build:
-    context: .
-    target: runner        # minimal production image
-  env_file: .env.prod     # separate prod env — never commit this file (.gitignore covers .env*)
-  restart: always
-  logging:
-    driver: json-file
-    options:
-      max-size: "10m"
-      max-file: "3"
-  healthcheck:
-    test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
-    interval: 30s
-    timeout: 5s
-    retries: 3
-    start_period: 15s
+  <<: *hardening
+  image: ${FLEET_SERVER_IMAGE:?set FLEET_SERVER_IMAGE to ghcr.io/ogc-ltd/fleet-server:<sha>}
+  env_file: [ "${FLEET_ENV_FILE:-/etc/fleet/server.env}" ]
+  environment:
+    NODE_ENV: production
+    # Survives restarts in the volume, so a deploy does not log in to VSS again
+    # (VSS rate-limits logins: error 10082).
+    VSS_SESSION_FILE: /app/.cache/vss-session.json
+  volumes:
+    - fleet-cache:/app/.cache
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  stop_grace_period: 30s
+  networks: [backend]
 
 services:
-  # The single writer: polls the providers and runs the background jobs.
-  poller:
+  server:
     <<: *app
-    environment:
-      POLL_ENABLED: "true"
-    deploy:
-      replicas: 1         # must stay 1
-      resources:
-        limits:
-          cpus: "1"
-          memory: 512M
-
-  # Serves the API from the database. Safe to scale; put a proxy in front
-  # (deploy/nginx) rather than publishing a fixed host port per replica.
-  api:
-    <<: *app
-    environment:
-      POLL_ENABLED: "false"
     ports:
-      - "3000:3000"
-    deploy:
-      replicas: 1
-      resources:
-        limits:
-          cpus: "1"
-          memory: 512M
+      # Loopback only. Phase 4 removes this: the edge reaches server:3000 itself.
+      - "127.0.0.1:${SERVER_HOST_PORT:-3001}:3000"
+    # Uses about 1 GB today under pm2. Swap stays allowed (Docker's default,
+    # 2x the limit): under pm2 it can swap, and a hard cut would OOM-kill it.
+    mem_limit: 1536m
+    cpus: 1.5
+    pids_limit: 256
+
+  report-worker:
+    <<: *app
+    command: ["node", "--max-old-space-size=1536", "dist/src/report-worker.js"]
+    # No HTTP port; the image's /health check would mark it unhealthy forever.
+    healthcheck: { disable: true }
+    mem_limit: 1800m
+    cpus: 1.0
+    pids_limit: 256
+
+  migrate:
+    <<: *hardening
+    profiles: [migrate]
+    # `:?` would make compose refuse to start ANY service while this one's
+    # profile is off, so an unset tag becomes a name that cannot be pulled.
+    image: ${FLEET_MIGRATE_IMAGE:-fleet-migrate-image-not-set}
+    env_file: [ "${FLEET_ENV_FILE:-/etc/fleet/server.env}" ]
+    restart: "no"
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /home/node:size=64m,uid=1000,gid=1000
+    mem_limit: 512m
+    pids_limit: 64
+    networks: [backend]
+
+  web:
+    <<: *hardening
+    profiles: [web, edge]
+    # Same reason as `migrate`: unset fails at pull time, not for every service.
+    image: ${RAITRACK_IMAGE:-raitrack-image-not-set}
+    # No ports here: phase 3 adds 127.0.0.1:8081 through
+    # docker-compose.phase3.yml, because an internal network cannot publish.
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    mem_limit: 64m
+    pids_limit: 64
+    networks: [frontend]
+
+  edge:
+    <<: *hardening
+    profiles: [edge]
+    image: nginxinc/nginx-unprivileged:1.28.0-alpine
+    # The only host ports open to the internet. An explicit address is needed:
+    # the daemon's default binds to 127.0.0.1.
+    ports:
+      - "0.0.0.0:80:8080"
+      - "[::]:80:8080"
+      - "0.0.0.0:443:8443"
+      - "[::]:443:8443"
+    volumes:
+      - ./deploy/edge/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/edge/conf.d:/etc/nginx/conf.d:ro
+      - ./deploy/edge/fleet:/etc/nginx/fleet:ro
+      - certs:/etc/letsencrypt:ro
+      - acme:/var/www/certbot:ro
+    tmpfs:
+      - /tmp:size=64m,uid=101,gid=101
+    # Picks up renewed certificates: certbot cannot signal this container
+    # without the Docker socket, which no container gets.
+    command: ["/bin/sh", "-c", "(while sleep 12h; do nginx -s reload; done) & exec nginx -g 'daemon off;'"]
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
+    mem_limit: 256m
+    pids_limit: 128
+    depends_on: [web]
+    networks: [frontend, backend]
+
+  certbot:
+    <<: *hardening
+    profiles: [edge]
+    image: certbot/certbot:v4.0.0
+    # Renews twice a day through the webroot the edge serves; certbot itself
+    # skips certificates that are not near expiry.
+    entrypoint: ["/bin/sh", "-c", "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"]
+    volumes:
+      - certs:/etc/letsencrypt
+      - acme:/var/www/certbot
+    tmpfs:
+      - /tmp:size=32m
+      - /var/lib/letsencrypt:size=16m
+      - /var/log/letsencrypt:size=16m
+    # certbot writes the certs volume as root; it needs no other privilege.
+    # Checked with a dry-run renewal before phase 4 depends on it.
+    cap_add: [CHOWN, FOWNER]
+    mem_limit: 128m
+    pids_limit: 64
+    networks: [backend]
+
+networks:
+  backend: {}
+  # The site files need no network beyond the edge.
+  frontend: { internal: true }
+
+volumes:
+  fleet-cache: {}
+  certs: {}
+  acme: {}

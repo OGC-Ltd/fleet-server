@@ -4,7 +4,7 @@ services:
   app:
     build:
       context: .
-      target: builder       # use the builder stage for dev (includes devDeps + tsx)
+      target: deps          # all dependencies incl. tsx; the source is mounted
     command: npx tsx watch src/index.ts
     ports:
       - "3000:3000"
@@ -28,7 +28,7 @@ services:
   test:
     build:
       context: .
-      target: builder
+      target: deps
     command: npx vitest run
     volumes:
       - .:/app
@@ -47,7 +47,7 @@ services:
         condition: service_healthy
     profiles: [test]
   postgres:
-    image: postgres:16-alpine
+    image: postgis/postgis:16-3.5-alpine   # production uses PostGIS
     environment:
       POSTGRES_DB: fleet_dev
       POSTGRES_USER: fleet
@@ -62,7 +62,7 @@ services:
       timeout: 5s
       retries: 10
   postgres-test:
-    image: postgres:16-alpine
+    image: postgis/postgis:16-3.5-alpine   # production uses PostGIS
     environment:
       POSTGRES_DB: fleet_test
       POSTGRES_USER: fleet
