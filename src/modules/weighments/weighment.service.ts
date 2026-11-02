@@ -14,6 +14,7 @@ import { fleetDayBounds, fleetDayKey } from '../../lib/provider-time.js'
 import * as repo from './weighment.repository.js'
 import type { WeighmentRow } from './weighment.repository.js'
 import type { WeighmentQuery } from './weighment.schema.js'
+import { TRACTOR_PLATE } from '../route-ahead/unit-class.js'
 
 /** One ticket, with the two things the row cannot know about itself. */
 export interface WeighmentDto {
@@ -87,11 +88,25 @@ export interface WeighmentDayStats {
   lightest:       { token: string; vehicleNo: string; centerName: string; netWeightKg: number; at: string } | null
   /** Everything weighed in, for the strip's tooltip. */
   totalNetKg:     number
+  /** The day split by kind of unit, every bridge: trucks (cane coming in) and tractors (going out). */
+  trucks:         KindTotal
+  tractors:       KindTotal
 }
+
+/** Tickets and net weight of one kind of unit. */
+export interface KindTotal { tickets: number; netKg: number }
+
+/**
+ * Trucks bring the cane in; tractors go out (operator, 2026-11-02). A Kenyan
+ * tractor is registered KT… ("KTCC 870B"), so the plate decides, as on the
+ * map (route-ahead/unit-class); any other plate is a truck.
+ */
+export const isTractorTicket = (row: { vehicleNo: string; vehiclePlate: string }) =>
+  TRACTOR_PLATE.test(row.vehicleNo) || TRACTOR_PLATE.test(row.vehiclePlate)
 
 export interface WeighmentDayResult {
   day:      string
-  centres:  { code: number; name: string; count: number }[]
+  centres:  { code: number; name: string; count: number; netKg: number; trucks: KindTotal; tractors: KindTotal }[]
   stats:    WeighmentDayStats
   rows:     WeighmentDto[]
   /** Rows in the day before the centre and search filters — so the page can
@@ -199,9 +214,14 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
   let heaviest: WeighmentRow | null = null
   let lightest: WeighmentRow | null = null
   let totalNetKg = 0
+  const trucks: KindTotal = { tickets: 0, netKg: 0 }
+  const tractors: KindTotal = { tickets: 0, netKg: 0 }
   for (const row of all) {
+    const kind = isTractorTicket(row) ? tractors : trucks
+    kind.tickets += 1
     const net = row.netWeightKg
     if (net == null) continue
+    kind.netKg += net
     totalNetKg += net
     if (!heaviest || net > (heaviest.netWeightKg ?? -Infinity)) heaviest = row
     if (net > 0 && (!lightest || net < (lightest.netWeightKg ?? Infinity))) lightest = row
@@ -226,6 +246,8 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
     lightestNetKg:  lightest?.netWeightKg ?? null,
     lightest:       ticket(lightest),
     totalNetKg,
+    trucks,
+    tractors,
   }
 
   // Has this organisation EVER had a ticket, and at which bridges? Both are
@@ -250,15 +272,23 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
   // property the hardcoded list was there for: a bridge that is closed today
   // still has a tab, because "quiet today" and "not ours" are different news
   // and a tab that vanishes on a quiet day cannot tell them apart.
-  const counts = new Map<number, number>()
+  // Each centre's own tonnage, and its trucks and tractors (operator,
+  // 2026-11-02: "compute the total tonnage of these individually")
+  const blank = () => ({ count: 0, netKg: 0, trucks: { tickets: 0, netKg: 0 }, tractors: { tickets: 0, netKg: 0 } })
+  const counts = new Map<number, ReturnType<typeof blank>>()
   const names  = new Map<number, string>()
-  for (const c of orgCentres) { counts.set(c.code, 0); names.set(c.code, c.name) }
+  for (const c of orgCentres) { counts.set(c.code, blank()); names.set(c.code, c.name) }
   for (const row of all) {
-    counts.set(row.centerCode, (counts.get(row.centerCode) ?? 0) + 1)
+    const c = counts.get(row.centerCode) ?? blank()
+    const kind = isTractorTicket(row) ? c.tractors : c.trucks
+    c.count += 1
+    kind.tickets += 1
+    if (row.netWeightKg != null) { c.netKg += row.netWeightKg; kind.netKg += row.netWeightKg }
+    counts.set(row.centerCode, c)
     names.set(row.centerCode, row.centerName)
   }
   const centres = [...counts.entries()]
-    .map(([code, count]) => ({ code, name: names.get(code) ?? `Centre ${code}`, count }))
+    .map(([code, c]) => ({ code, name: names.get(code) ?? `Centre ${code}`, ...c }))
     .sort((a, b) => a.code - b.code)
 
   // ── narrow to what the grid is showing ────────────────────────────────────
