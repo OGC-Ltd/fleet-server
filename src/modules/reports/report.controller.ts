@@ -4,8 +4,8 @@ import { BadRequestError } from '../../core/errors/errors.js'
 import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
-import { renderEndOfShiftPdf, reportNumber, endOfShiftFileName } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, EditedMovementReport, EndOfShiftQuery } from './report.schema.js'
+import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, EditedMovementReport, EndOfShiftQuery, ShiftDocBody } from './report.schema.js'
 import { getMovementReport, editedMovementReport, type WindowHours, type MovementReport } from './movement-report.service.js'
 import { renderMovementReportPdf, movementFileName } from './movement-report.pdf.js'
 
@@ -83,23 +83,58 @@ export const downloadPdfReport: RequestHandler = async (req, res, next) => {
 
 // ── End-of-shift report ───────────────────────────────────────────────────────
 
+/** The report for the period asked (today up to now by default), made for this caller. */
+async function endOfShiftFor(req: Parameters<RequestHandler>[0], now: number) {
+  const orgId = p(req, 'orgId')
+  const q = req.query as unknown as EndOfShiftQuery
+  const period = q.from != null && q.to != null ? { from: q.from, to: q.to } : undefined
+  const [org, { report }] = await Promise.all([
+    orgHeading(orgId),
+    loadEndOfShift({ orgId, vehicleIds: req.authz?.vehicleIds ?? null, userId: req.authz?.userId ?? null, now, period }),
+  ])
+  return { org, report }
+}
+
+function sendShiftPdf(res: Parameters<RequestHandler>[1], buffer: Buffer, orgName: string, now: number) {
+  res.setHeader('Content-Type', 'application/pdf')
+  res.setHeader('Content-Disposition', `attachment; filename="${endOfShiftFileName(orgName, now)}"`)
+  res.setHeader('Content-Length', String(buffer.length))
+  res.setHeader('Cache-Control', 'no-store')
+  res.send(buffer)
+}
+
 /** Today from midnight Nairobi up to now, or the period asked for, for this organisation, as a PDF. */
 export const downloadEndOfShift: RequestHandler = async (req, res, next) => {
   try {
-    const orgId = p(req, 'orgId')
     const now = Date.now()
-    const q = req.query as unknown as EndOfShiftQuery
-    const period = q.from != null && q.to != null ? { from: q.from, to: q.to } : undefined
-    const [org, { report }] = await Promise.all([
-      orgHeading(orgId),
-      loadEndOfShift({ orgId, vehicleIds: req.authz?.vehicleIds ?? null, userId: req.authz?.userId ?? null, now, period }),
-    ])
+    const { org, report } = await endOfShiftFor(req, now)
     const buffer = await renderEndOfShiftPdf(report, { orgName: org.name, reportNo: reportNumber(org.short, now), generatedAt: now })
-    res.setHeader('Content-Type', 'application/pdf')
-    res.setHeader('Content-Disposition', `attachment; filename="${endOfShiftFileName(org.name, now)}"`)
-    res.setHeader('Content-Length', String(buffer.length))
-    res.setHeader('Cache-Control', 'no-store')
-    res.send(buffer)
+    sendShiftPdf(res, buffer, org.name, now)
+  } catch (err) { next(err) }
+}
+
+/** GET /organisations/:orgId/reports/end-of-shift?from&to — the report as the document the PDF is drawn from. */
+export const getEndOfShiftDoc: RequestHandler = async (req, res, next) => {
+  try {
+    const now = Date.now()
+    const { org, report } = await endOfShiftFor(req, now)
+    sendSuccess(res, endOfShiftDoc(report, { orgName: org.name, reportNo: reportNumber(org.short, now), generatedAt: now }))
+  } catch (err) { next(err) }
+}
+
+/**
+ * POST /organisations/:orgId/reports/end-of-shift.pdf — the document as the
+ * operator edited it on the Reports page, drawn as the PDF. The report number
+ * and the footer's "made" time are the server's, from now.
+ */
+export const downloadEditedEndOfShift: RequestHandler = async (req, res, next) => {
+  try {
+    const now = Date.now()
+    const org = await orgHeading(p(req, 'orgId'))
+    const body = req.body as ShiftDocBody
+    const made = endOfShiftDoc.made(org.name, body.date, now)
+    const doc: ShiftDoc = { ...body, reportNo: reportNumber(org.short, now), footer: made }
+    sendShiftPdf(res, await renderShiftDoc(doc), org.name, now)
   } catch (err) { next(err) }
 }
 

@@ -98,6 +98,44 @@ export const endOfShiftQuerySchema = z.object({
 export type EndOfShiftQuery = z.infer<typeof endOfShiftQuerySchema>
 
 /**
+ * The end-of-shift report as edited on the Reports page (operator,
+ * 2026-11-02), sent back to be drawn as the PDF: the document the server
+ * answered (end-of-shift.pdf endOfShiftDoc), every text in it as the operator
+ * left it. Bounded so a request cannot ask for an unbounded document. The
+ * report number and the footer's "made" time are set again by the server.
+ */
+const docText = z.string().max(600)
+const docTone = z.enum(['flag', 'mut']).optional()
+const docCell = z.object({ text: docText, bold: z.boolean().optional(), tone: docTone })
+const docTable = z.object({
+  kind: z.literal('table'),
+  cols: z.array(z.object({ w: z.number().min(0).max(200), align: z.enum(['left', 'right', 'center']).optional() })).min(1).max(12),
+  head: z.array(z.string().max(80)).max(12),
+  rows: z.array(z.array(docCell).max(12)).max(2000),
+  size: z.number().min(6).max(10).optional(),
+})
+const docNone = z.object({ kind: z.literal('none'), text: docText })
+const docBlock = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('h2'), title: z.string().max(160), aside: z.string().max(160).optional() }),
+  z.object({ kind: z.literal('h3'), title: z.string().max(160), aside: z.string().max(160).optional() }),
+  z.object({ kind: z.literal('figures'), items: z.array(z.object({ label: z.string().max(160), value: z.string().max(160), flag: z.boolean().optional() })).max(12) }),
+  docTable,
+  docNone,
+  z.object({ kind: z.literal('note'), text: z.string().max(2000) }),
+  z.object({ kind: z.literal('pair'), halves: z.array(z.object({ title: z.string().max(160), aside: z.string().max(160).optional(), body: z.discriminatedUnion('kind', [docTable, docNone]) })).max(2) }),
+  z.object({ kind: z.literal('handover'), lines: z.array(z.string().max(300)).max(20), signatures: z.array(z.string().max(120)).max(2) }),
+])
+export const shiftDocSchema = z.object({
+  title: z.string().max(120),
+  reportNo: z.string().max(80),
+  date: z.string().max(40),
+  meta: z.array(z.object({ label: z.string().max(60), value: z.string().max(300) })).max(8),
+  blocks: z.array(docBlock).max(300),
+  footer: z.string().max(300),
+})
+export type ShiftDocBody = z.infer<typeof shiftDocSchema>
+
+/**
  * The movement report as edited on the Reports page, sent back to be drawn as
  * the PDF: the rows the operator kept, with their locations and directions,
  * and how many rows they changed or left out (printed on the PDF). Bounded so
