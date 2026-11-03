@@ -297,6 +297,21 @@ The containers' 127.0.0.1 port publishing becomes unnecessary here, since only t
 - **The migration history cannot rebuild a database from empty.** Migration 53 alters `vehicle_alerts`, which no earlier migration creates. Production is unaffected, because it is already past that point, but a fresh environment needs `prisma db push` rather than `migrate deploy`. This is worth fixing separately with a baseline migration.
 - **The full disk** is described under "Before phase 1" in section 6.
 
+**First CI run (2026-11-03, images #1): the scan failed, and that was correct.**
+- The runtime image had 11 Debian findings (`perl-base`, `pcre2`) and 26 npm findings. Most npm findings applied to the live box as well, since it installs the same lock file.
+- Fixes, in the commit after this:
+  - **Updated in the lock file** (each pinned to the oldest release with the fix):
+    - `proxy-addr` 2.0.8 (CRITICAL: IP spoofing through trusted-proxy matching)
+    - `body-parser` 2.4.0, with `qs` 6.16.1
+    - `compression` 1.8.2
+    - `ip-address` 10.3.1
+    - `nodemailer` 10.0.6. This is a major version, but its only breaking change is "Node 20+", and the SMTP transport was checked with the server's own settings.
+  - **Images:** Debian security updates installed at build time, and npm, corepack and yarn removed. That also clears `tar`, `undici` and `brace-expansion`, which only npm's own bundled copy carried.
+  - **Runtime image:** built with `--omit=peer`, so the Prisma CLI and typescript, which bring in `mysql2`, `deepmerge-ts`, `fast-uri` and `source-map-js`, are no longer in it.
+  - **Migrate image:** keeps the Prisma CLI, so those four are accepted in `.trivyignore.migrate`, for that image only, until 2026-12-15. None is reachable from `migrate deploy` against PostgreSQL. The real fix is upgrading Prisma to 7.10.x, as its own tested change.
+- CI now also boots the runtime image against a throwaway PostGIS before scanning, so a broken image cannot be pushed.
+- Full test suite after the updates: 2,553 passed.
+
 **Not yet verified**
 - Trivy's result: the scan ran out of disk on the box. CI is the first real run, and it may fail on base-image findings that need triage.
 - The workflows themselves: they have not run on GitHub yet.

@@ -79,9 +79,10 @@ services:
     image: ${FLEET_MIGRATE_IMAGE:-fleet-migrate-image-not-set}
     env_file: [ "${FLEET_ENV_FILE:-/etc/fleet/server.env}" ]
     restart: "no"
+    environment:
+      HOME: /tmp          # the image user has no home; Prisma caches under $HOME
     tmpfs:
       - /tmp:size=64m,mode=1777
-      - /home/node:size=64m,uid=1000,gid=1000
     mem_limit: 512m
     pids_limit: 64
     networks: [backend]
