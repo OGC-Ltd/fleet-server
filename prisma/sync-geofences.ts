@@ -70,6 +70,13 @@
  * a wrong guess writes one customer's boundaries into another's estate.
  * `--resource=<id>` then imports from whichever resource it names.
  *
+ * ## Routes
+ *
+ * Wialon's own route items are empty on this token (0 on 2026-11-04). The route
+ * paths are its corridors, 21 of them, kept on two or three resources per org and
+ * named for where they go, so each import names its resource and its zones:
+ *   --org=KABRAS --resource=27625222 --shapes=all --name="kabras to magut,kabras - "
+ *
  * Run: npm run sync:geofences -- --find="sukari"
  *      npm run sync:geofences -- --org=SUKARI --name="sukari"
  *      npm run sync:geofences -- --org=SUKARI --name="sukari" --apply
@@ -103,8 +110,10 @@ const TOKEN   = process.env.WIALON_TOKEN || process.env.access_token || ''
  */
 const ZONE_SOURCE: Record<string, { accountId: number; label: string; include?: RegExp; exclude?: RegExp }> = {
   KASULU:    { accountId: KASULU_WIALON_ACCOUNT_ID,      label: 'Mufindi Paper Mills' },
-  // Less Sukari's factory boundary, which SUKARI already holds (see below).
-  MENENGAI:  { accountId: MENENGAI_WIALON_ACCOUNT_ID,    label: 'Mene-ngai', exclude: /^sukari indurstries factory$/i },
+  // Less Sukari's factory boundary, which SUKARI already holds (see below), and
+  // the fences moved to their real owners on 2026-11-04 (move-misfiled-geofences).
+  // Those rows no longer follow edits made in Wialon.
+  MENENGAI:  { accountId: MENENGAI_WIALON_ACCOUNT_ID,    label: 'Mene-ngai', exclude: /^(sukari indurstries factory|aquamist factory_sigona( \(main\))?|raiply eldoret|kabras stop over)$/i },
   /**
    * NOT Rai Group, where Sukari's UNITS live.
    *
@@ -126,7 +135,8 @@ const ZONE_SOURCE: Record<string, { accountId: number; label: string; include?: 
   WESTSUGAR: { accountId: WEST_SUGAR_REPORT_RESOURCE_ID, label: 'WEST KENYA SUGAR', exclude: /kabras/i },
   KABRAS:    { accountId: WEST_SUGAR_REPORT_RESOURCE_ID, label: 'WEST KENYA SUGAR (Kabras zones)', include: /kabras/i },
   // 4 zones, 2026-10-07. Timsales has no resource on this token, so no entry.
-  AQUAMIST:  { accountId: AQUAMIST_RESOURCE_ID,          label: 'Aquamist' },
+  // Menengai's yard was on this resource; it moved to MENENGAI on 2026-11-04.
+  AQUAMIST:  { accountId: AQUAMIST_RESOURCE_ID,          label: 'Aquamist', exclude: /^menengai yard$/i },
 }
 
 const arg = (name: string): string | null => {
@@ -438,7 +448,8 @@ async function main() {
       // A traced polyline that closes on itself is an area boundary the
       // operator drew with the wrong tool — store what it means, not what
       // Wialon called it.
-      const isArea = kind === 'POLYGON' || isClosedRing(coords)
+      // A route out and back also closes on itself, and it is still a route.
+      const isArea = kind === 'POLYGON' || (isClosedRing(coords) && !/\broute\b/i.test(zoneName))
       if (isArea && kind === 'LINE') {
         retyped++
         console.log(`    ↻ "${base.name}" — closed ring, importing as POLYGON (Wialon says LINE w=${z.w ?? 1}m)`)
