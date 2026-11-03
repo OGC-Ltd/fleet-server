@@ -27,9 +27,10 @@ describe('classify', () => {
     expect(classify(fix(-4.051, 0), { lat: -3.0, lng: 39.65 }, morl)).toMatchObject({ state: 'at', kmToMorl: 0 })
   })
 
-  it('has no direction for less than a kilometre of change: moving or stopped by its speed', () => {
+  it('needs a kilometre of change to give a parked unit a direction, any change for one on the move', () => {
     expect(classify(fix(-3.5, 0), { lat: -3.5005, lng: 39.65 }, morl).state).toBe('stopped')
-    expect(classify(fix(-3.5, 40), { lat: -3.5005, lng: 39.65 }, morl).state).toBe('moving')
+    expect(classify(fix(-3.5, 40), { lat: -3.5005, lng: 39.65 }, morl).state).toBe('from')
+    expect(classify(fix(-3.5, 40), { lat: -3.4995, lng: 39.65 }, morl).state).toBe('to')
   })
 
   it('has no direction without a fix at the start of the window, or without a MORL fence', () => {

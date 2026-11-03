@@ -84,7 +84,7 @@ describe('the movement report', () => {
 
   it('gives every row a status in the Direction column, never a blank', () => {
     expect(Object.values(DIRECTION).every(Boolean)).toBe(true)
-    expect(DIRECTION).toMatchObject({ to: 'To MORL', from: 'From MORL', at: 'At MORL', moving: 'Moving', stopped: 'Stopped', 'no-fix': 'At RAIMDF' })
+    expect(DIRECTION).toMatchObject({ to: 'To MORL', from: 'From MORL', at: 'At MORL', moving: '–', stopped: 'Stopped', 'no-fix': 'At RAIMDF' })
   })
 
   it('prints the location of a moving unit green: 5 km/h or more on a fix inside the window', () => {

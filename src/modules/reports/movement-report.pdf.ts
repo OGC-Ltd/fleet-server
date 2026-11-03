@@ -63,10 +63,11 @@ const TINT: Partial<Record<MovementState, string>> = { to: '#e3f1dc', from: '#fb
 /**
  * Every row carries a status in the Direction column (operator, 2026-11-01),
  * read against the report's site: MORL for Menengai, the organisation's own
- * elsewhere ("To Sukari").
+ * elsewhere ("To Sukari"). A unit on the move with no direction (no fence, or
+ * no fix at the window's start) reads "-": there is no Moving (2026-11-03).
  */
 export const directionWords = (site = 'MORL'): Record<MovementState, string> => ({
-  to: `To ${site}`, from: `From ${site}`, at: `At ${site}`, moving: 'Moving', stopped: 'Stopped',
+  to: `To ${site}`, from: `From ${site}`, at: `At ${site}`, moving: DASH, stopped: 'Stopped',
   // Menengai's silent units stand at RAIMDF, the others are not reporting
   // (operator, 2026-11-02 / 2026-11-03: "remove no fix")
   'no-fix': site === 'MORL' ? NO_FIX_MENENGAI : 'Not reporting',
@@ -165,7 +166,6 @@ function drawReport(w: ReportWriter, doc: InstanceType<typeof PDFDocument>, r: M
     [`Heading to ${site}`, num(n.to), n.to ? C.good : undefined],
     [`Leaving ${site}`, num(n.from), n.from ? '#b45309' : undefined],
     [`At ${site}`, num(n.at)],
-    ['Moving', num(n.moving)],
     ['Stopped elsewhere', num(n.stopped)],
     ['Not reporting', num(n.stale + n['no-fix']), n.stale + n['no-fix'] ? C.flag : undefined],
   ])
