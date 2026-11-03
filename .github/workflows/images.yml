@@ -54,27 +54,60 @@ jobs:
           tags: ${{ env.IMAGE }}:${{ github.sha }}-migrate
           cache-from: type=gha,scope=runtime
 
-      - name: runtime image starts as non-root and has no secrets baked in
+      - name: images run as non-root, carry no .env, no npm, no Prisma CLI in runtime
         run: |
           set -euo pipefail
-          img="${IMAGE}:${GITHUB_SHA}"
-          user=$(docker image inspect -f '{{.Config.User}}' "$img")
-          [ "$user" = "10001:10001" ] || { echo "::error::image user is '$user', expected 10001:10001"; exit 1; }
-          if docker run --rm --entrypoint sh "$img" -c 'ls -a /app' | grep -qE '^\.env'; then
-            echo "::error::a .env file is inside the image"; exit 1
-          fi
-          echo "user $user, no .env in /app"
+          rt="${IMAGE}:${GITHUB_SHA}"; mg="${IMAGE}:${GITHUB_SHA}-migrate"
+          for img in "$rt" "$mg"; do
+            user=$(docker image inspect -f '{{.Config.User}}' "$img")
+            [ "$user" = "10001:10001" ] || { echo "::error::$img runs as '$user', expected 10001:10001"; exit 1; }
+          done
+          docker run --rm --entrypoint sh "$rt" -c '
+            set -e
+            ! ls -a /app | grep -qE "^\.env"            || { echo "::error::.env inside the image"; exit 1; }
+            ! command -v npm >/dev/null                   || { echo "::error::npm is in the image"; exit 1; }
+            [ ! -e /app/node_modules/prisma ]             || { echo "::error::Prisma CLI is in the runtime image"; exit 1; }
+            [ ! -e /app/node_modules/typescript ]         || { echo "::error::typescript is in the runtime image"; exit 1; }
+            echo "runtime: user $(id -u), no .env, no npm, no Prisma CLI"'
+
+      - name: boot test against a throwaway PostGIS (every background job off)
+        run: |
+          set -euo pipefail
+          rt="${IMAGE}:${GITHUB_SHA}"; mg="${IMAGE}:${GITHUB_SHA}-migrate"
+          docker network create --internal boot >/dev/null
+          docker run -d --name pg --network boot -e POSTGRES_USER=fleet -e POSTGRES_PASSWORD=boot -e POSTGRES_DB=fleet postgis/postgis:16-3.5-alpine >/dev/null
+          for i in $(seq 1 60); do docker exec pg pg_isready -U fleet -d fleet >/dev/null 2>&1 && break; sleep 2; done
+          docker exec pg psql -U fleet -d fleet -qc 'CREATE EXTENSION IF NOT EXISTS postgis'
+          URL=postgresql://fleet:boot@pg:5432/fleet
+          # The migration history cannot build a database from empty (see the plan),
+          # so the schema comes from db push, through the migrate image's own CLI.
+          docker run --rm --network boot --read-only --cap-drop ALL --tmpfs /tmp -e HOME=/tmp             -e DIRECT_URL=$URL -e DATABASE_URL=$URL --entrypoint node "$mg"             node_modules/prisma/build/index.js db push --config prisma.config.ts
+          {
+            echo "DATABASE_URL=$URL"; echo "DIRECT_URL=$URL"
+            echo "JWT_SECRET=ci-boot-test-signing-secret-not-a-real-key-0123"
+            for f in POLL RAIFACTORYSUITE_POLL VEHICLE_INSIGHT GOOGLE_ROUTING RETENTION_SWEEP NIGHTLY_ROLLUPS                      FUEL_SYNC LIVE_FUEL_WATCH INCIDENT_CAPTURE FUEL_SETTLE FUEL_ADJUDICATION                      PARKED_FALL_VERDICTS TRIP_BUILD REPORT_WORKER; do echo "${f}_ENABLED=false"; done
+          } > boot.env
+          docker run -d --name app --network boot --read-only --cap-drop ALL --security-opt no-new-privileges             --init --tmpfs /tmp --env-file boot.env "$rt" >/dev/null
+          for i in $(seq 1 45); do
+            s=$(docker inspect -f '{{.State.Health.Status}}' app 2>/dev/null || echo gone)
+            [ "$s" = healthy ] && break
+            [ "$(docker inspect -f '{{.State.Running}}' app)" = true ] || break
+            sleep 2
+          done
+          docker logs app 2>&1 | tail -40
+          [ "$s" = healthy ] || { echo "::error::the server image did not become healthy ($s)"; exit 1; }
+          docker exec app node -e "fetch('http://127.0.0.1:3000/api/v1/sim-clock').then(r=>{console.log('sim-clock',r.status);process.exit(r.ok?0:1)})"
+          docker rm -f app pg >/dev/null; docker network rm boot >/dev/null; rm -f boot.env
 
       - name: scan both images (fail on fixable HIGH/CRITICAL)
         run: |
-          set -euo pipefail
-          for tag in "${GITHUB_SHA}" "${GITHUB_SHA}-migrate"; do
-            echo "--- ${IMAGE}:${tag}"
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock:ro \
-              "${TRIVY_IMAGE}" image --scanners vuln,secret \
-              --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
-              "${IMAGE}:${tag}"
-          done
+          set -uo pipefail
+          trivy() { docker run --rm -v /var/run/docker.sock:/var/run/docker.sock:ro             -v "${PWD}/.trivyignore.migrate:/trivyignore.migrate:ro" -v trivy-cache:/root/.cache             "${TRIVY_IMAGE}" image --scanners vuln,secret --severity HIGH,CRITICAL             --ignore-unfixed --exit-code 1 --no-progress "$@"; }
+          echo "--- runtime: no exceptions"
+          trivy "${IMAGE}:${GITHUB_SHA}"; rt=$?
+          echo "--- migrate: exceptions in .trivyignore.migrate"
+          trivy --ignorefile /trivyignore.migrate "${IMAGE}:${GITHUB_SHA}-migrate"; mg=$?
+          [ $rt -eq 0 ] && [ $mg -eq 0 ]
 
       - name: log in to GHCR
         uses: docker/login-action@v3

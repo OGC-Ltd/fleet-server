@@ -1,0 +1,26 @@
+# Accepted findings for the MIGRATE image only (images.yml scans it with
+# --ignorefile .trivyignore.migrate). The runtime image is scanned with no
+# exceptions: it does not contain these packages at all.
+#
+# All four come with the Prisma 7.8.0 CLI (prisma -> mysql2, @prisma/config ->
+# deepmerge-ts + c12 -> source-map-js, @prisma/dev -> fast-uri). The migrate
+# container runs only `prisma migrate deploy` against PostgreSQL, for a minute,
+# on an internal network, then exits:
+#   - mysql2: credential leak when connecting to a malicious MySQL server;
+#     we never connect to MySQL.
+#   - deepmerge-ts / source-map-js: denial of service on crafted input; the
+#     only input is our own prisma.config.ts.
+#   - fast-uri: URL parsing flaws in Prisma's local dev server (prisma dev),
+#     which migrate deploy never starts.
+# Fix: upgrade Prisma to 7.10.x (mysql2 3.24.4, deepmerge-ts 8.0.2) as its own
+# tested change, then delete this file. The expiry forces that.
+GHSA-3f6p-5ww8-9rcr exp:2026-12-15
+CVE-2026-40345 exp:2026-12-15
+CVE-2026-93749 exp:2026-12-15
+CVE-2026-13676 exp:2026-12-15
+CVE-2026-16221 exp:2026-12-15
+CVE-2026-18446 exp:2026-12-15
+CVE-2026-75899 exp:2026-12-15
+CVE-2026-75975 exp:2026-12-15
+CVE-2026-76172 exp:2026-12-15
+CVE-2026-84292 exp:2026-12-15
