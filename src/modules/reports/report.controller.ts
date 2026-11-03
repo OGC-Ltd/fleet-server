@@ -5,8 +5,9 @@ import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
 import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody } from './report.schema.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, TankersReportBody } from './report.schema.js'
 import { getMovementReport, editedMovementReport, type MovementReport } from './movement-report.service.js'
+import { getTankersReport } from './tankers-report.service.js'
 import { renderMovementReportsPdf, movementFileName, movementReportsFileName } from './movement-report.pdf.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -178,6 +179,19 @@ export const getMovementReportData: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as MovementReportQuery
     sendSuccess(res, await getMovementReport(p(req, 'orgId'), movementWindow(q), req.authz?.vehicleIds ?? null))
+  } catch (err) { next(err) }
+}
+
+/**
+ * POST /organisations/:orgId/reports/tankers — the Tankers Report as data:
+ * each tanker the page sends that is on a trip from the Mombasa depot, when it
+ * left, how far it went in the 4 hours up to the report time and since it
+ * left, and its status. A permission-scoped caller gets only the units they may see.
+ */
+export const getTankersReportData: RequestHandler = async (req, res, next) => {
+  try {
+    const body = req.body as TankersReportBody
+    sendSuccess(res, await getTankersReport(p(req, 'orgId'), body.units, body.to ?? Date.now(), req.authz?.vehicleIds ?? null))
   } catch (err) { next(err) }
 }
 

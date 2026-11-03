@@ -97,6 +97,23 @@ export const movementReportQuerySchema = z.object({
 }).transform(q => ({ ...q, hours: q.hours ?? 2 }))
 export type MovementReportQuery = z.infer<typeof movementReportQuerySchema>
 
+/**
+ * The Tankers Report's request (operator, 2–4 Nov 2026): the tankers off the
+ * Reports page's fleet list, each with its trackers, and the report time
+ * (default now). Sent in a body, as the list is too long for a query string.
+ */
+export const tankersReportBodySchema = z.object({
+  to: z.number().int().positive().optional(),
+  units: z.array(z.object({
+    key: z.string().trim().min(1).max(80),
+    plate: z.string().trim().min(1).max(80),
+    vehicleIds: z.array(z.string().max(80)).max(10),
+  })).max(500),
+}).superRefine((q, ctx) => {
+  if (q.to != null && q.to > Date.now() + 60_000) ctx.addIssue({ code: 'custom', path: ['to'], message: 'The report time cannot be in the future' })
+})
+export type TankersReportBody = z.infer<typeof tankersReportBodySchema>
+
 /** The longest period an end-of-shift report may cover: it reads the feeds and the weighbridge day by day. */
 export const END_OF_SHIFT_MAX_DAYS = 7
 
