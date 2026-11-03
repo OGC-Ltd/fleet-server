@@ -3,8 +3,9 @@
 #
 # Each commit on main gives two images in Amazon ECR (af-south-1, private,
 # immutable tags, scanned on push):
-#   <account>.dkr.ecr.af-south-1.amazonaws.com/fleet-server:<sha>          server + report-worker
-#   <account>.dkr.ecr.af-south-1.amazonaws.com/fleet-server:<sha>-migrate  one-off `prisma migrate deploy`
+#   <account>.dkr.ecr.af-south-1.amazonaws.com/ghala:fleet-server-<sha>          server + report-worker
+#   <account>.dkr.ecr.af-south-1.amazonaws.com/ghala:fleet-server-<sha>-migrate  one-off `prisma migrate deploy`
+# (`ghala` is the one repository for all fleet images; the tag names the app.)
 # An image is pushed only after it boots and Trivy finds no fixable HIGH or
 # CRITICAL issue. AWS access is per run via GitHub OIDC: the role in the
 # repository variable AWS_ECR_PUSH_ROLE_ARN trusts only main of this repo and
@@ -148,7 +149,7 @@ jobs:
           push: true
           sbom: true
           provenance: mode=max
-          tags: ${{ steps.ecr.outputs.registry }}/fleet-server:${{ github.sha }}
+          tags: ${{ steps.ecr.outputs.registry }}/ghala:fleet-server-${{ github.sha }}
           cache-from: type=gha,scope=runtime
 
       - name: push the migrate image
@@ -160,5 +161,5 @@ jobs:
           push: true
           sbom: true
           provenance: mode=max
-          tags: ${{ steps.ecr.outputs.registry }}/fleet-server:${{ github.sha }}-migrate
+          tags: ${{ steps.ecr.outputs.registry }}/ghala:fleet-server-${{ github.sha }}-migrate
           cache-from: type=gha,scope=runtime
