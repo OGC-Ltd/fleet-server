@@ -32,8 +32,18 @@ RUN npx tsc -p tsconfig.json \
  && npm prune --omit=dev --no-audit --no-fund
 
 FROM build AS runtime-modules
-RUN npm prune --omit=dev --omit=peer --no-audit --no-fund \
- && test ! -e node_modules/prisma && test ! -e node_modules/typescript
+# prisma and typescript are devDependencies AND optional peers of
+# @prisma/client, so npm keeps them through `--omit=dev` and `--omit=peer`
+# alike. Dropping them from THIS stage's package.json (the repo's file and
+# lock are untouched) lets prune take them and everything only they need.
+# Prune runs until the tree is clean: each pass can orphan more packages.
+RUN npm pkg delete devDependencies.prisma devDependencies.typescript \
+ && npm prune --omit=dev --no-audit --no-fund \
+ && npm prune --omit=dev --no-audit --no-fund \
+ && npm prune --omit=dev --omit=peer --no-audit --no-fund \
+ && test ! -e node_modules/prisma && test ! -e node_modules/typescript \
+ && test ! -e node_modules/mysql2 && test ! -e node_modules/source-map-js \
+ && ! npm ls --omit=dev --omit=peer --all 2>&1 | grep -iE "extraneous|missing|invalid"
 
 FROM ${NODE_IMAGE} AS base
 RUN apt-get update \
