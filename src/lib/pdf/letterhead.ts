@@ -16,6 +16,13 @@ export const FOOT_H = 11 * MM
 export const BOTTOM = PAGE_H - FOOT_H
 const BAND_H = 21 * MM
 
+/** A page's shape: A4 upright, or turned on its side (a JPEG to read on a wide screen, 4 Nov 2026). */
+export interface Sheet { w: number; h: number; body: number; bottom: number; layout: 'portrait' | 'landscape' }
+export function sheetOf(landscape = false): Sheet {
+  const w = landscape ? PAGE_H : PAGE_W, h = landscape ? PAGE_W : PAGE_H
+  return { w, h, body: w - 2 * SIDE, bottom: h - FOOT_H, layout: landscape ? 'landscape' : 'portrait' }
+}
+
 export const C = {
   ink: '#1c1c1c', mut: '#5c5c5c', rule: '#bfbfbf', soft: '#e6e6e6', shade: '#f3f3f3',
   hd: '#1f3a5f', flag: '#b42318', good: '#1e6b3a', route: '#1f3a5f', dz: '#e4edf3', band: '#212121', paper: '#ffffff',
@@ -37,14 +44,14 @@ export function logo(file: string): Buffer | null {
 }
 
 /** The dark band with both logos across the top of the page. Returns where the body starts. */
-export function drawLetterhead(doc: Doc): number {
-  doc.rect(0, 0, PAGE_W, BAND_H).fill(C.band)
+export function drawLetterhead(doc: Doc, sheet: Sheet = sheetOf()): number {
+  doc.rect(0, 0, sheet.w, BAND_H).fill(C.band)
   const rai = logo('rai-group-logo.jpeg')
   const ogc = logo('ogc-logo.png')
   if (rai) doc.image(rai, 12 * MM, (BAND_H - 15.5 * MM) / 2, { height: 15.5 * MM })
   if (ogc) {
     const h = 9.5 * MM, wd = h * (733 / 315)
-    doc.save().opacity(0.78).image(ogc, PAGE_W - 12 * MM - wd, (BAND_H - h) / 2, { height: h }).restore()
+    doc.save().opacity(0.78).image(ogc, sheet.w - 12 * MM - wd, (BAND_H - h) / 2, { height: h }).restore()
   }
   return BAND_H + 5 * MM
 }
@@ -66,7 +73,7 @@ export class ReportWriter {
   /** Repeated at the top of a table that continues on a new page. */
   private continuing: (() => void) | null = null
 
-  constructor(readonly doc: Doc) {}
+  constructor(readonly doc: Doc, readonly sheet: Sheet = sheetOf()) {}
 
   /** `text` cut to `width` on one line, with an ellipsis when it had to be. */
   fit(text: string, width: number, font: string, size: number) {
@@ -92,26 +99,26 @@ export class ReportWriter {
 
   /** Room for `h` below the cursor, or a fresh page. Returns whether a page was added. */
   room(h: number): boolean {
-    if (this.y + h <= BOTTOM) return false
+    if (this.y + h <= this.sheet.bottom) return false
     this.newPage()
     return true
   }
 
   /** A fresh page, under the running head when there is one. */
   newPage() {
-    this.doc.addPage({ size: 'A4', margin: 0 })
+    this.doc.addPage({ size: 'A4', layout: this.sheet.layout, margin: 0 })
     this.y = 12 * MM
     if (this.runningHead) {
-      this.line(this.runningHead.title.toUpperCase(), SIDE, this.y, BODY_W / 2, { font: F.bold, size: 9.4 })
-      this.line(this.runningHead.right, SIDE + BODY_W / 2, this.y + 1, BODY_W / 2, { size: 7.4, color: C.mut, align: 'right' })
+      this.line(this.runningHead.title.toUpperCase(), SIDE, this.y, this.sheet.body / 2, { font: F.bold, size: 9.4 })
+      this.line(this.runningHead.right, SIDE + this.sheet.body / 2, this.y + 1, this.sheet.body / 2, { size: 7.4, color: C.mut, align: 'right' })
       this.y += 13
-      this.hr(SIDE, SIDE + BODY_W, this.y, C.ink, 0.9)
+      this.hr(SIDE, SIDE + this.sheet.body, this.y, C.ink, 0.9)
       this.y += 4 * MM
     }
   }
 
   /** A section heading, with an aside on the right. */
-  h2(text: string, small?: string, x = SIDE, width = BODY_W) {
+  h2(text: string, small?: string, x = SIDE, width = this.sheet.body) {
     this.y += 3.2 * MM
     this.line(text.toUpperCase(), x, this.y, width * (small ? 0.5 : 1), { font: F.bold, size: 8.6, color: C.hd })
     if (small) this.line(small, x + width * 0.4, this.y + 0.6, width * 0.6, { size: 7.6, color: C.mut, align: 'right' })
@@ -120,18 +127,18 @@ export class ReportWriter {
     this.y += 1.4 * MM
   }
 
-  none(text: string, x = SIDE, width = BODY_W) {
+  none(text: string, x = SIDE, width = this.sheet.body) {
     this.line(text, x, this.y + 1, width, { font: F.ital, size: 8.2, color: C.mut })
     this.y += 13
   }
 
-  more(text: string, x = SIDE, width = BODY_W, color = C.mut) {
+  more(text: string, x = SIDE, width = this.sheet.body, color = C.mut) {
     this.line(text, x, this.y + 1, width, { size: 7, color })
     this.y += 11
   }
 
   /** A paragraph that wraps, in the muted note style. */
-  note(text: string, x = SIDE, width = BODY_W) {
+  note(text: string, x = SIDE, width = this.sheet.body) {
     this.doc.font(F.reg).fontSize(7.4).fillColor(C.mut)
     const h = this.doc.heightOfString(text, { width })
     this.room(h + 4)
@@ -141,7 +148,7 @@ export class ReportWriter {
 
   /** A row of ruled boxes: a small label over a bold figure. */
   cells(items: Array<[string, string] | [string, string, string | undefined]>) {
-    const cw = BODY_W / items.length, h = 9.6 * MM
+    const cw = this.sheet.body / items.length, h = 9.6 * MM
     this.room(h)
     items.forEach(([k, v, color], i) => {
       const x = SIDE + i * cw
@@ -157,7 +164,7 @@ export class ReportWriter {
    * the last. Runs onto new pages as needed, repeating its heads there.
    */
   table(cols: Col[], head: string[], rows: Cell[][], o: { x?: number; width?: number; size?: number; fills?: Array<string | null> } = {}) {
-    const x = o.x ?? SIDE, width = o.width ?? BODY_W, size = o.size ?? 8.2
+    const x = o.x ?? SIDE, width = o.width ?? this.sheet.body, size = o.size ?? 8.2
     const fixed = cols.reduce((a, c) => a + c.w, 0)
     const flex = cols.filter(c => c.w === 0).length
     const widths = cols.map(c => (c.w === 0 ? (width - fixed) / flex : c.w))
@@ -202,10 +209,10 @@ export class ReportWriter {
     const range = this.doc.bufferedPageRange()
     for (let i = range.start; i < range.start + range.count; i++) {
       this.doc.switchToPage(i)
-      this.hr(SIDE, SIDE + BODY_W, PAGE_H - FOOT_H + 2 * MM, C.rule, 0.6)
+      this.hr(SIDE, SIDE + this.sheet.body, this.sheet.bottom + 2 * MM, C.rule, 0.6)
       // Three quarters for the left text: a report names itself and its period there.
-      this.line(generated, SIDE, PAGE_H - FOOT_H + 4 * MM, BODY_W * 0.75, { size: 7, color: C.mut })
-      this.line(`Page ${i - range.start + 1} of ${range.count}`, SIDE + BODY_W * 0.75, PAGE_H - FOOT_H + 4 * MM, BODY_W * 0.25,
+      this.line(generated, SIDE, this.sheet.bottom + 4 * MM, this.sheet.body * 0.75, { size: 7, color: C.mut })
+      this.line(`Page ${i - range.start + 1} of ${range.count}`, SIDE + this.sheet.body * 0.75, this.sheet.bottom + 4 * MM, this.sheet.body * 0.25,
         { size: 7, color: C.mut, align: 'right' })
     }
   }
