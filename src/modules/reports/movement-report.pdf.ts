@@ -13,7 +13,7 @@
 // Pure drawing: takes what movement-report.service answers and returns the file.
 
 import PDFDocument from 'pdfkit'
-import { MM, SIDE, BODY_W, C, F, DASH, num, drawLetterhead, ReportWriter, type Cell, type Col } from '../../lib/pdf/letterhead.js'
+import { MM, SIDE, sheetOf, C, F, DASH, num, drawLetterhead, ReportWriter, type Cell, type Col } from '../../lib/pdf/letterhead.js'
 import { haversineM } from '../../lib/geofence.js'
 import { MOVING_KMH, type MovementReport, type MovementRow, type MovementState } from './movement-report.service.js'
 
@@ -102,20 +102,21 @@ export function movementReportsFileName(rs: MovementReport[]): string {
   return `Movement Report ${first.organisation || first.orgCode} ${day(first.from)} to ${day(last.from)} ${at(first.from)}-${at(first.to)}.pdf`
 }
 
-export async function renderMovementReportPdf(r: MovementReport): Promise<Buffer> {
-  return renderMovementReportsPdf([r])
+export async function renderMovementReportPdf(r: MovementReport, o: { landscape?: boolean } = {}): Promise<Buffer> {
+  return renderMovementReportsPdf([r], o)
 }
 
 /** One report, or several (a window a day over a range of days), each from a new page, in one file. */
-export async function renderMovementReportsPdf(rs: MovementReport[]): Promise<Buffer> {
+export async function renderMovementReportsPdf(rs: MovementReport[], o: { landscape?: boolean } = {}): Promise<Buffer> {
   const first = rs[0]!
-  const doc = new PDFDocument({ size: 'A4', margin: 0, bufferPages: true, info: { Title: `Movement Report ${movementReportNo(first)}`, Author: 'Off-Grid Consulting Ltd.' } })
+  const sheet = sheetOf(o.landscape)
+  const doc = new PDFDocument({ size: 'A4', layout: sheet.layout, margin: 0, bufferPages: true, info: { Title: `Movement Report ${movementReportNo(first)}`, Author: 'Off-Grid Consulting Ltd.' } })
   const chunks: Buffer[] = []
   doc.on('data', (c: Buffer) => chunks.push(c))
   const done = new Promise<Buffer>(res => doc.on('end', () => res(Buffer.concat(chunks))))
-  const w = new ReportWriter(doc)
+  const w = new ReportWriter(doc, sheet)
   rs.forEach((r, i) => {
-    if (i) { w.runningHead = null; doc.addPage({ size: 'A4', margin: 0 }) }
+    if (i) { w.runningHead = null; doc.addPage({ size: 'A4', layout: sheet.layout, margin: 0 }) }
     drawReport(w, doc, r)
   })
   const last = rs[rs.length - 1]!
@@ -132,9 +133,10 @@ function drawReport(w: ReportWriter, doc: InstanceType<typeof PDFDocument>, r: M
   // The site its directions read against: MORL, or the organisation's own ("Sukari")
   const site = r.site || 'MORL'
   const words = directionWords(site)
+  const BODY_W = w.sheet.body
 
   // ── letterhead, title, who and when ──
-  w.y = drawLetterhead(doc)
+  w.y = drawLetterhead(doc, w.sheet)
   w.line('MOVEMENT REPORT', SIDE, w.y, BODY_W / 2, { font: F.bold, size: 15 })
   {
     const right = `Report no. ${reportNo}   ·   Date ${dateOf(r.to)}`

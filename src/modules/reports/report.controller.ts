@@ -149,9 +149,12 @@ export const downloadEditedEndOfShift: RequestHandler = async (req, res, next) =
     const doc: ShiftDoc = { ...body, reportNo: reportNumber(org.short, now), footer: made }
     // A category's report is named for it: "… Menengai Tankers 2026-11-02 …"
     const category = body.meta.find((m) => m.label === 'Category')?.value
-    sendShiftPdf(res, await renderShiftDoc(doc), category ? `${org.name} ${category}` : org.name, now)
+    sendShiftPdf(res, await renderShiftDoc(doc, { landscape: turned(req) }), category ? `${org.name} ${category}` : org.name, now)
   } catch (err) { next(err) }
 }
+
+/** `?landscape=1`: the pages turned on their side (the JPEG's Landscape, 4 Nov 2026). */
+const turned = (req: Parameters<RequestHandler>[0]) => req.query.landscape === '1'
 
 /** The window a movement-report query asks for: from–to, or the last `hours` up to now. */
 const movementWindow = (q: MovementReportQuery) => (q.from != null && q.to != null ? { from: q.from, to: q.to } : q.hours)
@@ -207,13 +210,13 @@ export const downloadEditedMovementReport: RequestHandler = async (req, res, nex
     const body = req.body as MovementPdfBody
     const asked = 'reports' in body ? body.reports : [body]
     const reports = await Promise.all(asked.map(r => editedMovementReport(p(req, 'orgId'), r, by)))
-    await sendMovementPdf(res, reports)
+    await sendMovementPdf(res, reports, turned(req))
   } catch (err) { next(err) }
 }
 
 /** One report, or a window a day over a range of days, as one PDF. */
-async function sendMovementPdf(res: Parameters<RequestHandler>[1], reports: MovementReport[]) {
-  const buffer = await renderMovementReportsPdf(reports)
+async function sendMovementPdf(res: Parameters<RequestHandler>[1], reports: MovementReport[], landscape = false) {
+  const buffer = await renderMovementReportsPdf(reports, { landscape })
   const name = reports.length === 1 ? movementFileName(reports[0]!) : movementReportsFileName(reports)
   res.setHeader('Content-Type', 'application/pdf')
   res.setHeader('Content-Disposition',

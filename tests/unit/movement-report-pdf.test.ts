@@ -109,6 +109,12 @@ describe('the movement report', () => {
     expect(movementFileName(report)).toMatch(/^Movement Report Menengai Oil Refineries Ltd \d{8}-\d{4} 2 hours\.pdf$/)
   })
 
+  it('turns the pages on their side when asked', async () => {
+    const box = (buf: Buffer) => buf.toString('latin1').match(/\/MediaBox \[([^\]]+)\]/)?.[1]?.trim()
+    expect(box(await renderMovementReportPdf(report))).toBe('0 0 595.28 841.89')
+    expect(box(await renderMovementReportPdf(report, { landscape: true }))).toBe('0 0 841.89 595.28')
+  })
+
   it('runs onto a second page under the running head when the fleet is long', async () => {
     const long = { ...report, groups: [{ name: 'CPO - Menengai', rows: Array.from({ length: 80 }, (_, i) => ({ ...report.groups[0]!.rows[i % 7]!, plate: `K${i}` })) }] }
     const buf = await renderMovementReportPdf(long)

@@ -202,6 +202,13 @@ describe('end of shift: the PDF', () => {
     expect(buf.subarray(0, 5).toString()).toBe('%PDF-')
     expect(pages(buf)).toBeGreaterThanOrEqual(1)
   })
+  it('turns the pages on their side when asked', async () => {
+    const d = endOfShiftDoc(buildEndOfShift(fixture), { orgName: 'West Sugar', reportNo: 'R', generatedAt: NOW })
+    const buf = await renderShiftDoc(d, { landscape: true })
+    const boxes = buf.toString('latin1').match(/\/MediaBox \[[^\]]+\]/g) ?? []
+    expect(boxes.length).toBeGreaterThanOrEqual(1)
+    expect(boxes.every((b) => b.includes('841.89 595.28'))).toBe(true)
+  })
 })
 
 describe('end of shift: a picked period', () => {

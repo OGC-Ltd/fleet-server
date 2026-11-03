@@ -10,7 +10,7 @@
 // Pure: takes what end-of-shift builds and returns the document, or the file.
 
 import PDFDocument from 'pdfkit'
-import { MM, SIDE, BODY_W, C, F, DASH, num, drawLetterhead, ReportWriter, type Cell, type Col } from '../../lib/pdf/letterhead.js'
+import { MM, SIDE, sheetOf, C, F, DASH, num, drawLetterhead, ReportWriter, type Cell, type Col } from '../../lib/pdf/letterhead.js'
 import type { EndOfShift, Tone } from './end-of-shift.js'
 
 const TZ = 'Africa/Nairobi'
@@ -212,13 +212,15 @@ const cellOf = (c: DocCell): Cell => ({ text: c.text, bold: c.bold, color: color
 const colsOf = (cols: DocCol[]): Col[] => cols.map((c) => ({ w: c.w * MM, align: c.align }))
 
 /** Draws a document: the one endOfShiftDoc made, or the operator's edit of it. */
-export async function renderShiftDoc(d: ShiftDoc): Promise<Buffer> {
-  const doc = new PDFDocument({ size: 'A4', margin: 0, bufferPages: true,
+export async function renderShiftDoc(d: ShiftDoc, o: { landscape?: boolean } = {}): Promise<Buffer> {
+  const sheet = sheetOf(o.landscape)
+  const BODY_W = sheet.body
+  const doc = new PDFDocument({ size: 'A4', layout: sheet.layout, margin: 0, bufferPages: true,
     info: { Title: `End of shift report ${d.meta[0]?.value ?? ''} ${d.date}`.trim(), Author: 'Off-Grid Consulting Ltd.' } })
   const chunks: Buffer[] = []
   doc.on('data', (c: Buffer) => chunks.push(c))
   const done = new Promise<Buffer>((res) => doc.on('end', () => res(Buffer.concat(chunks))))
-  const w = new ReportWriter(doc)
+  const w = new ReportWriter(doc, sheet)
 
   /** A muted note, a little clear of the table above it. */
   const note = (text: string) => { w.y += 1.2 * MM; w.note(text) }
@@ -232,7 +234,7 @@ export async function renderShiftDoc(d: ShiftDoc): Promise<Buffer> {
     w.table(colsOf(t.cols), t.head, t.rows.map((row) => row.map(cellOf)), { ...o, ...(t.size ? { size: t.size } : {}) })
 
   // ── letterhead and title ──
-  w.y = drawLetterhead(doc)
+  w.y = drawLetterhead(doc, sheet)
   w.line(d.title, SIDE, w.y, BODY_W / 2, { font: F.bold, size: 15 })
   w.line(`Report no. ${d.reportNo}  ·  Date ${d.date}`, SIDE + BODY_W / 2, w.y + 6, BODY_W / 2, { font: F.bold, size: 8, align: 'right' })
   w.y += 19
