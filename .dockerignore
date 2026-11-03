@@ -8,6 +8,9 @@ generated
 .env
 .env.*
 *.pem
+# The one exception: Amazon's PUBLIC RDS root certificates, so the app can
+# verify the database (sslmode=verify-full). Never put a key in deploy/certs.
+!deploy/certs/rds-*-bundle.pem
 *.log
 *.patch
 *.pdf

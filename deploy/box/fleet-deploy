@@ -73,6 +73,18 @@ mode() {
   else echo none; fi
 }
 
+# Once SSM is the source of the secrets (the marker below, set after the
+# import was checked), every check and deploy writes the env file from SSM
+# first, and stops if it cannot: a deploy never runs on secrets it could not
+# confirm. Running containers are not touched by a failure here.
+SECRETS_MARK=/etc/fleet/secrets-from-ssm
+refresh_env() {
+  [ "$PROJECT" = fleet ] && [ -f "$SECRETS_MARK" ] || return 0
+  local out
+  out=$(/usr/local/sbin/fleet-secrets render) || die "could not render secrets from SSM: nothing deployed"
+  say "secrets: $out"
+}
+
 check_env() {
   [ -f "$ENV_FILE" ] || die "missing $ENV_FILE"
   [ "$(stat -c '%U %a' "$ENV_FILE")" = "root 600" ] || die "$ENV_FILE must be owned by root, mode 600"
@@ -164,6 +176,7 @@ pm2_back() {
 check() {
   local sha=$1 img tmp rc=0
   img="${REPO}:fleet-server-${sha}"
+  refresh_env
   check_env
   say "mode: $(mode)"
   [ "$(mode)" != BOTH ] || die "pm2 and containers are BOTH serving: stop one now"
@@ -179,14 +192,22 @@ const h = v => crypto.createHash('sha256').update(v ?? '').digest('hex')
   // 1. The env file reads the same under compose as under dotenv on the host.
   const want = JSON.parse(fs.readFileSync('/chk/want.json', 'utf8'))
   const bad = Object.keys(want).filter(k => h(process.env[k]) !== want[k])
-  out(bad.length === 0, `env parity with the live .env: ${Object.keys(want).length} keys${bad.length ? ', differ: ' + bad.join(' ') : ''}`)
-  // 2. Database: reachable, and NOT read-only (this is the real login).
+  out(bad.length === 0, `env file reads the same in the container: ${Object.keys(want).length} keys${bad.length ? ', differ: ' + bad.join(' ') : ''}`)
+  const drift = fs.readFileSync('/chk/drift.txt', 'utf8').trim()
+  console.log(`INFO keys that differ from the live pm2 .env: ${drift || 'none'}`)
+  // 2. Database: reachable, NOT read-only (this is the real login), and how
+  //    far TLS goes: encrypted, and whether the certificate is checked.
   try {
     const { Client } = appRequire('pg')
     const c = new Client({ connectionString: process.env.DATABASE_URL }); await c.connect()
-    const r = await c.query('show transaction_read_only'); await c.end()
+    const r = await c.query('show transaction_read_only')
+    const s = (await c.query('select ssl, version from pg_stat_ssl where pid = pg_backend_pid()')).rows[0]; await c.end()
     out(r.rows[0].transaction_read_only === 'off', 'database: connects, read-write login')
-  } catch (e) { out(false, 'database: ' + e.code) }
+    out(s.ssl, `database: TLS ${s.version}`)
+    const mode = new URL(process.env.DATABASE_URL).searchParams.get('sslmode')
+    console.log(mode === 'verify-full' ? 'OK   database: certificate checked (verify-full, RDS root CAs)'
+                                       : `WARN database: certificate NOT checked (sslmode=${mode}); fleet-secrets import sets verify-full`)
+  } catch (e) { out(false, 'database: ' + (e.code || e.message.slice(0, 80))) }
   // 3. Redis (BullMQ, rate limits): PING only.
   try {
     const Redis = appRequire('ioredis')
@@ -200,7 +221,14 @@ const h = v => crypto.createHash('sha256').update(v ?? '').digest('hex')
     try { const u = new URL(process.env[k]); hosts.set(k, [u.hostname, +u.port || (u.protocol === 'http:' ? 80 : 443)]) } catch {}
   }
   if (process.env.MAILTRAP_SMTP_HOST) hosts.set('MAILTRAP_SMTP', [process.env.MAILTRAP_SMTP_HOST, +(process.env.MAILTRAP_SMTP_PORT || 587)])
-  for (const [k, hp] of [['openai', ['api.openai.com', 443]], ['google routes', ['routes.googleapis.com', 443]], ['web push (fcm)', ['fcm.googleapis.com', 443]], ['openweather', ['api.openweathermap.org', 443]]]) hosts.set(k, hp)
+  // Every fixed host in src/ (grep https:// in src, 2026-11-03), plus the
+  // browsers' push services web-push posts to.
+  for (const [k, host] of [['openai', 'api.openai.com'], ['deepseek', 'api.deepseek.com'],
+      ['google routes', 'routes.googleapis.com'], ['google roads', 'roads.googleapis.com'], ['google weather', 'weather.googleapis.com'],
+      ['openweather', 'api.openweathermap.org'], ['osrm', 'router.project-osrm.org'], ['overpass', 'overpass-api.de'],
+      ['overpass (mirror)', 'overpass.private.coffee'], ['factorysuite', 'factorysuite.org'],
+      ['push: chrome (fcm)', 'fcm.googleapis.com'], ['push: firefox', 'updates.push.services.mozilla.com'], ['push: apple', 'web.push.apple.com']])
+    hosts.set(k, [host, 443])
   for (const [k, [host, port]] of hosts) {
     const ok = await new Promise(res => { const s = net.connect({ host, port, timeout: 6000 }, () => { s.destroy(); res(true) }); s.on('error', () => res(false)); s.on('timeout', () => { s.destroy(); res(false) }) })
     out(ok, `reach ${k}`)
@@ -210,14 +238,19 @@ const h = v => crypto.createHash('sha256').update(v ?? '').digest('hex')
   try { fs.writeFileSync('/app/dist/.write-test', 'x'); out(false, '/app/dist is writable') } catch { out(true, 'image file system read-only') }
 })()
 JS
-  # What the live server reads today, by dotenv, as hashes.
-  runuser -u ubuntu -- env PATH="$NODE_BIN:$PATH" node -e '
-    const crypto = require("crypto"), d = require(process.argv[1] + "/node_modules/dotenv")
-    const env = d.parse(require("fs").readFileSync(process.argv[1] + "/.env"))
+  # What the env file says, read by dotenv on the host, as hashes; and which
+  # keys differ from the live pm2 .env (names only). Since SSM became the
+  # source, DATABASE_URL is expected there (verify-full).
+  "$NODE_BIN/node" -e '
+    const fs = require("fs"), crypto = require("crypto"), [live, file, tmp] = process.argv.slice(1)
+    const d = require(live + "/node_modules/dotenv")
+    const env = d.parse(fs.readFileSync(file)), old = d.parse(fs.readFileSync(live + "/.env"))
     const h = v => crypto.createHash("sha256").update(v ?? "").digest("hex")
     const want = {}; for (const k of Object.keys(env)) if (!["NODE_ENV", "VSS_SESSION_FILE"].includes(k)) want[k] = h(env[k])
-    process.stdout.write(JSON.stringify(want))' "$LIVE_DIR" > "$tmp/want.json"
-  chmod 644 "$tmp/want.json"
+    const drift = [...new Set([...Object.keys(env), ...Object.keys(old)])].filter(k => env[k] !== old[k]).sort()
+    fs.writeFileSync(tmp + "/want.json", JSON.stringify(want)); fs.writeFileSync(tmp + "/drift.txt", drift.join(" "))' \
+    "$LIVE_DIR" "$ENV_FILE" "$tmp"
+  chmod 644 "$tmp/want.json" "$tmp/drift.txt"
   say "checks inside the image with $ENV_FILE (throwaway project fleet-check)"
   PROJECT=fleet-check IMAGE="$img" compose run --rm --no-deps -T -v "$tmp:/chk:ro" --entrypoint node server /chk/check.js || rc=1
   PROJECT=fleet-check compose down -v --remove-orphans >/dev/null 2>&1 || true
@@ -239,7 +272,7 @@ case "${1:-}" in
   check) valid_sha "${2:-}"; [ "$PROJECT" = fleet ] || die "check runs against the real env only"; check "$2" ;;
 
   up)
-    sha="${2:-}"; valid_sha "$sha"; check_env
+    sha="${2:-}"; valid_sha "$sha"; refresh_env; check_env
     if [ "$PROJECT" = fleet ]; then
       m=$(mode)
       [ "$m" = containers ] || die "mode is '$m': the first switch is 'fleet-deploy cutover <sha>'"
