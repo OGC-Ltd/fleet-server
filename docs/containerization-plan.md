@@ -200,6 +200,25 @@ That leaves about 7 GiB free during the rollout, with the old pm2 setup still in
 - No user traffic reaches it.
 - *Undo:* `docker compose down`.
 
+**Phases 2 and 3: how they are wired (2026-11-03, ready, not switched).**
+- **`deploy/box/fleet-deploy`** (as `/usr/local/sbin/fleet-deploy`) runs `server` and `report-worker` as compose project `fleet` on **`127.0.0.1:3000`**, the port nginx already proxies to. So the server cutover changes no nginx config, unlike the 3001 plan in the steps below.
+  - `check <sha>`: inside the image with the real `/etc/fleet/server.env` (root 600, copied from `.env`), it runs a check script instead of the app. The script confirms the env reads the same as dotenv reads the live `.env` (by hash), the database login is read-write, Redis answers PING, every outside service is reachable over TCP, and the cache volume is writable while the image is not. Nothing live changes.
+  - `cutover <sha>`: runs `check`, copies `.cache` into the volume, stops pm2, copies again plus the VSS session, then starts the containers. On any failure it stops them and starts pm2 again. On success it disables `pm2-ubuntu.service`, so a reboot cannot start both.
+  - `up <sha>` / `rollback`: refuses unless the box is in container mode. If `/health` or the worker fails, it goes back to the previous image by itself. Keeps two images.
+  - `back-to-pm2`: stops the containers, copies the reports made since then back to `.cache`, and starts pm2.
+  - **pm2 and the containers never serve together.** `mode` reports `BOTH` if they ever do, and CI refuses to deploy.
+- **CI (fleet-server `deploy.yml`)** asks `fleet-deploy mode` first. In `pm2` mode it runs today's git-push deploy. In `containers` mode it runs `fleet-deploy up <sha>`, which waits up to 20 min for images.yml to push the image.
+- **`deploy/box/fleet-web`** runs the site image as project `fleet-web` on `127.0.0.1:8081`.
+  - `check <sha>` compares the image's files and answers with what host nginx serves today.
+  - `up <sha>` starts or replaces the container.
+  - `switch` changes `/` in `locations.conf` to proxy to the container and reloads nginx. `/api` and `/webhook` are untouched. If its checks fail, it puts the static version back.
+  - `back` puts the static version back.
+- **CI (new-ui `deploy.yml`)** still publishes the files to `~/prod/dash/build`, which is the way back. After `switch`, it also runs `fleet-web up <sha>`.
+- Rehearsed on 2026-11-03, with pm2 live throughout (`/health` 200 each time):
+  - `up` refused while pm2 was serving.
+  - Deploying image A, then B (which waited for CI), then a rollback to A all worked.
+  - A missing image failed within 2 s.
+
 **Phase 2: switch the server and worker to containers.** This happens at a quiet hour, with the following steps:
 1. Copy `.cache` into the `fleet-cache` volume. Repeat right before the switch to catch new reports.
 2. `pm2 stop server report-worker`.
