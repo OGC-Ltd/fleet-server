@@ -67,6 +67,11 @@ export function classify(last: Fix | null, start: { lat: number; lng: number } |
   const closerKm = Math.round((km(start) - km(last)) * 10) / 10
   if (closerKm >= DIRECTION_MIN_KM) return { state: 'to', kmToMorl, closerKm }
   if (closerKm <= -DIRECTION_MIN_KM) return { state: 'from', kmToMorl, closerKm }
+  // A unit on the move always has a direction, however small the change
+  // (operator, 2026-11-03: "we do not need the moving at all"); the kilometre
+  // only keeps a parked unit's GPS drift from reading as one
+  if (moving && closerKm > 0) return { state: 'to', kmToMorl, closerKm }
+  if (moving && closerKm < 0) return { state: 'from', kmToMorl, closerKm }
   return { state: moving ? 'moving' : 'stopped', kmToMorl, closerKm }
 }
 
