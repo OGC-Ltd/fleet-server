@@ -1,0 +1,15 @@
+# `fleet-edge check` only (deploy/box/fleet-edge): compose project
+# fleet-edgecheck runs the edge on loopback test ports in front of a harmless
+# server (the shadow's read-only env, via FLEET_ENV_FILE) and the site image.
+# Nothing here touches the live project `fleet`, and the project is removed
+# with its volumes (including its certificate copy) when the check ends.
+services:
+  server:
+    ports: !override
+      - "127.0.0.1:3011:3000"
+  web:
+    ports: !reset []   # the live web container may hold 8081
+  edge:
+    ports: !override
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:18443:8443"

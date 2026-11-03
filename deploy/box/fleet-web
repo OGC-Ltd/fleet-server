@@ -2,7 +2,7 @@
 # fleet-web: phase 3 of docs/containerization-plan.md, new-ui as a container.
 #
 # The web container (ghala:raitrack-<sha>, unprivileged nginx with the built
-# site) runs as compose project `fleet-web` on 127.0.0.1:8081. The host's nginx
+# site) runs as service `web` of compose project `fleet` on 127.0.0.1:8081. The host's nginx
 # keeps TLS, /api and /webhook; switching only changes where `/` comes from,
 # with a reload, so neither direction drops a request.
 #
@@ -22,7 +22,7 @@ set -Eeuo pipefail
 
 REGION=af-south-1
 COMPOSE_DIR=/etc/fleet/compose
-PROJECT=fleet-web
+PROJECT=fleet          # same project as the server: the phase 4 edge reaches web and server on its networks
 PORT=8081
 CHECK_PORT=8082
 STATE=/etc/fleet/web.deployed
