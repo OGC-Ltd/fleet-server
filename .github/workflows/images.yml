@@ -76,8 +76,10 @@ jobs:
           rt="${IMAGE}:${GITHUB_SHA}"; mg="${IMAGE}:${GITHUB_SHA}-migrate"
           docker network create --internal boot >/dev/null
           docker run -d --name pg --network boot -e POSTGRES_USER=fleet -e POSTGRES_PASSWORD=boot -e POSTGRES_DB=fleet postgis/postgis:16-3.5-alpine >/dev/null
-          for i in $(seq 1 60); do docker exec pg pg_isready -U fleet -d fleet >/dev/null 2>&1 && break; sleep 2; done
-          docker exec pg psql -U fleet -d fleet -qc 'CREATE EXTENSION IF NOT EXISTS postgis'
+          # Over TCP, not the socket: the image's init server answers on the socket
+          # while it is still creating the postgis extension itself.
+          for i in $(seq 1 60); do docker exec pg pg_isready -h 127.0.0.1 -U fleet -d fleet >/dev/null 2>&1 && break; sleep 2; done
+          docker exec pg psql -h 127.0.0.1 -U fleet -d fleet -tAc "select extversion from pg_extension where extname='postgis'"
           URL=postgresql://fleet:boot@pg:5432/fleet
           # The migration history cannot build a database from empty (see the plan),
           # so the schema comes from db push, through the migrate image's own CLI.
