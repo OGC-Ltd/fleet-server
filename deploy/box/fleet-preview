@@ -40,7 +40,15 @@ set -Eeuo pipefail
 REGION=af-south-1
 COMPOSE_DIR=/etc/fleet/compose
 PROJECT=fleet-preview
+# The preview's env. /etc/fleet/preview.env, when present, is the operator's
+# choice (2026-11-03) to let the preview SIGN IN against the live database:
+# the shadow env with a writable login, so what is done in the preview
+# changes real data, exactly as on the live site. Every other guard holds:
+# no background job, no Redis, no outside credential. Without that file the
+# preview stays read-only.
+WRITABLE_ENV=/etc/fleet/preview.env
 ENV_FILE=/etc/fleet/shadow.env
+[ -f "$WRITABLE_ENV" ] && ENV_FILE=$WRITABLE_ENV
 ALLOW=/etc/fleet/preview.allow
 STATE=/etc/fleet/preview.deployed
 CHAIN=FLEET-PREVIEW
@@ -100,8 +108,10 @@ check_env() {
     grep -qx "${k}_ENABLED=false" "$ENV_FILE" || die "${k}_ENABLED must be false in $ENV_FILE"
   done
   grep -qx 'FOLLOW_DB=false' "$ENV_FILE" || die "FOLLOW_DB must be false"
-  [ "$(grep -cE '^(DATABASE_URL|DIRECT_URL)=.*default_transaction_read_only%3Don' "$ENV_FILE")" = 2 ] \
-    || die "both database URLs must open read-only sessions"
+  if [ "$ENV_FILE" != "$WRITABLE_ENV" ]; then
+    [ "$(grep -cE '^(DATABASE_URL|DIRECT_URL)=.*default_transaction_read_only%3Don' "$ENV_FILE")" = 2 ] \
+      || die "both database URLs must open read-only sessions"
+  fi
   if grep -qE '^(REDIS_URL|WIALON_TOKEN|RAIFACTORYSUITE_API_KEY|VSS_PASSWORD|OPENAI_API_KEY|DEEPSEEK_API_KEY|GOOGLE_ROUTING_API_KEY|OPENWEATHER_API_KEY|MAILTRAP_API_TOKEN|VAPID_PRIVATE_KEY|FACTORY_SUITE_HOOK|access_token)=' "$ENV_FILE"; then
     die "$ENV_FILE carries an outside credential or Redis"
   fi
