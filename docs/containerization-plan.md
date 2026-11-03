@@ -77,9 +77,9 @@ than a few seconds.
 
 | Container | Image | Exposed | Limits (start) |
 | --- | --- | --- | --- |
-| `server` | `ghcr.io/ogc-ltd/fleet-server:<sha>` | `127.0.0.1:3001` during migration, then the internal network only | 1.5 GB memory, 1.5 CPU |
+| `server` | `<account>.dkr.ecr.af-south-1.amazonaws.com/fleet-server:<sha>` | `127.0.0.1:3001` during migration, then the internal network only | 1.5 GB memory, 1.5 CPU |
 | `report-worker` | the same image, different command | none | 1.8 GB memory, 1 CPU |
-| `web` | `ghcr.io/ogc-ltd/raitrack:<sha>` (nginx-unprivileged + build) | internal network only | 64 MB |
+| `web` | `<account>.dkr.ecr.af-south-1.amazonaws.com/raitrack:<sha>` (nginx-unprivileged + build) | internal network only | 64 MB |
 | `edge` | `nginx:<pinned>` + our config | **80, 443 on the host** (the only public ports) | 128 MB |
 | `certbot` | `certbot/certbot:<pinned>` | none | runs on a schedule |
 
@@ -93,7 +93,7 @@ different code versions.
 - **Multi-stage builds.** The final image has the compiled `dist/`, production `node_modules`, `generated/prisma`, `assets/` and `prisma/` only: no compilers, no source, no `.git`.
 - **Non-root user** with a fixed UID (10001), set by `USER` in the image.
 - **Scanned in CI** with Trivy. The build **fails on fixable HIGH or CRITICAL** issues. An SBOM is attached to each image.
-- **Private registry:** GHCR under OGC-Ltd. The box logs in for the pull with the job's short-lived token and logs out again, as project-manager already does. The box stores no GitHub credential.
+- **Private registry: Amazon ECR in af-south-1** (decided 2026-11-03, replacing GHCR). Repositories `fleet-server` and `raitrack`, immutable tags, scan on push, KMS-encrypted, lifecycle of 30 images. CI pushes through GitHub OIDC with role `github-ecr-push`, which only `main` of the two repositories can assume and which can only push to them. The box pulls with its own instance role `fleet-app` (read-only on the two repositories). No AWS keys or GitHub tokens are stored anywhere. Setup: the "Fleet ECR Setup" runbook.
 
 **Runtime (compose)**
 - **Locked-down containers:**
@@ -141,7 +141,7 @@ Each of these is tested locally with `docker compose` first:
 ## 6. Rolling it out (each phase can be undone)
 
 **Phase 0: CI builds images, nothing deployed.**
-- fleet-server CI gains build → Trivy scan → push `ghcr.io/…:<sha>`, beside the current pm2 deploy, which carries on unchanged.
+- fleet-server CI gains build → Trivy scan → push to ECR (`fleet-server:<sha>`), beside the current pm2 deploy, which carries on unchanged.
 - Same for new-ui.
 - *Done when:* images build, scan clean, and run locally.
 
@@ -176,6 +176,15 @@ That leaves about 7 GiB free during the rollout, with the old pm2 setup still in
 - It keeps only the current and previous tags, and prunes everything else, including dangling layers.
 - The migrate image is never left on the box.
 - Phase 4's cleanup (old checkouts, nvm, pm2) returns about 1.5 GiB. Grow the volume after that, using the runbook.
+
+**Phase 1: how it is wired (2026-11-03).**
+- **`/etc/fleet/shadow.env`** (root 600) is built from the live `.env` by **allowlist**: every outside credential, Redis and the webhook secret are left out. All 14 switches and `FOLLOW_DB` are false, `DB_POOL_MAX=4`, and both database URLs carry `options=-c default_transaction_read_only=on`.
+- **The read-only sessions are enforced by PostgreSQL itself**: even `CREATE TEMP TABLE` is refused. They stand in for a separate read-only role, because `fleet_app` cannot create roles and the RDS master password stays off the box.
+- **`deploy/box/fleet-shadow`** is installed root-owned as `/usr/local/sbin/fleet-shadow`.
+  - It re-checks all of the above, plus 3 GiB free, before every start.
+  - It pulls from ECR with the instance role (a login that lasts minutes, then logout), and runs compose project `fleet-shadow` on `127.0.0.1:3001`.
+  - Commands: `sudo fleet-shadow up <sha>` / `status` / `down`.
+- **`deploy.yml` ignores** pushes that change only Docker, CI, docs or `deploy/box` files, so container work no longer restarts the live server.
 
 **Phase 1: shadow container on the box.**
 - Run `server` from the image on `127.0.0.1:3001` with **all fourteen background switches off**:
@@ -320,6 +329,6 @@ The containers' 127.0.0.1 port publishing becomes unnecessary here, since only t
 
 ## 9. Open questions for the team
 
-1. Does fleet-server already have GHCR access set up in the OGC-Ltd org, or does it need the org setting that project-manager uses?
+1. Who runs the "Fleet ECR Setup" runbook in the AWS console (needs IAM and ECR rights), and adds the `AWS_ECR_PUSH_ROLE_ARN` variable in both GitHub repositories?
 2. Is there a quiet window for phase 2? Polling runs around the clock, so pick the lowest-traffic hour from the nginx access log.
 3. Should Dereva's backend, once it is connected, join this compose file or live separately?

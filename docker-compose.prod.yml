@@ -7,8 +7,8 @@
 # first.
 #
 # Images are named by commit, never `latest`, and passed in by the deploy:
-#   FLEET_SERVER_IMAGE=ghcr.io/ogc-ltd/fleet-server:<sha>
-#   RAITRACK_IMAGE=ghcr.io/ogc-ltd/raitrack:<sha>          (profile: web, edge)
+#   FLEET_SERVER_IMAGE=<account>.dkr.ecr.af-south-1.amazonaws.com/fleet-server:<sha>
+#   RAITRACK_IMAGE=<account>.dkr.ecr.af-south-1.amazonaws.com/raitrack:<sha>          (profile: web, edge)
 # Secrets come from FLEET_ENV_FILE (default /etc/fleet/server.env, root 600).
 #
 # Profiles follow the rollout:
@@ -36,7 +36,7 @@ x-hardening: &hardening
 
 x-app: &app
   <<: *hardening
-  image: ${FLEET_SERVER_IMAGE:?set FLEET_SERVER_IMAGE to ghcr.io/ogc-ltd/fleet-server:<sha>}
+  image: ${FLEET_SERVER_IMAGE:?set FLEET_SERVER_IMAGE to <account>.dkr.ecr.af-south-1.amazonaws.com/fleet-server:<sha>}
   env_file: [ "${FLEET_ENV_FILE:-/etc/fleet/server.env}" ]
   environment:
     NODE_ENV: production

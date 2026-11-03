@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# fleet-shadow: phase 1 of docs/containerization-plan.md.
+#
+# Runs one fleet-server image as the compose project `fleet-shadow`, published
+# on 127.0.0.1:3001 only, beside the live pm2 server, which it never touches.
+#
+#   sudo fleet-shadow up <40-char commit sha>   pull from ECR and start
+#   sudo fleet-shadow status
+#   sudo fleet-shadow down                      stop and remove (volume kept)
+#
+# Install (root-owned, so nobody else can change what it runs):
+#   sudo install -o root -g root -m 755 deploy/box/fleet-shadow /usr/local/sbin/fleet-shadow
+#   sudo install -o root -g root -m 644 docker-compose.prod.yml /etc/fleet/compose/docker-compose.prod.yml
+#
+# The shadow is harmless by construction, and this script refuses to start it
+# otherwise: /etc/fleet/shadow.env (root 600) opens read-only database
+# sessions, carries no outside credential and no Redis, and switches every
+# background job off. The image comes from ECR with the box's own instance
+# role: a registry login that lasts minutes and is removed straight after.
+set -euo pipefail
+
+REGION=af-south-1
+# The account comes from the instance role, so the public repo names none.
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
+REPO="${REGISTRY}/fleet-server"
+ENV_FILE=/etc/fleet/shadow.env
+COMPOSE_FILE=/etc/fleet/compose/docker-compose.prod.yml
+PROJECT=fleet-shadow
+PORT=3001
+MIN_FREE_GIB=3
+
+die() { echo "fleet-shadow: $*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || die "run as root (sudo)"
+[ -f "$COMPOSE_FILE" ] || die "missing $COMPOSE_FILE"
+
+compose() {
+  FLEET_SERVER_IMAGE="${IMAGE:-${REPO}:none}" FLEET_ENV_FILE="$ENV_FILE" SERVER_HOST_PORT="$PORT" \
+    docker compose -f "$COMPOSE_FILE" -p "$PROJECT" "$@"
+}
+
+check_env() {
+  [ "$(stat -c '%U %a' "$ENV_FILE")" = "root 600" ] || die "$ENV_FILE must be owned by root, mode 600"
+  local k
+  for k in POLL RAIFACTORYSUITE_POLL VEHICLE_INSIGHT GOOGLE_ROUTING RETENTION_SWEEP NIGHTLY_ROLLUPS FUEL_SYNC \
+           LIVE_FUEL_WATCH INCIDENT_CAPTURE FUEL_SETTLE FUEL_ADJUDICATION PARKED_FALL_VERDICTS TRIP_BUILD REPORT_WORKER; do
+    grep -qx "${k}_ENABLED=false" "$ENV_FILE" || die "${k}_ENABLED must be false in $ENV_FILE"
+  done
+  grep -qx 'FOLLOW_DB=false' "$ENV_FILE" || die "FOLLOW_DB must be false"
+  [ "$(grep -cE '^(DATABASE_URL|DIRECT_URL)=.*default_transaction_read_only%3Don' "$ENV_FILE")" = 2 ] \
+    || die "both database URLs must open read-only sessions"
+  if grep -qE '^(REDIS_URL|WIALON_TOKEN|RAIFACTORYSUITE_API_KEY|VSS_PASSWORD|OPENAI_API_KEY|DEEPSEEK_API_KEY|GOOGLE_ROUTING_API_KEY|OPENWEATHER_API_KEY|MAILTRAP_API_TOKEN|VAPID_PRIVATE_KEY|FACTORY_SUITE_HOOK|access_token)=' "$ENV_FILE"; then
+    die "$ENV_FILE carries an outside credential or Redis"
+  fi
+}
+
+case "${1:-}" in
+  status)
+    compose ps
+    docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' \
+      $(docker ps -q --filter "label=com.docker.compose.project=${PROJECT}") 2>/dev/null || true
+    df -h / | tail -1 ;;
+  down)
+    compose down --remove-orphans
+    docker image prune -f >/dev/null
+    df -h / | tail -1 ;;
+  up)
+    sha="${2:-}"
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "usage: fleet-shadow up <40-character commit sha>"
+    IMAGE="${REPO}:${sha}"
+    check_env
+    free=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+    [ "$free" -ge "$MIN_FREE_GIB" ] || die "only ${free} GiB free on /, need ${MIN_FREE_GIB}"
+
+    trap 'docker logout "$REGISTRY" >/dev/null 2>&1 || true' EXIT
+    aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null
+    docker pull -q "$IMAGE"
+    docker logout "$REGISTRY" >/dev/null; trap - EXIT
+
+    compose up -d --no-deps server
+    for _ in $(seq 1 45); do
+      st=$(docker inspect -f '{{.State.Health.Status}}' "${PROJECT}-server-1" 2>/dev/null || echo starting)
+      [ "$st" = healthy ] && break
+      sleep 4
+    done
+    docker logs "${PROJECT}-server-1" 2>&1 | grep -E 'NOT started|NOT scheduled|Fleet Server started|"level":(50|60)' | cut -c1-200 | head -40
+    [ "$st" = healthy ] || die "shadow did not become healthy ($st); see: docker logs ${PROJECT}-server-1"
+    curl -s -m 5 -w " [%{http_code}] shadow :${PORT}\n" "http://127.0.0.1:${PORT}/health"
+    curl -s -m 5 -o /dev/null -w "[%{http_code}] live :3000\n" http://127.0.0.1:3000/health
+    docker image prune -f >/dev/null
+    df -h / | tail -1 ;;
+  *) die "usage: fleet-shadow up <sha> | status | down" ;;
+esac
