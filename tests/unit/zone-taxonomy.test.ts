@@ -15,6 +15,33 @@ import { categorise, isEstateFeature, ringAreaHa } from '../../src/lib/zone-taxo
  * before these rules widened, which drew three fleets' entire estates in the
  * fallback grey.
  */
+describe('categorise — what a fence is for', () => {
+  it('reads Menengai\'s customers however they are typed', () => {
+    for (const name of [
+      'MENENGAI_FG: NAIVAS', 'MEMENGAI_FG: NAIVAS', 'MENENGAI _FG: SUKARI INDUSTRIES  NDHIWA',
+      'MENENGAI-FG: X', 'FG_P_Magunas Kahawa', 'Menengai: Gilanis Kisumu', 'Menengai:  jalaram',
+      'MENENGAI_FG:QUICKMART MOMBASA ROAD',
+    ]) expect(categorise(name), name).toBe('customer')
+  })
+
+  it('keeps the shops as shops, and the yard as the yard', () => {
+    for (const name of ['MENENGAI_VS: MAGUNANDU SHOP', 'MENENGAI:VS: KINGSTON SHOP', 'MENENGAI_SHOP: X'])
+      expect(categorise(name), name).toBe('shop')
+    for (const name of ['Menengai Yard - Nakuru HQ', 'Menengai Yard NEW'])
+      expect(categorise(name), name).toBe('logistics')
+  })
+
+  it('gives the site vocabulary only to names nothing else claimed', () => {
+    expect(categorise('Weighbridge 2')).toBe('weighing')
+    expect(categorise('Fuel bay')).toBe('fuel')
+    expect(categorise('Main gate')).toBe('gate')
+    expect(categorise('Staff parking')).toBe('parking')
+    expect(categorise('Sukari industries')).toBe('perimeter')
+    expect(categorise('Factory gate')).toBe('factory')
+    expect(categorise('Ngategi')).toBe('other')
+  })
+})
+
 describe('categorise — the operator-typed accounts, not just the surveyed one', () => {
   it('reads a plain "factory" as a factory', () => {
     for (const name of [
@@ -40,7 +67,7 @@ describe('categorise — the operator-typed accounts, not just the surveyed one'
   it('leaves a genuinely ambiguous name alone', () => {
     // Naming a town or a region says nothing about land use, and guessing one
     // is worse than the honest fallback.
-    for (const name of ['Nairobi', 'Selia Region', 'Sukari industries']) {
+    for (const name of ['Nairobi', 'Selia Region']) {
       expect(categorise(name), name).toBe('other')
     }
   })
@@ -122,6 +149,14 @@ describe('ringAreaHa — ranks overlapping features so the smallest can lead', (
   it('is zero for a degenerate ring rather than NaN', () => {
     expect(ringAreaHa([])).toBe(0)
     expect(ringAreaHa([[30, -4], [30.1, -4]])).toBe(0)
+  })
+})
+
+describe('categorise — routes imported from Wialon', () => {
+  it('files a route as a road, whatever its name contains', () => {
+    for (const name of ['Kabras - Khalaba Route', 'Kabras to Magut Route', 'Naitiri - Rai Paper Route', 'Factory - Awendo Rough Road'])
+      expect(categorise(name), name).toBe('road')
+    expect(categorise('Rerouted yard')).toBe('logistics')
   })
 })
 

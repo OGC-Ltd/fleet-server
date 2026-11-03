@@ -20,7 +20,8 @@
 export type ZoneCategory =
   | 'farm' | 'nursery' | 'commercial' | 'rainfed' | 'factory'
   | 'logistics' | 'facility' | 'wetland' | 'water' | 'drain' | 'road'
-  | 'restricted' | 'sample' | 'shop' | 'other'
+  | 'restricted' | 'sample' | 'shop' | 'customer'
+  | 'weighing' | 'fuel' | 'gate' | 'parking' | 'perimeter' | 'other'
 
 /**
  * These rules were written against ONE account's vocabulary and have now met
@@ -43,9 +44,15 @@ export function categorise(name: string): ZoneCategory {
   if (n.startsWith('ves'))                          return 'sample'
   /* Menengai's van-sales shops, 5,840 of its 6,170 Wialon zones (2026-11-03),
      typed every way: "MENENGAI_VS:", "MENENENGAI_VS:", "MENENGAI-VS:",
-     "MENENGAI _VS:", "MENENGAI_VANSALES:", "MENENGAI_SHOP:". Containment, not
-     narration: a van calls at dozens a day. */
-  if (/^me\w*\s*[_ -]?\s*(vs|vansales|shop)/.test(n)) return 'shop'
+     "MENENGAI _VS:", "MENENGAI:VS:", "MENENGAI_VANSALES:", "MENENGAI_SHOP:".
+     Containment, not narration: a van calls at dozens a day. */
+  if (/^me\w*\s*[_ :-]?\s*(vs|vansales|shop)/.test(n)) return 'shop'
+  /* Who Menengai delivers to: "MENENGAI_FG: NAIVAS", "MEMENGAI_FG:",
+     "FG_P_Magunas Kahawa", "Menengai: Gilanis Kisumu". Ahead of the land uses,
+     because the name after the prefix is the customer's own: "MENENGAI_FG:QUICKMART
+     MOMBASA ROAD" is a shop on a road, not a road. */
+  if (/^me\w*\s*[_ :-]?\s*fg\b/.test(n) || /^me\w*_fg/.test(n)
+    || /^fg[_ ]/.test(n) || /^men\w*\s*:/.test(n)) return 'customer'
   /* First, and before any land use: a keep-out is the one zone whose colour
      must not be the same grey as "we could not tell". It outranks whatever
      else the name says, because "NO GO ZONES -SUKARI" is a prohibition before
@@ -63,7 +70,9 @@ export function categorise(name: string): ZoneCategory {
      "site" the two could not collide; widening it to the plain word put a
      haulage road in the factory's colour, which the existing test caught. A
      name that says both is the road. */
-  if (n.includes('road') || n.includes('haulage'))  return 'road'
+  /* "Kabras - Khalaba Route" too: without this it fell to the facility rule below
+     on the "lab" in Khalaba, and a lorry on it read as arriving somewhere. */
+  if (n.includes('road') || n.includes('haulage') || /\broute\b/.test(n)) return 'road'
   // Was 'factory site' — the surveyor's phrasing. Three fleets write the plain
   // word and meant exactly the same thing.
   if (n.includes('factory'))                        return 'factory'
@@ -75,6 +84,15 @@ export function categorise(name: string): ZoneCategory {
   if (n.includes('drain'))                          return 'drain'
   if (n.includes('workshop') || n.includes('residence') || n.includes('dispensary')
     || n.includes('lab') || n.includes('reservoir') || n.includes('camp')) return 'facility'
+  /* Last, so they only ever take a name from `other`, which nothing narrates or
+     limits. The map's colours for these already exist (zoneLegend). */
+  if (n.includes('weigh'))                          return 'weighing'
+  if (/\b(fuel|petrol|diesel)\b|filling station/.test(n)) return 'fuel'
+  if (/\bgates?\b/.test(n))                         return 'gate'
+  if (/\bparking\b|\bvehicle park\b/.test(n))       return 'parking'
+  /* "Sukari industries", the fence around the whole works; the factory is a
+     separate fence inside it. */
+  if (n.includes('industries'))                     return 'perimeter'
   return 'other'
 }
 
