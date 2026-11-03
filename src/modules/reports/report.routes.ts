@@ -11,6 +11,7 @@ import {
   listSummaryQuerySchema,
   movementReportQuerySchema,
   movementPdfBodySchema,
+  tankersReportBodySchema,
   endOfShiftQuerySchema,
   endOfShiftBodySchema,
   shiftDocSchema,
@@ -44,6 +45,8 @@ router.get('/summaries', requirePermission('report:read'), validateQuery(listSum
 router.get('/reports/movements.pdf', requirePermission('telemetry:read'), validateQuery(movementReportQuerySchema), ctrl.downloadMovementReport)
 router.get('/reports/movements', requirePermission('telemetry:read'), validateQuery(movementReportQuerySchema), ctrl.getMovementReportData)
 router.post('/reports/movements.pdf', requirePermission('telemetry:read'), validateBody(movementPdfBodySchema), ctrl.downloadEditedMovementReport)
+// Menengai's tankers on the road from the Mombasa depot to MORL, 4 hours at a time
+router.post('/reports/tankers', requirePermission('telemetry:read'), validateBody(tankersReportBodySchema), ctrl.getTankersReportData)
 router.post('/summaries/refresh/:periodId', requirePermission('report:create'), ctrl.refreshSummaries)
 
 // Driver conduct follow-up: the cases a report run finds and what was done on

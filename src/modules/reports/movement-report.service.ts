@@ -162,7 +162,7 @@ export interface MovementReport {
  * the HQ yard ("Menengai Yard - Nakuru HQ") is read as MORL HQ, even with its
  * alerts switched off (operator, 2026-11-02): the refinery is there.
  */
-async function findMorl(orgId: string): Promise<MorlFence | null> {
+export async function findMorl(orgId: string): Promise<MorlFence | null> {
   const select = { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true }
   const fences = await prisma.geofence.findMany({
     where:  { organisationId: orgId, isActive: true, name: { contains: 'MORL', mode: 'insensitive' } },
