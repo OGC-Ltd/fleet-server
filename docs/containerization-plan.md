@@ -329,6 +329,6 @@ The containers' 127.0.0.1 port publishing becomes unnecessary here, since only t
 
 ## 9. Open questions for the team
 
-1. Who runs the "Fleet ECR Setup" runbook in the AWS console (needs IAM and ECR rights), and adds the `AWS_ECR_PUSH_ROLE_ARN` variable in both GitHub repositories?
+1. Who runs the "Fleet ECR Setup" runbook in the AWS console (needs IAM and ECR rights), and adds the `AWS_ECR_PUSH_ROLE_ARN` repository secret in both GitHub repositories?
 2. Is there a quiet window for phase 2? Polling runs around the clock, so pick the lowest-traffic hour from the nginx access log.
 3. Should Dereva's backend, once it is connected, join this compose file or live separately?
