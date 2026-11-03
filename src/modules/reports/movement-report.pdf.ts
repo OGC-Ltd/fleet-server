@@ -29,7 +29,7 @@ const longDay = (ms: number) => new Intl.DateTimeFormat('en-GB', { timeZone: TZ,
 
 /**
  * A unit moving now, on a fix inside the window: its Location cell filled green
- * (operator, 2026-11-02). A row the operator set to Stopped or No fix is not
+ * (operator, 2026-11-02). A row the operator set to Stopped or not reporting is not
  * moving, whatever the last speed said.
  */
 export const isMoving = (row: MovementRow) => row.lastAt != null && !row.stale
@@ -67,8 +67,9 @@ const TINT: Partial<Record<MovementState, string>> = { to: '#e3f1dc', from: '#fb
  */
 export const directionWords = (site = 'MORL'): Record<MovementState, string> => ({
   to: `To ${site}`, from: `From ${site}`, at: `At ${site}`, moving: 'Moving', stopped: 'Stopped',
-  // Menengai's silent units stand at RAIMDF (operator, 2026-11-02: "remove no fix")
-  'no-fix': site === 'MORL' ? NO_FIX_MENENGAI : 'No fix',
+  // Menengai's silent units stand at RAIMDF, the others are not reporting
+  // (operator, 2026-11-02 / 2026-11-03: "remove no fix")
+  'no-fix': site === 'MORL' ? NO_FIX_MENENGAI : 'Not reporting',
 })
 export const NO_FIX_MENENGAI = 'At RAIMDF'
 export const DIRECTION = directionWords('MORL')
@@ -145,7 +146,7 @@ function drawReport(w: ReportWriter, doc: InstanceType<typeof PDFDocument>, r: M
   const info: [string, string, string, string][] = [
     ['Fleet', r.organisation || DASH, 'Window', when],
     ['Groups', `${r.groups.length} (${r.groups.slice(0, 3).map(g => g.name).join(', ')}${r.groups.length > 3 ? ', …' : ''})`, 'Vehicles', `${num(r.counts.total)} listed`],
-    ['As at', `${longDay(r.to)}, ${hm(r.to)}`, 'Reference', r.morl ? `${r.morl} geofence` : `No ${site} geofence`],
+    ['As at', `${longDay(r.to)}, ${hm(r.to)}`, 'Reference', r.morl ? `${r.morl} geofence` : DASH],
   ]
   for (const [a, av, b, bv] of info) {
     w.line(a, SIDE, w.y, 23 * MM, { color: C.mut })
@@ -164,7 +165,7 @@ function drawReport(w: ReportWriter, doc: InstanceType<typeof PDFDocument>, r: M
     [`Heading to ${site}`, num(n.to), n.to ? C.good : undefined],
     [`Leaving ${site}`, num(n.from), n.from ? '#b45309' : undefined],
     [`At ${site}`, num(n.at)],
-    ['Moving, no direction', num(n.moving)],
+    ['Moving', num(n.moving)],
     ['Stopped elsewhere', num(n.stopped)],
     ['Not reporting', num(n.stale + n['no-fix']), n.stale + n['no-fix'] ? C.flag : undefined],
   ])
@@ -173,7 +174,7 @@ function drawReport(w: ReportWriter, doc: InstanceType<typeof PDFDocument>, r: M
   const cols: Col[] = [{ w: 54 * MM }, { w: 30 * MM }, { w: 0 }, { w: 15 * MM, align: 'right' }, { w: 20 * MM }]
   const cell = (row: MovementRow): Cell[] => [
     { text: row.grouping, bold: true, color: row.stale || row.state === 'no-fix' ? C.flag : undefined },
-    { text: row.lastAt != null ? stamp(row.lastAt) : site === 'MORL' ? DASH : 'No fix', color: row.stale ? C.flag : undefined },
+    { text: row.lastAt != null ? stamp(row.lastAt) : DASH, color: row.stale ? C.flag : undefined },
     { text: row.location ?? (row.state === 'at' ? r.morl ?? site : DASH), fill: locationFill(row) },
     { text: row.speedKmh != null ? `${row.speedKmh} km/h` : DASH },
     { text: words[row.state], bold: row.state === 'to' || row.state === 'from' },

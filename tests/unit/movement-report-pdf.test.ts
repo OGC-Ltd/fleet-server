@@ -143,7 +143,7 @@ describe('the movement report', () => {
     expect(siteNameOf('Mufindi Paper Mills Ltd')).toBe('Mufindi')
     expect(siteNameOf('West Kenya Sugar Ltd')).toBe('West Kenya')
     expect(siteNameOf('Aquamist Ltd')).toBe('Aquamist')
-    expect(directionWords('Sukari')).toMatchObject({ to: 'To Sukari', from: 'From Sukari', at: 'At Sukari', 'no-fix': 'No fix' })
+    expect(directionWords('Sukari')).toMatchObject({ to: 'To Sukari', from: 'From Sukari', at: 'At Sukari', 'no-fix': 'Not reporting' })
     // Its factory fence with its name first, switched off or not; then any factory
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const findMany = prismaMock.geofence.findMany as any
