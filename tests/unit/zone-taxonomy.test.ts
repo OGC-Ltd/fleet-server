@@ -124,3 +124,21 @@ describe('ringAreaHa — ranks overlapping features so the smallest can lead', (
     expect(ringAreaHa([[30, -4], [30.1, -4]])).toBe(0)
   })
 })
+
+describe('categorise — Menengai van-sales shops', () => {
+  it('reads every real spelling as a shop, contained but never narrated', () => {
+    for (const name of [
+      'MENENGAI_VS:SUKARI MINI MARKET', 'MENENENGAI_VS: X', 'MENENGAI-VS: X', 'MENENGAI _VS: X',
+      'MENEGAI_VS: X', 'MENENGAIVS: X', 'MENENGAI_VSRODAN TWO SUPPLIERS', 'MENENGAI VS_CONER SHOP ENDARASHA',
+      'MENENGAI_SHOP: X', 'MENENGAI_VANSALES: X',
+    ]) {
+      expect(categorise(name), name).toBe('shop')
+      expect(isEstateFeature(categorise(name)), name).toBe(false)
+    }
+  })
+  it('leaves the FG customers and the yard alone', () => {
+    for (const name of ['MENENGAI_FG:MDF NAKURU', 'Menengai: Naivas HQ Nairobi', 'FG_P_Magunas Kahawa', 'STO MORL'])
+      expect(categorise(name), name).not.toBe('shop')
+    expect(categorise('Menengai Yard - Nakuru HQ')).toBe('logistics')
+  })
+})

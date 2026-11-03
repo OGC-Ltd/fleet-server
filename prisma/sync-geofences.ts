@@ -103,7 +103,8 @@ const TOKEN   = process.env.WIALON_TOKEN || process.env.access_token || ''
  */
 const ZONE_SOURCE: Record<string, { accountId: number; label: string; include?: RegExp; exclude?: RegExp }> = {
   KASULU:    { accountId: KASULU_WIALON_ACCOUNT_ID,      label: 'Mufindi Paper Mills' },
-  MENENGAI:  { accountId: MENENGAI_WIALON_ACCOUNT_ID,    label: 'Mene-ngai' },
+  // Less Sukari's factory boundary, which SUKARI already holds (see below).
+  MENENGAI:  { accountId: MENENGAI_WIALON_ACCOUNT_ID,    label: 'Mene-ngai', exclude: /^sukari indurstries factory$/i },
   /**
    * NOT Rai Group, where Sukari's UNITS live.
    *
