@@ -8,9 +8,9 @@
 # (`ghala` is the one repository for all fleet images; the tag names the app.)
 # An image is pushed only after it boots and Trivy finds no fixable HIGH or
 # CRITICAL issue. AWS access is per run via GitHub OIDC: the role in the
-# repository variable AWS_ECR_PUSH_ROLE_ARN trusts only main of this repo and
+# repository secret AWS_ECR_PUSH_ROLE_ARN trusts only main of this repo and
 # can only push to these repositories. No AWS keys are stored in GitHub.
-# Until that variable exists, the run builds, tests and scans, then skips the
+# Until that secret exists, the run builds, tests and scans, then skips the
 # push with a notice. Setup: the "Fleet ECR Setup" runbook.
 name: images
 
@@ -122,16 +122,20 @@ jobs:
       - name: AWS push role configured?
         id: gate
         env:
-          ROLE: ${{ vars.AWS_ECR_PUSH_ROLE_ARN }}
+          ROLE: ${{ secrets.AWS_ECR_PUSH_ROLE_ARN }}
         run: |
-          if [ -n "${ROLE}" ]; then echo "push=true" >> "$GITHUB_OUTPUT"
-          else echo "::notice::AWS_ECR_PUSH_ROLE_ARN is not set: images built, tested and scanned, not pushed"; fi
+          if [ -n "${ROLE}" ]; then
+            # Public repo, public logs: hide the account id wherever it appears
+            # (the registry host in image names), not just the full ARN.
+            echo "::add-mask::$(printf '%s' "$ROLE" | cut -d: -f5)"
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else echo "::notice::secret AWS_ECR_PUSH_ROLE_ARN is not set: images built, tested and scanned, not pushed"; fi
 
       - name: sign in to AWS (OIDC, this run only)
         if: steps.gate.outputs.push == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ECR_PUSH_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE_ARN }}
           role-session-name: fleet-server-images-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
