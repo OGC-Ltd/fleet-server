@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# fleet-edge: phase 4 of docs/containerization-plan.md, the edge in a container.
+#
+# The `edge` service (unprivileged nginx with deploy/edge/) takes host ports
+# 80/443 from the host's nginx, and `certbot` renews the certificate from a
+# container. Both run in compose project `fleet`, beside `server` and `web`,
+# whose networks the edge joins. Needs phases 2 and 3 first.
+#
+#   sudo fleet-edge mode                           host | edge | none
+#   sudo fleet-edge check <server-sha> <web-sha>   edge on 127.0.0.1:18080/18443 vs host nginx; changes nothing live
+#   sudo fleet-edge certbot-dry-run                renewal rehearsal from the certbot container (Let's Encrypt staging)
+#   sudo fleet-edge switch                         host nginx -> edge   (back by itself on a failed check)
+#   sudo fleet-edge back                           edge -> host nginx   (renewed certificates come along)
+#
+# Install (root-owned):
+#   sudo install -o root -g root -m 755 deploy/box/fleet-edge /usr/local/sbin/fleet-edge
+#   sudo install -o root -g root -m 644 docker-compose.edgecheck.yml /etc/fleet/compose/
+#   sudo cp -r deploy/edge /etc/fleet/compose/deploy/   (root-owned, read-only to others)
+#
+# The host's nginx and certbot stay installed, stopped and disabled, as the
+# way back until the phase 4 cleanup.
+set -Eeuo pipefail
+
+REGION=af-south-1
+COMPOSE_DIR=/etc/fleet/compose
+LE=/etc/letsencrypt
+ACME_HOST=/var/www/certbot
+DOMAIN=logistics.raioperations.com
+CERTBOT_IMAGE=certbot/certbot:v4.0.0
+MIN_FREE_GIB=3
+# Keeps renewed keys readable by the edge (uid 101); the same as the certbot
+# service's --deploy-hook in docker-compose.prod.yml.
+PERMS='chgrp -R 101 /etc/letsencrypt/live /etc/letsencrypt/archive && chmod -R g+rX /etc/letsencrypt/live /etc/letsencrypt/archive'
+
+die() { echo "fleet-edge: $*" >&2; exit 1; }
+say() { echo "--- $*"; }
+[ "$(id -u)" = 0 ] || die "run as root (sudo)"
+for f in docker-compose.prod.yml docker-compose.phase3.yml deploy/edge/nginx.conf; do
+  [ -f "$COMPOSE_DIR/$f" ] || die "missing $COMPOSE_DIR/$f"
+done
+
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
+REPO="${REGISTRY}/ghala"
+
+# One compose call for every project here. The images are the ones already
+# deployed (or the check's), so nothing that runs is recreated by accident.
+compose() {   # project, compose args...
+  local p=$1; shift
+  FLEET_SERVER_IMAGE="${SERVER_IMAGE:-${REPO}:fleet-server-none}" RAITRACK_IMAGE="${WEB_IMAGE:-${REPO}:raitrack-none}" \
+  FLEET_ENV_FILE="${ENV_FILE:-/etc/fleet/server.env}" SERVER_HOST_PORT="${SERVER_PORT:-3000}" WEB_HOST_PORT=8081 \
+    docker compose -f "$COMPOSE_DIR/docker-compose.prod.yml" -f "$COMPOSE_DIR/docker-compose.phase3.yml" ${EXTRA:-} \
+      -p "$p" --profile edge "$@"
+}
+
+# Runs a command silently; its output is shown only when it fails.
+quiet() { local out; out=$("$@" 2>&1) || { printf '%s\n' "$out" | tail -15 >&2; return 1; }; }
+
+valid_sha() { [[ "${1:-}" =~ ^[0-9a-f]{40}$ ]] || die "expected a 40-character commit sha, got '${1:-}'"; }
+edge_running() { [ -n "$(docker ps -q --filter label=com.docker.compose.project=fleet --filter label=com.docker.compose.service=edge)" ]; }
+mode() {
+  if systemctl is-active -q nginx && edge_running; then echo BOTH
+  elif systemctl is-active -q nginx; then echo host
+  elif edge_running; then echo edge
+  else echo none; fi
+}
+
+pull() {
+  local img=$1 free
+  free=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+  [ "$free" -ge "$MIN_FREE_GIB" ] || die "only ${free} GiB free on /, need ${MIN_FREE_GIB}"
+  docker image inspect "$img" >/dev/null 2>&1 && return 0
+  case "$img" in
+    "$REGISTRY"/*)
+      trap 'docker logout "$REGISTRY" >/dev/null 2>&1 || true' EXIT
+      aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null
+      docker pull -q "$img" >/dev/null || { docker logout "$REGISTRY" >/dev/null; die "cannot pull ${img##*/}"; }
+      docker logout "$REGISTRY" >/dev/null; trap - EXIT ;;
+    *) docker pull -q "$img" >/dev/null ;;
+  esac
+}
+
+# A copy of the certificates the edge (uid 101) can read: everything certbot
+# keeps except the host's renewal hooks, which only make sense on the host.
+copy_certs() {   # volume name
+  local dir; dir=$(docker volume inspect -f '{{.Mountpoint}}' "$1")
+  rsync -a --delete --exclude renewal-hooks/ "$LE/" "$dir/"
+  ( cd "$dir" && sh -c "$(printf %s "$PERMS" | sed "s#/etc/letsencrypt#$dir#g")" )
+}
+
+# Status, Cache-Control, Content-Type and Location of one request, as one line.
+probe() {   # url [curl args...]
+  local u=$1; shift
+  curl -s -o /dev/null -m 8 "$@" -w '%{http_code} v%{http_version} cc=[%header{cache-control}] ct=[%header{content-type}] loc=[%header{location}]' "$u"
+}
+same() {   # label, host-nginx probe, edge probe
+  if [ "$2" = "$3" ]; then echo "OK   $1  $3"; else echo "FAIL $1  host: $2  edge: $3"; return 1; fi
+}
+entry() { curl -fsS -m 5 "$@" | grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' | head -1; }
+cert_fp() {   # port
+  echo | openssl s_client -connect "127.0.0.1:$1" -servername "$DOMAIN" 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2
+}
+
+# The same answers from host nginx (80/443) and an edge (http, https ports).
+compare_edge() {   # edge-http-port edge-https-port
+  local eh=$1 es=$2 bad=0 p tok
+  local H=http://127.0.0.1 E="http://127.0.0.1:$eh"
+  local HS=(--resolve "$DOMAIN:443:127.0.0.1") ES=(--resolve "$DOMAIN:$es:127.0.0.1")
+  for p in / /index.html /some/spa/route /api/v1/sim-clock /api/v1/me /api/v1/organisations/x/live /webhook/edge-check /assets/does-not-exist.js; do
+    same "http $p" "$(probe "$H$p")" "$(probe "$E$p")" || bad=1
+  done
+  same "http entry script" "$(probe "$H$(entry "$H/")")" "$(probe "$E$(entry "$E/")")" || bad=1
+  same "http Host: $DOMAIN -> https" "$(probe "$H/x?y=1" -H "Host: $DOMAIN")" "$(probe "$E/x?y=1" -H "Host: $DOMAIN")" || bad=1
+  for p in / /some/spa/route /api/v1/sim-clock /api/v1/me; do
+    same "https $p" "$(probe "https://$DOMAIN$p" "${HS[@]}")" "$(probe "https://$DOMAIN:$es$p" "${ES[@]}")" || bad=1
+  done
+  same "https entry script" "$(probe "https://$DOMAIN$(entry "https://$DOMAIN/" "${HS[@]}")" "${HS[@]}")" \
+                            "$(probe "https://$DOMAIN:$es$(entry "https://$DOMAIN:$es/" "${ES[@]}")" "${ES[@]}")" || bad=1
+  for v in --tlsv1.2 --tlsv1.3; do
+    same "https $v" "$(probe "https://$DOMAIN/" "${HS[@]}" $v --tls-max "${v#--tlsv}")" \
+                    "$(probe "https://$DOMAIN:$es/" "${ES[@]}" $v --tls-max "${v#--tlsv}")" || bad=1
+  done
+  same "certificate (sha256)" "$(cert_fp 443)" "$(cert_fp "$es")" || bad=1
+  return $bad
+}
+
+case "${1:-}" in
+  mode) mode ;;
+
+  check)
+    ssha="${2:-}"; wsha="${3:-}"; valid_sha "$ssha"; valid_sha "$wsha"
+    # The check's server is the harmless shadow: read-only database sessions,
+    # no outside credential, no Redis, every background job off.
+    S=/etc/fleet/shadow.env
+    [ "$(stat -c '%U %a' "$S")" = "root 600" ] || die "$S must be root 600"
+    grep -qx 'POLL_ENABLED=false' "$S" || die "$S must have POLL_ENABLED=false"
+    [ "$(grep -cE '^(DATABASE_URL|DIRECT_URL)=.*default_transaction_read_only%3Don' "$S")" = 2 ] || die "$S must open read-only sessions"
+    grep -qE '^(REDIS_URL|WIALON_TOKEN|RAIFACTORYSUITE_API_KEY|VSS_PASSWORD|OPENAI_API_KEY)=' "$S" && die "$S carries a credential or Redis"
+    [ "$(mode)" = host ] || die "the check compares against host nginx, which is not the only one serving (mode $(mode))"
+
+    export SERVER_IMAGE="${REPO}:fleet-server-${ssha}" WEB_IMAGE="${REPO}:raitrack-${wsha}"
+    export ENV_FILE=$S SERVER_PORT=3011 EXTRA="-f $COMPOSE_DIR/docker-compose.edgecheck.yml"
+    P=fleet-edgecheck
+    pull "$SERVER_IMAGE"; pull "$WEB_IMAGE"
+    trap 'compose "$P" down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
+    quiet compose "$P" create server web edge
+    copy_certs "${P}_certs"
+    say "edge config: $(compose "$P" run --rm --no-deps -T edge nginx -t 2>&1 | tail -1)"
+    quiet compose "$P" up -d --no-deps server web edge
+    for _ in $(seq 1 40); do
+      [ "$(docker inspect -f '{{.State.Health.Status}}' "${P}-server-1" 2>/dev/null)" = healthy ] \
+        && [ "$(docker inspect -f '{{.State.Health.Status}}' "${P}-web-1" 2>/dev/null)" = healthy ] \
+        && curl -fsS -m 3 -o /dev/null http://127.0.0.1:18080/ && break
+      sleep 3
+    done
+    rc=0
+    say "answers: host nginx (80/443) vs the edge (18080/18443)"
+    compare_edge 18080 18443 || rc=1
+    # The ACME path, served from each side's own webroot, where certbot puts
+    # its challenge files (.well-known/acme-challenge/ under the webroot).
+    tok="edgecheck-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    for root in "$ACME_HOST" "$(docker volume inspect -f '{{.Mountpoint}}' "${P}_acme")"; do
+      install -d -m 755 "$root/.well-known" "$root/.well-known/acme-challenge"
+      echo "$tok" > "$root/.well-known/acme-challenge/$tok"; chmod 644 "$root/.well-known/acme-challenge/$tok"
+    done
+    same "acme challenge" "$(curl -s -m 5 -H "Host: $DOMAIN" "http://127.0.0.1/.well-known/acme-challenge/$tok")" \
+                          "$(curl -s -m 5 -H "Host: $DOMAIN" "http://127.0.0.1:18080/.well-known/acme-challenge/$tok")" || rc=1
+    rm -f "$ACME_HOST/.well-known/acme-challenge/$tok"
+    say "the edge container"
+    u=$(docker exec "${P}-edge-1" id -u)
+    [ "$u" = 101 ] && echo "OK   runs as uid 101" || { echo "FAIL runs as uid $u"; rc=1; }
+    [ "$(docker inspect -f '{{.HostConfig.CapDrop}} {{.HostConfig.ReadonlyRootfs}}' "${P}-edge-1")" = "[ALL] true" ] \
+      && echo "OK   no capabilities, read-only root" || { echo "FAIL capabilities or root fs"; rc=1; }
+    [ "$(docker inspect -f '{{range .HostConfig.Ulimits}}{{.Name}}={{.Soft}}{{end}}' "${P}-edge-1")" = nofile=65535 ] \
+      && echo "OK   nofile 65535 (SSE viewers)" || { echo "FAIL nofile limit"; rc=1; }
+    [ $rc = 0 ] && echo "READY: edge in front of server ${ssha:0:7} and web ${wsha:0:7}" || die "NOT READY: fix the FAIL lines first" ;;
+
+  certbot-dry-run)
+    # A copy of the certificates, so nothing in /etc/letsencrypt changes. The
+    # challenge files go to the host webroot, which host nginx serves today.
+    pull "$CERTBOT_IMAGE"
+    V=fleet-certbot-dryrun
+    docker volume rm -f "$V" >/dev/null 2>&1 || true
+    docker volume create "$V" >/dev/null
+    trap 'docker volume rm -f "$V" >/dev/null 2>&1 || true' EXIT
+    copy_certs "$V"
+    docker run --rm --read-only --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --security-opt no-new-privileges \
+      --tmpfs /tmp --tmpfs /var/lib/letsencrypt --tmpfs /var/log/letsencrypt \
+      -v "$V:/etc/letsencrypt" -v "$ACME_HOST:/var/www/certbot" "$CERTBOT_IMAGE" \
+      renew --dry-run --webroot -w /var/www/certbot --no-directory-hooks --run-deploy-hooks --deploy-hook "$PERMS" 2>&1 \
+      | grep -vE '^\s*$|^Saving debug log' | tail -12
+    dir=$(docker volume inspect -f '{{.Mountpoint}}' "$V")
+    echo "newest key, as the edge would read it: $(stat -c 'group %g, mode %a' "$(ls -v "$dir/archive/$DOMAIN"/privkey*.pem | tail -1)")" ;;
+
+  switch)
+    m=$(mode); [ "$m" = host ] || die "mode is '$m', expected host"
+    [ "$(fleet-deploy mode)" = containers ] || die "phase 2 first: the server is not in containers"
+    [ "$(fleet-web mode)" = container ] || die "phase 3 first: / is not served by the web container"
+    SERVER_IMAGE="${REPO}:fleet-server-$(sed -n 1p /etc/fleet/deployed)"
+    WEB_IMAGE="${REPO}:raitrack-$(sed -n 1p /etc/fleet/web.deployed)"
+    export SERVER_IMAGE WEB_IMAGE
+    want=$(sed -n 1p /etc/fleet/web.deployed)
+    pull "$CERTBOT_IMAGE"
+    quiet compose fleet create --no-recreate edge certbot   # never recreates the running web
+    copy_certs fleet_certs
+    rsync -a "$ACME_HOST/" "$(docker volume inspect -f '{{.Mountpoint}}' fleet_acme)/"
+    say "edge config: $(compose fleet run --rm --no-deps -T edge nginx -t 2>&1 | tail -1)"
+
+    say "host nginx -> edge"
+    trap 'trap - ERR; echo "switch failed: back to host nginx" >&2; compose fleet stop -t 10 edge certbot >/dev/null 2>&1 || true; systemctl start nginx' ERR
+    systemctl stop nginx
+    t0=$(date +%s)
+    quiet compose fleet up -d --no-deps edge certbot
+    for _ in $(seq 1 20); do curl -fsS -m 3 -o /dev/null --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/" && break; sleep 1; done
+    ok=1
+    [ "$(curl -s -m 5 http://127.0.0.1/DEPLOYED_COMMIT | cut -d' ' -f1)" = "$want" ] || { echo "FAIL site commit"; ok=0; }
+    for p in / /api/v1/sim-clock; do
+      c=$(probe "https://$DOMAIN$p" --resolve "$DOMAIN:443:127.0.0.1")
+      case "$c" in "200 v2"*) echo "OK   https $p  $c" ;; *) echo "FAIL https $p  $c"; ok=0 ;; esac
+    done
+    case "$(probe "http://127.0.0.1/x" -H "Host: $DOMAIN")" in 301*"loc=[https://$DOMAIN/x]") echo "OK   http -> https" ;; *) echo "FAIL redirect"; ok=0 ;; esac
+    [ $ok = 1 ] || false   # the ERR trap stops the edge and starts host nginx
+    trap - ERR
+    # A reboot must start the edge only; host certbot would renew into a copy
+    # nobody serves any more.
+    systemctl disable -q nginx; systemctl disable -q --now certbot.timer
+    date -u +%FT%TZ > /etc/fleet/edge.on
+    echo "SWITCHED: the edge owns 80/443 (gap about $(( $(date +%s) - t0 ))s). Undo: sudo fleet-edge back" ;;
+
+  back)
+    m=$(mode); [ "$m" = edge ] || die "mode is '$m', expected edge"
+    # Certificates the container renewed come back to the host first.
+    rsync -a --exclude renewal-hooks/ "$(docker volume inspect -f '{{.Mountpoint}}' fleet_certs)/" "$LE/"
+    SERVER_IMAGE="${REPO}:fleet-server-$(sed -n 1p /etc/fleet/deployed)" WEB_IMAGE="${REPO}:raitrack-$(sed -n 1p /etc/fleet/web.deployed)" \
+      compose fleet stop -t 10 edge certbot >/dev/null 2>&1
+    systemctl enable -q --now nginx; systemctl enable -q --now certbot.timer
+    rm -f /etc/fleet/edge.on
+    for _ in $(seq 1 10); do curl -fsS -m 3 -o /dev/null --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/" && break; sleep 1; done
+    echo "BACK: host nginx serves 80/443 ($(probe "https://$DOMAIN/" --resolve "$DOMAIN:443:127.0.0.1"))" ;;
+
+  *) die "usage: fleet-edge mode | check <server-sha> <web-sha> | certbot-dry-run | switch | back" ;;
+esac

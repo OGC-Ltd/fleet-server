@@ -200,7 +200,7 @@ That leaves about 7 GiB free during the rollout, with the old pm2 setup still in
 - No user traffic reaches it.
 - *Undo:* `docker compose down`.
 
-**Phases 2 and 3: how they are wired (2026-11-03, ready, not switched).**
+**Phases 2, 3 and 4: how they are wired (2026-11-03, all checked, none switched).**
 - **`deploy/box/fleet-deploy`** (as `/usr/local/sbin/fleet-deploy`) runs `server` and `report-worker` as compose project `fleet` on **`127.0.0.1:3000`**, the port nginx already proxies to. So the server cutover changes no nginx config, unlike the 3001 plan in the steps below.
   - `check <sha>`: inside the image with the real `/etc/fleet/server.env` (root 600, copied from `.env`), it runs a check script instead of the app. The script confirms the env reads the same as dotenv reads the live `.env` (by hash), the database login is read-write, Redis answers PING, every outside service is reachable over TCP, and the cache volume is writable while the image is not. Nothing live changes.
   - `cutover <sha>`: runs `check`, copies `.cache` into the volume, stops pm2, copies again plus the VSS session, then starts the containers. On any failure it stops them and starts pm2 again. On success it disables `pm2-ubuntu.service`, so a reboot cannot start both.
@@ -214,7 +214,20 @@ That leaves about 7 GiB free during the rollout, with the old pm2 setup still in
   - `switch` changes `/` in `locations.conf` to proxy to the container and reloads nginx. `/api` and `/webhook` are untouched. If its checks fail, it puts the static version back.
   - `back` puts the static version back.
 - **CI (new-ui `deploy.yml`)** still publishes the files to `~/prod/dash/build`, which is the way back. After `switch`, it also runs `fleet-web up <sha>`.
-- Rehearsed on 2026-11-03, with pm2 live throughout (`/health` 200 each time):
+- **`deploy/box/fleet-edge`** handles phase 4: the `edge` and `certbot` containers in project `fleet`, beside `server` and `web` (`fleet-web` now uses project `fleet` too, so the edge can reach both on their networks).
+  - `check <server-sha> <web-sha>`: runs a throwaway project (`fleet-edgecheck`, `docker-compose.edgecheck.yml`) with the edge on `127.0.0.1:18080/18443`, in front of the shadow's harmless server and the site image. It compares the edge with host nginx: HTTP and HTTPS answers, HTTP/2, TLS 1.2 and 1.3, the certificate fingerprint, the redirect, the API, SSE auth, webhooks, cache headers and the ACME path. It also checks the edge runs as uid 101 with no capabilities, a read-only root file system and nofile 65535.
+  - `certbot-dry-run`: a staging renewal from the certbot container, on a copy of `/etc/letsencrypt`.
+  - `switch`: needs phases 2 and 3 first. It copies the certificates into the `certs` volume, without the host's renewal hooks and with keys readable by group 101. It then stops host nginx, starts `edge` and `certbot`, and checks the site commit, HTTPS on HTTP/2, the API and the redirect. If a check fails, it stops the edge and starts host nginx again. On success, host nginx and `certbot.timer` are disabled, so a reboot cannot start both.
+  - `back`: copies any renewed certificates back to `/etc/letsencrypt` and starts host nginx and its timer again.
+  - Compose changes for this:
+    - The edge publishes IPv4 only: the box has no IPv6 address and the domain no AAAA record.
+    - The daemon runs without the userland proxy, so client addresses reach the edge unchanged. The app always trusts its immediate peer, so the container addresses change nothing for `req.ip`.
+    - certbot runs with `--no-directory-hooks` (the host hook calls `systemctl`) and a deploy hook that keeps renewed keys readable by the edge, which reloads itself every 12 h.
+- Rehearsed on 2026-11-03, with live serving throughout:
+  - `fleet-edge check` passed all 19 comparisons and the container checks.
+  - `fleet-edge certbot-dry-run` passed: the simulated renewal succeeded, the new key came out as group 101, mode 640, and `/etc/letsencrypt` was unchanged.
+  - The one difference found is in host nginx's 404 page, which shows its version (`nginx/1.30.6`). The edge does not.
+- Server rehearsals on 2026-11-03, with pm2 live throughout (`/health` 200 each time):
   - `up` refused while pm2 was serving.
   - Deploying image A, then B (which waited for CI), then a rollback to A all worked.
   - A missing image failed within 2 s.
