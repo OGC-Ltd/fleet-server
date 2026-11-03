@@ -25,7 +25,7 @@
 #
 # FLEET_DEPLOY_REHEARSAL=1 runs `up` and `rollback` as project fleet-rehearsal
 # on 127.0.0.1:3001 with the shadow's harmless env file, to test this script
-# while pm2 is live.
+# while pm2 is live. Server only: that env has no Redis, which the worker needs.
 set -Eeuo pipefail
 
 REGION=af-south-1
@@ -34,12 +34,14 @@ LIVE_DIR=/home/ubuntu/prod/fleet-server
 NODE_BIN=/home/ubuntu/.nvm/versions/node/v24.20.0/bin
 VSS_TMP=/tmp/fleet-server-vss-session.json
 MIN_FREE_GIB=3
-PULL_WAIT_S=${PULL_WAIT_S:-1200}   # CI may still be pushing the image
+PULL_WAIT_S=${PULL_WAIT_S:-0}   # CI passes 1200: its image may still be on the way
 
 if [ "${FLEET_DEPLOY_REHEARSAL:-}" = 1 ]; then
   PROJECT=fleet-rehearsal; ENV_FILE=/etc/fleet/shadow.env; PORT=3001; STATE=/etc/fleet/rehearsal.deployed
+  SERVICES="server"
 else
   PROJECT=fleet; ENV_FILE=/etc/fleet/server.env; PORT=3000; STATE=/etc/fleet/deployed
+  SERVICES="server report-worker"
 fi
 
 die() { echo "fleet-deploy: $*" >&2; exit 1; }
@@ -106,6 +108,7 @@ wait_healthy() {
   done
   [ "$st" = healthy ] || { echo "server is $st"; return 1; }
   curl -fsS -m 5 -o /dev/null "http://127.0.0.1:${PORT}/health" || { echo "/health does not answer on :${PORT}"; return 1; }
+  [[ " $SERVICES " == *" report-worker "* ]] || return 0
   rc1=$(docker inspect -f '{{.RestartCount}} {{.State.Running}}' "${PROJECT}-report-worker-1" 2>/dev/null || echo "x false")
   sleep 10
   rc2=$(docker inspect -f '{{.RestartCount}} {{.State.Running}}' "${PROJECT}-report-worker-1" 2>/dev/null || echo "x false")
@@ -118,7 +121,7 @@ boot_log() {
 }
 
 start_image() {   # sha -> 0 when healthy
-  IMAGE="${REPO}:fleet-server-$1" compose up -d --no-deps server report-worker
+  IMAGE="${REPO}:fleet-server-$1" compose up -d --no-deps $SERVICES
   wait_healthy
 }
 

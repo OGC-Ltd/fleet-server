@@ -217,7 +217,7 @@ jobs:
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o ServerAliveInterval=30 "ubuntu@${HOST}" \
-            "sudo -n /usr/local/sbin/fleet-deploy up ${GITHUB_SHA}"
+            "sudo -n PULL_WAIT_S=1200 /usr/local/sbin/fleet-deploy up ${GITHUB_SHA}"
 
       - name: push this commit into the box's working tree
         if: steps.mode.outputs.mode == 'pm2'
