@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# fleet-preview: the container stack running BESIDE live, never instead of it.
+#
+#   sudo fleet-preview up <server-sha> <web-sha>   start (or replace) the preview
+#   sudo fleet-preview status
+#   sudo fleet-preview down                        stop and remove it
+#
+#   127.0.0.1:3001  the site: edge -> web, /api and /webhook -> server
+#   127.0.0.1:4001  the API: the server container directly
+#
+# The pm2 server and host nginx keep serving everyone; nothing here touches
+# them. The preview's server is the harmless shadow (/etc/fleet/shadow.env):
+# read-only database sessions, no outside credential, no Redis, every
+# background job off. So it cannot poll Wialon, raise alerts, send mail or
+# push, or write anything; screens that need a write (sign-in, saving) fail
+# there by design. The ports are bound to the box itself: open them through
+# an SSH tunnel, e.g.  ssh -L 3001:127.0.0.1:3001 -L 4001:127.0.0.1:4001 ubuntu@<box>
+#
+# Install (root-owned):
+#   sudo install -o root -g root -m 755 deploy/box/fleet-preview /usr/local/sbin/fleet-preview
+#   sudo install -o root -g root -m 644 docker-compose.preview.yml /etc/fleet/compose/
+#   deploy/edge/preview/ goes to /etc/fleet/compose/deploy/edge/preview/
+set -Eeuo pipefail
+
+REGION=af-south-1
+COMPOSE_DIR=/etc/fleet/compose
+PROJECT=fleet-preview
+ENV_FILE=/etc/fleet/shadow.env
+MIN_FREE_GIB=3
+
+die() { echo "fleet-preview: $*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || die "run as root (sudo)"
+for f in docker-compose.prod.yml docker-compose.phase3.yml docker-compose.preview.yml deploy/edge/preview/fleet.conf; do
+  [ -f "$COMPOSE_DIR/$f" ] || die "missing $COMPOSE_DIR/$f"
+done
+
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
+REPO="${REGISTRY}/ghala"
+
+compose() {
+  FLEET_SERVER_IMAGE="${SERVER_IMAGE:-${REPO}:fleet-server-none}" RAITRACK_IMAGE="${WEB_IMAGE:-${REPO}:raitrack-none}" \
+  FLEET_ENV_FILE="$ENV_FILE" SERVER_HOST_PORT=4001 WEB_HOST_PORT=8081 \
+    docker compose -f "$COMPOSE_DIR/docker-compose.prod.yml" -f "$COMPOSE_DIR/docker-compose.phase3.yml" \
+      -f "$COMPOSE_DIR/docker-compose.preview.yml" -p "$PROJECT" --profile edge "$@"
+}
+quiet() { local out; out=$("$@" 2>&1) || { printf '%s\n' "$out" | tail -15 >&2; return 1; }; }
+valid_sha() { [[ "${1:-}" =~ ^[0-9a-f]{40}$ ]] || die "expected a 40-character commit sha, got '${1:-}'"; }
+
+# The same rules fleet-shadow enforces: the preview's server must be harmless.
+check_env() {
+  [ "$(stat -c '%U %a' "$ENV_FILE")" = "root 600" ] || die "$ENV_FILE must be owned by root, mode 600"
+  local k
+  for k in POLL RAIFACTORYSUITE_POLL VEHICLE_INSIGHT GOOGLE_ROUTING RETENTION_SWEEP NIGHTLY_ROLLUPS FUEL_SYNC \
+           LIVE_FUEL_WATCH INCIDENT_CAPTURE FUEL_SETTLE FUEL_ADJUDICATION PARKED_FALL_VERDICTS TRIP_BUILD REPORT_WORKER; do
+    grep -qx "${k}_ENABLED=false" "$ENV_FILE" || die "${k}_ENABLED must be false in $ENV_FILE"
+  done
+  grep -qx 'FOLLOW_DB=false' "$ENV_FILE" || die "FOLLOW_DB must be false"
+  [ "$(grep -cE '^(DATABASE_URL|DIRECT_URL)=.*default_transaction_read_only%3Don' "$ENV_FILE")" = 2 ] \
+    || die "both database URLs must open read-only sessions"
+  if grep -qE '^(REDIS_URL|WIALON_TOKEN|RAIFACTORYSUITE_API_KEY|VSS_PASSWORD|OPENAI_API_KEY|DEEPSEEK_API_KEY|GOOGLE_ROUTING_API_KEY|OPENWEATHER_API_KEY|MAILTRAP_API_TOKEN|VAPID_PRIVATE_KEY|FACTORY_SUITE_HOOK|access_token)=' "$ENV_FILE"; then
+    die "$ENV_FILE carries an outside credential or Redis"
+  fi
+}
+
+pull() {
+  local img=$1 free
+  free=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+  [ "$free" -ge "$MIN_FREE_GIB" ] || die "only ${free} GiB free on /, need ${MIN_FREE_GIB}"
+  docker image inspect "$img" >/dev/null 2>&1 && return 0
+  trap 'docker logout "$REGISTRY" >/dev/null 2>&1 || true' EXIT
+  aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null
+  docker pull -q "$img" >/dev/null || { docker logout "$REGISTRY" >/dev/null; die "cannot pull ${img##*/}"; }
+  docker logout "$REGISTRY" >/dev/null; trap - EXIT
+}
+
+case "${1:-}" in
+  up)
+    ssha="${2:-}"; wsha="${3:-}"; valid_sha "$ssha"; valid_sha "$wsha"
+    check_env
+    [ -z "$(docker ps -q --filter label=com.docker.compose.project=fleet-shadow)" ] || die "the shadow holds 127.0.0.1:3001: sudo fleet-shadow down"
+    export SERVER_IMAGE="${REPO}:fleet-server-${ssha}" WEB_IMAGE="${REPO}:raitrack-${wsha}"
+    pull "$SERVER_IMAGE"; pull "$WEB_IMAGE"
+    quiet compose up -d --no-deps server web edge
+    st=""
+    for _ in $(seq 1 40); do
+      st="$(docker inspect -f '{{.State.Health.Status}}' "${PROJECT}-server-1" 2>/dev/null)/$(docker inspect -f '{{.State.Health.Status}}' "${PROJECT}-web-1" 2>/dev/null)"
+      [ "$st" = healthy/healthy ] && curl -fsS -m 3 -o /dev/null http://127.0.0.1:3001/ && break
+      sleep 3
+    done
+    [ "$st" = healthy/healthy ] || die "preview not healthy (server/web: $st); see: docker logs ${PROJECT}-server-1"
+    docker logs "${PROJECT}-server-1" 2>&1 | grep -cE 'NOT started|NOT scheduled' | xargs -I{} echo "background jobs reported off: {}"
+    echo "site  127.0.0.1:3001  $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/)  $(curl -s -m 5 http://127.0.0.1:3001/DEPLOYED_COMMIT)"
+    echo "api   127.0.0.1:4001  $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4001/health) /health   via site: $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/api/v1/sim-clock) /api/v1/sim-clock"
+    echo "live  127.0.0.1:3000  $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/health) (pm2, untouched)"
+    echo "PREVIEW UP: server ${ssha:0:7}, web ${wsha:0:7}" ;;
+
+  status)
+    compose ps --format 'table {{.Service}}\t{{.Status}}\t{{.Ports}}'
+    docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' \
+      $(docker ps -q --filter "label=com.docker.compose.project=${PROJECT}") 2>/dev/null || true
+    df -h / | tail -1 ;;
+
+  down)
+    quiet compose down -v --remove-orphans
+    echo "preview removed; live untouched ($(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/health))" ;;
+
+  *) die "usage: fleet-preview up <server-sha> <web-sha> | status | down" ;;
+esac

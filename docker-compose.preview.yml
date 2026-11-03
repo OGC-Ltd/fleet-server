@@ -1,0 +1,20 @@
+# `fleet-preview` only (deploy/box/fleet-preview): the container stack running
+# BESIDE the live pm2 server and host nginx, never instead of them.
+#   site (edge -> web, /api -> server)   127.0.0.1:3001
+#   API  (server directly)               127.0.0.1:4001
+# The server reads /etc/fleet/shadow.env: read-only database sessions, no
+# outside credential, no Redis, every background job off, so it cannot poll,
+# alert, mail or write. No report-worker (it needs Redis) and no certbot.
+services:
+  server:
+    ports: !override
+      - "127.0.0.1:4001:3000"
+  web:
+    ports: !reset []
+  edge:
+    ports: !override
+      - "127.0.0.1:3001:8080"
+    volumes: !override
+      - ./deploy/edge/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/edge/preview:/etc/nginx/conf.d:ro
+      - ./deploy/edge/fleet:/etc/nginx/fleet:ro

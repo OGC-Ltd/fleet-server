@@ -61,7 +61,7 @@ FROM base AS migrate
 COPY --from=build /app/node_modules ./node_modules
 COPY package.json prisma.config.ts ./
 COPY prisma ./prisma
-COPY --chmod=644 deploy/certs/rds-af-south-1-bundle.pem /app/certs/
+COPY deploy/certs/rds-af-south-1-bundle.pem /app/certs/
 USER 10001:10001
 ENTRYPOINT ["node", "node_modules/prisma/build/index.js", "migrate", "deploy", "--config", "prisma.config.ts"]
 
@@ -74,7 +74,9 @@ COPY assets ./assets
 # Amazon's public RDS root certificates for af-south-1, so DATABASE_URL can say
 # sslmode=verify-full&sslrootcert=/app/certs/rds-af-south-1-bundle.pem and the
 # app checks it is talking to the real database, not just that TLS is on.
-COPY --chmod=644 deploy/certs/rds-af-south-1-bundle.pem /app/certs/
+# Plain COPY: --chmod would give the new /app/certs directory 644 too, and the
+# app user could not enter it. The file arrives 644 from the checkout.
+COPY deploy/certs/rds-af-south-1-bundle.pem /app/certs/
 RUN mkdir -p /app/.cache && chown fleet:fleet /app/.cache
 USER 10001:10001
 EXPOSE 3000
