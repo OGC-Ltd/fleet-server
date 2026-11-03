@@ -16,6 +16,14 @@
 # working tree is dirty, so a deploy that would silently discard someone's
 # manual edit fails loudly instead.
 #
+# Since the containerization (docs/containerization-plan.md, phase 2) the box
+# runs in one of two modes, and this workflow asks it which before touching it:
+#   pm2         the git push + build + pm2 restart below, unchanged
+#   containers  `sudo fleet-deploy up <sha>`: pulls this commit's image from
+#               ECR (images.yml pushes it; the box waits for it), starts it and
+#               rolls back to the previous image by itself if /health fails
+# Anything else (both serving, or neither) stops the run: that is for a person.
+#
 # NOT automated on purpose: `prisma migrate deploy`. A schema change against the
 # shared RDS instance is not something to trigger from a merge — run it by hand.
 
@@ -107,6 +115,8 @@ jobs:
     # Lets you require a manual approval later (Settings → Environments) without
     # touching this file.
     environment: production
+    # Long enough for fleet-deploy to wait for the image CI is still pushing.
+    timeout-minutes: 40
     steps:
       # Full history: the box's main must be a fast-forward of what we push, and
       # a shallow clone cannot prove that.
@@ -187,7 +197,30 @@ jobs:
           echo "pinned $(grep -c . ~/.ssh/known_hosts) host key(s):"
           sed 's/^/  /' /tmp/host-fingerprints
 
+      - name: which mode is the box in
+        id: mode
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          mode=$(ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" 'sudo -n /usr/local/sbin/fleet-deploy mode')
+          echo "box mode: ${mode}"
+          case "${mode}" in
+            pm2|containers) echo "mode=${mode}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::box mode is '${mode}': not deploying. See docs/containerization-plan.md"; exit 1 ;;
+          esac
+
+      - name: deploy the image (containers)
+        if: steps.mode.outputs.mode == 'containers'
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o ServerAliveInterval=30 "ubuntu@${HOST}" \
+            "sudo -n /usr/local/sbin/fleet-deploy up ${GITHUB_SHA}"
+
       - name: push this commit into the box's working tree
+        if: steps.mode.outputs.mode == 'pm2'
         env:
           HOST: ${{ secrets.EC2_HOST }}
         run: |
@@ -199,6 +232,7 @@ jobs:
           git push "ssh://ubuntu@${HOST}/home/ubuntu/prod/fleet-server" HEAD:main
 
       - name: install, build and restart
+        if: steps.mode.outputs.mode == 'pm2'
         env:
           HOST: ${{ secrets.EC2_HOST }}
         run: |
@@ -260,5 +294,6 @@ jobs:
           done
           echo "::error::fleet-server did not answer /health after the restart"
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" \
-            'export PATH=$HOME/.nvm/versions/node/v24.20.0/bin:$PATH; pm2 logs server --lines 60 --nostream'
+            'if [ "$(sudo -n /usr/local/sbin/fleet-deploy mode)" = containers ]; then sudo -n docker logs --tail 60 fleet-server-1 2>&1;
+             else export PATH=$HOME/.nvm/versions/node/v24.20.0/bin:$PATH; pm2 logs server --lines 60 --nostream; fi'
           exit 1

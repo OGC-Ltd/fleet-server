@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+# fleet-deploy: phase 2 onward of docs/containerization-plan.md.
+#
+# Runs fleet-server and report-worker from one ECR image as compose project
+# `fleet`, published on 127.0.0.1:3000, the port the host's nginx already
+# proxies to. So the cutover changes no nginx config, and going back to pm2
+# changes none either.
+#
+#   sudo fleet-deploy mode                  pm2 | containers | none
+#   sudo fleet-deploy check <sha>           readiness, changes nothing that is live
+#   sudo fleet-deploy cutover <sha>         pm2 -> containers, once (rolls back itself)
+#   sudo fleet-deploy up <sha>              deploy an image (containers mode only)
+#   sudo fleet-deploy rollback              back to the previous image
+#   sudo fleet-deploy back-to-pm2           containers -> pm2 (reports made since come along)
+#   sudo fleet-deploy status
+#
+# Install (root-owned, so nobody else can change what it runs):
+#   sudo install -o root -g root -m 755 deploy/box/fleet-deploy /usr/local/sbin/fleet-deploy
+#   sudo install -o root -g root -m 644 docker-compose.prod.yml /etc/fleet/compose/docker-compose.prod.yml
+#
+# The one rule everything here keeps: the pm2 server and the container server
+# never run at the same time. Both would poll Wialon and write the same
+# telemetry. So `up` refuses while pm2 serves, `cutover` stops pm2 before the
+# containers start, and `back-to-pm2` stops the containers before pm2 starts.
+#
+# FLEET_DEPLOY_REHEARSAL=1 runs `up` and `rollback` as project fleet-rehearsal
+# on 127.0.0.1:3001 with the shadow's harmless env file, to test this script
+# while pm2 is live.
+set -Eeuo pipefail
+
+REGION=af-south-1
+COMPOSE_FILE=/etc/fleet/compose/docker-compose.prod.yml
+LIVE_DIR=/home/ubuntu/prod/fleet-server
+NODE_BIN=/home/ubuntu/.nvm/versions/node/v24.20.0/bin
+VSS_TMP=/tmp/fleet-server-vss-session.json
+MIN_FREE_GIB=3
+PULL_WAIT_S=${PULL_WAIT_S:-1200}   # CI may still be pushing the image
+
+if [ "${FLEET_DEPLOY_REHEARSAL:-}" = 1 ]; then
+  PROJECT=fleet-rehearsal; ENV_FILE=/etc/fleet/shadow.env; PORT=3001; STATE=/etc/fleet/rehearsal.deployed
+else
+  PROJECT=fleet; ENV_FILE=/etc/fleet/server.env; PORT=3000; STATE=/etc/fleet/deployed
+fi
+
+die() { echo "fleet-deploy: $*" >&2; exit 1; }
+say() { echo "--- $*"; }
+[ "$(id -u)" = 0 ] || die "run as root (sudo)"
+[ -f "$COMPOSE_FILE" ] || die "missing $COMPOSE_FILE"
+
+# The account comes from the instance role, so the public repo names none.
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
+REPO="${REGISTRY}/ghala"
+
+compose() {
+  FLEET_SERVER_IMAGE="${IMAGE:-${REPO}:fleet-server-none}" FLEET_ENV_FILE="$ENV_FILE" SERVER_HOST_PORT="$PORT" \
+    docker compose -f "$COMPOSE_FILE" -p "$PROJECT" "$@"
+}
+pm2() { runuser -u ubuntu -- env HOME=/home/ubuntu PATH="$NODE_BIN:$PATH" pm2 "$@"; }
+
+valid_sha() { [[ "${1:-}" =~ ^[0-9a-f]{40}$ ]] || die "expected a 40-character commit sha, got '${1:-}'"; }
+pm2_online() { pm2 jlist 2>/dev/null | jq -e '[.[] | select((.name=="server" or .name=="report-worker") and .pm2_env.status=="online")] | length > 0' >/dev/null; }
+running() { [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$1" --filter "label=com.docker.compose.service=server")" ]; }
+current() { [ -f "$STATE" ] && sed -n 1p "$STATE" || true; }
+previous() { [ -f "$STATE" ] && sed -n 2p "$STATE" || true; }
+
+mode() {
+  if running fleet && pm2_online; then echo BOTH
+  elif running fleet; then echo containers
+  elif pm2_online; then echo pm2
+  else echo none; fi
+}
+
+check_env() {
+  [ -f "$ENV_FILE" ] || die "missing $ENV_FILE"
+  [ "$(stat -c '%U %a' "$ENV_FILE")" = "root 600" ] || die "$ENV_FILE must be owned by root, mode 600"
+}
+
+pull() {
+  local img=$1 free waited=0
+  free=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+  [ "$free" -ge "$MIN_FREE_GIB" ] || die "only ${free} GiB free on /, need ${MIN_FREE_GIB}"
+  docker image inspect "$img" >/dev/null 2>&1 && return 0
+  trap 'docker logout "$REGISTRY" >/dev/null 2>&1 || true' EXIT
+  aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null
+  until docker pull -q "$img" >/dev/null 2>&1; do
+    [ "$waited" -lt "$PULL_WAIT_S" ] || { docker logout "$REGISTRY" >/dev/null; trap - EXIT; die "image not in ECR after ${PULL_WAIT_S}s: ${img##*/}"; }
+    [ "$waited" = 0 ] && echo "waiting for CI to push ${img##*/} ..."
+    sleep 20; waited=$((waited + 20))
+    # A login lasts 12 h, but refresh it on long waits anyway.
+    [ $((waited % 600)) = 0 ] && aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null
+  done
+  docker logout "$REGISTRY" >/dev/null; trap - EXIT
+  echo "pulled ${img##*/}"
+}
+
+# Healthy server (its /health answering on the host port) and a worker that
+# stays up. Returns non-zero instead of dying, so callers can roll back.
+wait_healthy() {
+  local st="" i rc1 rc2
+  for i in $(seq 1 60); do
+    st=$(docker inspect -f '{{.State.Health.Status}}' "${PROJECT}-server-1" 2>/dev/null || echo missing)
+    [ "$st" = healthy ] && break
+    [ "$st" = unhealthy ] && break
+    sleep 3
+  done
+  [ "$st" = healthy ] || { echo "server is $st"; return 1; }
+  curl -fsS -m 5 -o /dev/null "http://127.0.0.1:${PORT}/health" || { echo "/health does not answer on :${PORT}"; return 1; }
+  rc1=$(docker inspect -f '{{.RestartCount}} {{.State.Running}}' "${PROJECT}-report-worker-1" 2>/dev/null || echo "x false")
+  sleep 10
+  rc2=$(docker inspect -f '{{.RestartCount}} {{.State.Running}}' "${PROJECT}-report-worker-1" 2>/dev/null || echo "x false")
+  [ "$rc1" = "$rc2" ] && [ "${rc2#* }" = true ] || { echo "report-worker is not staying up ($rc1 -> $rc2)"; return 1; }
+  return 0
+}
+
+boot_log() {
+  docker logs "${PROJECT}-server-1" 2>&1 | grep -E 'NOT started|NOT scheduled| started|"level":(50|60)' | cut -c1-200 | head -40 || true
+}
+
+start_image() {   # sha -> 0 when healthy
+  IMAGE="${REPO}:fleet-server-$1" compose up -d --no-deps server report-worker
+  wait_healthy
+}
+
+record() {   # new current, previous
+  printf '%s\n%s\n' "$1" "${2:-}" > "$STATE"; chmod 644 "$STATE"
+  # Keep the current and previous images only; never leave a migrate image.
+  local keep1="${REPO}:fleet-server-$1" keep2="${REPO}:fleet-server-${2:-none}" img
+  for img in $(docker images "$REPO" --format '{{.Repository}}:{{.Tag}}'); do
+    case "$img" in "$keep1"|"$keep2") ;; *:fleet-server-*) docker rmi "$img" >/dev/null 2>&1 || true ;; esac
+  done
+  docker image prune -f >/dev/null
+}
+
+volume_dir() { docker volume inspect -f '{{.Mountpoint}}' "${PROJECT}_fleet-cache"; }
+
+copy_cache_in() {
+  local vol; vol=$(volume_dir)
+  rsync -a --chown=10001:10001 "$LIVE_DIR/.cache/" "$vol/"
+  if [ -f "$VSS_TMP" ]; then install -o 10001 -g 10001 -m 600 "$VSS_TMP" "$vol/vss-session.json"; fi
+}
+
+copy_cache_out() {
+  local vol; vol=$(volume_dir)
+  rsync -a --chown=ubuntu:ubuntu --exclude vss-session.json "$vol/" "$LIVE_DIR/.cache/"
+  if [ -f "$vol/vss-session.json" ]; then install -o ubuntu -g ubuntu -m 600 "$vol/vss-session.json" "$VSS_TMP"; fi
+}
+
+pm2_back() {
+  # After a reboot the pm2 daemon is gone (its boot unit is disabled at
+  # cutover), so the apps come back from pm2's saved list instead.
+  if pm2 describe server >/dev/null 2>&1; then pm2 start server report-worker >/dev/null; else pm2 resurrect >/dev/null; fi
+  systemctl enable pm2-ubuntu >/dev/null 2>&1 || true
+  local i; for i in $(seq 1 30); do curl -fsS -m 3 -o /dev/null http://127.0.0.1:3000/health && { echo "pm2 serving again"; return 0; }; sleep 2; done
+  echo "pm2 started but :3000/health is not answering: pm2 logs server" >&2; return 1
+}
+
+# Readiness, run with the REAL env file in a throwaway project. Runs node with
+# a check script instead of the app: no poller, no worker, nothing written to
+# the database. Prints names and OK/FAIL only, never values.
+check() {
+  local sha=$1 img tmp rc=0
+  img="${REPO}:fleet-server-${sha}"
+  check_env
+  say "mode: $(mode)"
+  [ "$(mode)" != BOTH ] || die "pm2 and containers are BOTH serving: stop one now"
+  running fleet-shadow && die "the shadow is running: sudo fleet-shadow down"
+  pull "$img"
+  tmp=$(mktemp -d); chmod 755 "$tmp"
+  cat > "$tmp/check.js" <<'JS'
+const fs = require('fs'), net = require('net'), crypto = require('crypto')
+const appRequire = require('module').createRequire('/app/package.json')   // the image's node_modules
+const out = (ok, what) => { console.log(`${ok ? 'OK  ' : 'FAIL'} ${what}`); if (!ok) process.exitCode = 1 }
+const h = v => crypto.createHash('sha256').update(v ?? '').digest('hex')
+;(async () => {
+  // 1. The env file reads the same under compose as under dotenv on the host.
+  const want = JSON.parse(fs.readFileSync('/chk/want.json', 'utf8'))
+  const bad = Object.keys(want).filter(k => h(process.env[k]) !== want[k])
+  out(bad.length === 0, `env parity with the live .env: ${Object.keys(want).length} keys${bad.length ? ', differ: ' + bad.join(' ') : ''}`)
+  // 2. Database: reachable, and NOT read-only (this is the real login).
+  try {
+    const { Client } = appRequire('pg')
+    const c = new Client({ connectionString: process.env.DATABASE_URL }); await c.connect()
+    const r = await c.query('show transaction_read_only'); await c.end()
+    out(r.rows[0].transaction_read_only === 'off', 'database: connects, read-write login')
+  } catch (e) { out(false, 'database: ' + e.code) }
+  // 3. Redis (BullMQ, rate limits): PING only.
+  try {
+    const Redis = appRequire('ioredis')
+    const r = new Redis(process.env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 1, connectTimeout: 8000 })
+    await r.connect(); const p = await r.ping(); r.disconnect()
+    out(p === 'PONG', 'redis: PING')
+  } catch (e) { out(false, 'redis: ' + (e.code || e.message.slice(0, 60))) }
+  // 4. Outside services: TCP reach only, no request, no credential sent.
+  const hosts = new Map()
+  for (const k of ['WIALON_API_URL', 'RAIFACTORYSUITE_API_URL', 'CONTROLTECH_API_URL', 'VSS_BASE_URL', 'APP_BASE_URL']) {
+    try { const u = new URL(process.env[k]); hosts.set(k, [u.hostname, +u.port || (u.protocol === 'http:' ? 80 : 443)]) } catch {}
+  }
+  if (process.env.MAILTRAP_SMTP_HOST) hosts.set('MAILTRAP_SMTP', [process.env.MAILTRAP_SMTP_HOST, +(process.env.MAILTRAP_SMTP_PORT || 587)])
+  for (const [k, hp] of [['openai', ['api.openai.com', 443]], ['google routes', ['routes.googleapis.com', 443]], ['web push (fcm)', ['fcm.googleapis.com', 443]], ['openweather', ['api.openweathermap.org', 443]]]) hosts.set(k, hp)
+  for (const [k, [host, port]] of hosts) {
+    const ok = await new Promise(res => { const s = net.connect({ host, port, timeout: 6000 }, () => { s.destroy(); res(true) }); s.on('error', () => res(false)); s.on('timeout', () => { s.destroy(); res(false) }) })
+    out(ok, `reach ${k}`)
+  }
+  // 5. The cache volume is writable by the app user; the image is not.
+  try { fs.writeFileSync('/app/.cache/.write-test', 'x'); fs.unlinkSync('/app/.cache/.write-test'); out(true, '.cache volume writable as uid ' + process.getuid()) } catch (e) { out(false, '.cache volume: ' + e.code) }
+  try { fs.writeFileSync('/app/dist/.write-test', 'x'); out(false, '/app/dist is writable') } catch { out(true, 'image file system read-only') }
+})()
+JS
+  # What the live server reads today, by dotenv, as hashes.
+  runuser -u ubuntu -- env PATH="$NODE_BIN:$PATH" node -e '
+    const crypto = require("crypto"), d = require(process.argv[1] + "/node_modules/dotenv")
+    const env = d.parse(require("fs").readFileSync(process.argv[1] + "/.env"))
+    const h = v => crypto.createHash("sha256").update(v ?? "").digest("hex")
+    const want = {}; for (const k of Object.keys(env)) if (!["NODE_ENV", "VSS_SESSION_FILE"].includes(k)) want[k] = h(env[k])
+    process.stdout.write(JSON.stringify(want))' "$LIVE_DIR" > "$tmp/want.json"
+  chmod 644 "$tmp/want.json"
+  say "checks inside the image with $ENV_FILE (throwaway project fleet-check)"
+  PROJECT=fleet-check IMAGE="$img" compose run --rm --no-deps -T -v "$tmp:/chk:ro" --entrypoint node server /chk/check.js || rc=1
+  PROJECT=fleet-check compose down -v --remove-orphans >/dev/null 2>&1 || true
+  rm -rf "$tmp"
+  say "disk: $(df -h / | tail -1 | awk '{print $4 " free"}'), memory: $(free -m | awk '/Mem:/ {print $7 " MiB available"}')"
+  [ $rc = 0 ] && echo "READY: ${sha}" || die "NOT READY: fix the FAIL lines first"
+}
+
+case "${1:-}" in
+  mode) mode ;;
+
+  status)
+    say "mode: $(mode)   current: $(current)   previous: $(previous)"
+    compose ps
+    docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' \
+      $(docker ps -q --filter "label=com.docker.compose.project=${PROJECT}") 2>/dev/null || true
+    df -h / | tail -1 ;;
+
+  check) valid_sha "${2:-}"; [ "$PROJECT" = fleet ] || die "check runs against the real env only"; check "$2" ;;
+
+  up)
+    sha="${2:-}"; valid_sha "$sha"; check_env
+    if [ "$PROJECT" = fleet ]; then
+      m=$(mode)
+      [ "$m" = containers ] || die "mode is '$m': the first switch is 'fleet-deploy cutover <sha>'"
+    fi
+    running fleet-shadow && die "the shadow is running: sudo fleet-shadow down"
+    prev=$(current)
+    [ "$sha" = "$prev" ] && running "$PROJECT" && { echo "already running ${sha}"; exit 0; }
+    pull "${REPO}:fleet-server-${sha}"
+    if start_image "$sha"; then
+      record "$sha" "$prev"; boot_log; echo "DEPLOYED ${sha}"
+    else
+      boot_log
+      [ -n "$prev" ] || die "${sha} is not healthy and there is no previous image to go back to"
+      echo "${sha} is not healthy: back to ${prev}"
+      start_image "$prev" || die "previous image ${prev} is not healthy either: look now"
+      die "deploy of ${sha} failed and was rolled back to ${prev}"
+    fi ;;
+
+  rollback)
+    prev=$(previous); cur=$(current)
+    [ -n "$prev" ] || die "no previous image recorded"
+    pull "${REPO}:fleet-server-${prev}"
+    start_image "$prev" || die "${prev} is not healthy: look now"
+    record "$prev" "$cur"; echo "ROLLED BACK to ${prev}" ;;
+
+  cutover)
+    sha="${2:-}"; valid_sha "$sha"; [ "$PROJECT" = fleet ] || die "cutover is for the real project only"
+    m=$(mode); [ "$m" = pm2 ] || die "mode is '$m', expected pm2"
+    check "$sha"
+    img="${REPO}:fleet-server-${sha}"
+    # Containers and the volume exist before anything stops, so the copy
+    # below is the only work left inside the gap.
+    IMAGE="$img" compose create --no-recreate server report-worker >/dev/null
+    say "copying .cache into the volume (live still serving)"
+    copy_cache_in
+
+    say "stopping pm2 server and report-worker"
+    trap 'trap - ERR; echo "cutover failed: back to pm2" >&2; IMAGE="$img" compose stop -t 30 server report-worker >/dev/null 2>&1 || true; pm2_back' ERR
+    pm2 stop server report-worker >/dev/null
+    t0=$(date +%s)
+    copy_cache_in
+    say "starting containers"
+    if ! start_image "$sha"; then
+      boot_log
+      false   # the ERR trap stops the containers and brings pm2 back
+    fi
+    trap - ERR
+    # From here a reboot must bring up the containers, never pm2 as well.
+    systemctl disable pm2-ubuntu >/dev/null 2>&1
+    record "$sha" ""
+    boot_log
+    echo "CUTOVER DONE: ${sha}, API gap about $(( $(date +%s) - t0 ))s. pm2 apps are stopped, not deleted."
+    echo "Undo: sudo fleet-deploy back-to-pm2" ;;
+
+  back-to-pm2)
+    [ "$PROJECT" = fleet ] || die "real project only"
+    m=$(mode); [ "$m" = containers ] || die "mode is '$m', expected containers"
+    compose stop -t 30 server report-worker
+    copy_cache_out
+    pm2_back
+    echo "pm2 is serving. Containers stopped (volume kept). Forward again: sudo fleet-deploy cutover <sha>" ;;
+
+  *) die "usage: fleet-deploy mode | status | check <sha> | cutover <sha> | up <sha> | rollback | back-to-pm2" ;;
+esac
