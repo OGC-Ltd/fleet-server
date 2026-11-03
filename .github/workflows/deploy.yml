@@ -24,6 +24,21 @@ name: build and deploy
 on:
   push:
     branches: [main]
+    # Files the pm2 deploy never reads: changing only these must not restart
+    # the live server. The next real deploy still pushes them to the box.
+    # This file is listed too, so editing the workflow alone does not
+    # redeploy; use "Run workflow" when a deploy is wanted.
+    paths-ignore:
+      - '.github/workflows/deploy.yml'
+      - 'docs/**'
+      - '**/*.md'
+      - '.github/workflows/images.yml'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.trivyignore*'
+      - 'docker-compose*.yml'
+      - 'deploy/edge/**'
+      - 'deploy/box/**'
   workflow_dispatch:
 
 # One deploy at a time, and never cancel one half-way: a cancelled run can leave
