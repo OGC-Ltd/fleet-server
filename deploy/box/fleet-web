@@ -76,15 +76,35 @@ probe() { curl -s -o /dev/null -m 5 -w '%{http_code} cc=[%header{cache-control}]
 
 served_commit() { curl -fsS -m 5 "$1/DEPLOYED_COMMIT" 2>/dev/null | cut -d' ' -f1; }
 
-# The same answers from two places, for paths that matter to browsers.
+# The same answers from two places, for paths that matter to browsers. Each
+# side's entry script is its own: the hashed name differs between builds.
 compare() {   # base-a base-b
-  local a=$1 b=$2 asset p bad=0
-  asset=$(curl -fsS -m 5 "$a/index.html" | grep -oE '/assets/[^"]+\.js' | head -1)
-  for p in / /index.html /some/spa/route "$asset" /assets/does-not-exist.js /favicon.ico; do
-    if [ "$(probe "$a$p")" = "$(probe "$b$p")" ]; then echo "OK   $p  $(probe "$b$p")"
-    else echo "FAIL $p  was: $(probe "$a$p")  now: $(probe "$b$p")"; bad=1; fi
+  local a=$1 b=$2 p pa pb bad=0
+  for p in / /index.html /some/spa/route @entry /assets/does-not-exist.js /favicon.ico; do
+    pa=$p; pb=$p
+    if [ "$p" = @entry ]; then pa=$(entry "$a"); pb=$(entry "$b"); fi
+    if [ "$(probe "$a$pa")" = "$(probe "$b$pb")" ]; then echo "OK   $pb  $(probe "$b$pb")"
+    else echo "FAIL $pb  was: $(probe "$a$pa")  now: $(probe "$b$pb")"; bad=1; fi
   done
   return $bad
+}
+entry() { curl -fsS -m 5 "$1/index.html" | grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' | head -1; }
+
+# Every build stamps its own time and commit into the bundle (vite.config.js
+# defines), and Vite's hashed file names follow from the content. Set those
+# aside and two builds of the same source must match file for file.
+fingerprint() {   # dir short-commit -> "name sha256" per file, stamps aside
+  ( cd "$1" && find . -type f ! -name DEPLOYED_COMMIT | sort | while read -r f; do
+      n=$(printf %s "$f" | sed -E 's/-[A-Za-z0-9_-]{8}\.(js|css)$/-<H>.\1/')
+      case "$f" in
+        *.js|*.css|*.html|*.json|*.map)
+          h=$(sed -E -e 's/"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z"/"<BUILT>"/g' \
+                     -e 's/-[A-Za-z0-9_-]{8}\.(js|css)/-<H>.\1/g' \
+                     -e "s/\"$2\"/\"<COMMIT>\"/g" "$f" | sha256sum | cut -c1-64) ;;
+        *) h=$(sha256sum "$f" | cut -c1-64) ;;
+      esac
+      echo "$n $h"
+    done ) | sort
 }
 
 wait_healthy() {
@@ -125,13 +145,15 @@ case "${1:-}" in
     trap 'docker rm -f fleet-web-check >/dev/null 2>&1 || true' EXIT
     for _ in $(seq 1 20); do curl -fsS -m 2 -o /dev/null "http://127.0.0.1:${CHECK_PORT}/" && break; sleep 1; done
     rc=0
-    say "files: image vs $STATIC_DIR (DEPLOYED_COMMIT aside)"
-    diff <(docker exec fleet-web-check sh -c 'cd /usr/share/nginx/html && find . -type f ! -name DEPLOYED_COMMIT -exec sha256sum {} + | sort -k2') \
-         <(cd "$STATIC_DIR" && find . -type f ! -name DEPLOYED_COMMIT -exec sha256sum {} + | sort -k2) > /tmp/fleet-web-diff || true
-    n=$(grep -c '^[<>]' /tmp/fleet-web-diff || true)
-    if [ "$n" = 0 ]; then echo "OK   all $(find "$STATIC_DIR" -type f | wc -l) files identical"
-    else echo "DIFF ${n} lines differ (< image, > served today):"; head -20 /tmp/fleet-web-diff; fi
-    rm -f /tmp/fleet-web-diff
+    say "files: image vs $STATIC_DIR (build time, commit and hashed names aside)"
+    tmp=$(mktemp -d); trap 'docker rm -f fleet-web-check >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
+    docker cp -q fleet-web-check:/usr/share/nginx/html "$tmp/img"
+    live_c=$(served_commit http://127.0.0.1 | cut -c1-7); img_c=$(printf %s "$sha" | cut -c1-7)
+    if diff <(fingerprint "$tmp/img" "$img_c") <(fingerprint "$STATIC_DIR" "$live_c") > "$tmp/diff"; then
+      echo "OK   all $(find "$STATIC_DIR" -type f | wc -l) files match"
+    else
+      echo "FAIL $(grep -c '^[<>]' "$tmp/diff") lines differ (< image, > served today):"; head -20 "$tmp/diff"; rc=1
+    fi
     say "answers: served today (host nginx) vs the image"
     compare http://127.0.0.1 "http://127.0.0.1:${CHECK_PORT}" || rc=1
     [ "$(docker exec fleet-web-check id -u)" != 0 ] && echo "OK   runs as uid $(docker exec fleet-web-check id -u)" || { echo "FAIL runs as root"; rc=1; }
