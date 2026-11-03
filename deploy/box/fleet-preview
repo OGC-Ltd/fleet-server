@@ -2,22 +2,37 @@
 # fleet-preview: the container stack running BESIDE live, never instead of it.
 #
 #   sudo fleet-preview up <server-sha> <web-sha>   start (or replace) the preview
+#   sudo fleet-preview allow <ip[/cidr]>...        open it to these addresses only (replaces the list)
+#   sudo fleet-preview close                       back to the box itself only
+#   sudo fleet-preview resume                      after a reboot: firewall, then the last images (systemd runs this)
 #   sudo fleet-preview status
-#   sudo fleet-preview down                        stop and remove it
+#   sudo fleet-preview down                        stop and remove it (the allow list is kept)
 #
-#   127.0.0.1:3001  the site: edge -> web, /api and /webhook -> server
-#   127.0.0.1:4001  the API: the server container directly
+#   :3001  the site: edge -> web, /api and /webhook -> server
+#   :4001  the API: the server container directly
 #
 # The pm2 server and host nginx keep serving everyone; nothing here touches
 # them. The preview's server is the harmless shadow (/etc/fleet/shadow.env):
 # read-only database sessions, no outside credential, no Redis, every
 # background job off. So it cannot poll Wialon, raise alerts, send mail or
 # push, or write anything; screens that need a write (sign-in, saving) fail
-# there by design. The ports are bound to the box itself: open them through
-# an SSH tunnel, e.g.  ssh -L 3001:127.0.0.1:3001 -L 4001:127.0.0.1:4001 ubuntu@<box>
+# there by design. It is plain HTTP: no TLS.
+#
+# Who can reach it. With no allow list the ports are bound to 127.0.0.1 (open
+# them through an SSH tunnel). With /etc/fleet/preview.allow they are bound to
+# every address, and two gates admit only the listed addresses:
+#   - here: chain FLEET-PREVIEW, jumped to from DOCKER-USER for connections
+#     that arrive on the public interface for 3001/4001, drops everyone else.
+#     Docker-published ports bypass UFW, so this is the box's own gate. It is
+#     applied before any port opens, and again by fleet-preview-resume.service
+#     after a reboot, BEFORE the containers start (they do not restart on
+#     their own: restart "no").
+#   - in AWS: the security group admits 3001/4001 from the same addresses
+#     (preview-sg-cloudshell.sh).
 #
 # Install (root-owned):
 #   sudo install -o root -g root -m 755 deploy/box/fleet-preview /usr/local/sbin/fleet-preview
+#   sudo install -o root -g root -m 644 deploy/box/fleet-preview-resume.service /etc/systemd/system/
 #   sudo install -o root -g root -m 644 docker-compose.preview.yml /etc/fleet/compose/
 #   deploy/edge/preview/ goes to /etc/fleet/compose/deploy/edge/preview/
 set -Eeuo pipefail
@@ -26,6 +41,10 @@ REGION=af-south-1
 COMPOSE_DIR=/etc/fleet/compose
 PROJECT=fleet-preview
 ENV_FILE=/etc/fleet/shadow.env
+ALLOW=/etc/fleet/preview.allow
+STATE=/etc/fleet/preview.deployed
+CHAIN=FLEET-PREVIEW
+PORTS="3001 4001"
 MIN_FREE_GIB=3
 
 die() { echo "fleet-preview: $*" >&2; exit 1; }
@@ -38,16 +57,41 @@ ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
 REPO="${REGISTRY}/ghala"
 
+allowed() { [ -s "$ALLOW" ] && grep -vE '^\s*(#|$)' "$ALLOW" || true; }
+bind_addr() { [ -n "$(allowed)" ] && echo 0.0.0.0 || echo 127.0.0.1; }
+
 compose() {
   FLEET_SERVER_IMAGE="${SERVER_IMAGE:-${REPO}:fleet-server-none}" RAITRACK_IMAGE="${WEB_IMAGE:-${REPO}:raitrack-none}" \
-  FLEET_ENV_FILE="$ENV_FILE" SERVER_HOST_PORT=4001 WEB_HOST_PORT=8081 \
+  FLEET_ENV_FILE="$ENV_FILE" SERVER_HOST_PORT=4001 WEB_HOST_PORT=8081 PREVIEW_ADDR="$(bind_addr)" \
     docker compose -f "$COMPOSE_DIR/docker-compose.prod.yml" -f "$COMPOSE_DIR/docker-compose.phase3.yml" \
       -f "$COMPOSE_DIR/docker-compose.preview.yml" -p "$PROJECT" --profile edge "$@"
 }
 quiet() { local out; out=$("$@" 2>&1) || { printf '%s\n' "$out" | tail -15 >&2; return 1; }; }
 valid_sha() { [[ "${1:-}" =~ ^[0-9a-f]{40}$ ]] || die "expected a 40-character commit sha, got '${1:-}'"; }
+valid_net() {
+  [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(/([0-9]|[12][0-9]|3[0-2]))?$ ]] || return 1
+  local o; for o in "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"; do [ "$o" -le 255 ] || return 1; done
+  local bits="${BASH_REMATCH[6]:-32}"; [ "$bits" -ge 16 ] || return 1   # no wide ranges, never 0.0.0.0/0
+}
 
-# The same rules fleet-shadow enforces: the preview's server must be harmless.
+# The box's own gate. Rebuilt from the allow list every time; with an empty
+# list it drops every outside connection to the preview ports.
+firewall() {
+  local ifc a p
+  ifc=$(ip route get 1.1.1.1 | grep -oE 'dev [^ ]+' | cut -d' ' -f2)
+  [ -n "$ifc" ] || die "cannot find the public interface"
+  iptables -N "$CHAIN" 2>/dev/null || true
+  iptables -F "$CHAIN"
+  while read -r a; do [ -n "$a" ] && iptables -A "$CHAIN" -s "$a" -j RETURN; done < <(allowed)
+  iptables -A "$CHAIN" -j DROP
+  iptables -L DOCKER-USER -n >/dev/null 2>&1 || iptables -N DOCKER-USER
+  for p in $PORTS; do
+    iptables -C DOCKER-USER -i "$ifc" -p tcp -m conntrack --ctorigdstport "$p" -j "$CHAIN" 2>/dev/null \
+      || iptables -I DOCKER-USER -i "$ifc" -p tcp -m conntrack --ctorigdstport "$p" -j "$CHAIN"
+  done
+}
+
+# The harmless-server rules, the same ones fleet-shadow enforces.
 check_env() {
   [ "$(stat -c '%U %a' "$ENV_FILE")" = "root 600" ] || die "$ENV_FILE must be owned by root, mode 600"
   local k
@@ -74,36 +118,58 @@ pull() {
   docker logout "$REGISTRY" >/dev/null; trap - EXIT
 }
 
+start() {   # server-sha web-sha
+  local ssha=$1 wsha=$2 st=""
+  check_env
+  [ -z "$(docker ps -q --filter label=com.docker.compose.project=fleet-shadow)" ] || die "the shadow holds 127.0.0.1:3001: sudo fleet-shadow down"
+  export SERVER_IMAGE="${REPO}:fleet-server-${ssha}" WEB_IMAGE="${REPO}:raitrack-${wsha}"
+  pull "$SERVER_IMAGE"; pull "$WEB_IMAGE"
+  firewall   # the gate first, then the ports
+  quiet compose up -d --no-deps server web edge
+  printf '%s\n%s\n' "$ssha" "$wsha" > "$STATE"; chmod 644 "$STATE"
+  for _ in $(seq 1 40); do
+    st="$(docker inspect -f '{{.State.Health.Status}}' "${PROJECT}-server-1" 2>/dev/null)/$(docker inspect -f '{{.State.Health.Status}}' "${PROJECT}-web-1" 2>/dev/null)"
+    [ "$st" = healthy/healthy ] && curl -fsS -m 3 -o /dev/null http://127.0.0.1:3001/ && break
+    sleep 3
+  done
+  [ "$st" = healthy/healthy ] || die "preview not healthy (server/web: $st); see: docker logs ${PROJECT}-server-1"
+  echo "site  :3001  $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/)  $(curl -s -m 5 http://127.0.0.1:3001/DEPLOYED_COMMIT)"
+  echo "api   :4001  $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4001/health) /health"
+  echo "live  :3000  $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/health) (pm2, untouched)"
+  echo "reachable from: $(allowed | paste -sd' ' | sed 's/^$/this box only (SSH tunnel)/')"
+  echo "PREVIEW UP: server ${ssha:0:7}, web ${wsha:0:7}"
+}
+
 case "${1:-}" in
-  up)
-    ssha="${2:-}"; wsha="${3:-}"; valid_sha "$ssha"; valid_sha "$wsha"
-    check_env
-    [ -z "$(docker ps -q --filter label=com.docker.compose.project=fleet-shadow)" ] || die "the shadow holds 127.0.0.1:3001: sudo fleet-shadow down"
-    export SERVER_IMAGE="${REPO}:fleet-server-${ssha}" WEB_IMAGE="${REPO}:raitrack-${wsha}"
-    pull "$SERVER_IMAGE"; pull "$WEB_IMAGE"
-    quiet compose up -d --no-deps server web edge
-    st=""
-    for _ in $(seq 1 40); do
-      st="$(docker inspect -f '{{.State.Health.Status}}' "${PROJECT}-server-1" 2>/dev/null)/$(docker inspect -f '{{.State.Health.Status}}' "${PROJECT}-web-1" 2>/dev/null)"
-      [ "$st" = healthy/healthy ] && curl -fsS -m 3 -o /dev/null http://127.0.0.1:3001/ && break
-      sleep 3
-    done
-    [ "$st" = healthy/healthy ] || die "preview not healthy (server/web: $st); see: docker logs ${PROJECT}-server-1"
-    docker logs "${PROJECT}-server-1" 2>&1 | grep -cE 'NOT started|NOT scheduled' | xargs -I{} echo "background jobs reported off: {}"
-    echo "site  127.0.0.1:3001  $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/)  $(curl -s -m 5 http://127.0.0.1:3001/DEPLOYED_COMMIT)"
-    echo "api   127.0.0.1:4001  $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4001/health) /health   via site: $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/api/v1/sim-clock) /api/v1/sim-clock"
-    echo "live  127.0.0.1:3000  $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/health) (pm2, untouched)"
-    echo "PREVIEW UP: server ${ssha:0:7}, web ${wsha:0:7}" ;;
+  up) valid_sha "${2:-}"; valid_sha "${3:-}"; start "$2" "$3" ;;
+
+  allow)
+    shift; [ $# -gt 0 ] || die "usage: fleet-preview allow <ip[/cidr]>..."
+    for a in "$@"; do valid_net "$a" || die "'$a' is not an IPv4 address or a /16 or narrower network"; done
+    printf '%s\n' "$@" > "$ALLOW"; chmod 644 "$ALLOW"
+    [ -f "$STATE" ] || { firewall; echo "allow list saved; start the preview with: fleet-preview up <server-sha> <web-sha>"; exit 0; }
+    start "$(sed -n 1p "$STATE")" "$(sed -n 2p "$STATE")" ;;
+
+  close)
+    rm -f "$ALLOW"
+    firewall
+    if [ -f "$STATE" ]; then start "$(sed -n 1p "$STATE")" "$(sed -n 2p "$STATE")"; else echo "closed"; fi ;;
+
+  resume)
+    firewall
+    [ -f "$STATE" ] || { echo "no preview to resume"; exit 0; }
+    start "$(sed -n 1p "$STATE")" "$(sed -n 2p "$STATE")" ;;
 
   status)
     compose ps --format 'table {{.Service}}\t{{.Status}}\t{{.Ports}}'
-    docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' \
-      $(docker ps -q --filter "label=com.docker.compose.project=${PROJECT}") 2>/dev/null || true
+    echo "reachable from: $(allowed | paste -sd' ' | sed 's/^$/this box only (SSH tunnel)/')"
+    iptables -S "$CHAIN" 2>/dev/null | sed 's/^/  /'
     df -h / | tail -1 ;;
 
   down)
     quiet compose down -v --remove-orphans
-    echo "preview removed; live untouched ($(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/health))" ;;
+    rm -f "$STATE"
+    echo "preview removed (allow list kept, firewall still closed to others); live: $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/health)" ;;
 
-  *) die "usage: fleet-preview up <server-sha> <web-sha> | status | down" ;;
+  *) die "usage: fleet-preview up <server-sha> <web-sha> | allow <ip>... | close | resume | status | down" ;;
 esac

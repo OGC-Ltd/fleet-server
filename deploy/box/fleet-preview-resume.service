@@ -1,0 +1,18 @@
+# Puts the preview's firewall back after a reboot, then starts the preview
+# with the images it last ran. The preview containers never restart on their
+# own (restart "no"), so they cannot come up before this gate.
+# Install: sudo install -o root -g root -m 644 deploy/box/fleet-preview-resume.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable fleet-preview-resume.service
+[Unit]
+Description=fleet preview: firewall, then the preview containers
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fleet-preview resume
+RemainingAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
