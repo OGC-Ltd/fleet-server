@@ -232,6 +232,8 @@ That leaves about 7 GiB free during the rollout, with the old pm2 setup still in
   - Deploying image A, then B (which waited for CI), then a rollback to A all worked.
   - A missing image failed within 2 s.
 
+**Preview beside live (2026-11-03, running).** `deploy/box/fleet-preview` runs the container stack next to pm2 and host nginx, never instead of them: the site through the edge on `127.0.0.1:3001` and the API on `127.0.0.1:4001` (compose project `fleet-preview`, `docker-compose.preview.yml`, plain HTTP, no certificates). Its server reads the shadow env, so it has read-only database sessions (a write was refused), no outside credentials, no Redis and every background job off: it cannot poll, alert, mail or write, and screens that need a write (sign-in, saving) fail there by design. The ports are bound to the box itself; open them with `ssh -L 3001:127.0.0.1:3001 -L 4001:127.0.0.1:4001 ubuntu@<box>`. Commands: `sudo fleet-preview up <server-sha> <web-sha>`, `status`, `down`. Running server `958e800` and web `f2cab55`, about 340 MB together.
+
 **Phase 2: switch the server and worker to containers.** This happens at a quiet hour, with the following steps:
 1. Copy `.cache` into the `fleet-cache` volume. Repeat right before the switch to catch new reports.
 2. `pm2 stop server report-worker`.
