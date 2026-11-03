@@ -281,7 +281,22 @@ The containers' 127.0.0.1 port publishing becomes unnecessary here, since only t
 3. **Grow the volume to 40 GiB** with the no-downtime runbook (snapshot, `ModifyVolume`, `growpart`, `resize2fs`).
 
 **Phase 5: further hardening** (each one is independent).
-- Secrets in SSM Parameter Store.
+- **Secrets in SSM Parameter Store: wired 2026-11-03, not imported yet.**
+  - **Storage:** one SecureString per key under `/fleet/prod/server/`, encrypted with the customer-managed KMS key `alias/fleet-secrets`, which rotates yearly.
+  - **The box's access:** `fleet-app` may only read that path, and may decrypt only through SSM (`kms:ViaService`). Set up by `ssm-secrets-cloudshell.sh open`, run in CloudShell.
+  - **Import, once:** `sudo fleet-secrets import` copies today's live `.env` into SSM. The write permission it needs exists only between `open` and `close`, and `close` runs straight after the import.
+  - **Values never show:** not in output, not on command lines (`put-parameter --value file://`), and not in files outside root-only places (a `/run` directory in RAM, then `/etc/fleet/server.env`, root 600).
+  - **From then on:** with `/etc/fleet/secrets-from-ssm` present, `fleet-deploy` runs `fleet-secrets render` before every check and deploy. If SSM cannot be read, the deploy stops and the running containers are not touched. A secret changes in SSM, then the next deploy picks it up, and `server.env.prev` keeps the version before.
+  - `fleet-secrets status` compares key names between SSM, `server.env` and the live `.env`.
+  - The live pm2 server keeps reading its own `.env`.
+- **The database certificate is checked: wired 2026-11-03.**
+  - **What was wrong:** with `uselibpqcompat`, `sslmode=require` encrypts (TLS 1.3, measured) but does not check the certificate. Node's own CAs cannot check it either, because RDS uses its own root CAs.
+  - **The bundle:** the image carries Amazon's public af-south-1 RDS root bundle at `/app/certs/rds-af-south-1-bundle.pem` (from `truststore.pki.rds.amazonaws.com`; two separate downloads matched, sha256 `336dbbf4…`). `.dockerignore` excludes every other `.pem`, and CI fails if the bundle is missing.
+  - **The setting:** `fleet-secrets import` stores `DATABASE_URL` with `sslmode=verify-full&sslrootcert=` that path. This was tested from the image against RDS: it connects, and without the bundle it fails with `SELF_SIGNED_CERT_IN_CHAIN`. The readiness check reports which mode is in use.
+  - **`DIRECT_URL` is unchanged.** Only hand-run migrations use it, and Prisma's migration engine reads TLS settings its own way. Changing it needs its own test.
+  - **After the import:** images built before this change cannot roll back onto the new `DATABASE_URL`, because they lack the bundle.
+- **Redis: checked 2026-11-03, nothing to change.** It uses TLS 1.2 with the certificate checked (Amazon CA), and refuses unauthenticated connections (`NOAUTH`). ioredis keeps certificate checking on.
+- **Outside services:** the readiness check now reaches every fixed host in `src/` and the three browser push services (21 in all, every one OK on 2026-11-03). Inbound webhooks go through nginx or the edge to `/webhook/`, and that route is part of the edge check.
 - An Elastic IP.
 - Moving SSH to SSM Session Manager, so port 22 can close. The SSM agent already runs on the box.
 - Redis pub/sub for the event bus, which is what allows more than one `server` replica.
