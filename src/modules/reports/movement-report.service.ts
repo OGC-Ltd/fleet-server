@@ -173,7 +173,9 @@ async function findMorl(orgId: string): Promise<MorlFence | null> {
   const hq = named ? undefined : (await prisma.geofence.findMany({
     where: { organisationId: orgId, name: { contains: 'HQ', mode: 'insensitive' } },
     select, orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
-  })).find(f => /\bHQ\b/i.test(f.name))
+  })).filter(f => /\bHQ\b/i.test(f.name))
+    // The yard's HQ, never a customer's: "Menengai: Naivas HQ Nairobi" sorts first.
+    .sort((a, b) => Number(/yard/i.test(b.name)) - Number(/yard/i.test(a.name)))[0]
   const pick = named ?? (hq && { ...hq, name: 'MORL HQ' })
   return pick ? fenceOf(pick) : null
 }

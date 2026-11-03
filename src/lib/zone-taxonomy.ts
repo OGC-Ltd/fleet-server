@@ -20,7 +20,7 @@
 export type ZoneCategory =
   | 'farm' | 'nursery' | 'commercial' | 'rainfed' | 'factory'
   | 'logistics' | 'facility' | 'wetland' | 'water' | 'drain' | 'road'
-  | 'restricted' | 'sample' | 'other'
+  | 'restricted' | 'sample' | 'shop' | 'other'
 
 /**
  * These rules were written against ONE account's vocabulary and have now met
@@ -41,6 +41,11 @@ export type ZoneCategory =
 export function categorise(name: string): ZoneCategory {
   const n = name.toLowerCase()
   if (n.startsWith('ves'))                          return 'sample'
+  /* Menengai's van-sales shops, 5,840 of its 6,170 Wialon zones (2026-11-03),
+     typed every way: "MENENGAI_VS:", "MENENENGAI_VS:", "MENENGAI-VS:",
+     "MENENGAI _VS:", "MENENGAI_VANSALES:", "MENENGAI_SHOP:". Containment, not
+     narration: a van calls at dozens a day. */
+  if (/^me\w*\s*[_ -]?\s*(vs|vansales|shop)/.test(n)) return 'shop'
   /* First, and before any land use: a keep-out is the one zone whose colour
      must not be the same grey as "we could not tell". It outranks whatever
      else the name says, because "NO GO ZONES -SUKARI" is a prohibition before
@@ -98,7 +103,7 @@ export function categorise(name: string): ZoneCategory {
  * containment — but they are never narrated.
  */
 export function isEstateFeature(category: ZoneCategory): boolean {
-  return category !== 'sample'
+  return category !== 'sample' && category !== 'shop'
 }
 
 /**
