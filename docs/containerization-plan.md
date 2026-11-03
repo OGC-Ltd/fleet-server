@@ -77,9 +77,9 @@ than a few seconds.
 
 | Container | Image | Exposed | Limits (start) |
 | --- | --- | --- | --- |
-| `server` | `<account>.dkr.ecr.af-south-1.amazonaws.com/fleet-server:<sha>` | `127.0.0.1:3001` during migration, then the internal network only | 1.5 GB memory, 1.5 CPU |
+| `server` | `<account>.dkr.ecr.af-south-1.amazonaws.com/ghala:fleet-server-<sha>` | `127.0.0.1:3001` during migration, then the internal network only | 1.5 GB memory, 1.5 CPU |
 | `report-worker` | the same image, different command | none | 1.8 GB memory, 1 CPU |
-| `web` | `<account>.dkr.ecr.af-south-1.amazonaws.com/raitrack:<sha>` (nginx-unprivileged + build) | internal network only | 64 MB |
+| `web` | `<account>.dkr.ecr.af-south-1.amazonaws.com/ghala:raitrack-<sha>` (nginx-unprivileged + build) | internal network only | 64 MB |
 | `edge` | `nginx:<pinned>` + our config | **80, 443 on the host** (the only public ports) | 128 MB |
 | `certbot` | `certbot/certbot:<pinned>` | none | runs on a schedule |
 
@@ -93,7 +93,7 @@ different code versions.
 - **Multi-stage builds.** The final image has the compiled `dist/`, production `node_modules`, `generated/prisma`, `assets/` and `prisma/` only: no compilers, no source, no `.git`.
 - **Non-root user** with a fixed UID (10001), set by `USER` in the image.
 - **Scanned in CI** with Trivy. The build **fails on fixable HIGH or CRITICAL** issues. An SBOM is attached to each image.
-- **Private registry: Amazon ECR in af-south-1** (decided 2026-11-03, replacing GHCR). Repositories `fleet-server` and `raitrack`, immutable tags, scan on push, KMS-encrypted, lifecycle of 30 images. CI pushes through GitHub OIDC with role `github-ecr-push`, which only `main` of the two repositories can assume and which can only push to them. The box pulls with its own instance role `fleet-app` (read-only on the two repositories). No AWS keys or GitHub tokens are stored anywhere. Setup: the "Fleet ECR Setup" runbook.
+- **Private registry: Amazon ECR in af-south-1** (decided 2026-11-03, replacing GHCR). One repository, `ghala` (created by the operator), for all fleet images, told apart by tag (`fleet-server-<sha>`, `fleet-server-<sha>-migrate`, `raitrack-<sha>`); immutable tags, scan on push, KMS-encrypted, lifecycle of 30 images. CI pushes through GitHub OIDC with role `github-ecr-push`, which only `main` of fleet-server and raitrack can assume and which can only push to `ghala`. The box pulls with its own instance role `fleet-app` (read-only on `ghala`). No AWS keys or GitHub tokens are stored anywhere. Setup: the "Fleet ECR Setup" runbook.
 
 **Runtime (compose)**
 - **Locked-down containers:**
@@ -141,7 +141,7 @@ Each of these is tested locally with `docker compose` first:
 ## 6. Rolling it out (each phase can be undone)
 
 **Phase 0: CI builds images, nothing deployed.**
-- fleet-server CI gains build → Trivy scan → push to ECR (`fleet-server:<sha>`), beside the current pm2 deploy, which carries on unchanged.
+- fleet-server CI gains build → Trivy scan → push to ECR (`ghala:fleet-server-<sha>`), beside the current pm2 deploy, which carries on unchanged.
 - Same for new-ui.
 - *Done when:* images build, scan clean, and run locally.
 

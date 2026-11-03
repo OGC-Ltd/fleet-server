@@ -23,7 +23,7 @@ REGION=af-south-1
 # The account comes from the instance role, so the public repo names none.
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
-REPO="${REGISTRY}/fleet-server"
+REPO="${REGISTRY}/ghala"          # one repository; the tag names the app
 ENV_FILE=/etc/fleet/shadow.env
 COMPOSE_FILE=/etc/fleet/compose/docker-compose.prod.yml
 PROJECT=fleet-shadow
@@ -35,7 +35,7 @@ die() { echo "fleet-shadow: $*" >&2; exit 1; }
 [ -f "$COMPOSE_FILE" ] || die "missing $COMPOSE_FILE"
 
 compose() {
-  FLEET_SERVER_IMAGE="${IMAGE:-${REPO}:none}" FLEET_ENV_FILE="$ENV_FILE" SERVER_HOST_PORT="$PORT" \
+  FLEET_SERVER_IMAGE="${IMAGE:-${REPO}:fleet-server-none}" FLEET_ENV_FILE="$ENV_FILE" SERVER_HOST_PORT="$PORT" \
     docker compose -f "$COMPOSE_FILE" -p "$PROJECT" "$@"
 }
 
@@ -67,7 +67,7 @@ case "${1:-}" in
   up)
     sha="${2:-}"
     [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "usage: fleet-shadow up <40-character commit sha>"
-    IMAGE="${REPO}:${sha}"
+    IMAGE="${REPO}:fleet-server-${sha}"
     check_env
     free=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
     [ "$free" -ge "$MIN_FREE_GIB" ] || die "only ${free} GiB free on /, need ${MIN_FREE_GIB}"
