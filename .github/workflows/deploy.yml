@@ -47,6 +47,7 @@ on:
       - 'docker-compose*.yml'
       - 'deploy/edge/**'
       - 'deploy/box/**'
+      - 'deploy/certs/**'
   workflow_dispatch:
 
 # One deploy at a time, and never cancel one half-way: a cancelled run can leave

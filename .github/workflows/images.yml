@@ -81,6 +81,8 @@ jobs:
             ! command -v npm >/dev/null                   || { echo "::error::npm is in the image"; exit 1; }
             [ ! -e /app/node_modules/prisma ]             || { echo "::error::Prisma CLI is in the runtime image"; exit 1; }
             [ ! -e /app/node_modules/typescript ]         || { echo "::error::typescript is in the runtime image"; exit 1; }
+            [ "$(grep -c BEGIN /app/certs/rds-af-south-1-bundle.pem 2>/dev/null)" = 3 ] \
+                                                          || { echo "::error::the RDS CA bundle is missing from the image"; exit 1; }
             echo "runtime: user $(id -u), no .env, no npm, no Prisma CLI"'
 
       - name: boot test against a throwaway PostGIS (every background job off)
