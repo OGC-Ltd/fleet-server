@@ -119,7 +119,7 @@ export async function renderDormantPdf(b: DormantPdfBody, o: { orgCode: string; 
   }
   w.y += 2 * MM
   if (b.never) w.note(`${num(b.never)} vehicle${b.never === 1 ? ' has' : 's have'} never reported to the platform and ${b.never === 1 ? 'is' : 'are'} not listed.`)
-  w.note('A tracker that stopped sending today is not listed yet: it shows tomorrow, as offline yesterday.')
+  w.note('A tracker that stopped sending on the day of the report is not listed yet: it shows the next day, as offline yesterday.')
   w.footers(`${b.fleet} · Dormant Assets Report · ${asAt}`)
   doc.end()
   return done
