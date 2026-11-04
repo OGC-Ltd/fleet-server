@@ -1,4 +1,4 @@
-// The Dormant Assets, Geofence, TAT and Fuel and Speed reports as PDFs, drawn on the
+// The Dormant Assets, Geofence, TAT and Fuel, Speed and Deliveries reports as PDFs, drawn on the
 // server (operator, 4 Nov 2026), on the letterhead the Movement Report uses.
 // The page makes the rows, for one organisation or several together and for the
 // sites ticked (new-ui hooks/useReportOrgs), and sends them here to be drawn.
@@ -7,7 +7,7 @@
 
 import PDFDocument from 'pdfkit'
 import { MM, SIDE, sheetOf, C, F, DASH, num, drawLetterhead, ReportWriter, type Cell, type Col } from '../../lib/pdf/letterhead.js'
-import type { DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody } from './report.schema.js'
+import type { DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody, DeliveriesPdfBody } from './report.schema.js'
 
 const OFFSET = 3 * 3600_000
 const DAY = 86_400_000
@@ -347,6 +347,109 @@ export async function renderSpeedPdf(b: SpeedPdfBody, o: { orgCode: string; land
   w.y += 2 * MM
   w.note(CONTACT_LINE)
   w.footers(`${b.fleet} · Speed Report · ${date}`)
+  doc.end()
+  return done
+}
+
+// ── Deliveries ───────────────────────────────────────────────────────────────
+
+type DeliveryPdfRow = DeliveriesPdfBody['rows'][number]
+
+export const DELIVERY_HEADS = ['Reg', 'Time left MORL/STO', 'Orders fulfilled', 'Current location', 'Time arrived MORL/STO']
+const DELIVERY_WIDTHS = [22, 42, 24, 60, 36]
+const DELIVERED = '#2e7d32'
+const NOT_DELIVERED = '#c62828'
+
+/** "30.10.2026 04:05:02", in Nairobi, as Menengai's sheet writes it. */
+const sheetStamp = (ms: number) => { const s = iso(ms); return `${s.slice(8, 10)}.${s.slice(5, 7)}.${s.slice(0, 4)} ${s.slice(11, 19)}` }
+
+export function deliveryCells(r: DeliveryPdfRow): string[] {
+  return [
+    r.plate,
+    r.leftAt != null ? `${sheetStamp(r.leftAt)} (${r.leftFrom?.short ?? ''})` : r.notLeft ?? DASH,
+    `${r.fulfilled}/${r.planned}`,
+    r.arrivedAt != null && r.arrivedTo ? r.arrivedTo : r.place || DASH,
+    r.arrivedAt != null ? sheetStamp(r.arrivedAt) : '',
+  ]
+}
+
+export function deliverySummary(rows: DeliveryPdfRow[]) {
+  return {
+    vehicles: rows.length,
+    out: rows.filter(r => r.leftAt != null && r.arrivedAt == null).length,
+    back: rows.filter(r => r.arrivedAt != null).length,
+    fulfilled: rows.reduce((n, r) => n + r.fulfilled, 0),
+    planned: rows.reduce((n, r) => n + r.planned, 0),
+  }
+}
+
+/** A customer's line: delivered when, not yet, or no longer a geofence on the platform. */
+export function customerCells(c: DeliveryPdfRow['customers'][number]): Cell[] {
+  return [
+    { text: c.label },
+    c.missing ? { text: 'Not on the platform', color: C.mut }
+      : c.at != null ? { text: `Delivered ${iso(c.at).slice(11, 16)}`, bold: true, color: DELIVERED }
+        : { text: 'Not yet', color: NOT_DELIVERED },
+  ]
+}
+
+export const deliveriesFileName = (b: Pick<DeliveriesPdfBody, 'fleet' | 'at'>) => {
+  const s = iso(b.at)
+  return `Deliveries Report ${b.fleet} ${s.slice(0, 10)} ${s.slice(11, 16).replace(':', '')}.pdf`
+}
+
+/**
+ * `stops: false` (operator, 4 Nov 2026): the letterhead and the sheet's table
+ * under its date bar, as the operator's sheet, and nothing else.
+ */
+export async function renderDeliveriesPdf(b: DeliveriesPdfBody, o: { orgCode: string; landscape?: boolean; now?: number }): Promise<Buffer> {
+  const now = o.now ?? Date.now()
+  const reportNo = templateReportNo('DL', o.orgCode, now)
+  const { doc, done, w } = open(`Deliveries Report ${reportNo}`, Boolean(o.landscape))
+  const s = deliverySummary(b.rows)
+  const period = periodWords(b.from, b.at, now)
+  const orders = `${num(s.fulfilled)}/${num(s.planned)}`
+  heading(w, doc, {
+    title: 'Deliveries Report', reportNo, date: dmy(b.at), fleet: b.fleet,
+    info: [
+      ['Fleet', b.fleet], ['Window', period],
+      ['Units', b.group === 'all' ? 'All groups' : b.group], ['Vehicles', num(s.vehicles)],
+      ['As at', dmyhm(b.at)], ['Orders fulfilled', orders],
+    ],
+  })
+  const used = DELIVERY_WIDTHS.reduce((a, x) => a + x, 0)
+  const cols: Col[] = DELIVERY_WIDTHS.map((x, i) => ({
+    w: (x * w.sheet.body) / used, ...(i === 2 ? { align: 'right' as const } : {}), ...(i === 0 || i === 1 || i === 3 ? { wrap: true } : {}),
+  }))
+  const sheet = () => {
+    if (!b.rows.length) { w.none('No vehicles in the report.'); return }
+    w.table(cols, DELIVERY_HEADS, b.rows.map(r => deliveryCells(r).map((text, i): Cell => ({ text, bold: i === 0 }))), { size: 7.8 })
+  }
+  if (!b.stops) {
+    sectionBar(w, dmy(b.at), `${num(s.vehicles)} vehicle${s.vehicles === 1 ? '' : 's'}`)
+    sheet()
+  } else {
+    w.h2('1. Overview', `as at ${dmyhm(b.at)}`)
+    w.cells([['Vehicles', num(s.vehicles)], ['Out on delivery', num(s.out)], ['Back at storage', num(s.back)], ['Orders fulfilled', orders]])
+    w.h2('2. Deliveries', period)
+    sheet()
+    w.h2('3. Customers by vehicle')
+    const customerCols: Col[] = [{ w: 0, wrap: true }, { w: 48 * MM }]
+    for (const r of b.rows) {
+      // A vehicle's name never sits alone at a page foot
+      w.room(50)
+      w.y += 2 * MM
+      const left = r.leftAt != null && r.leftFrom ? ` · left ${r.leftFrom.label} ${iso(r.leftAt).slice(11, 16)}` : ''
+      w.line(r.plate, SIDE, w.y, w.sheet.body * 0.4, { font: F.bold, size: 8.2 })
+      w.line(`${r.fulfilled}/${r.planned} delivered${left}`, SIDE + w.sheet.body * 0.4, w.y + 0.6, w.sheet.body * 0.6, { size: 7.6, color: C.mut, align: 'right' })
+      w.y += 11
+      if (!r.customers.length) { w.none('No customers given.'); continue }
+      w.table(customerCols, ['Customer', 'Delivered'], r.customers.map(customerCells), { size: 7.8 })
+    }
+  }
+  w.y += 2 * MM
+  w.note(CONTACT_LINE)
+  w.footers(`${b.fleet} · Deliveries Report · ${dmyhm(b.at)}`)
   doc.end()
   return done
 }

@@ -1,10 +1,10 @@
 /** The Dormant Assets, Geofence and TAT and Fuel PDFs the server draws from the page's rows. */
 import { describe, it, expect } from 'vitest'
 import {
-  renderDormantPdf, renderGeofencePdf, renderTatFuelPdf, renderSpeedPdf, dormantFileName, geofenceFileName, tatFileName, tatPeriodWords, speedFileName, speedCells, speedSummary, peakLink, SPEED_HEADS,
+  renderDormantPdf, renderGeofencePdf, renderTatFuelPdf, renderSpeedPdf, renderDeliveriesPdf, deliveriesFileName, deliveryCells, deliverySummary, customerCells, dormantFileName, geofenceFileName, tatFileName, tatPeriodWords, speedFileName, speedCells, speedSummary, peakLink, SPEED_HEADS,
   sectionDays, DORMANT_SECTIONS, stampWords, visitDuration, endsNow, tripWords, tatSummary, tatCells, TAT_HEADS, templateReportNo,
 } from '../../src/modules/reports/template-report.pdf.js'
-import { dormantPdfBodySchema, geofencePdfBodySchema, tatFuelPdfBodySchema, speedPdfBodySchema } from '../../src/modules/reports/report.schema.js'
+import { dormantPdfBodySchema, geofencePdfBodySchema, tatFuelPdfBodySchema, speedPdfBodySchema, deliveriesPdfBodySchema } from '../../src/modules/reports/report.schema.js'
 
 const at = (s: string) => Date.parse(`${s}+03:00`)
 const isPdf = (b: Buffer) => b.subarray(0, 5).toString('latin1') === '%PDF-'
@@ -124,5 +124,39 @@ describe('Speed Report', () => {
     expect(isPdf(await renderSpeedPdf(body, { orgCode: 'WESTSU', landscape: true }))).toBe(true)
     expect(pages(await renderSpeedPdf({ ...body, rows: [] }, { orgCode: 'WESTSU' }))).toBe(1)
     expect(speedFileName(body)).toBe('Speed Report West Kenya 2026-10-30.pdf')
+  })
+})
+
+describe('Deliveries', () => {
+  const left = { plate: 'KCP 136P', leftAt: at('2026-10-30T04:05:02'), leftFrom: { short: 'MORL', label: 'MORL' }, notLeft: null, fulfilled: 1, planned: 3,
+    place: LONG_PLACE, arrivedAt: null, arrivedTo: null,
+    customers: [{ label: 'JOJAC INVESTMENTS', at: at('2026-10-30T06:00:00') }, { label: 'THANJU SHOP', at: null }, { label: 'GONE SHOP', at: null, missing: true }] }
+  const parked = { plate: 'KDE 123E', leftAt: null, leftFrom: null, notLeft: 'At MORL, not left', fulfilled: 0, planned: 0, place: null, arrivedAt: null, arrivedTo: null, customers: [] }
+  const back = { ...left, plate: 'KCB 345K', arrivedAt: at('2026-10-30T16:00:00'), arrivedTo: 'Nairobi depot', fulfilled: 3 }
+  const body = deliveriesPdfBodySchema.parse({ fleet: 'Menengai Oil Refineries Ltd', from: at('2026-10-30T07:00:00'), at: at('2026-10-30T20:00:00'), rows: [left, parked, back] })
+
+  it('writes the sheet\'s row', () => {
+    expect(deliveryCells(body.rows[0]!)).toEqual(['KCP 136P', '30.10.2026 04:05:02 (MORL)', '1/3', LONG_PLACE, ''])
+    expect(deliveryCells(body.rows[1]!)).toEqual(['KDE 123E', 'At MORL, not left', '0/0', '–', ''])
+    expect(deliveryCells(body.rows[2]!).slice(3)).toEqual(['Nairobi depot', '30.10.2026 16:00:00'])
+  })
+  it('counts the rows as posted, typed counts included', () => {
+    expect(deliverySummary(body.rows)).toEqual({ vehicles: 3, out: 1, back: 1, fulfilled: 4, planned: 6 })
+  })
+  it('says what became of each customer, in letters the font has', () => {
+    expect(customerCells(left.customers[0]!)[1]!.text).toBe('Delivered 06:00')
+    expect(customerCells(left.customers[1]!)[1]!.text).toBe('Not yet')
+    expect(customerCells(left.customers[2]!)[1]!.text).toBe('Not on the platform')
+  })
+  it('draws upright or on its side, with or without the customers', async () => {
+    expect(isPdf(await renderDeliveriesPdf(body, { orgCode: 'MENENGAI' }))).toBe(true)
+    expect(isPdf(await renderDeliveriesPdf(body, { orgCode: 'MENENGAI', landscape: true }))).toBe(true)
+    expect(pages(await renderDeliveriesPdf({ ...body, stops: false }, { orgCode: 'MENENGAI' }))).toBe(1)
+    expect(pages(await renderDeliveriesPdf({ ...body, rows: [] }, { orgCode: 'MENENGAI' }))).toBe(1)
+    expect(deliveriesFileName(body)).toBe('Deliveries Report Menengai Oil Refineries Ltd 2026-10-30 2000.pdf')
+  })
+  it('runs onto more pages for a long list', async () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({ ...left, plate: `KDE ${100 + i}E` }))
+    expect(pages(await renderDeliveriesPdf({ ...body, rows: many }, { orgCode: 'MENENGAI' }))).toBeGreaterThan(1)
   })
 })

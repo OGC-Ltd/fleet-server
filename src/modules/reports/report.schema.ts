@@ -204,6 +204,29 @@ export const speedPdfBodySchema = z.object({
 })
 export type SpeedPdfBody = z.infer<typeof speedPdfBodySchema>
 
+/** The Deliveries Report as the page made it: its counts stand as posted, an operator may have typed them. */
+export const deliveriesPdfBodySchema = z.object({
+  fleet: pdfFleet,
+  from: pdfTime,
+  at: pdfTime,
+  group: z.string().max(100).default('all'),
+  /** Each vehicle's customers under the table, or the table alone. */
+  stops: z.boolean().default(true),
+  rows: z.array(z.object({
+    plate: pdfText,
+    leftAt: pdfTime.nullable(),
+    leftFrom: z.object({ short: z.string().max(40), label: z.string().max(100) }).nullable(),
+    notLeft: pdfText.nullable(),
+    fulfilled: z.number().int().nonnegative(),
+    planned: z.number().int().nonnegative(),
+    place: pdfText.nullable(),
+    arrivedAt: pdfTime.nullable(),
+    arrivedTo: z.string().max(100).nullable(),
+    customers: z.array(z.object({ label: pdfText, at: pdfTime.nullable(), missing: z.boolean().optional() })).max(PDF_MAX_ROWS),
+  })).max(PDF_MAX_ROWS),
+})
+export type DeliveriesPdfBody = z.infer<typeof deliveriesPdfBodySchema>
+
 /** The longest period an end-of-shift report may cover: it reads the feeds and the weighbridge day by day. */
 export const END_OF_SHIFT_MAX_DAYS = 7
 
