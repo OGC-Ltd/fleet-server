@@ -80,7 +80,7 @@ export function sectionDays(s: { days: readonly [number, number] }, now: number)
 }
 
 /** A section's bar: its title in the very middle of the bar, its days on the right, neither moving the other. */
-function sectionBar(w: ReportWriter, title: string, aside: string) {
+export function sectionBar(w: ReportWriter, title: string, aside: string) {
   // A bar never sits alone at a page foot: it keeps a row, or the "None." under it
   w.room(4 * MM + BAR_H + 26)
   w.y += 4 * MM

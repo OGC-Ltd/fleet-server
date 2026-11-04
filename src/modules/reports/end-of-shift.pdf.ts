@@ -12,6 +12,7 @@
 import PDFDocument from 'pdfkit'
 import { MM, SIDE, sheetOf, C, F, DASH, num, drawLetterhead, ReportWriter, type Cell, type Col } from '../../lib/pdf/letterhead.js'
 import type { EndOfShift, Tone } from './end-of-shift.js'
+import { sectionBar } from './template-report.pdf.js'
 
 const TZ = 'Africa/Nairobi'
 const H = 3_600_000
@@ -42,14 +43,16 @@ export function endOfShiftFileName(orgName: string, at: number): string {
 
 /** flag = red, mut = grey; otherwise ink. */
 export type DocTone = 'flag' | 'mut'
-export interface DocCell { text: string; bold?: boolean; tone?: DocTone }
+export interface DocCell { text: string; bold?: boolean; tone?: DocTone; /** Where a click on it goes. */ link?: string; /** A tint behind it, #rrggbb. */ fill?: string }
 /** A column: width in mm, 0 shares what is left. */
-export interface DocCol { w: number; align?: 'left' | 'right' | 'center' }
+export interface DocCol { w: number; align?: 'left' | 'right' | 'center'; /** Long text runs onto more lines. */ wrap?: boolean }
 export interface DocTable { kind: 'table'; cols: DocCol[]; head: string[]; rows: DocCell[][]; size?: number }
 export interface DocNone { kind: 'none'; text: string }
 export type DocBlock =
   | { kind: 'h2'; title: string; aside?: string }
   | { kind: 'h3'; title: string; aside?: string }
+  /** A coloured section bar, its title in the very middle (Dormant Assets). */
+  | { kind: 'bar'; title: string; aside?: string }
   | { kind: 'figures'; items: Array<{ label: string; value: string; flag?: boolean }> }
   | DocTable
   | DocNone
@@ -66,6 +69,10 @@ export interface ShiftDoc {
   meta: Array<{ label: string; value: string }>
   blocks: DocBlock[]
   footer: string
+  /** What the PDF is called inside the file; End of Shift's by default. */
+  docName?: string
+  /** The facts two to a row, as the template reports set them. */
+  pairs?: boolean
 }
 
 const toneOf = (t: Tone): DocTone | undefined => (t === 'c' ? 'flag' : t === 'm' ? 'mut' : undefined)
@@ -208,15 +215,15 @@ endOfShiftDoc.made = (orgName: string, date: string, at: number) => `${orgName} 
 // ── drawing ───────────────────────────────────────────────────────────────────
 
 const colorOf = (t?: DocTone) => (t === 'flag' ? C.flag : t === 'mut' ? C.mut : undefined)
-const cellOf = (c: DocCell): Cell => ({ text: c.text, bold: c.bold, color: colorOf(c.tone) })
-const colsOf = (cols: DocCol[]): Col[] => cols.map((c) => ({ w: c.w * MM, align: c.align }))
+const cellOf = (c: DocCell): Cell => ({ text: c.text, bold: c.bold, color: c.link ? C.hd : colorOf(c.tone), link: c.link, fill: c.fill })
+const colsOf = (cols: DocCol[]): Col[] => cols.map((c) => ({ w: c.w * MM, align: c.align, wrap: c.wrap }))
 
 /** Draws a document: the one endOfShiftDoc made, or the operator's edit of it. */
 export async function renderShiftDoc(d: ShiftDoc, o: { landscape?: boolean } = {}): Promise<Buffer> {
   const sheet = sheetOf(o.landscape)
   const BODY_W = sheet.body
   const doc = new PDFDocument({ size: 'A4', layout: sheet.layout, margin: 0, bufferPages: true,
-    info: { Title: `End of shift report ${d.meta[0]?.value ?? ''} ${d.date}`.trim(), Author: 'Off-Grid Consulting Ltd.' } })
+    info: { Title: d.docName ?? `End of shift report ${d.meta[0]?.value ?? ''} ${d.date}`.trim(), Author: 'Off-Grid Consulting Ltd.' } })
   const chunks: Buffer[] = []
   doc.on('data', (c: Buffer) => chunks.push(c))
   const done = new Promise<Buffer>((res) => doc.on('end', () => res(Buffer.concat(chunks))))
@@ -240,10 +247,20 @@ export async function renderShiftDoc(d: ShiftDoc, o: { landscape?: boolean } = {
   w.y += 19
   w.hr(SIDE, SIDE + BODY_W, w.y, C.ink, 1.2)
   w.y += 2.2 * MM
-  for (const m of d.meta) {
-    w.line(m.label, SIDE, w.y, 23 * MM, { color: C.mut })
-    w.line(m.value, SIDE + 23 * MM, w.y, BODY_W - 23 * MM, { font: F.bold })
-    w.y += 12
+  if (d.pairs) {
+    const half = BODY_W / 2
+    d.meta.forEach((m, i) => {
+      const x = SIDE + (i % 2) * half
+      w.line(m.label, x, w.y, 23 * MM, { color: C.mut })
+      w.line(m.value, x + 23 * MM, w.y, half - 26 * MM, { font: F.bold })
+      if (i % 2 || i === d.meta.length - 1) w.y += 12
+    })
+  } else {
+    for (const m of d.meta) {
+      w.line(m.label, SIDE, w.y, 23 * MM, { color: C.mut })
+      w.line(m.value, SIDE + 23 * MM, w.y, BODY_W - 23 * MM, { font: F.bold })
+      w.y += 12
+    }
   }
 
   let prev: DocBlock['kind'] | null = null
@@ -251,6 +268,7 @@ export async function renderShiftDoc(d: ShiftDoc, o: { landscape?: boolean } = {
     switch (blk.kind) {
       case 'h2': w.h2(blk.title, blk.aside ?? ''); break
       case 'h3': if (prev && prev !== 'h2') w.y += 1.5 * MM; h3(blk.title, blk.aside); break
+      case 'bar': sectionBar(w, blk.title, blk.aside ?? ''); break
       case 'figures': w.cells(blk.items.map((i) => [i.label, i.value, i.flag ? C.flag : undefined] as [string, string, string | undefined])); break
       case 'table': table(blk); break
       case 'none': w.none(blk.text); break
