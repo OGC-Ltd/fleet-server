@@ -18,7 +18,7 @@ import {
   tankersReportBodySchema, tatFuelReportQuerySchema,
   endOfShiftQuerySchema,
   endOfShiftBodySchema,
-  shiftDocSchema,
+  shiftDocSchema, reportDocSchema,
 } from './report.schema.js'
 import * as ctrl from './report.controller.js'
 import * as conduct from './driver-conduct.controller.js'
@@ -55,6 +55,7 @@ router.post('/reports/tankers', requirePermission('telemetry:read'), validateBod
 router.get('/reports/tat-fuel', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), ctrl.getTatFuelReportData)
 router.get('/reports/speed', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), ctrl.getSpeedReportData)
 // The rows the page made, for one organisation or several together, drawn on the letterhead
+router.post('/reports/document.pdf', requirePermission('telemetry:read'), validateBody(reportDocSchema), ctrl.downloadReportDoc)
 router.post('/reports/dormant-assets.pdf', requirePermission('telemetry:read'), validateBody(dormantPdfBodySchema), ctrl.downloadDormantPdf)
 router.post('/reports/geofences.pdf', requirePermission('telemetry:read'), validateBody(geofencePdfBodySchema), ctrl.downloadGeofencePdf)
 router.post('/reports/tat-fuel.pdf', requirePermission('telemetry:read'), validateBody(tatFuelPdfBodySchema), ctrl.downloadTatFuelPdf)

@@ -5,7 +5,7 @@ import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
 import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, TankersReportBody, TatFuelReportQuery, DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody } from './report.schema.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, ReportDocBody, TankersReportBody, TatFuelReportQuery, DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody } from './report.schema.js'
 import { getMovementReport, editedMovementReport, type MovementReport } from './movement-report.service.js'
 import { getTankersReport } from './tankers-report.service.js'
 import { getTatFuelReport } from './tat-fuel-report.service.js'
@@ -246,6 +246,14 @@ function sendPdf(res: Parameters<RequestHandler>[1], buffer: Buffer, name: strin
     `attachment; filename="${name.replace(/[^\x20-\x7e]|"/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`)
   res.setHeader('Content-Length', String(buffer.length))
   res.send(buffer)
+}
+
+/** POST /organisations/:orgId/reports/document.pdf — any report as edited on its page, drawn from the sheet. */
+export const downloadReportDoc: RequestHandler = async (req, res, next) => {
+  try {
+    const { filename, ...doc } = req.body as ReportDocBody
+    sendPdf(res, await renderShiftDoc(doc, { landscape: turned(req) }), `${filename}.pdf`)
+  } catch (err) { next(err) }
 }
 
 /** POST /organisations/:orgId/reports/dormant-assets.pdf — the page's rows, drawn on the letterhead. */

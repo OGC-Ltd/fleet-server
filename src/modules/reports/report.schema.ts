@@ -251,18 +251,23 @@ export type EndOfShiftBody = z.infer<typeof endOfShiftBodySchema>
  */
 const docText = z.string().max(600)
 const docTone = z.enum(['flag', 'mut']).optional()
-const docCell = z.object({ text: docText, bold: z.boolean().optional(), tone: docTone })
+const docCell = z.object({
+  text: docText, bold: z.boolean().optional(), tone: docTone,
+  link: z.string().url().regex(/^https:\/\//).max(300).optional(),
+  fill: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+})
 const docTable = z.object({
   kind: z.literal('table'),
-  cols: z.array(z.object({ w: z.number().min(0).max(200), align: z.enum(['left', 'right', 'center']).optional() })).min(1).max(12),
-  head: z.array(z.string().max(80)).max(12),
-  rows: z.array(z.array(docCell).max(12)).max(2000),
+  cols: z.array(z.object({ w: z.number().min(0).max(300), align: z.enum(['left', 'right', 'center']).optional(), wrap: z.boolean().optional() })).min(1).max(40),
+  head: z.array(z.string().max(80)).max(40),
+  rows: z.array(z.array(docCell).max(40)).max(5000),
   size: z.number().min(6).max(10).optional(),
 })
 const docNone = z.object({ kind: z.literal('none'), text: docText })
 const docBlock = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('h2'), title: z.string().max(160), aside: z.string().max(160).optional() }),
   z.object({ kind: z.literal('h3'), title: z.string().max(160), aside: z.string().max(160).optional() }),
+  z.object({ kind: z.literal('bar'), title: z.string().max(160), aside: z.string().max(160).optional() }),
   z.object({ kind: z.literal('figures'), items: z.array(z.object({ label: z.string().max(160), value: z.string().max(160), flag: z.boolean().optional() })).max(12) }),
   docTable,
   docNone,
@@ -277,8 +282,14 @@ export const shiftDocSchema = z.object({
   meta: z.array(z.object({ label: z.string().max(60), value: z.string().max(300) })).max(8),
   blocks: z.array(docBlock).max(300),
   footer: z.string().max(300),
+  docName: z.string().max(200).optional(),
+  pairs: z.boolean().optional(),
 })
 export type ShiftDocBody = z.infer<typeof shiftDocSchema>
+
+/** Any other report as edited on its page (new-ui lib/reportDocs): what the sheet held, and what to call the file. */
+export const reportDocSchema = shiftDocSchema.extend({ filename: z.string().trim().min(1).max(200) })
+export type ReportDocBody = z.infer<typeof reportDocSchema>
 
 /**
  * The movement report as edited on the Reports page, sent back to be drawn as

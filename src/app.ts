@@ -97,7 +97,7 @@ export function createApp() {
   // would change key order/whitespace and invalidate the signature.
   // Reports the page makes and the server draws: a week of a family's geofence
   // visits runs past the usual limit. The parser below skips a body already read.
-  app.use(/^\/api\/v1\/organisations\/[^/]+\/reports\/(?:dormant-assets|geofences|tat-fuel|speed)\.pdf$/, express.json({ limit: '8mb' }))
+  app.use(/^\/api\/v1\/organisations\/[^/]+\/reports\/(?:dormant-assets|geofences|tat-fuel|speed|document)\.pdf$/, express.json({ limit: '8mb' }))
   app.use(express.json({
     limit: '1mb',
     verify: (req, _res, buf) => { (req as { rawBody?: Buffer }).rawBody = buf },
