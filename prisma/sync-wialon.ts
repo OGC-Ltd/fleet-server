@@ -346,7 +346,11 @@ async function main() {
     try {
       const existingRow = await prisma.vehicle.findUnique({ where: { externalId }, select: { id: true } })
       if (existingRow) {
-        await prisma.vehicle.update({ where: { externalId }, data })
+        // UNSPECIFIED means Wialon said nothing, so a type the operator gave stands.
+        await prisma.vehicle.update({
+          where: { externalId },
+          data: data.vehicleType === 'UNSPECIFIED' ? { ...data, vehicleType: undefined } : data,
+        })
         vehicleId = existingRow.id
         updated++
       } else {

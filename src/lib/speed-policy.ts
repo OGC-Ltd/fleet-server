@@ -50,7 +50,20 @@ export interface SpeedPolicy {
   premises?: Readonly<Partial<Record<ZoneCategory, readonly [number, number][]>>>
 }
 
+/**
+ * West Kenya and its two mills (set 2026-11-04): the operator's list of
+ * non-commercial vehicles, stored as the SALOON type, drive at 110 km/h
+ * everywhere. Every other unit stays on the fleet's 80.
+ */
+const WEST_KENYA_POLICY: SpeedPolicy = {
+  default: { outsideKmh: 80 },
+  byType:  { SALOON: { outsideKmh: 110 } },
+}
+
 export const SPEED_POLICIES: Readonly<Record<string, SpeedPolicy>> = {
+  WESTSUGAR: WEST_KENYA_POLICY,
+  KABRAS:    WEST_KENYA_POLICY,
+  NZOIA:     WEST_KENYA_POLICY,
   KASULU: {
     default: { outsideKmh: 80, insideKmh: { factory: 40 } },
     byType:  { SALOON: { outsideKmh: 100, insideKmh: { factory: 60 } } },
