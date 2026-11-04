@@ -54,6 +54,25 @@ beforeEach(async () => {
   await warmSpeedPolicy(KASULU)
 })
 
+describe('West Kenya speed limits', () => {
+  const WK = 'org-west-kenya'
+
+  it.each(['WESTSUGAR', 'KABRAS', 'NZOIA'])('%s: listed light vehicles do 110 anywhere, everything else 80', (code) => {
+    _setPolicyOrgsForTest(new Map([[WK, SPEED_POLICIES[code]!]]))
+    for (const p of [IN_FACTORY, NATIONAL, { lat: null, lng: null }]) {
+      expect(zoneLimitAt(WK, 'SALOON', p.lat, p.lng)).toEqual({ kmh: 110, source: 'org', zone: null })
+      expect(overspeedLimitFor('SALOON', { orgId: WK, ...p })).toBe(110)
+      for (const type of ['UNSPECIFIED', 'TRUCK', null]) {
+        expect(overspeedLimitFor(type, { orgId: WK, ...p })).toBe(80)
+      }
+    }
+  })
+
+  it('leaves Kasulu saloons on their own limits', () => {
+    expect(overspeedLimitFor('SALOON', { orgId: KASULU, ...NATIONAL })).toBe(100)
+  })
+})
+
 describe('Kasulu speed limits', () => {
   it('keeps road limits in the part only the wider factory fence covers', () => {
     expect(zoneLimitAt(KASULU, 'SALOON', WIDER_FENCE_ONLY.lat, WIDER_FENCE_ONLY.lng)).toEqual({ kmh: 100, source: 'road', zone: null })
