@@ -5,13 +5,13 @@ import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
 import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, ReportDocBody, TankersReportBody, TatFuelReportQuery, DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody } from './report.schema.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, ReportDocBody, TankersReportBody, TatFuelReportQuery, DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody, DeliveriesPdfBody } from './report.schema.js'
 import { getMovementReport, editedMovementReport, type MovementReport } from './movement-report.service.js'
 import { getTankersReport } from './tankers-report.service.js'
 import { getTatFuelReport } from './tat-fuel-report.service.js'
 import { getSpeedReport } from './speed-report.service.js'
 import { renderMovementReportsPdf, movementFileName, movementReportsFileName } from './movement-report.pdf.js'
-import { renderDormantPdf, renderGeofencePdf, renderTatFuelPdf, renderSpeedPdf, dormantFileName, geofenceFileName, tatFileName, speedFileName } from './template-report.pdf.js'
+import { renderDormantPdf, renderGeofencePdf, renderTatFuelPdf, renderSpeedPdf, renderDeliveriesPdf, dormantFileName, geofenceFileName, tatFileName, speedFileName, deliveriesFileName } from './template-report.pdf.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -289,6 +289,15 @@ export const downloadSpeedPdf: RequestHandler = async (req, res, next) => {
     const body = req.body as SpeedPdfBody
     const { short } = await orgHeading(p(req, 'orgId'))
     sendPdf(res, await renderSpeedPdf(body, { orgCode: short, landscape: turned(req) }), speedFileName(body))
+  } catch (err) { next(err) }
+}
+
+/** POST /organisations/:orgId/reports/deliveries.pdf — the page's rows, drawn on the letterhead. */
+export const downloadDeliveriesPdf: RequestHandler = async (req, res, next) => {
+  try {
+    const body = req.body as DeliveriesPdfBody
+    const { short } = await orgHeading(p(req, 'orgId'))
+    sendPdf(res, await renderDeliveriesPdf(body, { orgCode: short, landscape: turned(req) }), deliveriesFileName(body))
   } catch (err) { next(err) }
 }
 

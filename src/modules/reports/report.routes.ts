@@ -15,6 +15,7 @@ import {
   geofencePdfBodySchema,
   tatFuelPdfBodySchema,
   speedPdfBodySchema,
+  deliveriesPdfBodySchema,
   tankersReportBodySchema, tatFuelReportQuerySchema,
   endOfShiftQuerySchema,
   endOfShiftBodySchema,
@@ -60,6 +61,7 @@ router.post('/reports/dormant-assets.pdf', requirePermission('telemetry:read'), 
 router.post('/reports/geofences.pdf', requirePermission('telemetry:read'), validateBody(geofencePdfBodySchema), ctrl.downloadGeofencePdf)
 router.post('/reports/tat-fuel.pdf', requirePermission('telemetry:read'), validateBody(tatFuelPdfBodySchema), ctrl.downloadTatFuelPdf)
 router.post('/reports/speed.pdf', requirePermission('telemetry:read'), validateBody(speedPdfBodySchema), ctrl.downloadSpeedPdf)
+router.post('/reports/deliveries.pdf', requirePermission('telemetry:read'), validateBody(deliveriesPdfBodySchema), ctrl.downloadDeliveriesPdf)
 router.post('/summaries/refresh/:periodId', requirePermission('report:create'), ctrl.refreshSummaries)
 
 // Driver conduct follow-up: the cases a report run finds and what was done on
