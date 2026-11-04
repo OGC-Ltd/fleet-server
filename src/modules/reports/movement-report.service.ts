@@ -252,6 +252,26 @@ async function nameRows(rows: MovementRow[]) {
   for (const r of rows) if (!r.location && r.lat != null && r.lng != null && r.state !== 'at') r.location = `${r.lat.toFixed(4)}, ${r.lng.toFixed(4)}`
 }
 
+/**
+ * Each unit's very last fix at or before `to`, however long before. Dormant Assets for a past
+ * day: a unit silent over the week's lookback is the report's subject, not one that never reported.
+ */
+async function everLastFixesAt(ids: string[], to: number, orgId: string): Promise<Map<string, { lat: number; lng: number; speedKmh: number | null; at: number }>> {
+  if (!ids.length) return new Map()
+  const rows = await prisma.$queryRaw<Array<{ vehicle_id: string; lat: number; lng: number; speed_kmh: number | null; captured_at: Date }>>`
+      SELECT v.id AS vehicle_id, t.lat, t.lng, t.speed_kmh, t.captured_at
+        FROM unnest(${ids}::text[]) AS v(id)
+       CROSS JOIN LATERAL (
+         SELECT lat, lng, speed_kmh, captured_at FROM vehicle_telemetries
+          WHERE vehicle_id = v.id AND captured_at <= ${new Date(to)} AND lat IS NOT NULL AND lng IS NOT NULL
+          ORDER BY captured_at DESC LIMIT 1
+       ) t`.catch((err) => {
+        logger.warn({ err, orgId }, 'movement report: last fixes for a past day failed — units shown without a fix')
+        return []
+      })
+  return new Map(rows.map(r => [r.vehicle_id, { lat: r.lat, lng: r.lng, speedKmh: r.speed_kmh, at: r.captured_at.getTime() }]))
+}
+
 /** Each unit's last fix at or before `to`, from the stored telemetry: where it stood when a past window ended. */
 async function lastFixesAt(ids: string[], to: number, orgId: string): Promise<Map<string, { lat: number; lng: number; speedKmh: number | null; at: number }>> {
   if (!ids.length) return new Map()
@@ -300,7 +320,7 @@ export async function getMovementReport(orgId: string, window: WindowHours | Win
     : []
   const startOf = new Map(starts.map(s => [s.vehicle_id, { lat: s.lat, lng: s.lng }]))
   // Where each unit stood when the window ended: now from the snapshot, or its last stored fix.
-  const past = live ? null : await lastFixesAt(ids, to, orgId)
+  const past = live ? null : await (opts.offline ? everLastFixesAt : lastFixesAt)(ids, to, orgId)
 
   const rows: MovementRow[] = units.map(u => {
     const at = past ? past.get(u.vehicleId) ?? null : null
