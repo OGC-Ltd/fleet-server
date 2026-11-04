@@ -5,11 +5,13 @@ import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
 import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, TankersReportBody, TatFuelReportQuery } from './report.schema.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, TankersReportBody, TatFuelReportQuery, DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody } from './report.schema.js'
 import { getMovementReport, editedMovementReport, type MovementReport } from './movement-report.service.js'
 import { getTankersReport } from './tankers-report.service.js'
 import { getTatFuelReport } from './tat-fuel-report.service.js'
+import { getSpeedReport } from './speed-report.service.js'
 import { renderMovementReportsPdf, movementFileName, movementReportsFileName } from './movement-report.pdf.js'
+import { renderDormantPdf, renderGeofencePdf, renderTatFuelPdf, renderSpeedPdf, dormantFileName, geofenceFileName, tatFileName, speedFileName } from './template-report.pdf.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -182,7 +184,7 @@ export const downloadMovementReport: RequestHandler = async (req, res, next) => 
 export const getMovementReportData: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as MovementReportQuery
-    sendSuccess(res, await getMovementReport(p(req, 'orgId'), movementWindow(q), req.authz?.vehicleIds ?? null))
+    sendSuccess(res, await getMovementReport(p(req, 'orgId'), movementWindow(q), req.authz?.vehicleIds ?? null, Date.now(), { offline: q.offline === '1' }))
   } catch (err) { next(err) }
 }
 
@@ -211,6 +213,17 @@ export const getTatFuelReportData: RequestHandler = async (req, res, next) => {
 }
 
 /**
+ * GET /organisations/:orgId/reports/speed?day=YYYY-MM-DD — each unit that went
+ * over its limit that fleet day: mileage, peak, limit, distance and occurrences.
+ */
+export const getSpeedReportData: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as TatFuelReportQuery
+    sendSuccess(res, await getSpeedReport(p(req, 'orgId'), q.day, req.authz?.vehicleIds ?? null))
+  } catch (err) { next(err) }
+}
+
+/**
  * POST /organisations/:orgId/reports/movements.pdf — the report as edited on
  * the Reports page, drawn as the PDF. The organisation's name comes from the
  * database, the overview is counted from the rows sent, and the PDF names the
@@ -223,6 +236,51 @@ export const downloadEditedMovementReport: RequestHandler = async (req, res, nex
     const asked = 'reports' in body ? body.reports : [body]
     const reports = await Promise.all(asked.map(r => editedMovementReport(p(req, 'orgId'), r, by)))
     await sendMovementPdf(res, reports, turned(req))
+  } catch (err) { next(err) }
+}
+
+/** A PDF, under its name, as the browser should save it. */
+function sendPdf(res: Parameters<RequestHandler>[1], buffer: Buffer, name: string) {
+  res.setHeader('Content-Type', 'application/pdf')
+  res.setHeader('Content-Disposition',
+    `attachment; filename="${name.replace(/[^\x20-\x7e]|"/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`)
+  res.setHeader('Content-Length', String(buffer.length))
+  res.send(buffer)
+}
+
+/** POST /organisations/:orgId/reports/dormant-assets.pdf — the page's rows, drawn on the letterhead. */
+export const downloadDormantPdf: RequestHandler = async (req, res, next) => {
+  try {
+    const body = req.body as DormantPdfBody
+    const { short } = await orgHeading(p(req, 'orgId'))
+    sendPdf(res, await renderDormantPdf(body, { orgCode: short, landscape: turned(req) }), dormantFileName(body))
+  } catch (err) { next(err) }
+}
+
+/** POST /organisations/:orgId/reports/geofences.pdf — the page's rows, drawn on the letterhead. */
+export const downloadGeofencePdf: RequestHandler = async (req, res, next) => {
+  try {
+    const body = req.body as GeofencePdfBody
+    const { short } = await orgHeading(p(req, 'orgId'))
+    sendPdf(res, await renderGeofencePdf(body, { orgCode: short, landscape: turned(req) }), geofenceFileName(body))
+  } catch (err) { next(err) }
+}
+
+/** POST /organisations/:orgId/reports/tat-fuel.pdf — the page's rows, drawn on the letterhead. */
+export const downloadTatFuelPdf: RequestHandler = async (req, res, next) => {
+  try {
+    const body = req.body as TatFuelPdfBody
+    const { short } = await orgHeading(p(req, 'orgId'))
+    sendPdf(res, await renderTatFuelPdf(body, { orgCode: short }), tatFileName(body))
+  } catch (err) { next(err) }
+}
+
+/** POST /organisations/:orgId/reports/speed.pdf — the page's rows, drawn on the letterhead. */
+export const downloadSpeedPdf: RequestHandler = async (req, res, next) => {
+  try {
+    const body = req.body as SpeedPdfBody
+    const { short } = await orgHeading(p(req, 'orgId'))
+    sendPdf(res, await renderSpeedPdf(body, { orgCode: short, landscape: turned(req) }), speedFileName(body))
   } catch (err) { next(err) }
 }
 

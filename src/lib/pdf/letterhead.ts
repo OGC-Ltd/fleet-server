@@ -57,9 +57,9 @@ export function drawLetterhead(doc: Doc, sheet: Sheet = sheetOf()): number {
 }
 
 export type Align = 'left' | 'right' | 'center'
-export interface Col { w: number; align?: Align }
+export interface Col { w: number; align?: Align; /** Long text runs onto more lines and the row grows, instead of being cut. */ wrap?: boolean }
 /** A table cell; `fill` paints that cell alone, over any fill the row has. */
-export interface Cell { text: string; bold?: boolean; color?: string; fill?: string }
+export interface Cell { text: string; bold?: boolean; color?: string; fill?: string; /** Where a click on the cell goes. */ link?: string }
 
 /** Ruled-document primitives over one pdfkit document, with a running cursor. */
 export class ReportWriter {
@@ -170,17 +170,29 @@ export class ReportWriter {
     const widths = cols.map(c => (c.w === 0 ? (width - fixed) / flex : c.w))
     const pad = 1.4 * MM
     const rowH = Math.max(11.2, size * 1.37)
-    const cellsAt = (yy: number, items: Cell[], f: { font?: string; size: number; color?: string }) => {
+    const cellsAt = (yy: number, items: Cell[], f: { font?: string; size: number; color?: string; wrap?: boolean }) => {
       let cx = x
       items.forEach((c, i) => {
         const cw = widths[i]!
         const left = i === 0 ? 0 : pad
-        this.line(c.text, cx + left, yy, cw - left - pad, {
-          font: c.bold ? F.bold : f.font ?? F.reg, size: f.size, color: c.color ?? f.color, align: cols[i]!.align,
-        })
+        const font = c.bold ? F.bold : f.font ?? F.reg
+        if (f.wrap && cols[i]!.wrap) {
+          this.doc.font(font).fontSize(f.size).fillColor(c.color ?? f.color ?? C.ink)
+            .text(c.text, cx + left, yy, { width: cw - left - pad, align: cols[i]!.align ?? 'left' })
+        } else {
+          this.line(c.text, cx + left, yy, cw - left - pad, { font, size: f.size, color: c.color ?? f.color, align: cols[i]!.align })
+        }
+        if (c.link) this.doc.link(cx, yy - 1, cw, f.size * 1.4, c.link)
         cx += cw
       })
     }
+    /** A row's height: one line, or as many as its longest wrapped cell takes. */
+    const heightOf = (row: Cell[]) => row.reduce((h, c, i) => {
+      if (!cols[i]?.wrap) return h
+      const left = i === 0 ? 0 : pad
+      this.doc.font(c.bold ? F.bold : F.reg).fontSize(size)
+      return Math.max(h, this.doc.heightOfString(c.text || ' ', { width: widths[i]! - left - pad }) + 3.4)
+    }, rowH)
     const heads = () => {
       cellsAt(this.y + 1.6, head.map(text => ({ text })), { font: F.bold, size: 7.2, color: C.mut })
       this.y += 11.2
@@ -189,16 +201,17 @@ export class ReportWriter {
     this.room(11.2 + rowH * Math.min(rows.length, 2))
     heads()
     rows.forEach((row, ri) => {
-      if (this.room(rowH)) heads()
+      const h = heightOf(row)
+      if (this.room(h)) heads()
       const fill = o.fills?.[ri]
-      if (fill) this.doc.save().rect(x, this.y, width, rowH).fill(fill).restore()
+      if (fill) this.doc.save().rect(x, this.y, width, h).fill(fill).restore()
       let fx = x
       row.forEach((c, i) => {
-        if (c.fill) this.doc.save().rect(fx, this.y, widths[i]!, rowH).fill(c.fill).restore()
+        if (c.fill) this.doc.save().rect(fx, this.y, widths[i]!, h).fill(c.fill).restore()
         fx += widths[i]!
       })
-      cellsAt(this.y + 2, row, { size })
-      this.y += rowH
+      cellsAt(this.y + 2, row, { size, wrap: true })
+      this.y += h
       const last = ri === rows.length - 1
       this.hr(x, x + width, this.y, last ? C.rule : C.soft, last ? 0.6 : 0.4)
     })
