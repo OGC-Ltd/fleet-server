@@ -131,6 +131,8 @@ describe('the movement report', () => {
       { id: 'KCA227M', vehicleType: 'TRACTOR' }, { id: 'KCT510W', vehicleType: 'UNSPECIFIED' },
     ])
     const sukari = await getMovementReport('org2', 2)
+    const dormant = await getMovementReport('org2', 2, null, Date.now(), { offline: true })
+    expect(dormant.groups.flatMap(g => g.rows).length).toBeGreaterThan(sukari.groups.flatMap(g => g.rows).length)
     const all = sukari.groups.flatMap(g => g.rows)
     // KCN 910F last reported a day ago: not in it
     expect(all.some(r => r.plate === 'KCN 910F')).toBe(false)

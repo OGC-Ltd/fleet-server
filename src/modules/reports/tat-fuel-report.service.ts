@@ -68,7 +68,7 @@ const CACHE_MS = 10 * 60_000
 /** A haulage unit with no stated type carries a tank at least this big. */
 const HAULAGE_TANK_L = 300
 /** A road registration; KTC.. is a tractor, KHMA a machine, KM.. a motorcycle. */
-const ROAD_PLATE = /^K(?!TC|HM|M)[A-Z]{2}\s*\d{3}[A-Z]$/i
+export const ROAD_PLATE = /^K(?!TC|HM|M)[A-Z]{2}\s*\d{3}[A-Z]$/i
 /** Whose fences read together: West Kenya's trucks deliver to each other's mills. */
 const FENCE_FAMILIES: readonly (readonly string[])[] = [['WESTSUGAR', 'KABRAS', 'NZOIA']]
 /** A mill's fence is named for a factory; this one is drawn over KABRAS FACTORY -WKS and wider, where the road passes. */

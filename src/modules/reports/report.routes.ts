@@ -11,6 +11,10 @@ import {
   listSummaryQuerySchema,
   movementReportQuerySchema,
   movementPdfBodySchema,
+  dormantPdfBodySchema,
+  geofencePdfBodySchema,
+  tatFuelPdfBodySchema,
+  speedPdfBodySchema,
   tankersReportBodySchema, tatFuelReportQuerySchema,
   endOfShiftQuerySchema,
   endOfShiftBodySchema,
@@ -49,6 +53,12 @@ router.post('/reports/movements.pdf', requirePermission('telemetry:read'), valid
 router.post('/reports/tankers', requirePermission('telemetry:read'), validateBody(tankersReportBodySchema), ctrl.getTankersReportData)
 // Each trip signed back in on a fleet day, its fuel and its distance (Sukari's daily sheet)
 router.get('/reports/tat-fuel', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), ctrl.getTatFuelReportData)
+router.get('/reports/speed', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), ctrl.getSpeedReportData)
+// The rows the page made, for one organisation or several together, drawn on the letterhead
+router.post('/reports/dormant-assets.pdf', requirePermission('telemetry:read'), validateBody(dormantPdfBodySchema), ctrl.downloadDormantPdf)
+router.post('/reports/geofences.pdf', requirePermission('telemetry:read'), validateBody(geofencePdfBodySchema), ctrl.downloadGeofencePdf)
+router.post('/reports/tat-fuel.pdf', requirePermission('telemetry:read'), validateBody(tatFuelPdfBodySchema), ctrl.downloadTatFuelPdf)
+router.post('/reports/speed.pdf', requirePermission('telemetry:read'), validateBody(speedPdfBodySchema), ctrl.downloadSpeedPdf)
 router.post('/summaries/refresh/:periodId', requirePermission('report:create'), ctrl.refreshSummaries)
 
 // Driver conduct follow-up: the cases a report run finds and what was done on

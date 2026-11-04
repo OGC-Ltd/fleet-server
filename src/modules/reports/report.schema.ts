@@ -88,6 +88,8 @@ export const movementReportQuerySchema = z.object({
   hours: z.coerce.number().int().min(1).max(MOVEMENT_MAX_WINDOW_H).optional(),
   from: z.coerce.number().int().positive().optional(),
   to: z.coerce.number().int().positive().optional(),
+  /** Keep the units not reporting, which the report leaves out outside Menengai. */
+  offline: z.enum(['1']).optional(),
 }).superRefine((q, ctx) => {
   if ((q.from == null) !== (q.to == null)) {
     ctx.addIssue({ code: 'custom', path: [q.from == null ? 'from' : 'to'], message: 'Give both from and to, or neither' })
@@ -114,11 +116,91 @@ export const tankersReportBodySchema = z.object({
 })
 export type TankersReportBody = z.infer<typeof tankersReportBodySchema>
 
-/** The TAT and Fuel Report's request: one fleet day. */
+/** The TAT and Fuel and Speed Reports' request: one fleet day. */
 export const tatFuelReportQuerySchema = z.object({
   day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'day must be YYYY-MM-DD'),
 })
 export type TatFuelReportQuery = z.infer<typeof tatFuelReportQuerySchema>
+
+/** The most rows one of the PDFs below takes: far past a week of a whole family's visits. */
+const PDF_MAX_ROWS = 60_000
+const pdfFleet = z.string().trim().min(1).max(200)
+const pdfText = z.string().max(400)
+const pdfTime = z.number().int().nonnegative()
+
+const dormantRowSchema = z.object({ name: pdfText, lastAt: pdfTime, location: pdfText.nullable().optional() })
+/** The Dormant Assets Report as the page made it, for the server to draw. */
+export const dormantPdfBodySchema = z.object({
+  fleet: pdfFleet,
+  now: pdfTime,
+  total: z.number().int().nonnegative(),
+  never: z.number().int().nonnegative().default(0),
+  sections: z.object({
+    yesterday: z.array(dormantRowSchema).max(PDF_MAX_ROWS),
+    two: z.array(dormantRowSchema).max(PDF_MAX_ROWS),
+    over: z.array(dormantRowSchema).max(PDF_MAX_ROWS),
+  }),
+})
+export type DormantPdfBody = z.infer<typeof dormantPdfBodySchema>
+
+/** The Geofence Report as the page made it. */
+export const geofencePdfBodySchema = z.object({
+  fleet: pdfFleet,
+  from: pdfTime,
+  to: pdfTime,
+  /** How many geofences were picked; null: all of them. */
+  places: z.number().int().nonnegative().nullable().default(null),
+  failed: z.number().int().nonnegative().default(0),
+  rows: z.array(z.object({
+    vehicle: pdfText, vehicleId: z.string().max(100).nullable().optional(), place: pdfText,
+    in: pdfTime, out: pdfTime, open: z.boolean().default(false),
+  })).max(PDF_MAX_ROWS),
+})
+export type GeofencePdfBody = z.infer<typeof geofencePdfBodySchema>
+
+const pdfLitres = z.number().nullable()
+/** The TAT and Fuel Report as the page made it. */
+export const tatFuelPdfBodySchema = z.object({
+  fleet: pdfFleet,
+  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'day must be YYYY-MM-DD'),
+  group: z.string().max(100).default('all'),
+  rows: z.array(z.object({
+    vehicleId: z.string().max(100).nullable().optional(),
+    plate: pdfText,
+    group: z.string().max(100),
+    dispatchedAt: pdfTime.nullable(),
+    leftAt: pdfTime.nullable(),
+    returnedAt: pdfTime.nullable(),
+    station: pdfText.nullable(),
+    fuel: z.object({ initial: pdfLitres, topUps: pdfLitres, total: pdfLitres, consumption: pdfLitres, theft: pdfLitres, final: pdfLitres }).nullable(),
+    km: z.number().nullable(),
+    rate: z.number().nullable(),
+    tankL: z.number().nullable(),
+    comment: z.string().max(100),
+    base: pdfText,
+  })).max(PDF_MAX_ROWS),
+})
+export type TatFuelPdfBody = z.infer<typeof tatFuelPdfBodySchema>
+
+/** The Speed Report as the page made it. */
+export const speedPdfBodySchema = z.object({
+  fleet: pdfFleet,
+  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'day must be YYYY-MM-DD'),
+  group: z.string().max(100).default('all'),
+  rows: z.array(z.object({
+    vehicleId: z.string().max(100).nullable().optional(),
+    name: pdfText,
+    group: z.string().max(100),
+    km: z.number(),
+    maxKmh: z.number(),
+    limitKmh: z.number(),
+    overByKmh: z.number(),
+    overKm: z.number(),
+    occurrences: z.number().int().nonnegative(),
+    peak: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }).nullable().optional(),
+  })).max(PDF_MAX_ROWS),
+})
+export type SpeedPdfBody = z.infer<typeof speedPdfBodySchema>
 
 /** The longest period an end-of-shift report may cover: it reads the feeds and the weighbridge day by day. */
 export const END_OF_SHIFT_MAX_DAYS = 7

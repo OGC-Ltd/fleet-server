@@ -271,7 +271,7 @@ async function lastFixesAt(ids: string[], to: number, orgId: string): Promise<Ma
  * The report for a window: the last `hours` up to now, or any window (a
  * past one reads the stored telemetry rather than the live snapshot).
  */
-export async function getMovementReport(orgId: string, window: WindowHours | Window, vehicleIds: Set<string> | null = null, now = Date.now()): Promise<MovementReport> {
+export async function getMovementReport(orgId: string, window: WindowHours | Window, vehicleIds: Set<string> | null = null, now = Date.now(), opts: { offline?: boolean } = {}): Promise<MovementReport> {
   const { from, to } = typeof window === 'number' ? { from: now - window * 3_600_000, to: now } : window
   const hours = (to - from) / 3_600_000
   const live = to >= now - LIVE_WITHIN_MS
@@ -324,7 +324,8 @@ export async function getMovementReport(orgId: string, window: WindowHours | Win
   const typeOf = byName ? null : new Map((await prisma.vehicle.findMany({
     where: { id: { in: ids } }, select: { id: true, vehicleType: true },
   })).map(v => [v.id, v.vehicleType]))
-  const kept = byName ? rows : rows.filter(r => !isOffline(r))
+  // Dormant Assets asks for the units not reporting, which are what it is about.
+  const kept = byName || opts.offline ? rows : rows.filter(r => !isOffline(r))
 
   const byGroup = new Map<string, { name: string; rows: MovementRow[] }>()
   for (const r of kept) {
