@@ -147,7 +147,12 @@ async function main() {
   const owned = await client.listUnits(fleet.accountId)
   // Rai Group's account carries five customers. The mask is what separates
   // West Sugar's 486 from Sukari's 344 and Aquamist's 77 — see wialon.account.
-  const units = fleet.nameMask ? owned.filter(u => fleet.nameMask!.test(u.nm)) : owned
+  const inAccount = fleet.nameMask ? owned.filter(u => fleet.nameMask!.test(u.nm)) : owned
+  // Without these the sweep at the end would deactivate them on every run.
+  const extras = fleet.extraUnitIds?.length
+    ? (await client.listUnits()).filter(u => fleet.extraUnitIds!.includes(u.id) && !inAccount.some(x => x.id === u.id))
+    : []
+  const units = [...inAccount, ...extras]
   if (units.length === 0) {
     throw new Error(
       fleet.nameMask
