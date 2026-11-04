@@ -163,6 +163,8 @@ const pdfLitres = z.number().nullable()
 export const tatFuelPdfBodySchema = z.object({
   fleet: pdfFleet,
   day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'day must be YYYY-MM-DD'),
+  /** The last day, when several were picked. */
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'to must be YYYY-MM-DD').optional(),
   group: z.string().max(100).default('all'),
   rows: z.array(z.object({
     vehicleId: z.string().max(100).nullable().optional(),

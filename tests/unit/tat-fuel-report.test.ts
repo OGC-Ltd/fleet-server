@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  baseOf, isPrimeMover, PRIME_MOVERS, fenceTrips, idleComment, leftPremises, millStays, onRoster, placeStation, routeStation, sortRows, stationFromFences,
+  baseOf, groupOf, isPrimeMover, PRIME_MOVERS, fenceTrips, idleComment, leftPremises, millStays, onRoster, placeStation, routeStation, sortRows, stationFromFences,
   ticketStation, tripComment, PARKED_MS, type Reading,
 } from '../../src/modules/reports/tat-fuel-report.service.js'
 import type { MorlFence } from '../../src/modules/reports/movement-report.service.js'
@@ -157,5 +157,18 @@ describe('sortRows', () => {
       { group: 'Trucks', plate: 'KDA 1', leftAt: 5 },
     ])
     expect(rows.map(r => `${r.plate}:${r.leftAt}`)).toEqual(['KDA 1:5', 'KDB 2:3', 'KDB 2:9', 'KTCA 1:1'])
+  })
+})
+
+describe('the Units list says the kind of vehicle', () => {
+  const unit = { name: 'WKS - Selia - KDE 321Q', plate: 'KDE 321Q', type: 'UNSPECIFIED', prime: false }
+  it('an untyped unit on a road plate is a truck, wherever it is based', () => {
+    expect(groupOf(unit)).toBe('Trucks')
+  })
+  it('the register says the rest', () => {
+    expect(groupOf({ ...unit, type: 'TRACTOR' })).toBe('Tractors')
+    expect(groupOf({ ...unit, plate: 'KTCC 782L' })).toBe('Tractors')
+    expect(groupOf({ ...unit, name: 'WKS - Selia - Land Cruiser' })).toBe('Other')
+    expect(groupOf({ ...unit, prime: true })).toBe('Prime Movers')
   })
 })

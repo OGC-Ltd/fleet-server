@@ -1,7 +1,7 @@
 /** The Dormant Assets, Geofence and TAT and Fuel PDFs the server draws from the page's rows. */
 import { describe, it, expect } from 'vitest'
 import {
-  renderDormantPdf, renderGeofencePdf, renderTatFuelPdf, renderSpeedPdf, dormantFileName, geofenceFileName, tatFileName, speedFileName, speedCells, speedSummary, peakLink, SPEED_HEADS,
+  renderDormantPdf, renderGeofencePdf, renderTatFuelPdf, renderSpeedPdf, dormantFileName, geofenceFileName, tatFileName, tatPeriodWords, speedFileName, speedCells, speedSummary, peakLink, SPEED_HEADS,
   sectionDays, DORMANT_SECTIONS, stampWords, visitDuration, endsNow, tripWords, tatSummary, tatCells, TAT_HEADS, templateReportNo,
 } from '../../src/modules/reports/template-report.pdf.js'
 import { dormantPdfBodySchema, geofencePdfBodySchema, tatFuelPdfBodySchema, speedPdfBodySchema } from '../../src/modules/reports/report.schema.js'
@@ -92,6 +92,15 @@ describe('TAT and Fuel', () => {
     expect(isPdf(await renderTatFuelPdf(body, { orgCode: 'SUKARI' }))).toBe(true)
     expect(tatFileName(body)).toBe('TAT and Fuel Report Sukari Industries 2026-11-03.pdf')
     expect(templateReportNo('TF', 'SUKARI', at('2026-11-04T08:00:00'))).toBe('TF-SUKARI-20261104-0800')
+  })
+  it('draws several days, and says which', async () => {
+    const days = tatFuelPdfBodySchema.parse({ fleet: 'Sukari Industries', day: '2026-11-01', to: '2026-11-03', rows: [trip, idle] })
+    expect(isPdf(await renderTatFuelPdf(days, { orgCode: 'SUKARI' }))).toBe(true)
+    expect(tatFileName(days)).toBe('TAT and Fuel Report Sukari Industries 2026-11-01 to 2026-11-03.pdf')
+    expect(tatPeriodWords('2026-11-03')).toBe('3 November 2026')
+    expect(tatPeriodWords('2026-11-01', '2026-11-03')).toBe('1 to 3 November 2026')
+    expect(tatPeriodWords('2026-10-28', '2026-11-03')).toBe('28 October to 3 November 2026')
+    expect(tatPeriodWords('2026-12-30', '2027-01-02')).toBe('30 December 2026 to 2 January 2027')
   })
 })
 
