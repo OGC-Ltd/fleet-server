@@ -4,8 +4,8 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  baseOf, isPrimeMover, PRIME_MOVERS, fenceTrips, fuelFigures, idleComment, leftPremises, millStays, onRoster, placeStation, routeStation, sortRows, stationFromFences,
-  ticketStation, topUpLitres, tripComment, PARKED_MS, type Reading,
+  baseOf, isPrimeMover, PRIME_MOVERS, fenceTrips, idleComment, leftPremises, millStays, onRoster, placeStation, routeStation, sortRows, stationFromFences,
+  ticketStation, tripComment, PARKED_MS, type Reading,
 } from '../../src/modules/reports/tat-fuel-report.service.js'
 import type { MorlFence } from '../../src/modules/reports/movement-report.service.js'
 
@@ -115,39 +115,6 @@ describe('the units on the report', () => {
     expect(onRoster(unit('UNSPECIFIED', 'KTCC 409H', 310), false, false)).toBe(false)
     expect(onRoster(unit('UNSPECIFIED', 'CAT 214B', 600), false, false)).toBe(false)
     expect(onRoster(unit('UNSPECIFIED', 'KDM 359A', 80), false, false)).toBe(false)
-  })
-})
-
-describe('topUpLitres', () => {
-  it('reads one stop at the pump off the level, not the claimed fillings', () => {
-    const readings = [reading(0, 320), reading(1, 322), reading(2, 321), reading(40, 373), reading(41, 372), reading(42, 374)]
-    const fills = [{ at: 5 * MIN, ml: 15_000 }, { at: 30 * MIN, ml: 62_000 }]
-    expect(topUpLitres(readings, fills)).toBe(52)
-  })
-  it('does not count a probe rocking on the yard', () => {
-    const readings = [reading(0, 320), reading(1, 321), reading(30, 322), reading(31, 323)]
-    expect(topUpLitres(readings, [{ at: 5 * MIN, ml: 13_000 }])).toBe(0)
-  })
-  it('adds separate stops', () => {
-    const readings = [reading(0, 100), reading(10, 150), reading(200, 140), reading(300, 190)]
-    expect(topUpLitres(readings, [{ at: 5 * MIN, ml: 50_000 }, { at: 250 * MIN, ml: 50_000 }])).toBe(100)
-  })
-  it('takes the filling itself when the level around it is not there', () => {
-    expect(topUpLitres([], [{ at: 5 * MIN, ml: 40_000 }])).toBe(40)
-  })
-})
-
-describe('fuelFigures', () => {
-  it('balances as the sheet does', () => {
-    const flat = (min: number, l: number) => Array.from({ length: 7 }, (_, i) => reading(min + i, l))
-    const readings = [...flat(0, 200), ...flat(10, 250), ...flat(300, 180)]
-    expect(fuelFigures(readings, [{ at: 5 * MIN, ml: 50_000 }], 10)).toEqual({
-      initial: 200, topUps: 50, total: 250, consumption: 60, theft: 10, final: 180,
-    })
-  })
-  it('skips a dead probe and gives nothing without readings', () => {
-    expect(fuelFigures([reading(0, 0), reading(1, 0.5)], [], 0)).toBeNull()
-    expect(fuelFigures([reading(0, null), reading(1, 100), reading(2, 90)], [], 0)?.initial).toBe(100)
   })
 })
 

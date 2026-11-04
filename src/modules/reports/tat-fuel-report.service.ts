@@ -14,14 +14,9 @@
  *                  the trip. The station is the cane-transfer ticket's centre,
  *                  then the route most driven, then the geofence most stood in.
  *
- *   Initial/Final  the fuel level at each end, as the middle of the first and
- *                  the last few readings; a sloshing tank moves any one by litres.
- *   Top ups        the level before and after each filling, so a probe rocking
- *                  on the yard's ground is not counted as fuel. Fillings within
- *                  FILL_GAP_MS are one stop at the pump.
- *   Theft          drains called SIPHON that no one has ruled out.
- *   Consumption    initial + top ups - theft - final.
- *   Rate           km / consumption.
+ *   The fuel       every figure as Vehicle analytics gives it for the times the
+ *                  row shows, to the minute (fuel/fuel-balance; operator, 4 Nov
+ *                  2026): type those times in there and the two read the same.
  */
 import { prisma } from '../../lib/prisma.js'
 import { reportDb } from '../../lib/report-db.js'
@@ -30,6 +25,7 @@ import { fleetDayBounds } from '../../lib/provider-time.js'
 import { isInsideFence } from '../../lib/geofence.js'
 import { fenceOf, siteNameOf, typeHeading, type MorlFence } from './movement-report.service.js'
 import { trackKm, type Ping } from './tankers-report.service.js'
+import { asDaySeries, fuelBalance, type BalanceReading } from '../fuel/fuel-balance.js'
 
 const HOUR_MS = 3_600_000
 const DAY_MS = 24 * HOUR_MS
@@ -43,8 +39,6 @@ const OPEN_TRIP_MS = 72 * HOUR_MS
 const FIRST_READ_MS = 2 * DAY_MS
 /** As far back as a fence trip's start is followed. */
 const LONGEST_READ_MS = 5 * DAY_MS
-/** Fillings this close are one stop at the pump. */
-export const FILL_GAP_MS = 60 * 60_000
 /** Out of a fence and back within this is the fix wandering at the gate. */
 export const GATE_BLIP_MS = 15 * 60_000
 /** Between two entries a unit must have driven this far for it to be a trip, not a shuffle around the yard. */
@@ -52,11 +46,6 @@ export const MIN_FENCE_TRIP_KM = 5
 /** Parked at the mill longer than this: the trip starts at PARKED_LEAD_MS before it drove out, not days back. */
 export const PARKED_MS = 24 * HOUR_MS
 const PARKED_LEAD_MS = 2 * HOUR_MS
-/** Readings taken for a level: the middle of them is the level. */
-const LEVEL_READINGS = 7
-const FILL_READINGS = 5
-/** Under this is the probe, not a filling. */
-const MIN_TOP_UP_L = 5
 /** A reading under this is a dead probe, not a level. */
 const MIN_LEVEL_L = 1
 const MIN_TRIP_KM = 1
@@ -82,8 +71,6 @@ const NOT_THE_GATE = /\(West Kenya\)/i
 const ROUTE_NAME = /\broute\b/i
 /** Fences that are the site itself or its surroundings, never where a trip went. */
 const NOT_A_STATION = /industries|stop\s*over|no[\s-]*go/i
-/** Reviewed and found not to be a theft. */
-const NOT_A_THEFT = new Set(['DISMISSED', 'NOT_THEFT', 'PROBE_FAULT'])
 /** The ticket's name for a centre, as the sheet names it. */
 const STATION_WORDS: Readonly<Record<string, string>> = { SELIENT: 'Selia', WEYETA: 'Wayeta', 'KITALE (AMUKA)': 'Amuka' }
 /** The site in a unit's name, as it is misspelt there. */
@@ -98,7 +85,8 @@ export interface Reading extends Ping { fuelL: number | null }
 export interface Fill { at: number; ml: number }
 
 export interface FuelFigures {
-  initial: number; topUps: number; total: number; consumption: number; theft: number; final: number
+  /** Null where no reading read a tank; what was filled and drained is on the ledger regardless. */
+  initial: number | null; topUps: number; total: number | null; consumption: number | null; theft: number; final: number | null
 }
 
 export interface TatRow {
@@ -131,14 +119,6 @@ export interface TatFuelReport {
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100
-
-function middle(values: number[]): number | null {
-  if (!values.length) return null
-  const s = [...values].sort((a, b) => a - b)
-  return s[s.length >> 1]!
-}
-
-const levels = (rs: Reading[]) => rs.map(r => r.fuelL).filter((l): l is number => l != null && l >= MIN_LEVEL_L)
 
 const insideAny = (p: Ping, fences: MorlFence[]) =>
   p.lat != null && p.lng != null && fences.some(f => isInsideFence(p.lat!, p.lng!, f.geometry))
@@ -242,45 +222,11 @@ export function onRoster(v: { type: string; plate: string; tankL: number | null;
   return v.type === 'UNSPECIFIED' && (v.tankL ?? 0) >= HAULAGE_TANK_L && ROAD_PLATE.test(v.plate)
 }
 
-/** Litres that went in: one figure a stop at the pump, read off the level around it. Pure. */
-export function topUpLitres(readings: Reading[], fills: Fill[]): number {
-  const ordered = [...fills].sort((a, b) => a.at - b.at)
-  const stops: Fill[][] = []
-  for (const f of ordered) {
-    const last = stops.at(-1)
-    if (last && f.at - last.at(-1)!.at <= FILL_GAP_MS) last.push(f)
-    else stops.push([f])
-  }
-  let total = 0
-  for (const stop of stops) {
-    const first = stop[0]!.at
-    const lastAt = stop.at(-1)!.at
-    const before = middle(levels(readings.filter(r => r.t < first)).slice(-FILL_READINGS))
-    const after = middle(levels(readings.filter(r => r.t > lastAt + 60_000)).slice(0, FILL_READINGS))
-    const rise = before != null && after != null ? after - before : Math.max(...stop.map(f => f.ml)) / 1000
-    if (rise >= MIN_TOP_UP_L) total += rise
-  }
-  return total
-}
-
-/** The fuel columns over one trip, or null with too few readings to say. Pure. */
-export function fuelFigures(readings: Reading[], fills: Fill[], theftL: number): FuelFigures | null {
-  const all = levels(readings)
-  if (all.length < 2) return null
-  const initial = middle(all.slice(0, LEVEL_READINGS))!
-  const final = middle(all.slice(-LEVEL_READINGS))!
-  const topUps = topUpLitres(readings, fills)
-  return {
-    initial: round2(initial), topUps: round2(topUps), total: round2(initial + topUps),
-    consumption: round2(initial + topUps - theftL - final), theft: round2(theftL), final: round2(final),
-  }
-}
-
 /** What the sheet's Comment says of a finished trip. Pure. */
 export function tripComment(o: { readings: number; fuel: FuelFigures | null; km: number; durationMs: number; tankL: number | null }): TatComment {
   if (!o.readings) return 'NOT UPDATING'
   if (o.km < MIN_TRIP_KM && o.durationMs >= MIN_GPS_TRIP_MS) return 'GPS MILEAGE FAILURE'
-  if (!o.fuel) return o.tankL == null ? 'NO FLS' : 'PROBE FAILURE'
+  if (o.fuel?.consumption == null) return o.tankL == null ? 'NO FLS' : 'PROBE FAILURE'
   if (o.fuel.consumption <= 0 || o.km / o.fuel.consumption > MAX_KM_PER_L) return 'PROBE ISSUE'
   return 'PROBE OK'
 }
@@ -328,37 +274,41 @@ interface TripWindow {
   driver: string | null
 }
 
+const MINUTE_MS = 60_000
+const toMinute = (ms: number) => Math.floor(ms / MINUTE_MS) * MINUTE_MS
+
 /** The rows for the trips worked out; the fills and drains read once over them all. */
 async function tripRows(unit: Unit, windows: TripWindow[], readings: Reading[]): Promise<TatRow[]> {
-  const a = Math.min(...windows.map(w => w.startAt))
+  const a = toMinute(Math.min(...windows.map(w => w.shownAt)))
   const b = Math.max(...windows.map(w => w.endAt))
-  const [fills, thefts] = await Promise.all([
+  const [fillings, drains] = await Promise.all([
     reportDb().fuelFilling.findMany({
-      where: { vehicleId: unit.id, filledAt: { gte: new Date(a), lte: new Date(b) }, verdict: { in: ['REFILL', 'PENDING'] } },
-      select: { filledAt: true, filledMl: true },
+      where: { vehicleId: unit.id, filledAt: { gte: new Date(a), lte: new Date(b) } },
+      select: { filledAt: true, verdict: true, observedRiseMl: true, filledMl: true },
     }),
     reportDb().fuelTheft.findMany({
-      where: { vehicleId: unit.id, beganAt: { gte: new Date(a), lte: new Date(b) }, drainCause: 'SIPHON', dismissedAt: null },
-      select: { beganAt: true, stolenMl: true, reviewStatus: true },
+      where: { vehicleId: unit.id, beganAt: { gte: new Date(a), lte: new Date(b) } },
+      select: { beganAt: true, verdict: true, drainCause: true, cleanDropMl: true, measuredDropMl: true, stolenMl: true, finalFuelLevelMl: true },
     }),
   ])
+  const series: BalanceReading[] = readings.map(r => asDaySeries({ ...r, fuelMl: r.fuelL == null ? null : r.fuelL * 1000 }))
+  const fills = fillings.map(f => ({ at: f.filledAt.getTime(), verdict: f.verdict, observedRiseMl: f.observedRiseMl, filledMl: f.filledMl }))
+  const lost = drains.map(d => ({ ...d, at: d.beganAt.getTime() }))
   return windows.map((w) => {
-    const inTrip = readings.filter(r => r.t >= w.startAt && r.t <= w.endAt)
-    const km = trackKm(inTrip, w.leftAt, w.endAt)
-    const theftL = thefts
-      .filter(x => !NOT_A_THEFT.has(String(x.reviewStatus)) && x.beganAt.getTime() >= w.startAt && x.beganAt.getTime() <= w.endAt)
-      .reduce((s, x) => s + x.stolenMl / 1000, 0)
-    const inFills = fills
-      .filter(f => f.filledAt.getTime() >= w.startAt && f.filledAt.getTime() <= w.endAt)
-      .map(f => ({ at: f.filledAt.getTime(), ml: f.filledMl }))
-    const fuel = fuelFigures(inTrip, inFills, theftL)
-    const comment = tripComment({ readings: inTrip.length, fuel, km, durationMs: w.endAt - w.leftAt, tankL: unit.tankL })
+    const [from, to] = [toMinute(w.shownAt), toMinute(w.endAt)]
+    const bal = fuelBalance({ readings: series, fillings: fills, drains: lost, from, to })
+    const inTrip = series.filter(r => r.t >= from && r.t < to).length
+    const fuel: FuelFigures = {
+      initial: bal.startL, topUps: bal.filledL, total: bal.startL == null ? null : Math.round((bal.startL + bal.filledL) * 10) / 10,
+      consumption: bal.consumedL, theft: bal.theftL, final: bal.endL,
+    }
+    const comment = tripComment({ readings: inTrip, fuel, km: bal.distanceKm, durationMs: w.endAt - w.leftAt, tankL: unit.tankL })
     return {
       vehicleId: unit.id, plate: unit.plate, group: groupOf(unit), source: w.source,
       dispatchedAt: w.dispatchedAt, leftAt: w.shownAt, returnedAt: w.endAt,
       station: w.station, driver: w.driver,
-      fuel, km: Math.round(km),
-      rate: comment === 'PROBE OK' ? round2(km / fuel!.consumption) : null,
+      fuel, km: round2(bal.distanceKm),
+      rate: bal.kmPerL == null ? null : round2(bal.kmPerL),
       tankL: unit.tankL, comment, base: unit.base,
     }
   })
@@ -372,7 +322,8 @@ async function dispatchRows(unit: Unit, trips: Dispatched[], fences: Fences): Pr
   const start = (t: Dispatched) => Math.max(t.dispatchedAt, t.returnedAt - MAX_TRIP_MS)
   const a = Math.min(...trips.map(start))
   const b = Math.max(...trips.map(t => t.returnedAt))
-  const readings = await readReadings(unit.id, a, b + 1)
+  // A minute early: the fuel is read from the minute the row shows
+  const readings = await readReadings(unit.id, a - 60_000, b + 1)
   const windows = trips.map((t): TripWindow => {
     const leftAt = leftPremises(readings.filter(r => r.t >= start(t) && r.t <= t.returnedAt), fences.mills, start(t), t.returnedAt)
     return {
