@@ -140,6 +140,11 @@ describe('Deliveries', () => {
     expect(deliveryCells(body.rows[1]!)).toEqual(['KDE 123E', 'At MORL, not left', '0/0', '–', ''])
     expect(deliveryCells(body.rows[2]!).slice(3)).toEqual(['Nairobi depot', '30.10.2026 16:00:00'])
   })
+  it('names the depot it came back to, and keeps a time when it has gone out again', () => {
+    expect(deliveryCells({ ...body.rows[2]!, arrivedShort: 'STO' }).slice(3)).toEqual(['Nairobi depot', '30.10.2026 16:00:00 (STO)'])
+    expect(deliveryCells({ ...body.rows[2]!, arrivedTo: null, arrivedShort: 'MORL', place: 'Fuel station' }).slice(3)).toEqual(['Fuel station', '30.10.2026 16:00:00 (MORL)'])
+    expect(deliveriesPdfBodySchema.parse({ ...body, rows: [{ ...back, arrivedShort: 'STO', run: '3/3 delivered' }] }).rows[0]).toMatchObject({ arrivedShort: 'STO', run: '3/3 delivered' })
+  })
   it('counts the rows as posted, typed counts included', () => {
     expect(deliverySummary(body.rows)).toEqual({ vehicles: 3, out: 1, back: 1, fulfilled: 4, planned: 6 })
   })
