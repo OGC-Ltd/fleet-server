@@ -69,6 +69,10 @@ const CACHE_MS = 10 * 60_000
 const HAULAGE_TANK_L = 300
 /** A road registration; KTC.. is a tractor, KHMA a machine, KM.. a motorcycle. */
 export const ROAD_PLATE = /^K(?!TC|HM|M)[A-Z]{2}\s*\d{3}[A-Z]$/i
+/** A prime mover, by its name on the register: every one is on the report (operator, 4 Nov 2026). */
+const PRIME_MOVER = /prime[\s-]*mover/i
+export const isPrimeMover = (name: string) => PRIME_MOVER.test(name)
+export const PRIME_MOVERS = 'Prime Movers'
 /** Whose fences read together: West Kenya's trucks deliver to each other's mills. */
 const FENCE_FAMILIES: readonly (readonly string[])[] = [['WESTSUGAR', 'KABRAS', 'NZOIA']]
 /** A mill's fence is named for a factory; this one is drawn over KABRAS FACTORY -WKS and wider, where the road passes. */
@@ -231,8 +235,8 @@ export function baseOf(name: string, fallback: string): string {
 }
 
 /** Is this unit on the report? Dispatched, ticketed, or by its size and plate a haulage unit. Pure. */
-export function onRoster(v: { type: string; plate: string; tankL: number | null }, dispatched: boolean, ticketed: boolean): boolean {
-  if (dispatched) return true
+export function onRoster(v: { type: string; plate: string; tankL: number | null; prime?: boolean }, dispatched: boolean, ticketed: boolean): boolean {
+  if (dispatched || v.prime) return true
   if (v.type === 'SALOON' || v.type === 'COMPANY_VEHICLE' || v.type === 'PLANT') return false
   if (ticketed) return true
   return v.type === 'UNSPECIFIED' && (v.tankL ?? 0) >= HAULAGE_TANK_L && ROAD_PLATE.test(v.plate)
@@ -289,9 +293,10 @@ export function idleComment(o: { readings: number; fuelReadings: number; open: b
   return 'NO TRIP'
 }
 
-/** A unit's rows come together, trucks before tractors, plate by plate, trips in order. Pure. */
+/** A unit's rows come together, prime movers first, then trucks before tractors, plate by plate, trips in order. Pure. */
 export function sortRows<T extends Pick<TatRow, 'group' | 'plate' | 'leftAt'>>(rows: T[]): T[] {
-  return rows.sort((a, b) => b.group.localeCompare(a.group) || a.plate.localeCompare(b.plate) || (a.leftAt ?? 0) - (b.leftAt ?? 0))
+  const rank = (g: string) => (g === PRIME_MOVERS ? 0 : 1)
+  return rows.sort((a, b) => rank(a.group) - rank(b.group) || b.group.localeCompare(a.group) || a.plate.localeCompare(b.plate) || (a.leftAt ?? 0) - (b.leftAt ?? 0))
 }
 
 async function readReadings(vehicleId: string, a: number, b: number): Promise<Reading[]> {
@@ -306,7 +311,7 @@ async function readReadings(vehicleId: string, a: number, b: number): Promise<Re
   }))
 }
 
-interface Unit { id: string; plate: string; type: string; tankL: number | null; base: string }
+interface Unit { id: string; plate: string; type: string; tankL: number | null; base: string; prime: boolean }
 interface Dispatched { vehicleId: string; dispatchedAt: number; returnedAt: number; destination: string | null; driver: string }
 interface Fences { mills: MorlFence[]; routes: MorlFence[]; places: MorlFence[] }
 interface TripWindow {
@@ -359,8 +364,8 @@ async function tripRows(unit: Unit, windows: TripWindow[], readings: Reading[]):
   })
 }
 
-/** Kind of unit where the register says one; otherwise the site it is named for. */
-const groupOf = (u: Pick<Unit, 'type' | 'base'>) => (u.type === 'UNSPECIFIED' ? u.base : typeHeading(u.type))
+/** Prime movers together; else the kind of unit where the register says one, otherwise the site it is named for. */
+const groupOf = (u: Pick<Unit, 'type' | 'base' | 'prime'>) => (u.prime ? PRIME_MOVERS : u.type === 'UNSPECIFIED' ? u.base : typeHeading(u.type))
 
 /** A unit's FactorySuite trips: from dispatch to sign-in. */
 async function dispatchRows(unit: Unit, trips: Dispatched[], fences: Fences): Promise<TatRow[]> {
@@ -496,7 +501,7 @@ async function buildReport(orgId: string, day: string, allowed: Set<string> | nu
   const hasTicket = new Set(ticketed.map(t => t.vehicleId))
   const units: Unit[] = vehicles
     .map(v => ({
-      id: v.id, plate: v.registrationPlate, type: v.vehicleType, base: baseOf(v.name, site),
+      id: v.id, plate: v.registrationPlate, type: v.vehicleType, base: baseOf(v.name, site), prime: isPrimeMover(v.name),
       tankL: v.tankCapacityLitres == null ? null : Number(v.tankCapacityLitres),
     }))
     .filter(u => onRoster(u, wasDispatched.has(u.id) || trips.has(u.id), hasTicket.has(u.id)))

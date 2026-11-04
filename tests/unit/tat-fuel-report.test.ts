@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  baseOf, fenceTrips, fuelFigures, idleComment, leftPremises, millStays, onRoster, placeStation, routeStation, sortRows, stationFromFences,
+  baseOf, isPrimeMover, PRIME_MOVERS, fenceTrips, fuelFigures, idleComment, leftPremises, millStays, onRoster, placeStation, routeStation, sortRows, stationFromFences,
   ticketStation, topUpLitres, tripComment, PARKED_MS, type Reading,
 } from '../../src/modules/reports/tat-fuel-report.service.js'
 import type { MorlFence } from '../../src/modules/reports/movement-report.service.js'
@@ -103,6 +103,12 @@ describe('the units on the report', () => {
     expect(onRoster(unit('UNSPECIFIED', 'KDE 321Q', 567), false, false)).toBe(true)
     expect(onRoster(unit('UNSPECIFIED', 'KDE 321Q', null), false, true)).toBe(true)
   })
+  it('takes every prime mover, trip or no trip', () => {
+    expect(onRoster({ ...unit('TRUCK', 'KBU 715P', null), prime: true }, false, false)).toBe(true)
+    expect(onRoster(unit('TRUCK', 'KBU 715P', null), false, false)).toBe(false)
+    for (const n of ['Faw Prime Mover CA4181 KCR 713F', 'Faw Prime mover CA4181 KBU 723P', 'SUKARI-PRIME MOVER-FAW-KBU 715P-2km/l']) expect(isPrimeMover(n)).toBe(true)
+    for (const n of ['SINO ZZ4257V344JB1R KDL 201X', 'WKS - Kabras - KDE 321Q']) expect(isPrimeMover(n)).toBe(false)
+  })
   it('leaves out the listed light vehicles, plant, and machines by their plate', () => {
     expect(onRoster(unit('SALOON', 'KDM 359A', 80), false, true)).toBe(false)
     expect(onRoster(unit('PLANT', 'CAT 214B', 600), false, true)).toBe(false)
@@ -168,6 +174,14 @@ describe('the Comment column', () => {
 })
 
 describe('sortRows', () => {
+  it('puts prime movers first', () => {
+    const rows = sortRows([
+      { group: 'Tractors', plate: 'KTCA 1', leftAt: 1 },
+      { group: 'Trucks', plate: 'KDA 1', leftAt: 5 },
+      { group: PRIME_MOVERS, plate: 'KCX 790S', leftAt: 2 },
+    ])
+    expect(rows.map(r => r.group)).toEqual([PRIME_MOVERS, 'Trucks', 'Tractors'])
+  })
   it('keeps a unit together, trucks first, trips in order', () => {
     const rows = sortRows([
       { group: 'Tractors', plate: 'KTCA 1', leftAt: 1 },
