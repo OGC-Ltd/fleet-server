@@ -26,8 +26,7 @@ import { overspeedLimitFor } from '../../lib/derived-alerts.js'
 import { fleetDayBounds } from '../../lib/provider-time.js'
 import { speedPolicyFor, warmSpeedPolicy, type SpeedPolicy } from '../../lib/speed-policy.js'
 import { WialonClient } from '../../providers/wialon/wialon.client.js'
-import { typeHeading } from './movement-report.service.js'
-import { ROAD_PLATE } from './tat-fuel-report.service.js'
+import { vehicleHeading } from './tat-fuel-report.service.js'
 
 /** Reads running at once, each on a session of its own: Wialon serialises a session's requests. */
 const SESSIONS = 5
@@ -130,13 +129,8 @@ export function limitFor(type: string, policy: SpeedPolicy | null, wialonKmh: nu
   return wialonKmh != null && wialonKmh > 0 ? wialonKmh : fallbackKmh
 }
 
-/** Named for what it is, on a road plate like any truck's. */
-const NOT_A_TRUCK = /land\s*cruiser|hilux|prado|pick\s*-?\s*up|double\s*cab/i
-
 /** The heading a unit goes under: its type, and an untyped unit on a road plate is a truck (not a KTCC tractor, not a Landcruiser). Pure. */
-export function groupOf(v: { type: string; plate: string; name: string }): string {
-  return v.type === 'UNSPECIFIED' && ROAD_PLATE.test(v.plate) && !NOT_A_TRUCK.test(v.name) ? 'Trucks' : typeHeading(v.type)
-}
+export const groupOf = (v: { type: string; plate: string; name: string }): string => vehicleHeading(v)
 
 /** Trucks first, then by heading; within one, by the unit's name, as the sheet is. Pure. */
 export function sortSpeedRows<T extends Pick<SpeedRow, 'group' | 'name'>>(rows: T[]): T[] {

@@ -233,7 +233,18 @@ export function tatCells(r: TatPdfRow): string[] {
   ]
 }
 
-export const tatFileName = (b: Pick<TatFuelPdfBody, 'fleet' | 'day'>) => `TAT and Fuel Report ${b.fleet} ${b.day}.pdf`
+const several = (b: Pick<TatFuelPdfBody, 'day' | 'to'>) => b.to != null && b.to !== b.day
+
+export const tatFileName = (b: Pick<TatFuelPdfBody, 'fleet' | 'day' | 'to'>) => `TAT and Fuel Report ${b.fleet} ${b.day}${several(b) ? ` to ${b.to}` : ''}.pdf`
+
+/** "3 November 2026"; over several days "1 to 3 November 2026", "28 October to 3 November 2026". Pure. */
+export function tatPeriodWords(from: string, to: string = from): string {
+  const words = (day: string) => new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(`${day}T00:00:00Z`))
+  if (from === to) return words(from)
+  const a = words(from)
+  const short = from.slice(0, 7) === to.slice(0, 7) ? a.split(' ')[0]! : from.slice(0, 4) === to.slice(0, 4) ? a.split(' ').slice(0, 2).join(' ') : a
+  return `${short} to ${words(to)}`
+}
 
 /** Landscape always, for the sheet's fourteen columns. */
 export async function renderTatFuelPdf(b: TatFuelPdfBody, o: { orgCode: string; now?: number }): Promise<Buffer> {
@@ -241,13 +252,13 @@ export async function renderTatFuelPdf(b: TatFuelPdfBody, o: { orgCode: string; 
   const reportNo = templateReportNo('TF', o.orgCode, now)
   const { doc, done, w } = open(`TAT and Fuel Report ${reportNo}`, true)
   const s = tatSummary(b.rows)
-  const date = b.day.split('-').reverse().join('/')
-  const dayWords = new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(`${b.day}T00:00:00Z`))
+  const date = (b.to ?? b.day).split('-').reverse().join('/')
+  const period = tatPeriodWords(b.day, b.to)
   heading(w, doc, {
     title: 'TAT and Fuel Report', reportNo, date, fleet: b.fleet,
-    info: [['Fleet', b.fleet], ['Units', b.group === 'all' ? 'All units' : b.group], ['Day', dayWords], ['Trips', `Finished on the day (${num(s.trips)})`]],
+    info: [['Fleet', b.fleet], ['Units', b.group === 'all' ? 'All units' : b.group], [several(b) ? 'Days' : 'Day', period], ['Trips', `Finished ${several(b) ? 'on these days' : 'on the day'} (${num(s.trips)})`]],
   })
-  w.h2('1. Overview', dayWords)
+  w.h2('1. Overview', period)
   w.cells([
     ['Trips', num(s.trips)], ['Units on trips', num(s.units)], ['Fuel used, L', num(Math.round(s.litres))], ['Distance, km', num(Math.round(s.km))],
     ['Rate, km/L', s.rate == null ? DASH : s.rate.toFixed(2)], ['Not updating', num(s.notUpdating)],
@@ -266,7 +277,7 @@ export async function renderTatFuelPdf(b: TatFuelPdfBody, o: { orgCode: string; 
   }
   w.y += 2 * MM
   w.note(CONTACT_LINE)
-  w.footers(`${b.fleet} · TAT and Fuel Report · ${date}`)
+  w.footers(`${b.fleet} · TAT and Fuel Report · ${several(b) ? period : date}`)
   doc.end()
   return done
 }

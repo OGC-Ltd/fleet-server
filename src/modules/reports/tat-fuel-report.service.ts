@@ -58,6 +58,12 @@ const CACHE_MS = 10 * 60_000
 const HAULAGE_TANK_L = 300
 /** A road registration; KTC.. is a tractor, KHMA a machine, KM.. a motorcycle. */
 export const ROAD_PLATE = /^K(?!TC|HM|M)[A-Z]{2}\s*\d{3}[A-Z]$/i
+/** Named for what it is, on a road plate like any truck's. */
+const NOT_A_TRUCK = /land\s*cruiser|hilux|prado|pick\s*-?\s*up|double\s*cab/i
+/** The kind of vehicle: its type, and an untyped unit on a road plate is a truck. Pure. */
+export function vehicleHeading(v: { type: string; plate: string; name: string }): string {
+  return v.type === 'UNSPECIFIED' && ROAD_PLATE.test(v.plate) && !NOT_A_TRUCK.test(v.name) ? 'Trucks' : typeHeading(v.type)
+}
 /** A prime mover, by its name on the register: every one is on the report (operator, 4 Nov 2026). */
 const PRIME_MOVER = /prime[\s-]*mover/i
 export const isPrimeMover = (name: string) => PRIME_MOVER.test(name)
@@ -257,7 +263,7 @@ async function readReadings(vehicleId: string, a: number, b: number): Promise<Re
   }))
 }
 
-interface Unit { id: string; plate: string; type: string; tankL: number | null; base: string; prime: boolean }
+interface Unit { id: string; name: string; plate: string; type: string; tankL: number | null; base: string; prime: boolean }
 interface Dispatched { vehicleId: string; dispatchedAt: number; returnedAt: number; destination: string | null; driver: string }
 interface Fences { mills: MorlFence[]; routes: MorlFence[]; places: MorlFence[] }
 interface TripWindow {
@@ -314,8 +320,15 @@ async function tripRows(unit: Unit, windows: TripWindow[], readings: Reading[]):
   })
 }
 
-/** Prime movers together; else the kind of unit where the register says one, otherwise the site it is named for. */
-const groupOf = (u: Pick<Unit, 'type' | 'base' | 'prime'>) => (u.prime ? PRIME_MOVERS : u.type === 'UNSPECIFIED' ? u.base : typeHeading(u.type))
+/**
+ * Prime movers together, else the kind of vehicle, never the site it is named
+ * for (operator, 4 Nov 2026: the site is in Base, and picked with the
+ * organisations). An untyped KTC.. plate is a tractor. Pure.
+ */
+export function groupOf(u: Pick<Unit, 'name' | 'plate' | 'type' | 'prime'>): string {
+  if (u.prime) return PRIME_MOVERS
+  return u.type === 'UNSPECIFIED' && /^KTC/i.test(u.plate) ? 'Tractors' : vehicleHeading(u)
+}
 
 /** A unit's FactorySuite trips: from dispatch to sign-in. */
 async function dispatchRows(unit: Unit, trips: Dispatched[], fences: Fences): Promise<TatRow[]> {
@@ -452,7 +465,7 @@ async function buildReport(orgId: string, day: string, allowed: Set<string> | nu
   const hasTicket = new Set(ticketed.map(t => t.vehicleId))
   const units: Unit[] = vehicles
     .map(v => ({
-      id: v.id, plate: v.registrationPlate, type: v.vehicleType, base: baseOf(v.name, site), prime: isPrimeMover(v.name),
+      id: v.id, name: v.name, plate: v.registrationPlate, type: v.vehicleType, base: baseOf(v.name, site), prime: isPrimeMover(v.name),
       tankL: v.tankCapacityLitres == null ? null : Number(v.tankCapacityLitres),
     }))
     .filter(u => onRoster(u, wasDispatched.has(u.id) || trips.has(u.id), hasTicket.has(u.id)))
