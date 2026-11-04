@@ -1,12 +1,12 @@
 /** The fuel figures Vehicle analytics gives, as the server works them out for TAT and Fuel. */
 import { describe, it, expect } from 'vitest'
-import { asDaySeries, fuelBalance, tripDistanceKm, type BalanceDrain, type BalanceFilling, type BalanceReading } from '../../src/modules/fuel/fuel-balance.js'
+import { asDaySeries, fuelBalance, ruledOut, stopLitres, tripDistanceKm, type BalanceDrain, type BalanceFilling, type BalanceReading } from '../../src/modules/fuel/fuel-balance.js'
 
 const MIN = 60_000
 const at = (m: number, fuelL: number | null, speedKmh = 0, lat = 0.5, lng = 34.5): BalanceReading => ({ t: m * MIN, lat, lng, speedKmh, fuelMl: fuelL == null ? null : fuelL * 1000 })
-const fill = (m: number, o: Partial<BalanceFilling> = {}): BalanceFilling => ({ at: m * MIN, verdict: 'REFILL', observedRiseMl: 50_000, filledMl: 60_000, ...o })
+const fill = (m: number, o: Partial<BalanceFilling> = {}): BalanceFilling => ({ at: m * MIN, verdict: 'REFILL', observedRiseMl: 50_000, filledMl: 60_000, initialFuelLevelMl: null, finalFuelLevelMl: null, ...o })
 const drain = (m: number, o: Partial<BalanceDrain> = {}): BalanceDrain => ({
-  at: m * MIN, verdict: 'DRAIN', drainCause: 'SIPHON', cleanDropMl: 10_000, measuredDropMl: 12_000, stolenMl: 14_000, finalFuelLevelMl: 80_000, ...o,
+  at: m * MIN, verdict: 'DRAIN', drainCause: 'SIPHON', cleanDropMl: 10_000, measuredDropMl: 12_000, stolenMl: 14_000, finalFuelLevelMl: 80_000, reviewStatus: null, dismissedAt: null, ...o,
 })
 const span = { from: 0, to: 100 * MIN }
 const flat = (fuelL: number, a: number, n = 7) => Array.from({ length: n }, (_, i) => at(a + i, fuelL))
@@ -21,8 +21,8 @@ describe('fuelBalance', () => {
     expect(b.startL).toBe(100)
   })
   it('counts a filling by the rise it observed, else what it recorded, and only if judged a filling', () => {
-    const fillings = [fill(1), fill(2, { observedRiseMl: null }), fill(3, { verdict: null }), fill(4, { verdict: 'PENDING' }), fill(5, { verdict: 'SLOSH' })]
-    expect(fuelBalance({ readings: flat(100, 0), fillings, drains: [], ...span }).filledL).toBe(50 + 60 + 50 + 50)
+    const fillings = [fill(0), fill(70, { observedRiseMl: null }), fill(140, { verdict: null }), fill(210, { verdict: 'PENDING' }), fill(280, { verdict: 'SLOSH' })]
+    expect(fuelBalance({ readings: flat(100, 0), fillings, drains: [], from: 0, to: 400 * MIN }).filledL).toBe(50 + 60 + 50 + 50)
   })
   it('counts only siphon drains, by their clean drop, and never a probe going dark', () => {
     const drains = [
@@ -73,5 +73,36 @@ describe('asDaySeries', () => {
   it('rounds as the day series does', () => {
     expect(asDaySeries({ t: 1_499, lat: 0.1234567, lng: 34.1234567, speedKmh: 2.6, fuelMl: 1000.4 }))
       .toEqual({ t: 1000, lat: 0.12346, lng: 34.12346, speedKmh: 3, fuelMl: 1000 })
+  })
+})
+
+describe('stopLitres', () => {
+  const stop = (m: number, rise: number, before: number, after: number) => fill(m, { observedRiseMl: rise, initialFuelLevelMl: before, finalFuelLevelMl: after })
+  it('does not count overlapping rises twice (KCS 644G, 2 Nov)', () => {
+    const [l, ...rest] = stopLitres([stop(18, 78_297, 168_530, 236_920), stop(0, 85_820, 151_030, 163_410)])
+    expect(rest).toEqual([])
+    expect(l).toBeCloseTo(85.89, 2)
+  })
+  it('keeps the biggest rise where the levels say less', () => {
+    expect(stopLitres([stop(0, 60_000, 100_000, 105_000), stop(10, 20_000, 105_000, 110_000)])).toEqual([60])
+  })
+  it('leaves fillings over an hour apart alone', () => {
+    expect(stopLitres([stop(0, 50_000, 100_000, 150_000), stop(61, 40_000, 120_000, 160_000)])).toEqual([50, 40])
+  })
+  it('reads a chain as one stop', () => {
+    expect(stopLitres([stop(0, 30_000, 100_000, 130_000), stop(50, 30_000, 130_000, 160_000), stop(100, 30_000, 160_000, 190_000)])).toEqual([90])
+  })
+})
+
+describe('ruledOut', () => {
+  const when = new Date(0)
+  it('takes a reviewer at their word', () => {
+    for (const reviewStatus of ['DISMISSED', 'NOT_THEFT', 'PROBE_FAULT']) expect(ruledOut({ reviewStatus, dismissedAt: null })).toBe(true)
+    expect(ruledOut({ reviewStatus: null, dismissedAt: when })).toBe(true)
+  })
+  it('keeps a theft under review or confirmed, though it was dismissed on the way', () => {
+    expect(ruledOut({ reviewStatus: 'CONFIRMED_THEFT', dismissedAt: when })).toBe(false)
+    expect(ruledOut({ reviewStatus: 'UNDER_REVIEW', dismissedAt: when })).toBe(false)
+    expect(ruledOut({ reviewStatus: null, dismissedAt: null })).toBe(false)
   })
 })

@@ -284,15 +284,15 @@ async function tripRows(unit: Unit, windows: TripWindow[], readings: Reading[]):
   const [fillings, drains] = await Promise.all([
     reportDb().fuelFilling.findMany({
       where: { vehicleId: unit.id, filledAt: { gte: new Date(a), lte: new Date(b) } },
-      select: { filledAt: true, verdict: true, observedRiseMl: true, filledMl: true },
+      select: { filledAt: true, verdict: true, observedRiseMl: true, filledMl: true, initialFuelLevelMl: true, finalFuelLevelMl: true },
     }),
     reportDb().fuelTheft.findMany({
       where: { vehicleId: unit.id, beganAt: { gte: new Date(a), lte: new Date(b) } },
-      select: { beganAt: true, verdict: true, drainCause: true, cleanDropMl: true, measuredDropMl: true, stolenMl: true, finalFuelLevelMl: true },
+      select: { beganAt: true, verdict: true, drainCause: true, cleanDropMl: true, measuredDropMl: true, stolenMl: true, finalFuelLevelMl: true, reviewStatus: true, dismissedAt: true },
     }),
   ])
   const series: BalanceReading[] = readings.map(r => asDaySeries({ ...r, fuelMl: r.fuelL == null ? null : r.fuelL * 1000 }))
-  const fills = fillings.map(f => ({ at: f.filledAt.getTime(), verdict: f.verdict, observedRiseMl: f.observedRiseMl, filledMl: f.filledMl }))
+  const fills = fillings.map(f => ({ ...f, at: f.filledAt.getTime() }))
   const lost = drains.map(d => ({ ...d, at: d.beganAt.getTime() }))
   return windows.map((w) => {
     const [from, to] = [toMinute(w.shownAt), toMinute(w.endAt)]

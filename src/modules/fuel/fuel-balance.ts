@@ -7,9 +7,13 @@
  *
  *   Initial/Final  the middle of the first and last 7 readings that read a tank.
  *   Filled         the ledger's fillings judged REFILL or PENDING, each by the
- *                  rise it observed, else the volume it recorded.
+ *                  rise it observed, else the volume it recorded. Fillings up to
+ *                  STOP_GAP_MS apart are one stop: the tank's rise over it, or its
+ *                  biggest single rise if that is more, as one's rise can take in
+ *                  the next (KCS 644G, 2 Nov: 85.8 + 78.3 L, tank 151 to 237 L).
  *   Theft          the ledger's drains judged DRAIN with cause SIPHON, except
- *                  one ending on a dead probe, which is the probe going dark.
+ *                  one ending on a dead probe, which is the probe going dark, and
+ *                  one a reviewer ruled out.
  *   Consumed       initial + filled - theft - final, each rounded to 0.1 L first
  *                  so the figures shown add up, and never below nothing.
  *   Distance       "Mileage in trips": the moving stretches of the track.
@@ -23,12 +27,19 @@ const GAP_MS = 20 * 60_000
 const JITTER_M = 20
 const EDGE_READINGS = 7
 const DEAD_PROBE_ML = 1000
+/** Fillings this close are one stop at the pump. */
+export const STOP_GAP_MS = 60 * 60_000
+const RULED_OUT = new Set(['DISMISSED', 'NOT_THEFT', 'PROBE_FAULT'])
 
 export interface BalanceReading { t: number; lat: number | null; lng: number | null; speedKmh: number | null; fuelMl: number | null }
-export interface BalanceFilling { at: number; verdict: string | null; observedRiseMl: number | null; filledMl: number | null }
+export interface BalanceFilling {
+  at: number; verdict: string | null; observedRiseMl: number | null; filledMl: number | null
+  initialFuelLevelMl: number | null; finalFuelLevelMl: number | null
+}
 export interface BalanceDrain {
   at: number; verdict: string | null; drainCause: string | null
   cleanDropMl: number | null; measuredDropMl: number | null; stolenMl: number | null; finalFuelLevelMl: number | null
+  reviewStatus: string | null; dismissedAt: Date | null
 }
 export interface FuelBalance {
   startL: number | null; endL: number | null; filledL: number; theftL: number
@@ -89,6 +100,30 @@ export function tripDistanceKm(readings: BalanceReading[]): number {
   return km
 }
 
+/**
+ * A reviewer's answer that it was not a theft. A confirmed theft also carries a
+ * dismissedAt (dismissed into its follow-up on the way), so that alone says nothing
+ * where a review has answered since.
+ */
+export const ruledOut = (d: Pick<BalanceDrain, 'reviewStatus' | 'dismissedAt'>) =>
+  RULED_OUT.has(String(d.reviewStatus)) || (d.reviewStatus == null && d.dismissedAt != null)
+
+/** Litres in at each stop at the pump, in time order. */
+export function stopLitres(fillings: BalanceFilling[]): number[] {
+  const stops: BalanceFilling[][] = []
+  for (const f of [...fillings].sort((a, b) => a.at - b.at)) {
+    const last = stops.at(-1)
+    if (last && f.at - last.at(-1)!.at <= STOP_GAP_MS) last.push(f)
+    else stops.push([f])
+  }
+  const volume = (f: BalanceFilling) => orNull(f.observedRiseMl ?? f.filledMl) ?? 0
+  return stops.map((stop) => {
+    if (stop.length === 1) return volume(stop[0]!)
+    const before = orNull(stop[0]!.initialFuelLevelMl), after = orNull(stop.at(-1)!.finalFuelLevelMl)
+    return Math.max(before != null && after != null ? after - before : -Infinity, ...stop.map(volume))
+  })
+}
+
 /** The period [from, to): readings once each in time order, and the ledger's events, any wider. */
 export function fuelBalance(o: { readings: BalanceReading[]; fillings: BalanceFilling[]; drains: BalanceDrain[]; from: number; to: number }): FuelBalance {
   const seen = new Set<number>()
@@ -99,12 +134,12 @@ export function fuelBalance(o: { readings: BalanceReading[]; fillings: BalanceFi
   const startL = levels.length ? r1(median(levels.slice(0, EDGE_READINGS)) / 1000) : null
   const endL = levels.length ? r1(median(levels.slice(-EDGE_READINGS)) / 1000) : null
 
-  const filledL = r1(o.fillings
-    .filter(f => inSpan(f.at) && (f.verdict === 'REFILL' || f.verdict === 'PENDING' || f.verdict == null))
-    .reduce((n, f) => n + r1(orNull(f.observedRiseMl ?? f.filledMl) ?? 0), 0))
+  const filledL = r1(stopLitres(o.fillings
+    .filter(f => inSpan(f.at) && (f.verdict === 'REFILL' || f.verdict === 'PENDING' || f.verdict == null)))
+    .reduce((n, l) => n + r1(l), 0))
   const theftL = r1(o.drains
     .filter(d => inSpan(d.at) && d.verdict === 'DRAIN' && d.drainCause === 'SIPHON'
-      && !(d.finalFuelLevelMl != null && Number.isFinite(d.finalFuelLevelMl) && d.finalFuelLevelMl < DEAD_PROBE_ML))
+      && !(d.finalFuelLevelMl != null && Number.isFinite(d.finalFuelLevelMl) && d.finalFuelLevelMl < DEAD_PROBE_ML) && !ruledOut(d))
     .reduce((n, d) => n + r1(orNull(d.cleanDropMl ?? d.measuredDropMl ?? d.stolenMl) ?? 0), 0))
 
   const gap = startL != null && endL != null ? r1(startL + filledL - theftL - endL) : null
