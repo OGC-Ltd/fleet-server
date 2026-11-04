@@ -11,7 +11,7 @@ import {
   listSummaryQuerySchema,
   movementReportQuerySchema,
   movementPdfBodySchema,
-  tankersReportBodySchema,
+  tankersReportBodySchema, tatFuelReportQuerySchema,
   endOfShiftQuerySchema,
   endOfShiftBodySchema,
   shiftDocSchema,
@@ -47,6 +47,8 @@ router.get('/reports/movements', requirePermission('telemetry:read'), validateQu
 router.post('/reports/movements.pdf', requirePermission('telemetry:read'), validateBody(movementPdfBodySchema), ctrl.downloadEditedMovementReport)
 // Menengai's tankers on the road from the Mombasa depot to MORL, 4 hours at a time
 router.post('/reports/tankers', requirePermission('telemetry:read'), validateBody(tankersReportBodySchema), ctrl.getTankersReportData)
+// Each trip signed back in on a fleet day, its fuel and its distance (Sukari's daily sheet)
+router.get('/reports/tat-fuel', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), ctrl.getTatFuelReportData)
 router.post('/summaries/refresh/:periodId', requirePermission('report:create'), ctrl.refreshSummaries)
 
 // Driver conduct follow-up: the cases a report run finds and what was done on

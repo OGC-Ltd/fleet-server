@@ -114,6 +114,12 @@ export const tankersReportBodySchema = z.object({
 })
 export type TankersReportBody = z.infer<typeof tankersReportBodySchema>
 
+/** The TAT and Fuel Report's request: one fleet day. */
+export const tatFuelReportQuerySchema = z.object({
+  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'day must be YYYY-MM-DD'),
+})
+export type TatFuelReportQuery = z.infer<typeof tatFuelReportQuerySchema>
+
 /** The longest period an end-of-shift report may cover: it reads the feeds and the weighbridge day by day. */
 export const END_OF_SHIFT_MAX_DAYS = 7
 

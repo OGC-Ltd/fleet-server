@@ -225,7 +225,7 @@ export async function findHomeFence(orgId: string, site: string): Promise<MorlFe
 }
 
 /** A geofence row as the shape directions are measured against, or null when it has no usable geometry. */
-function fenceOf(pick: FenceRow): MorlFence | null {
+export function fenceOf(pick: FenceRow): MorlFence | null {
   if (pick.type === 'CIRCLE' && pick.centerLat != null && pick.centerLng != null && pick.radiusM != null) {
     return { name: pick.name, geometry: { type: 'CIRCLE', centerLat: pick.centerLat, centerLng: pick.centerLng, radiusM: pick.radiusM },
              centre: { lat: pick.centerLat, lng: pick.centerLng } }
