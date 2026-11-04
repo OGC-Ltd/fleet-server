@@ -220,14 +220,16 @@ const TAT_WIDTHS = [20, 48, 14, 17, 14, 20, 15, 14, 25, 10, 11, 13, 30, 14]
 const TAT_WRAP = new Set([0, 1, 8, 12, 13])
 const TAT_FIGURES = new Set([2, 3, 4, 5, 6, 7, 9, 10, 11])
 
-const litres = (v: number | null | undefined) => (v == null ? DASH : v.toFixed(2))
+// As Vehicle analytics writes them: litres to 0.1, kilometres to 0.01.
+const litres = (v: number | null | undefined) => (v == null ? DASH : v.toFixed(1))
+const kms = (v: number | null | undefined) => (v == null ? DASH : v.toFixed(2))
 const whole = (v: number | null | undefined) => (v == null ? DASH : String(Math.round(v)))
 
 export function tatCells(r: TatPdfRow): string[] {
   const f = r.fuel
   return [
     r.plate, tripWords(r), litres(f?.initial), litres(f?.topUps), litres(f?.total), litres(f?.consumption), litres(f?.theft), litres(f?.final),
-    r.station || DASH, whole(r.km), r.rate == null ? DASH : r.rate.toFixed(2), whole(r.tankL), r.comment, r.base,
+    r.station || DASH, kms(r.km), r.rate == null ? DASH : r.rate.toFixed(2), whole(r.tankL), r.comment, r.base,
   ]
 }
 
@@ -247,7 +249,7 @@ export async function renderTatFuelPdf(b: TatFuelPdfBody, o: { orgCode: string; 
   })
   w.h2('1. Overview', dayWords)
   w.cells([
-    ['Trips', num(s.trips)], ['Units on trips', num(s.units)], ['Fuel used, L', num(Math.round(s.litres))], ['Distance, km', num(s.km)],
+    ['Trips', num(s.trips)], ['Units on trips', num(s.units)], ['Fuel used, L', num(Math.round(s.litres))], ['Distance, km', num(Math.round(s.km))],
     ['Rate, km/L', s.rate == null ? DASH : s.rate.toFixed(2)], ['Not updating', num(s.notUpdating)],
   ])
   const used = TAT_WIDTHS.reduce((a, x) => a + x, 0)
