@@ -16,9 +16,10 @@
  *     untyped — 40 km/h inside the factory premises, 80 km/h on the
  *     highway (everywhere outside it; raised from 40 everywhere, same day).
  *
- * Kasulu's factory is the "Factory site Location" polygon, the only zone
- * lib/zone-taxonomy files as `factory` (the haulage road from the factory is
- * filed as `road`, deliberately — see categorise). Its farms, haulage roads,
+ * Kasulu's factory premises are the 137 ha "Factory site Location" polygon the
+ * limits were agreed on, held here in `premises`. Wialon's newer "Factory site
+ * location" fence covers 343 ha; the operator kept the original area for speed
+ * (2026-11-04), so a fence edit never moves a limit. Its farms, haulage roads,
  * logistic centres and workshops are all outside it, so an LMV there takes the
  * road limit — as agreed when this was set.
  *
@@ -28,6 +29,7 @@
 
 import { prisma } from './prisma.js'
 import { logger } from './logger.js'
+import { pointInPolygon } from './geofence.js'
 import { zoneCategoriesAt, loadOrgZones } from './zone-presence.js'
 import type { ZoneCategory } from './zone-taxonomy.js'
 
@@ -44,12 +46,23 @@ export interface SpeedPolicy {
   default: SpeedRule
   /** By Vehicle.vehicleType, upper case. */
   byType?: Readonly<Record<string, SpeedRule>>
+  /** Where a category's limit applies, as [lng, lat] rings, instead of the org's fences. */
+  premises?: Readonly<Partial<Record<ZoneCategory, readonly [number, number][]>>>
 }
 
 export const SPEED_POLICIES: Readonly<Record<string, SpeedPolicy>> = {
   KASULU: {
     default: { outsideKmh: 80, insideKmh: { factory: 40 } },
     byType:  { SALOON: { outsideKmh: 100, insideKmh: { factory: 60 } } },
+    premises: {
+      factory: [
+        [30.4046804317, -4.03839315339],
+        [30.4163124574, -4.0437775123],
+        [30.420129116, -4.03607567507],
+        [30.4086446552, -4.03047382712],
+        [30.4046804317, -4.03839315339],
+      ],
+    },
   },
 }
 
@@ -133,11 +146,12 @@ export function zoneLimitAt(
   if (!zones.length) return { kmh: rule.outsideKmh, source: 'org', zone: null }
   const road: ZoneLimit = { kmh: rule.outsideKmh, source: 'road', zone: null }
   if (lat == null || lng == null || !Number.isFinite(lat) || !Number.isFinite(lng)) return road
-  const inside = zoneCategoriesAt(orgId, lat, lng)
-  if (!inside) return road
+  const fenced = zoneCategoriesAt(orgId, lat, lng)
   let best: ZoneLimit = road
   for (const [cat, kmh] of zones) {
-    if (inside.has(cat) && (best.source === 'road' || kmh < best.kmh)) best = { kmh, source: 'zone', zone: cat }
+    const ring = policy.premises?.[cat]
+    const inside = ring ? pointInPolygon(lat, lng, ring as [number, number][]) : fenced?.has(cat)
+    if (inside && (best.source === 'road' || kmh < best.kmh)) best = { kmh, source: 'zone', zone: cat }
   }
   return best
 }
