@@ -29,7 +29,8 @@ const poly = (id: string, name: string, coords: [number, number][]) => ({
 })
 
 const ZONES = [
-  poly('factory', 'Factory site Location', ring(-4.05, 30.49, 0.01)),
+  // Wialon's wider fence: limits stay on the premises in SPEED_POLICIES.
+  poly('factory', 'Factory site location', ring(-4.0453, 30.4042, 0.019)),
   poly('farm',    'FARM #215',             ring(-4.2, 30.3, 0.1)),
   poly('lc1',     'Logistic centre1',      ring(-4.02, 30.52, 0.005)),
   { id: 'haul', name: 'Main Haulage road from  Factory to Zone3', type: 'LINE', mode: 'BLOCKLIST', isActive: false,
@@ -38,7 +39,8 @@ const ZONES = [
 ]
 
 const KASULU = 'org-kasulu'
-const IN_FACTORY = { lat: -4.045, lng: 30.495 }  // also on the haulage road's end
+const IN_FACTORY = { lat: -4.0372, lng: 30.4124 }
+const WIDER_FENCE_ONLY = { lat: -4.0430, lng: 30.4060 }
 const ON_FARM    = { lat: -4.15,  lng: 30.35 }
 const IN_LC1     = { lat: -4.018, lng: 30.522 }
 const NATIONAL   = { lat: -4.6,   lng: 29.9 }
@@ -53,6 +55,11 @@ beforeEach(async () => {
 })
 
 describe('Kasulu speed limits', () => {
+  it('keeps road limits in the part only the wider factory fence covers', () => {
+    expect(zoneLimitAt(KASULU, 'SALOON', WIDER_FENCE_ONLY.lat, WIDER_FENCE_ONLY.lng)).toEqual({ kmh: 100, source: 'road', zone: null })
+    expect(zoneLimitAt(KASULU, 'TRUCK', WIDER_FENCE_ONLY.lat, WIDER_FENCE_ONLY.lng)).toEqual({ kmh: 80, source: 'road', zone: null })
+  })
+
   it('holds an LMV to 60 inside the factory site', () => {
     expect(zoneLimitAt(KASULU, 'SALOON', IN_FACTORY.lat, IN_FACTORY.lng)).toEqual({ kmh: 60, source: 'zone', zone: 'factory' })
   })

@@ -471,10 +471,14 @@ async function main() {
 
     // Without a database there is nothing to compare against, so everything
     // reads as new — which is the honest answer for a preview.
-    const select = { id: true, isActive: true, mode: true, organisationId: true } as const
+    const select = { id: true, name: true, isActive: true, mode: true, organisationId: true } as const
     const byKey  = org ? await prisma.geofence.findUnique({ where: { externalId }, select }) : null
     const legacy = org && !byKey ? await prisma.geofence.findUnique({ where: { externalId: legacyId }, select }) : null
-    const existing = byKey ?? (legacy?.organisationId === org?.id ? legacy : null)
+    // The same org isn't enough: Mufindi's new DG 02 is zone 12 on its new
+    // resource, and the old key wialon:zone:12 is its FARM#210 (2026-11-04). An
+    // old row is only this zone if the name agrees too.
+    const sameLegacy = legacy?.organisationId === org?.id && legacy?.name === base.name
+    const existing = byKey ?? (sameLegacy ? legacy : null)
     if (byKey && byKey.organisationId !== org?.id) {
       throw new Error(`${externalId} belongs to another organisation — refusing to move it into ${ORG_CODE}`)
     }
