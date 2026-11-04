@@ -147,6 +147,8 @@ describe('Deliveries', () => {
     expect(customerCells(left.customers[0]!)[1]!.text).toBe('Delivered 06:00')
     expect(customerCells(left.customers[1]!)[1]!.text).toBe('Not yet')
     expect(customerCells(left.customers[2]!)[1]!.text).toBe('Not on the platform')
+    expect(customerCells({ label: 'Shop', at: null, note: 'Not reached, closest 2.2 km at 14:05' })[1]!.text).toBe('Not reached, closest 2.2 km at 14:05')
+    expect(customerCells({ label: 'Shop', at: 1, note: 'Delivered 03.11 10:00' })[1]!.text).toBe('Delivered 03.11 10:00')
   })
   it('draws upright or on its side, with or without the customers', async () => {
     expect(isPdf(await renderDeliveriesPdf(body, { orgCode: 'MENENGAI' }))).toBe(true)

@@ -222,7 +222,7 @@ export const deliveriesPdfBodySchema = z.object({
     place: pdfText.nullable(),
     arrivedAt: pdfTime.nullable(),
     arrivedTo: z.string().max(100).nullable(),
-    customers: z.array(z.object({ label: pdfText, at: pdfTime.nullable(), missing: z.boolean().optional() })).max(PDF_MAX_ROWS),
+    customers: z.array(z.object({ label: pdfText, at: pdfTime.nullable(), note: pdfText.nullable().optional(), missing: z.boolean().optional() })).max(PDF_MAX_ROWS),
   })).max(PDF_MAX_ROWS),
 })
 export type DeliveriesPdfBody = z.infer<typeof deliveriesPdfBodySchema>
