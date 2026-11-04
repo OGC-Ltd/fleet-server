@@ -356,7 +356,7 @@ export async function renderSpeedPdf(b: SpeedPdfBody, o: { orgCode: string; land
 type DeliveryPdfRow = DeliveriesPdfBody['rows'][number]
 
 export const DELIVERY_HEADS = ['Reg', 'Time left MORL/STO', 'Orders fulfilled', 'Current location', 'Time arrived MORL/STO']
-const DELIVERY_WIDTHS = [22, 42, 24, 60, 36]
+const DELIVERY_WIDTHS = [22, 42, 24, 52, 44]
 const DELIVERED = '#2e7d32'
 const NOT_DELIVERED = '#c62828'
 
@@ -369,7 +369,7 @@ export function deliveryCells(r: DeliveryPdfRow): string[] {
     r.leftAt != null ? `${sheetStamp(r.leftAt)} (${r.leftFrom?.short ?? ''})` : r.notLeft ?? DASH,
     `${r.fulfilled}/${r.planned}`,
     r.arrivedAt != null && r.arrivedTo ? r.arrivedTo : r.place || DASH,
-    r.arrivedAt != null ? sheetStamp(r.arrivedAt) : '',
+    r.arrivedAt != null ? `${sheetStamp(r.arrivedAt)}${r.arrivedShort ? ` (${r.arrivedShort})` : ''}` : '',
   ]
 }
 
@@ -423,7 +423,7 @@ export async function renderDeliveriesPdf(b: DeliveriesPdfBody, o: { orgCode: st
   })
   const used = DELIVERY_WIDTHS.reduce((a, x) => a + x, 0)
   const cols: Col[] = DELIVERY_WIDTHS.map((x, i) => ({
-    w: (x * w.sheet.body) / used, ...(i === 2 ? { align: 'right' as const } : {}), ...(i === 0 || i === 1 || i === 3 ? { wrap: true } : {}),
+    w: (x * w.sheet.body) / used, ...(i === 2 ? { align: 'right' as const } : {}), ...(i === 2 ? {} : { wrap: true }),
   }))
   const sheet = () => {
     if (!b.rows.length) { w.none('No vehicles in the report.'); return }
@@ -444,8 +444,8 @@ export async function renderDeliveriesPdf(b: DeliveriesPdfBody, o: { orgCode: st
       w.room(50)
       w.y += 2 * MM
       const left = r.leftAt != null && r.leftFrom ? ` · left ${r.leftFrom.label} ${iso(r.leftAt).slice(11, 16)}` : ''
-      w.line(r.plate, SIDE, w.y, w.sheet.body * 0.4, { font: F.bold, size: 8.2 })
-      w.line(`${r.fulfilled}/${r.planned} delivered${left}`, SIDE + w.sheet.body * 0.4, w.y + 0.6, w.sheet.body * 0.6, { size: 7.6, color: C.mut, align: 'right' })
+      w.line(r.plate, SIDE, w.y, w.sheet.body * 0.2, { font: F.bold, size: 8.2 })
+      w.line(r.run ?? `${r.fulfilled}/${r.planned} delivered${left}`, SIDE + w.sheet.body * 0.2, w.y + 0.6, w.sheet.body * 0.8, { size: 7.6, color: C.mut, align: 'right' })
       w.y += 11
       if (!r.customers.length) { w.none('No customers given.'); continue }
       w.table(customerCols, ['Stop', 'Result'], r.customers.map(customerCells), { size: 7.8 })
