@@ -383,13 +383,17 @@ export function deliverySummary(rows: DeliveryPdfRow[]) {
   }
 }
 
-/** A customer's line: delivered when, not yet, or no longer a geofence on the platform. */
+/**
+ * A customer's line: delivered when, not yet, or no longer a geofence on the
+ * platform. `note`: the page's words for what the route did there (reached
+ * without stopping, how close it came), its times dated when the report spans days.
+ */
 export function customerCells(c: DeliveryPdfRow['customers'][number]): Cell[] {
   return [
     { text: c.label },
     c.missing ? { text: 'Not on the platform', color: C.mut }
-      : c.at != null ? { text: `Delivered ${iso(c.at).slice(11, 16)}`, bold: true, color: DELIVERED }
-        : { text: 'Not yet', color: NOT_DELIVERED },
+      : c.at != null ? { text: c.note ?? `Delivered ${iso(c.at).slice(11, 16)}`, bold: true, color: DELIVERED }
+        : { text: c.note ?? 'Not yet', color: NOT_DELIVERED },
   ]
 }
 
@@ -426,7 +430,7 @@ export async function renderDeliveriesPdf(b: DeliveriesPdfBody, o: { orgCode: st
     w.table(cols, DELIVERY_HEADS, b.rows.map(r => deliveryCells(r).map((text, i): Cell => ({ text, bold: i === 0 }))), { size: 7.8 })
   }
   if (!b.stops) {
-    sectionBar(w, dmy(b.at), `${num(s.vehicles)} vehicle${s.vehicles === 1 ? '' : 's'}`)
+    sectionBar(w, dmy(b.from) === dmy(b.at) ? dmy(b.at) : `${dmy(b.from)} to ${dmy(b.at)}`, `${num(s.vehicles)} vehicle${s.vehicles === 1 ? '' : 's'}`)
     sheet()
   } else {
     w.h2('1. Overview', `as at ${dmyhm(b.at)}`)
@@ -434,7 +438,7 @@ export async function renderDeliveriesPdf(b: DeliveriesPdfBody, o: { orgCode: st
     w.h2('2. Deliveries', period)
     sheet()
     w.h2('3. Customers by vehicle')
-    const customerCols: Col[] = [{ w: 0, wrap: true }, { w: 48 * MM }]
+    const customerCols: Col[] = [{ w: 0, wrap: true }, { w: 68 * MM, wrap: true }]
     for (const r of b.rows) {
       // A vehicle's name never sits alone at a page foot
       w.room(50)
@@ -444,7 +448,7 @@ export async function renderDeliveriesPdf(b: DeliveriesPdfBody, o: { orgCode: st
       w.line(`${r.fulfilled}/${r.planned} delivered${left}`, SIDE + w.sheet.body * 0.4, w.y + 0.6, w.sheet.body * 0.6, { size: 7.6, color: C.mut, align: 'right' })
       w.y += 11
       if (!r.customers.length) { w.none('No customers given.'); continue }
-      w.table(customerCols, ['Customer', 'Delivered'], r.customers.map(customerCells), { size: 7.8 })
+      w.table(customerCols, ['Stop', 'Result'], r.customers.map(customerCells), { size: 7.8 })
     }
   }
   w.y += 2 * MM
