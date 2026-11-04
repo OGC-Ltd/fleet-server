@@ -5,9 +5,10 @@ import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
 import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, TankersReportBody } from './report.schema.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, TankersReportBody, TatFuelReportQuery } from './report.schema.js'
 import { getMovementReport, editedMovementReport, type MovementReport } from './movement-report.service.js'
 import { getTankersReport } from './tankers-report.service.js'
+import { getTatFuelReport } from './tat-fuel-report.service.js'
 import { renderMovementReportsPdf, movementFileName, movementReportsFileName } from './movement-report.pdf.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -195,6 +196,17 @@ export const getTankersReportData: RequestHandler = async (req, res, next) => {
   try {
     const body = req.body as TankersReportBody
     sendSuccess(res, await getTankersReport(p(req, 'orgId'), body.units, body.to ?? Date.now(), req.authz?.vehicleIds ?? null))
+  } catch (err) { next(err) }
+}
+
+/**
+ * GET /organisations/:orgId/reports/tat-fuel?day=YYYY-MM-DD — each trip signed
+ * back in that fleet day, with its fuel and distance, and why any other unit has none.
+ */
+export const getTatFuelReportData: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as TatFuelReportQuery
+    sendSuccess(res, await getTatFuelReport(p(req, 'orgId'), q.day, req.authz?.vehicleIds ?? null))
   } catch (err) { next(err) }
 }
 
