@@ -120,6 +120,8 @@ export interface WialonFleet {
    * carries five customers; without this, one org would swallow all 915 units.
    */
   nameMask?: RegExp
+  /** Units of this fleet billed to another account, by Wialon unit id: the account boundary would leave them out. */
+  extraUnitIds?: readonly number[]
   /** Which vehicle group a unit belongs to, read from its name. */
   groupOf:  (unitName: string) => { code: string; name: string }
   /**
@@ -159,6 +161,8 @@ const FLEETS: WialonFleet[] = [
     orgCode:   'MENENGAI',
     orgName:   'Menengai',
     accountId: MENENGAI_WIALON_ACCOUNT_ID,
+    // CPO - Menengai - KCM 123T is billed to account 17082202 (operator, 4 Nov 2026).
+    extraUnitIds: [27192058],
     groupOf:   menengaiGroup,
     // 227 of the 244 units name a real registration; the other 17 are plant and
     // gensets ("MORL FARM EQUIPMENT - GENSET MOLO RIVER"). Those keep the unit
