@@ -5,8 +5,9 @@ import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
 import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, ReportDocBody, TankersReportBody, TatFuelReportQuery, DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody, DeliveriesPdfBody } from './report.schema.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementEventsQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, ReportDocBody, TankersReportBody, TatFuelReportQuery, DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody, DeliveriesPdfBody } from './report.schema.js'
 import { getMovementReport, editedMovementReport, type MovementReport } from './movement-report.service.js'
+import { getMovementEvents } from './movement-events.service.js'
 import { getTankersReport } from './tankers-report.service.js'
 import { getTatFuelReport } from './tat-fuel-report.service.js'
 import { getSpeedReport } from './speed-report.service.js'
@@ -185,6 +186,14 @@ export const getMovementReportData: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as MovementReportQuery
     sendSuccess(res, await getMovementReport(p(req, 'orgId'), movementWindow(q), req.authz?.vehicleIds ?? null, Date.now(), { offline: q.offline === '1' }))
+  } catch (err) { next(err) }
+}
+
+/** GET /organisations/:orgId/reports/movements/events?from&to&kinds=stop,braking — the events picked onto the report. */
+export const getMovementEventsData: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as MovementEventsQuery
+    sendSuccess(res, await getMovementEvents(p(req, 'orgId'), q, req.authz?.vehicleIds ?? null))
   } catch (err) { next(err) }
 }
 

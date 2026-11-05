@@ -99,6 +99,15 @@ export const movementReportQuerySchema = z.object({
 }).transform(q => ({ ...q, hours: q.hours ?? 2 }))
 export type MovementReportQuery = z.infer<typeof movementReportQuerySchema>
 
+/** The events picked onto a window of the Movements report: kinds as a comma list. */
+export const movementEventsQuerySchema = z.object({
+  from: z.coerce.number().int().positive(),
+  to: z.coerce.number().int().positive(),
+  kinds: z.string().max(100).transform(s => s.split(',').map(k => k.trim()).filter(Boolean))
+    .pipe(z.array(z.enum(['freewheel', 'cornering', 'braking', 'acceleration', 'stop'])).min(1)),
+}).superRefine((q, ctx) => movementWindowIssues(q.from, q.to, ctx))
+export type MovementEventsQuery = z.infer<typeof movementEventsQuerySchema>
+
 /**
  * The Tankers Report's request (operator, 2–4 Nov 2026): the tankers off the
  * Reports page's fleet list, each with its trackers, and the report time

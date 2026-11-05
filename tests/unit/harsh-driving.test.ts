@@ -120,8 +120,14 @@ describe('recordHarshEvent', () => {
     )
   })
 
-  it('leaves cornering and units we do not hold alone', async () => {
+  it('records cornering without a word to the feed', async () => {
     await recordHarshEvent(event('CORNERING'))
+    const data = (prismaMock.providerAlert.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data
+    expect(data['type']).toBe('HARSH_CORNERING')
+    expect(eventBus.publish).not.toHaveBeenCalled()
+  })
+
+  it('leaves units we do not hold alone', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.vehicle.findUnique as any).mockResolvedValue(null)
     await recordHarshEvent(event('BRAKING'))

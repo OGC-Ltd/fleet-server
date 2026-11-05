@@ -10,6 +10,7 @@ import {
   listEngineSessionQuerySchema,
   listSummaryQuerySchema,
   movementReportQuerySchema,
+  movementEventsQuerySchema,
   movementPdfBodySchema,
   dormantPdfBodySchema,
   geofencePdfBodySchema,
@@ -48,6 +49,7 @@ router.get('/summaries', requirePermission('report:read'), validateQuery(listSum
 // or as data for the Reports page's Movements table, and the PDF of that
 // table as the operator edited it. Positions, so telemetry:read.
 router.get('/reports/movements.pdf', requirePermission('telemetry:read'), validateQuery(movementReportQuerySchema), ctrl.downloadMovementReport)
+router.get('/reports/movements/events', requirePermission('telemetry:read'), validateQuery(movementEventsQuerySchema), ctrl.getMovementEventsData)
 router.get('/reports/movements', requirePermission('telemetry:read'), validateQuery(movementReportQuerySchema), ctrl.getMovementReportData)
 router.post('/reports/movements.pdf', requirePermission('telemetry:read'), validateBody(movementPdfBodySchema), ctrl.downloadEditedMovementReport)
 // Menengai's tankers on the road from the Mombasa depot to MORL, 4 hours at a time
