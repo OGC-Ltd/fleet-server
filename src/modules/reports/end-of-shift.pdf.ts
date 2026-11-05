@@ -267,7 +267,8 @@ export async function renderShiftDoc(d: ShiftDoc, o: { landscape?: boolean } = {
   for (const blk of d.blocks) {
     switch (blk.kind) {
       case 'h2': w.h2(blk.title, blk.aside ?? ''); break
-      case 'h3': if (prev && prev !== 'h2') w.y += 1.5 * MM; h3(blk.title, blk.aside); break
+      // With room for its table's heading and a first row, so it never sits alone at the foot of a page
+      case 'h3': w.room(48); if (prev && prev !== 'h2') w.y += 1.5 * MM; h3(blk.title, blk.aside); break
       case 'bar': sectionBar(w, blk.title, blk.aside ?? ''); break
       case 'figures': w.cells(blk.items.map((i) => [i.label, i.value, i.flag ? C.flag : undefined] as [string, string, string | undefined])); break
       case 'table': table(blk); break
