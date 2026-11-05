@@ -51,13 +51,14 @@ function drawRoute(doc: Doc, vehicle: RecoveryVehicle, y: number, width: number,
   }
 }
 
-export const recoveryReportFileName = (day: string) => `Recovery Vehicle Report ${day}.pdf`
+export const recoveryReportFileName = (day: string, vehicle?: string) =>
+  `Recovery Vehicle Report${vehicle ? ` ${vehicle}` : ''} ${day}.pdf`
 
-export async function renderRecoveryReportPdf(report: RecoveryReport): Promise<Buffer> {
+export async function renderRecoveryReportPdf(report: RecoveryReport, landscape = false): Promise<Buffer> {
   const title = `Daily Recovery Vehicle Report — ${report.day}`
-  const sheet = sheetOf()
+  const sheet = sheetOf(landscape)
   const doc = new PDFDocument({
-    size: 'A4', margin: 0, bufferPages: true,
+    size: 'A4', layout: landscape ? 'landscape' : 'portrait', margin: 0, bufferPages: true,
     info: { Title: title, Author: 'Off-Grid Consulting Ltd.' },
   })
   const chunks: Buffer[] = []
