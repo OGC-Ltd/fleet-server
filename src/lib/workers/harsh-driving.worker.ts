@@ -10,8 +10,10 @@
  * every message for them; this writes the row and hands it to the same fan-out
  * every other provider alert takes (notification.worker: feed, history, push).
  *
- * Harsh cornering is reported by the same trackers but is not recorded: it was
- * not asked for, and it is the noisiest of the three on rough estate roads.
+ * Harsh cornering is recorded too (operator, 5 Nov 2026, for the Movements
+ * report's events), but silently: no feed line and no push, as it is the
+ * noisiest of the three on rough estate roads. Everything else reads these rows
+ * by the two other types, so it counts in no scorecard or trip report.
  *
  * A harsh ACCELERATION from a unit in the workshop is not recorded at all
  * (operator, 2026-10-31): the workshop revs and road-tests it, and that is not
@@ -35,11 +37,12 @@ const limit = createLimiter(2)
 export const HARSH_ALERTS = {
   ACCELERATION: { type: 'HARSH_ACCELERATION', words: 'Harsh acceleration' },
   BRAKING:      { type: 'HARSH_BRAKING',      words: 'Harsh braking' },
+  CORNERING:    { type: 'HARSH_CORNERING',    words: 'Harsh cornering' },
 } as const
 
 /** One event per unit and kind per minute, even if Wialon repeats its message. */
 export function harshEventExternalId(e: HarshDrivingEvent): string | null {
-  const what = e.kind === 'CORNERING' ? null : HARSH_ALERTS[e.kind]
+  const what = HARSH_ALERTS[e.kind]
   if (!what) return null
   return `harsh:${e.deviceId}:${what.type}:${Math.floor(e.at.getTime() / 60_000)}`
 }
@@ -61,7 +64,7 @@ export function harshMessage(
 }
 
 export async function recordHarshEvent(e: HarshDrivingEvent): Promise<void> {
-  const what = e.kind === 'CORNERING' ? null : HARSH_ALERTS[e.kind]
+  const what = HARSH_ALERTS[e.kind]
   if (!what) return
 
   const externalId = harshEventExternalId(e)
@@ -123,6 +126,8 @@ export async function recordHarshEvent(e: HarshDrivingEvent): Promise<void> {
     if ((err as { code?: string })?.code === 'P2002') return
     throw err
   }
+
+  if (e.kind === 'CORNERING') return     // on record for the reports, not for the feed
 
   eventBus.publish('provider:alert', {
     orgId:     vehicle.organisationId,
