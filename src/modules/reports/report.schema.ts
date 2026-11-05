@@ -131,6 +131,18 @@ export const tatFuelReportQuerySchema = z.object({
 })
 export type TatFuelReportQuery = z.infer<typeof tatFuelReportQuerySchema>
 
+const PROBE_REPORT_MAX_DAYS = 31
+/** The Probe Disconnection Report's request: fleet days, first to last. */
+export const probeReportQuerySchema = z.object({
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'from must be YYYY-MM-DD'),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'to must be YYYY-MM-DD'),
+}).superRefine((q, ctx) => {
+  const days = (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000
+  if (!(days >= 0)) ctx.addIssue({ code: 'custom', path: ['to'], message: 'to must not be before from' })
+  else if (days >= PROBE_REPORT_MAX_DAYS) ctx.addIssue({ code: 'custom', path: ['to'], message: `${PROBE_REPORT_MAX_DAYS} days at most` })
+})
+export type ProbeReportQuery = z.infer<typeof probeReportQuerySchema>
+
 /** The most rows one of the PDFs below takes: far past a week of a whole family's visits. */
 const PDF_MAX_ROWS = 60_000
 const pdfFleet = z.string().trim().min(1).max(200)

@@ -16,6 +16,7 @@ import {
   geofencePdfBodySchema,
   tatFuelPdfBodySchema,
   speedPdfBodySchema,
+  probeReportQuerySchema,
   deliveriesPdfBodySchema,
   tankersReportBodySchema, tatFuelReportQuerySchema,
   endOfShiftQuerySchema,
@@ -57,6 +58,7 @@ router.post('/reports/tankers', requirePermission('telemetry:read'), validateBod
 // Each trip signed back in on a fleet day, its fuel and its distance (Sukari's daily sheet)
 router.get('/reports/tat-fuel', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), ctrl.getTatFuelReportData)
 router.get('/reports/speed', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), ctrl.getSpeedReportData)
+router.get('/reports/probe-disconnections', requirePermission('telemetry:read'), validateQuery(probeReportQuerySchema), ctrl.getProbeReportData)
 // The rows the page made, for one organisation or several together, drawn on the letterhead
 router.post('/reports/document.pdf', requirePermission('telemetry:read'), validateBody(reportDocSchema), ctrl.downloadReportDoc)
 router.post('/reports/dormant-assets.pdf', requirePermission('telemetry:read'), validateBody(dormantPdfBodySchema), ctrl.downloadDormantPdf)

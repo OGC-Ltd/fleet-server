@@ -5,12 +5,13 @@ import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
 import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementEventsQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, ReportDocBody, TankersReportBody, TatFuelReportQuery, DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody, DeliveriesPdfBody } from './report.schema.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementEventsQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, ReportDocBody, TankersReportBody, TatFuelReportQuery, ProbeReportQuery, DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody, DeliveriesPdfBody } from './report.schema.js'
 import { getMovementReport, editedMovementReport, type MovementReport } from './movement-report.service.js'
 import { getMovementEvents } from './movement-events.service.js'
 import { getTankersReport } from './tankers-report.service.js'
 import { getTatFuelReport } from './tat-fuel-report.service.js'
 import { getSpeedReport } from './speed-report.service.js'
+import { getProbeReport } from './probe-disconnection.service.js'
 import { renderMovementReportsPdf, movementFileName, movementReportsFileName } from './movement-report.pdf.js'
 import { renderDormantPdf, renderGeofencePdf, renderTatFuelPdf, renderSpeedPdf, renderDeliveriesPdf, dormantFileName, geofenceFileName, tatFileName, speedFileName, deliveriesFileName } from './template-report.pdf.js'
 
@@ -289,6 +290,14 @@ export const downloadTatFuelPdf: RequestHandler = async (req, res, next) => {
     const body = req.body as TatFuelPdfBody
     const { short } = await orgHeading(p(req, 'orgId'))
     sendPdf(res, await renderTatFuelPdf(body, { orgCode: short }), tatFileName(body))
+  } catch (err) { next(err) }
+}
+
+/** GET /organisations/:orgId/reports/probe-disconnections?from&to — each time a unit's fuel probe was disconnected. */
+export const getProbeReportData: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as ProbeReportQuery
+    sendSuccess(res, await getProbeReport(p(req, 'orgId'), q.from, q.to, req.authz?.vehicleIds ?? null))
   } catch (err) { next(err) }
 }
 
