@@ -131,6 +131,21 @@ export const tatFuelReportQuerySchema = z.object({
 })
 export type TatFuelReportQuery = z.infer<typeof tatFuelReportQuerySchema>
 
+/** One fleet day for the recovery vehicles report. */
+export const recoveryReportQuerySchema = z.object({
+  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'day must be YYYY-MM-DD'),
+}).superRefine(({ day }, ctx) => {
+  const utcDay = Date.parse(`${day}T00:00:00Z`)
+  if (!Number.isFinite(utcDay) || new Date(utcDay).toISOString().slice(0, 10) !== day) {
+    ctx.addIssue({ code: 'custom', path: ['day'], message: 'day must be a valid calendar date' })
+    return
+  }
+  if (Date.parse(`${day}T00:00:00+03:00`) > Date.now()) {
+    ctx.addIssue({ code: 'custom', path: ['day'], message: 'day cannot be in the future' })
+  }
+})
+export type RecoveryReportQuery = z.infer<typeof recoveryReportQuerySchema>
+
 const PROBE_REPORT_MAX_DAYS = 31
 /** The Probe Disconnection Report's request: fleet days, first to last. */
 export const probeReportQuerySchema = z.object({
