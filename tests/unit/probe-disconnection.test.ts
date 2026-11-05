@@ -3,7 +3,7 @@
  * Kenya's Wialon sheet.
  */
 import { describe, it, expect } from 'vitest'
-import { disconnectionsOf, parseProbeAlert, RUN_GAP_MS, type ProbeAlert } from '../../src/modules/reports/probe-disconnection.service.js'
+import { disconnectionsOf, isTruck, parseProbeAlert, RUN_GAP_MS, type ProbeAlert } from '../../src/modules/reports/probe-disconnection.service.js'
 
 const MOVING = 'WKS Fuel Probe Disconnection Alert (Omnicom)\n\nWKS - Nzoia Sugar - KDJ 813Z: Probe has been disconnected, Current Fuel Level = 0L. At 30.10.2026 19:54:54 with a speed of 5 km/h within  Location D267, South Kabras Ward, Malava Sub County, Kakamega County, Kenya, 2.11 km from Kambi-Mwanza Google Map https://maps.google.com/?q=0.376852,34.834289'
 const STANDING = 'Kabras Fuel Probe Disconnection Alert (Omnicom)\n\nWKS - Kabras - KDJ 820Z: Probe has been disconnected, Current Fuel Level = 3L. At 27.10.2026 18:53:24 with a speed of  within  Location  Google Map https://maps.google.com/?q=0.378502,34.833738'
@@ -27,6 +27,23 @@ describe('an alert’s words', () => {
     const words = 'Probe has been disconnected.'
     expect(parseProbeAlert(words, 5_000)?.at).toBe(5_000)
     expect(parseProbeAlert(words)).toBeNull()
+  })
+})
+
+describe('which units are on the report', () => {
+  const unit = (name: string, plate: string, type = 'UNSPECIFIED') => isTruck({ name, plate, type })
+  it('has the sheet’s trucks and the prime movers', () => {
+    expect(unit('WKS - Nzoia Sugar - KDJ 813Z', 'KDJ 813Z')).toBe(true)
+    expect(unit('WKS - Naitiri - KCY 511U', 'KCY 511U', 'TRUCK')).toBe(true)
+    expect(unit('Faw Prime Mover CA 4181 KDL 705E', 'KDL 705E', 'PRIME_MOVER')).toBe(true)
+    expect(unit('SINO ZZ4257V344JB1R KDL 214X', 'KDL 214X')).toBe(true)
+  })
+  it('leaves out tractors, machines and light vehicles', () => {
+    expect(unit('WKS - Kabras - KTCC 188G', 'KTCC 188G')).toBe(false)
+    expect(unit('WKS - Naitiri - KTCB 256N', 'KTCB 256N')).toBe(false)
+    expect(unit('Mahindra Haulmaster 4WD KTCC 111G', 'KTCC 111G')).toBe(false)
+    expect(unit('Toyota Hilux HZJT9R KCG 897Z', 'KCG 897Z')).toBe(false)
+    expect(unit('SUKARI-LV-KBW 748A', 'KBW 748A')).toBe(false)
   })
 })
 

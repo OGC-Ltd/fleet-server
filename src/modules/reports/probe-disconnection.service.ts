@@ -2,6 +2,9 @@
  * The Probe Disconnection Report (operator, 5 Nov 2026; West Kenya's Wialon
  * violations sheet): each time a unit's fuel probe was disconnected.
  *
+ * Trucks only (operator, 5 Nov 2026), as the sheet is: no tractors, machines or
+ * light vehicles.
+ *
  * Wialon's "Fuel Probe Disconnection Alert (Omnicom)" rules decide what a
  * disconnection is, against sensors we do not hold, and leave an event on the
  * unit. They do not post to us, so the events are read from Wialon here. What
@@ -22,12 +25,20 @@ import { prisma } from '../../lib/prisma.js'
 import { fleetDayBounds } from '../../lib/provider-time.js'
 import { WialonClient } from '../../providers/wialon/wialon.client.js'
 import { wialonIdOf } from './speed-report.service.js'
+import { isPrimeMover, vehicleHeading } from './tat-fuel-report.service.js'
 
 /** Alerts closer than this are one disconnection. */
 export const RUN_GAP_MS = 30 * 60_000
 const SESSIONS = 5
 const PAGE = 5_000
 const CACHE_MS = 60 * 60_000
+/** Named a light vehicle, whatever its plate or type says. */
+const LIGHT_VEHICLE = /(?:^|[\s-])LV(?:[\s-]|$)/i
+/** A truck: the reports' own heading for one, or a prime mover by its name. Pure. */
+export function isTruck(v: { type: string; plate: string; name: string }): boolean {
+  return !LIGHT_VEHICLE.test(v.name) && (['Trucks', 'Lorries'].includes(vehicleHeading(v)) || isPrimeMover(v.name))
+}
+
 /** Wialon's message type in bits 8 to 15: this bit is the events, and leaves out data, SMS and commands. */
 const EVENT_BIT = 0x0400
 
@@ -116,11 +127,12 @@ async function buildReport(orgId: string, fromDay: string, toDay: string, allowe
   if (!start || !end) return { from: fromDay, to: toDay, rows: [], read: 0, failed: 0, eventsSeen: 0 }
   const vehicles = await prisma.vehicle.findMany({
     where: { organisationId: orgId, isActive: true },
-    select: { id: true, name: true, registrationPlate: true, deviceId: true },
+    select: { id: true, name: true, registrationPlate: true, deviceId: true, vehicleType: true },
   })
   const planned = vehicles.flatMap((v) => {
     const wialonId = wialonIdOf(v.deviceId)
-    return wialonId != null && (!allowed || allowed.has(v.id)) ? [{ unit: v, wialonId }] : []
+    const truck = isTruck({ type: v.vehicleType, plate: v.registrationPlate, name: v.name })
+    return truck && wialonId != null && (!allowed || allowed.has(v.id)) ? [{ unit: v, wialonId }] : []
   })
   const fromMs = start.from.getTime()
   const toMs = end.to.getTime()
