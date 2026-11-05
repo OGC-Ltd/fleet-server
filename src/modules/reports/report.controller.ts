@@ -5,7 +5,7 @@ import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
 import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementEventsQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, ReportDocBody, TankersReportBody, TatFuelReportQuery, ProbeReportQuery, DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody, DeliveriesPdfBody } from './report.schema.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementEventsQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, ReportDocBody, TankersReportBody, TatFuelReportQuery, ProbeReportQuery, RecoveryReportQuery, DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody, DeliveriesPdfBody } from './report.schema.js'
 import { getMovementReport, editedMovementReport, type MovementReport } from './movement-report.service.js'
 import { getMovementEvents } from './movement-events.service.js'
 import { getTankersReport } from './tankers-report.service.js'
@@ -14,6 +14,8 @@ import { getSpeedReport } from './speed-report.service.js'
 import { getProbeReport } from './probe-disconnection.service.js'
 import { renderMovementReportsPdf, movementFileName, movementReportsFileName } from './movement-report.pdf.js'
 import { renderDormantPdf, renderGeofencePdf, renderTatFuelPdf, renderSpeedPdf, renderDeliveriesPdf, dormantFileName, geofenceFileName, tatFileName, speedFileName, deliveriesFileName } from './template-report.pdf.js'
+import { getRecoveryVehicleReport } from './recovery-report.service.js'
+import { recoveryReportFileName, renderRecoveryReportPdf } from './recovery-report.pdf.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -298,6 +300,23 @@ export const getProbeReportData: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as ProbeReportQuery
     sendSuccess(res, await getProbeReport(p(req, 'orgId'), q.from, q.to, req.authz?.vehicleIds ?? null))
+  } catch (err) { next(err) }
+}
+
+/** GET /organisations/:orgId/reports/recovery?day=YYYY-MM-DD — the recovery fleet's daily measurements. */
+export const getRecoveryReport: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as RecoveryReportQuery
+    sendSuccess(res, await getRecoveryVehicleReport(p(req, 'orgId'), q.day, req.authz?.vehicleIds ?? null))
+  } catch (err) { next(err) }
+}
+
+/** The same daily recovery report as a printable PDF. */
+export const downloadRecoveryReport: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as RecoveryReportQuery
+    const report = await getRecoveryVehicleReport(p(req, 'orgId'), q.day, req.authz?.vehicleIds ?? null)
+    sendPdf(res, await renderRecoveryReportPdf(report), recoveryReportFileName(q.day))
   } catch (err) { next(err) }
 }
 

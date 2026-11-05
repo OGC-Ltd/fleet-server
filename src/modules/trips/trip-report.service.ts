@@ -116,6 +116,7 @@ interface ReportScope {
    * on plain white (operator, 2026-10-31), so it skips the download.
    */
   withMap?: boolean
+  withConduct?: boolean
 }
 
 function loadVehicle(orgId: string, vehicleId: string) {
@@ -294,7 +295,9 @@ export async function getDayTrips(orgId: string, vehicleId: string, day: string)
  * getDayTrips lists them. Same data as a dispatch's report: a trip that
  * belongs to a sign-out carries that dispatch, its yard and its destination.
  */
-export async function getDayReportData(orgId: string, vehicleId: string, day: string, trip: number | null) {
+export async function getDayReportData(
+  orgId: string, vehicleId: string, day: string, trip: number | null, options: { withConduct?: boolean } = {},
+) {
   const vehicle = await loadVehicle(orgId, vehicleId)
   if (!vehicle) throw new NotFoundError('Vehicle not found')
   const bounds = fleetDayBounds(day)
@@ -311,6 +314,7 @@ export async function getDayReportData(orgId: string, vehicleId: string, day: st
     return gatherReportData(orgId, vehicle, {
       mode: 'day', from: dayFrom, to: dayTo, dayFrom, dayTo, clipped: false,
       dispatch: null, yard: null, dest: null, arrivedAt: null, driverName: first?.driverName ?? null,
+      withConduct: options.withConduct,
     })
   }
 
@@ -395,7 +399,9 @@ async function gatherReportData(orgId: string, vehicle: ReportVehicle, scope: Re
       logger.warn({ err, vehicleId }, 'trip report: zone timeline failed')
       return null
     }),
-    dashcamConduct(orgId, vehicleId, dayFrom, dayTo),
+    scope.withConduct === false
+      ? Promise.resolve({ fitted: false, complete: true, alarms: [] })
+      : dashcamConduct(orgId, vehicleId, dayFrom, dayTo),
     !scope.withMap ? null : routeMap([...located0.map(f => [f.lat!, f.lng!] as [number, number]),
               ...[yard, dest].filter(Boolean).map(p => [p!.lat, p!.lng] as [number, number])]).catch((err) => {
       logger.warn({ err, vehicleId }, 'trip report: map tiles failed')
