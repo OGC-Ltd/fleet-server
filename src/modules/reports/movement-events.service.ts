@@ -33,11 +33,15 @@ export interface MovementEvent {
   place: string | null
   speedKmh: number | null
   source: 'tracker' | 'camera'
-  /** A long stop: how long it stood in the window. */
+  /** A long stop: how long it stood, the whole stop even where it ran past the window. */
   minutes?: number
-  /** Already standing when the window opened: it began before `at`. */
+  /** A long stop: when it stopped, which can be before the window (`at` stays inside it). */
+  stoppedAt?: number
+  /** A long stop: when it left, null while it has not. */
+  leftAt?: number | null
+  /** Standing for as far back as the lookup reads: it began before `stoppedAt`. */
   before?: boolean
-  /** Still standing when the window closed. */
+  /** No move seen after the window either: still standing. */
   ongoing?: boolean
 }
 
@@ -57,9 +61,20 @@ const ALERT_KIND: Record<string, EventKind> = { HARSH_ACCELERATION: 'acceleratio
 const MAX_PLACE_LOOKUPS = 15
 const PLACE_LOOKUP_WAIT_MS = 8_000
 const VEHICLES_A_READ = 40
+/** How far past the window a stop's start and end are looked for. */
+const STOP_LOOK_MS = 7 * 86_400_000
+/** MOVED_AWAY_M in degrees: a box for the database, which has no distance to hand. */
+const MOVED_AWAY_DEG = 0.0045
 
 export interface Reading { t: number; lat: number; lng: number; speedKmh: number | null }
-export interface LongStop { at: number; lat: number; lng: number; minutes: number; before: boolean; ongoing: boolean }
+export interface LongStop {
+  at: number; lat: number; lng: number; minutes: number; before: boolean; ongoing: boolean
+  /** The reading before the stand: what it was doing when it stopped. Null where the window opened on it. */
+  lastSpeedKmh: number | null
+  leftAt: number | null
+}
+/** What the readings before the window say of a stop already running. */
+export interface StopBefore { stoodAt: number | null; speedKmh: number | null }
 
 const rad = (d: number) => (d * Math.PI) / 180
 const metres = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) => {
@@ -74,10 +89,11 @@ const metres = (a: { lat: number; lng: number }, b: { lat: number; lng: number }
  */
 export function longStops(readings: Reading[], { from, to }: { from: number; to: number }): LongStop[] {
   const out: LongStop[] = []
-  let stand: { t: number; lat: number; lng: number; last: number; first: boolean } | null = null
+  let stand: { t: number; lat: number; lng: number; last: number; first: boolean; lastSpeedKmh: number | null } | null = null
   const close = (end: number, ongoing: boolean) => {
     if (stand && end - stand.t >= LONG_STOP_MS) {
-      out.push({ at: stand.t, lat: stand.lat, lng: stand.lng, minutes: Math.round((end - stand.t) / 60_000), before: stand.first, ongoing })
+      out.push({ at: stand.t, lat: stand.lat, lng: stand.lng, minutes: Math.round((end - stand.t) / 60_000), before: stand.first, ongoing,
+        lastSpeedKmh: stand.lastSpeedKmh, leftAt: ongoing ? null : end })
     }
     stand = null
   }
@@ -88,10 +104,28 @@ export function longStops(readings: Reading[], { from, to }: { from: number; to:
     else if (stand && metres(stand, r) > MOVED_AWAY_M) close(stand.last, false)
     if (moving) return
     if (stand) stand.last = r.t
-    else stand = { t: r.t, lat: r.lat, lng: r.lng, last: r.t, first: i === 0 }
+    else stand = { t: r.t, lat: r.lat, lng: r.lng, last: r.t, first: i === 0, lastSpeedKmh: readings[i - 1]?.speedKmh ?? null }
   })
   close(to, true)
   return out
+}
+
+/**
+ * A stop as a whole: the window cuts it, the readings either side of the window
+ * say when it really began and ended. With neither to go on it stays as the
+ * window saw it. Pure.
+ */
+export function wholeStop(s: LongStop, before: StopBefore | undefined, leftAfter: number | undefined, to: number) {
+  const began = s.before && before
+  const stoppedAt = began ? before.stoodAt ?? s.at : s.at
+  const leftAt = s.ongoing && leftAfter != null ? leftAfter : s.leftAt
+  return {
+    stoppedAt, leftAt,
+    lastSpeedKmh: began ? before.speedKmh : s.lastSpeedKmh,
+    before: s.before && !before,
+    ongoing: leftAt == null,
+    minutes: Math.round(((leftAt ?? to) - stoppedAt) / 60_000),
+  }
 }
 
 /** One event where the tracker and the camera both reported it: the tracker's stands. Pure. */
@@ -132,11 +166,74 @@ async function trackerEvents(orgId: string, kinds: Set<EventKind>, plates: Map<s
   })
 }
 
+/** For stops the window opened on: the last reading that moved or stood elsewhere, and the first reading after it. */
+async function readStopsBefore(stops: Array<{ vehicleId: string; lat: number; lng: number }>, from: number) {
+  const found = new Map<string, StopBefore>()
+  for (let i = 0; i < stops.length; i += VEHICLES_A_READ) {
+    const part = stops.slice(i, i + VEHICLES_A_READ)
+    const rows = await prisma.$queryRaw<Array<{ vehicle_id: string; speed_kmh: number | null; stood_at: Date | null }>>`
+      SELECT a.vehicle_id, b.speed_kmh, n.captured_at AS stood_at
+        FROM unnest(${part.map(s => s.vehicleId)}::text[], ${part.map(s => s.lat)}::float8[], ${part.map(s => s.lng)}::float8[]) AS a(vehicle_id, lat, lng)
+        JOIN LATERAL (
+          SELECT t.captured_at, t.speed_kmh FROM vehicle_telemetries t
+           WHERE t.vehicle_id = a.vehicle_id AND t.captured_at < ${new Date(from)} AND t.captured_at >= ${new Date(from - STOP_LOOK_MS)}
+             AND t.lat IS NOT NULL AND t.lng IS NOT NULL
+             AND (t.speed_kmh > ${MOVING_KMH}::float8 OR abs(t.lat - a.lat) > ${MOVED_AWAY_DEG}::float8 OR abs(t.lng - a.lng) > ${MOVED_AWAY_DEG}::float8)
+           ORDER BY t.captured_at DESC LIMIT 1
+        ) b ON true
+        LEFT JOIN LATERAL (
+          SELECT t.captured_at FROM vehicle_telemetries t
+           WHERE t.vehicle_id = a.vehicle_id AND t.captured_at > b.captured_at AND t.captured_at < ${new Date(from)}
+             AND t.lat IS NOT NULL AND t.lng IS NOT NULL
+           ORDER BY t.captured_at ASC LIMIT 1
+        ) n ON true`
+    for (const r of rows) found.set(r.vehicle_id, { speedKmh: r.speed_kmh, stoodAt: r.stood_at?.getTime() ?? null })
+  }
+  return found
+}
+
+/** For stops the window closed on: when each left, read as longStops ends a stand. */
+async function readStopsLeft(stops: Array<{ vehicleId: string; lat: number; lng: number }>, to: number) {
+  const found = new Map<string, number>()
+  for (let i = 0; i < stops.length; i += VEHICLES_A_READ) {
+    const part = stops.slice(i, i + VEHICLES_A_READ)
+    const rows = await prisma.$queryRaw<Array<{ vehicle_id: string; speed_kmh: number | null; gone_at: Date; last_at: Date | null }>>`
+      SELECT a.vehicle_id, f.speed_kmh, f.captured_at AS gone_at, p.captured_at AS last_at
+        FROM unnest(${part.map(s => s.vehicleId)}::text[], ${part.map(s => s.lat)}::float8[], ${part.map(s => s.lng)}::float8[]) AS a(vehicle_id, lat, lng)
+        JOIN LATERAL (
+          SELECT t.captured_at, t.speed_kmh FROM vehicle_telemetries t
+           WHERE t.vehicle_id = a.vehicle_id AND t.captured_at > ${new Date(to)} AND t.captured_at <= ${new Date(to + STOP_LOOK_MS)}
+             AND t.lat IS NOT NULL AND t.lng IS NOT NULL
+             AND (t.speed_kmh > ${MOVING_KMH}::float8 OR abs(t.lat - a.lat) > ${MOVED_AWAY_DEG}::float8 OR abs(t.lng - a.lng) > ${MOVED_AWAY_DEG}::float8)
+           ORDER BY t.captured_at ASC LIMIT 1
+        ) f ON true
+        LEFT JOIN LATERAL (
+          SELECT t.captured_at FROM vehicle_telemetries t
+           WHERE t.vehicle_id = a.vehicle_id AND t.captured_at < f.captured_at AND t.captured_at > ${new Date(to)}
+             AND t.lat IS NOT NULL AND t.lng IS NOT NULL
+           ORDER BY t.captured_at DESC LIMIT 1
+        ) p ON true`
+    for (const r of rows) {
+      const moved = (r.speed_kmh ?? 0) > MOVING_KMH
+      found.set(r.vehicle_id, (moved ? r.gone_at : r.last_at ?? r.gone_at).getTime())
+    }
+  }
+  return found
+}
+
+/** A failed lookup leaves the stops as the window saw them: the list still arrives. */
+async function orNothing<T>(what: string, read: () => Promise<Map<string, T>>): Promise<Map<string, T>> {
+  try { return await read() } catch (err) {
+    logger.warn({ err, what }, 'movement events: stop edges failed')
+    return new Map()
+  }
+}
+
 /** Each unit's stops over 10 minutes away from every fence and corridor. */
-async function stopEvents(orgId: string, plates: Map<string, string>, from: number, to: number): Promise<MovementEvent[]> {
+async function stopEvents(orgId: string, plates: Map<string, string>, from: number, to: number, now: number): Promise<MovementEvent[]> {
   await loadOrgZones(orgId)
   const ids = [...plates.keys()]
-  const out: MovementEvent[] = []
+  const found: Array<{ vehicleId: string; stop: LongStop }> = []
   for (let i = 0; i < ids.length; i += VEHICLES_A_READ) {
     const part = ids.slice(i, i + VEHICLES_A_READ)
     const rows = await prisma.$queryRaw<Array<{ vehicle_id: string; lat: number; lng: number; speed_kmh: number | null; captured_at: Date }>>`
@@ -155,12 +252,20 @@ async function stopEvents(orgId: string, plates: Map<string, string>, from: numb
       for (const s of longStops(readings, { from, to })) {
         const inFence = zoneCategoriesAt(orgId, s.lat, s.lng)
         if (inFence && inFence.size > 0) continue
-        out.push({ vehicleId, plate: plates.get(vehicleId) ?? '', kind: 'stop', at: s.at, lat: s.lat, lng: s.lng, place: null, speedKmh: 0,
-          source: 'tracker', minutes: s.minutes, ...(s.before ? { before: true } : {}), ...(s.ongoing ? { ongoing: true } : {}) })
+        found.push({ vehicleId, stop: s })
       }
     }
   }
-  return out
+  const edge = (pick: (s: LongStop) => boolean) => found.filter(f => pick(f.stop)).map(f => ({ vehicleId: f.vehicleId, lat: f.stop.lat, lng: f.stop.lng }))
+  const before = await orNothing('before', () => readStopsBefore(edge(s => s.before), from))
+  // A window ending now has nothing after it to read
+  const left = to < now ? await orNothing('left', () => readStopsLeft(edge(s => s.ongoing), to)) : new Map<string, number>()
+  return found.map(({ vehicleId, stop: s }) => {
+    const whole = wholeStop(s, before.get(vehicleId), left.get(vehicleId), to)
+    return { vehicleId, plate: plates.get(vehicleId) ?? '', kind: 'stop' as const, at: s.at, lat: s.lat, lng: s.lng, place: null, speedKmh: whole.lastSpeedKmh,
+      source: 'tracker' as const, minutes: whole.minutes, stoppedAt: whole.stoppedAt, leftAt: whole.leftAt,
+      ...(whole.before ? { before: true } : {}), ...(whole.ongoing ? { ongoing: true } : {}) }
+  })
 }
 
 /** Names the places it knows at once and looks up a few more; the rest read as coordinates. */
@@ -190,7 +295,7 @@ export async function getMovementEvents(
   const notes: string[] = []
   const events: MovementEvent[] = await trackerEvents(orgId, picked, plates, from, to)
 
-  if (picked.has('stop')) events.push(...await stopEvents(orgId, plates, from, to))
+  if (picked.has('stop')) events.push(...await stopEvents(orgId, plates, from, to, now))
 
   if (kinds.some(k => CAMERA_CODES[k])) {
     if (from < now - CAMERA_DAYS * 86_400_000) {
