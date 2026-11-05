@@ -307,7 +307,7 @@ export const getProbeReportData: RequestHandler = async (req, res, next) => {
 export const getRecoveryReport: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as RecoveryReportQuery
-    sendSuccess(res, await getRecoveryVehicleReport(p(req, 'orgId'), q.day, req.authz?.vehicleIds ?? null))
+    sendSuccess(res, await getRecoveryVehicleReport(p(req, 'orgId'), q.day, req.authz?.vehicleIds ?? null, q.vehicle))
   } catch (err) { next(err) }
 }
 
@@ -315,8 +315,8 @@ export const getRecoveryReport: RequestHandler = async (req, res, next) => {
 export const downloadRecoveryReport: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as RecoveryReportQuery
-    const report = await getRecoveryVehicleReport(p(req, 'orgId'), q.day, req.authz?.vehicleIds ?? null)
-    sendPdf(res, await renderRecoveryReportPdf(report), recoveryReportFileName(q.day))
+    const report = await getRecoveryVehicleReport(p(req, 'orgId'), q.day, req.authz?.vehicleIds ?? null, q.vehicle)
+    sendPdf(res, await renderRecoveryReportPdf(report, q.landscape === '1'), recoveryReportFileName(q.day, q.vehicle))
   } catch (err) { next(err) }
 }
 

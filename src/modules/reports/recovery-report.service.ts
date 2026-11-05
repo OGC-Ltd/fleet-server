@@ -7,17 +7,20 @@ export const RECOVERY_VEHICLES = [
   { plate: 'KDX 130Y', recoveryType: 'mechanical' },
   { plate: 'KCS 969P', recoveryType: 'mechanical' },
   { plate: 'KDC 099U', recoveryType: 'mechanical' },
-  { plate: 'KDX 113Y', recoveryType: 'puncture' },
+  { plate: 'KDX 131Y', recoveryType: 'puncture' },
 ] as const
+
+export type RecoveryVehiclePlate = (typeof RECOVERY_VEHICLES)[number]['plate']
 
 const normalisePlate = (plate: string) => plate.replace(/\s+/g, '').toUpperCase()
 
 export async function getRecoveryVehicleReport(
-  orgId: string, day: string, vehicleIds: Set<string> | null = null,
+  orgId: string, day: string, vehicleIds: Set<string> | null = null, vehiclePlate?: RecoveryVehiclePlate,
 ) {
   fleetDayBounds(day)
   const now = Date.now()
-  const plates = RECOVERY_VEHICLES.flatMap(({ plate }) => [plate, plate.replace(/\s+/g, '')])
+  const roster = vehiclePlate ? RECOVERY_VEHICLES.filter(({ plate }) => plate === vehiclePlate) : RECOVERY_VEHICLES
+  const plates = roster.flatMap(({ plate }) => [plate, plate.replace(/\s+/g, '')])
   const vehicles = vehicleIds?.size === 0 ? [] : await prisma.vehicle.findMany({
     where: {
       organisationId: orgId,
@@ -27,7 +30,7 @@ export async function getRecoveryVehicleReport(
     select: { id: true, registrationPlate: true },
   })
 
-  const rows = await Promise.all(RECOVERY_VEHICLES.map(async (target) => {
+  const rows = await Promise.all(roster.map(async (target) => {
     const matches = vehicles.filter(v => normalisePlate(v.registrationPlate) === normalisePlate(target.plate))
     if (matches.length > 1) throw new ConflictError(`Multiple vehicles match recovery registration ${target.plate}`)
     if (matches.length === 0) {
