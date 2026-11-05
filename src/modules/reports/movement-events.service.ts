@@ -6,7 +6,8 @@
  *   Harsh acceleration, braking  provider_alerts, from the trackers
  *   Harsh cornering              provider_alerts (kept silent, harsh-driving.worker) and the cameras' Harsh turn
  *   Free-wheeling                the cameras, alarm 38, which needs a CAN-bus link to the camera
- *   Long stops                   the stored telemetry, every fence and corridor left out
+ *   Long stops                   the stored telemetry, every fence and corridor left out, only
+ *                                those that began in the window (operator, 5 Nov 2026)
  *
  * The cameras are read only when one of their events is picked: that search is
  * the slow part, and when it fails the rest of the answer still arrives, a note
@@ -35,12 +36,10 @@ export interface MovementEvent {
   source: 'tracker' | 'camera'
   /** A long stop: how long it stood, the whole stop even where it ran past the window. */
   minutes?: number
-  /** A long stop: when it stopped, which can be before the window (`at` stays inside it). */
+  /** A long stop: when it stopped, always inside the window. */
   stoppedAt?: number
-  /** A long stop: when it left, null while it has not. */
+  /** A long stop: when it left, null while it has not. It can be after the window. */
   leftAt?: number | null
-  /** Standing for as far back as the lookup reads: it began before `stoppedAt`. */
-  before?: boolean
   /** No move seen after the window either: still standing. */
   ongoing?: boolean
 }
@@ -260,11 +259,13 @@ async function stopEvents(orgId: string, plates: Map<string, string>, from: numb
   const before = await orNothing('before', () => readStopsBefore(edge(s => s.before), from))
   // A window ending now has nothing after it to read
   const left = to < now ? await orNothing('left', () => readStopsLeft(edge(s => s.ongoing), to)) : new Map<string, number>()
-  return found.map(({ vehicleId, stop: s }) => {
+  return found.flatMap(({ vehicleId, stop: s }) => {
     const whole = wholeStop(s, before.get(vehicleId), left.get(vehicleId), to)
-    return { vehicleId, plate: plates.get(vehicleId) ?? '', kind: 'stop' as const, at: s.at, lat: s.lat, lng: s.lng, place: null, speedKmh: whole.lastSpeedKmh,
+    // Already standing when the window opened: that stop happened before it
+    if (whole.before || whole.stoppedAt < from) return []
+    return [{ vehicleId, plate: plates.get(vehicleId) ?? '', kind: 'stop' as const, at: s.at, lat: s.lat, lng: s.lng, place: null, speedKmh: whole.lastSpeedKmh,
       source: 'tracker' as const, minutes: whole.minutes, stoppedAt: whole.stoppedAt, leftAt: whole.leftAt,
-      ...(whole.before ? { before: true } : {}), ...(whole.ongoing ? { ongoing: true } : {}) }
+      ...(whole.ongoing ? { ongoing: true } : {}) }]
   })
 }
 
