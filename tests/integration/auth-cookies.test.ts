@@ -63,6 +63,20 @@ describe('POST /auth/login', () => {
     expect(named(res, 'fleet_rt')).toBeTruthy()
   })
 
+  it('records only a successful password sign-in', async () => {
+    const res = await request(app).post('/api/v1/auth/login')
+      .send({ email: USER.email, password: 'correct-horse-battery' })
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.user.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: USER.id },
+      data: expect.objectContaining({ lastLoginAt: expect.any(Date) }),
+    }))
+    expect(prismaMock.userLoginEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ userId: USER.id, loggedInAt: expect.any(Date) }),
+    }))
+  })
+
   /**
    * The refresh cookie is scoped to the two endpoints that consume it, so it
    * does not ride along on the hundreds of ordinary API calls that have no
@@ -107,6 +121,7 @@ describe('POST /auth/login', () => {
 
     expect(res.status).toBe(401)
     expect(cookiesOf(res)).toHaveLength(0)
+    expect(prismaMock.userLoginEvent.create).not.toHaveBeenCalled()
   })
 
   it('refuses an account with no password the same way', async () => {
@@ -135,6 +150,7 @@ describe('POST /auth/refresh', () => {
 
     expect(res.status).toBe(200)
     expect(named(res, 'fleet_at')).toBeTruthy()
+    expect(prismaMock.userLoginEvent.create).not.toHaveBeenCalled()
   })
 
   /**

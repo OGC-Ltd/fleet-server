@@ -33,6 +33,25 @@ export const listUserQuerySchema = z.object({
   access: z.enum(['all', 'system']).optional().default('all'),
 })
 
+export const userLoginReportQuerySchema = z.object({
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'from must be YYYY-MM-DD'),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'to must be YYYY-MM-DD'),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+}).superRefine(({ from, to }, ctx) => {
+  for (const [field, day] of [['from', from], ['to', to]] as const) {
+    const utcDay = Date.parse(`${day}T00:00:00Z`)
+    if (!Number.isFinite(utcDay) || new Date(utcDay).toISOString().slice(0, 10) !== day) {
+      ctx.addIssue({ code: 'custom', path: [field], message: `${field} must be a valid calendar date` })
+    } else if (Date.parse(`${day}T00:00:00+03:00`) > Date.now()) {
+      ctx.addIssue({ code: 'custom', path: [field], message: `${field} cannot be in the future` })
+    }
+  }
+  if (from > to) {
+    ctx.addIssue({ code: 'custom', path: ['from'], message: 'from must be on or before to' })
+  }
+})
+
 export const assignRoleSchema = z.object({
   roleId: z.string().cuid(),
 })
@@ -117,6 +136,7 @@ export const setMembershipSchema = membershipInputSchema.omit({ organisationId: 
 export type CreateUserDto = z.infer<typeof createUserSchema>
 export type UpdateUserDto = z.infer<typeof updateUserSchema>
 export type ListUserQuery = z.infer<typeof listUserQuerySchema>
+export type UserLoginReportQuery = z.infer<typeof userLoginReportQuerySchema>
 export type AssignRoleDto = z.infer<typeof assignRoleSchema>
 export type MembershipInput = z.infer<typeof membershipInputSchema>
 export type ProvisionUserDto = z.infer<typeof provisionUserSchema>

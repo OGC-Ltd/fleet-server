@@ -4,7 +4,7 @@ import { requirePermission, requirePermissionStrict } from '../../middleware/aut
 import { requireRealAuth } from '../../middleware/requireRealAuth.js'
 import { requireUserAdministrator, requireUserReader } from './user.authz.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
-import { createUserSchema, updateUserSchema, listUserQuerySchema, assignRoleSchema, orgProvisionUserSchema, setMembershipSchema, setUserStatusSchema, setUserRoleSchema } from './user.schema.js'
+import { createUserSchema, updateUserSchema, listUserQuerySchema, userLoginReportQuerySchema, assignRoleSchema, orgProvisionUserSchema, setMembershipSchema, setUserStatusSchema, setUserRoleSchema } from './user.schema.js'
 import * as ctrl from './user.controller.js'
 
 // Mounted at /api/v1/organisations/:orgId/users
@@ -32,6 +32,7 @@ router.use(authenticate, requireOrgAccess)
 // starts failing. What stops working is the thing that should never have
 // worked.
 router.get('/', requirePermissionStrict('user:read'), requireUserReader, validateQuery(listUserQuerySchema), ctrl.list)
+router.get('/login-report', requirePermissionStrict('user:read'), requireUserReader, validateQuery(userLoginReportQuerySchema), ctrl.loginReport)
 router.post('/', requireRealAuth, requirePermissionStrict('user:create'), requireUserAdministrator, validateBody(createUserSchema), ctrl.create)
 // BEFORE the /:userId routes — a literal path must be declared ahead of the
 // parameter that would otherwise swallow it, the same ordering constraint

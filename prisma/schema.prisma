@@ -430,6 +430,9 @@ model User {
   /// by then is read for this person (alerts.repository readSql). Alerts read
   /// one at a time after it are in alert_reads. NULL for never.
   alertsReadAt        DateTime?  @map("alerts_read_at")
+  /// Most recent successful password login. The initial value is backfilled
+  /// from the latest stored auth session; subsequent values are exact logins.
+  lastLoginAt         DateTime?  @map("last_login_at")
   createdAt           DateTime   @default(now()) @map("created_at")
   updatedAt           DateTime   @updatedAt @map("updated_at")
   deletedAt           DateTime?  @map("deleted_at") // soft delete — preserves FK integrity on trips
@@ -449,6 +452,7 @@ model User {
   memberships           OrgMembership[] @relation("MembershipUser")
   membershipsGranted    OrgMembership[] @relation("MembershipGrantedBy")
   authSessions          AuthSession[]
+  loginEvents           UserLoginEvent[]
   passwordTokens        PasswordToken[] @relation("PasswordTokenUser")
   passwordTokensCreated PasswordToken[] @relation("PasswordTokenCreatedBy")
 
@@ -613,6 +617,19 @@ model AuthSession {
   @@index([familyId])
   @@index([expiresAt]) // the expiry sweep
   @@map("auth_sessions")
+}
+
+/// Successful password logins. Refresh-token rotations are not login events.
+model UserLoginEvent {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  loggedInAt DateTime @default(now()) @map("logged_in_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([loggedInAt])
+  @@index([userId, loggedInAt])
+  @@map("user_login_events")
 }
 
 /// Purpose of a password-setting link. One table serves both because the
