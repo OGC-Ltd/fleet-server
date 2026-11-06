@@ -113,6 +113,28 @@ export function authorizeMock() {
         next()
       }),
     ),
+    requireAnyPermission: vi.fn((slugs: readonly string[]) =>
+      vi.fn((req: Record<string, unknown>, _res: unknown, next: (err?: unknown) => void) => {
+        const held = subject.permissions
+        const params = (req['params'] ?? {}) as Record<string, string | undefined>
+        const orgId = params['orgId']
+        const allowed = held.includes('*') || slugs.some((slug) => held.includes(slug))
+
+        if ((!orgId && subject.orgs !== '*')
+          || (orgId && subject.orgs !== '*' && !subject.orgs.includes(orgId))
+          || !allowed) {
+          return next(new ForbiddenError(`Missing permission: ${slugs.join(' or ')}`))
+        }
+
+        req['authz'] = {
+          userId:     subject.user.id,
+          orgId:      orgId ?? '',
+          isPlatform: subject.orgs === '*',
+          vehicleIds: subject.vehicleScope === 'all' ? null : new Set(subject.vehicleScope),
+        }
+        next()
+      }),
+    ),
     // The strict variant shares requirePermission's decision entirely — the
     // real difference is that it never falls through to shadow mode, and the
     // mock has no shadow mode to fall through to. Declared as its own export
