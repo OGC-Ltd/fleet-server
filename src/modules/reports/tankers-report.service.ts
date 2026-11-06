@@ -23,7 +23,7 @@
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { haversineM, isInsideFence } from '../../lib/geofence.js'
-import { findMorl, getMovementReport, type MorlFence } from './movement-report.service.js'
+import { findMorlDestination, getMovementReport, type MorlFence } from './movement-report.service.js'
 
 export const WINDOW_MS = 4 * 3_600_000
 const DAY_MS = 86_400_000
@@ -207,9 +207,10 @@ export async function getTankersReport(orgId: string, units: TankerUnit[], to: n
     .map(u => ({ ...u, vehicleIds: u.vehicleIds.filter(id => !allowed || allowed.has(id)) }))
     .filter(u => u.vehicleIds.length)
   const ids = scoped.flatMap(u => u.vehicleIds)
-  // MORL is where a trip from Mombasa ends; without it a trip still reads, it never completes
+  // Only a dedicated MORL fence completes this trip; the Movements report's
+  // HQ-yard fallback must not mark a tanker at Menengai Yard as arrived.
   const [morl, moves] = await Promise.all([
-    findMorl(orgId),
+    findMorlDestination(orgId),
     ids.length ? getMovementReport(orgId, { from, to }, new Set(ids)) : null,
   ])
   // Where each tracker was at the report time, as Movements names it
