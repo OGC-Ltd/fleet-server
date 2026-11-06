@@ -25,7 +25,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { overspeedLimitFor } from '../../lib/derived-alerts.js'
-import { warmSpeedPolicy, speedPolicyFor } from '../../lib/speed-policy.js'
+import { warmSpeedPolicy, speedPolicyFor, vehicleSpeedLimitFor } from '../../lib/speed-policy.js'
 import type { PlaybackPoint } from './telemetry.repository.js'
 import { STATIONARY_KMH } from '../../lib/simplify-path.js'
 
@@ -91,8 +91,8 @@ export const SPEEDING_KMH = 80
  * playback is per-vehicle, so the type is in hand. The constant stays as the
  * fallback for a replay of a unit whose type is unknown.
  */
-export const playbackLimitFor = (vehicleType: string | null): number =>
-  overspeedLimitFor(vehicleType) || SPEEDING_KMH
+export const playbackLimitFor = (vehicleType: string | null, registrationPlate?: string | null): number =>
+  overspeedLimitFor(vehicleType, undefined, registrationPlate) || SPEEDING_KMH
 
 /**
  * A speeding run has to last this long to be reported.
@@ -343,15 +343,16 @@ export async function buildPlaybackEvents(
   // fourth hardcoded 80 drifting away from OVERSPEED_LIMIT_BY_TYPE.
   const [logged, vehicle] = await Promise.all([
     readLoggedEvents(vehicleId, from, to),
-    prisma.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleType: true, organisationId: true } }),
+    prisma.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleType: true, organisationId: true, registrationPlate: true } }),
   ])
   const type = vehicle?.vehicleType ?? null
+  const plate = vehicle?.registrationPlate ?? null
   const orgId = vehicle?.organisationId ?? null
   if (orgId) await warmSpeedPolicy(orgId)
   // Per fix where the org's limit depends on place, else one number.
-  const limitKmh = orgId && speedPolicyFor(orgId)
-    ? (p: PlaybackPoint) => overspeedLimitFor(type, { orgId, lat: p.lat, lng: p.lng })
-    : playbackLimitFor(type)
+  const limitKmh = orgId && (speedPolicyFor(orgId) || vehicleSpeedLimitFor(plate) != null)
+    ? (p: PlaybackPoint) => overspeedLimitFor(type, { orgId, lat: p.lat, lng: p.lng }, plate)
+    : playbackLimitFor(type, plate)
   const all = [...logged, ...deriveStops(points), ...deriveSpeeding(points, limitKmh)]
 
   const truncatedEvents = all.length > MAX_EVENTS

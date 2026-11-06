@@ -255,6 +255,7 @@ class TelemetryPoller {
       const derived = deriveAlertFlags(frame, {
         orgId:          meta.orgId,
         vehicleId:      meta.vehicleId,
+        registrationPlate: meta.plate,
         tankCapacityMl: meta.tankCapacityMl,
         vehicleType:    meta.vehicleType,
       })
@@ -272,6 +273,7 @@ class TelemetryPoller {
       noteSpeedFrame(frame, {
         orgId:       meta.orgId,
         vehicleId:   meta.vehicleId,
+        registrationPlate: meta.plate,
         vehicleType: meta.vehicleType,
         driverId:    meta.driverId,
         driverName:  meta.driverName,
