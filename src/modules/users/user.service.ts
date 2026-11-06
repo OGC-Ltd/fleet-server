@@ -87,7 +87,7 @@ export async function updateUser(orgId: string, userId: string, dto: UpdateUserD
   // Exists, right organisation, AND in the caller's group — the same gate the
   // roster uses, so a row this admin cannot see is a row they cannot edit.
   await getUser(orgId, userId, actorUserId)
-  const user = await repo.update(orgId, userId, dto)
+  const user = await repo.update(orgId, userId, dto, await groupScopeFor(actorUserId, orgId))
   // Every roster they appear in, not just this one — a renamed person is
   // renamed everywhere they have access.
   await invalidateRosterForUser(userId, orgId)
