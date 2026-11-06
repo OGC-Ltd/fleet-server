@@ -134,6 +134,8 @@ export type TatFuelReportQuery = z.infer<typeof tatFuelReportQuerySchema>
 /** One fleet day for the recovery vehicles report. */
 export const recoveryReportQuerySchema = z.object({
   day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'day must be YYYY-MM-DD'),
+  vehicle: z.enum(['KDX 130Y', 'KCS 969P', 'KDC 099U', 'KDX 131Y']).optional(),
+  landscape: z.enum(['0', '1']).optional(),
 }).superRefine(({ day }, ctx) => {
   const utcDay = Date.parse(`${day}T00:00:00Z`)
   if (!Number.isFinite(utcDay) || new Date(utcDay).toISOString().slice(0, 10) !== day) {
