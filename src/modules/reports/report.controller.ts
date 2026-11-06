@@ -291,7 +291,8 @@ export const downloadTatFuelPdf: RequestHandler = async (req, res, next) => {
   try {
     const body = req.body as TatFuelPdfBody
     const { short } = await orgHeading(p(req, 'orgId'))
-    sendPdf(res, await renderTatFuelPdf(body, { orgCode: short }), tatFileName(body))
+    // Landscape unless upright is asked for (`?landscape=0`): its 14 columns were made for a wide page
+    sendPdf(res, await renderTatFuelPdf(body, { orgCode: short, landscape: req.query.landscape !== '0' }), tatFileName(body))
   } catch (err) { next(err) }
 }
 
