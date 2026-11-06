@@ -39,7 +39,7 @@ describe('daily recovery vehicle report', () => {
       { id: 'mechanical-id', registrationPlate: 'KDX130Y' },
       { id: 'puncture-id', registrationPlate: 'KDX 131Y' },
     ])
-    mocks.getDayReportData.mockResolvedValue({})
+    mocks.getDayReportData.mockResolvedValue({ fuel: { balance: null } })
     mocks.buildTripReport.mockReturnValue({
       track: [[-1.2, 36.8], [-1.21, 36.81]],
       summary: { distanceKm: 12.3, fuelUsedL: 8.1 },
@@ -81,6 +81,22 @@ describe('daily recovery vehicle report', () => {
     }))
     expect(mocks.getDayReportData).toHaveBeenCalledTimes(1)
     expect(mocks.getDayReportData).toHaveBeenCalledWith('org-1', 'puncture-id', '2026-10-28', null, { withConduct: false })
+  })
+
+  it('uses the Fuel Report balance for daily recovery fuel consumption', async () => {
+    mocks.getDayReportData.mockResolvedValue({ fuel: { balance: { consumedL: 17.6 } } })
+
+    const report = await getRecoveryVehicleReport('org-1', '2026-11-05', null, 'KDX 131Y')
+
+    expect(report.vehicles[0]).toMatchObject({ fuelConsumedL: 17.6 })
+  })
+
+  it('does not substitute the legacy estimate when the Fuel Report balance is unmeasurable', async () => {
+    mocks.getDayReportData.mockResolvedValue({ fuel: { balance: { consumedL: null } } })
+
+    const report = await getRecoveryVehicleReport('org-1', '2026-11-05', null, 'KDX 131Y')
+
+    expect(report.vehicles[0]).toMatchObject({ fuelConsumedL: null })
   })
 
   it('does not expose a selected vehicle outside the caller scope', async () => {

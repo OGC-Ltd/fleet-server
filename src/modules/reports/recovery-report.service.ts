@@ -49,7 +49,9 @@ export async function getRecoveryVehicleReport(
       hasTelemetry,
       distanceKm: hasTelemetry ? report.summary.distanceKm : null,
       route: report.track,
-      fuelConsumedL: hasTelemetry ? report.summary.fuelUsedL : null,
+      fuelConsumedL: hasTelemetry
+        ? (data.fuel.balance ? data.fuel.balance.consumedL : report.summary.fuelUsedL)
+        : null,
       stopsTotal: hasTelemetry ? report.stopsTotal : null,
       stops: report.stops.map(stop => ({
         arrivedAt: stop.t,

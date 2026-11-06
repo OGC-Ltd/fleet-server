@@ -27,6 +27,7 @@ import { logger } from '../../lib/logger.js'
 import { cachedPlace, reverseGeocode } from '../../lib/geocode.js'
 import { splitTrips } from './day-trips.js'
 import { workshopSpans, inSpans } from '../repairs/workshop-presence.js'
+import { asDaySeries, fuelBalance } from '../fuel/fuel-balance.js'
 
 const MAX_WINDOW_MS = 7 * 86_400_000
 /** Points sent for stops and distance; a day at one fix per 15 s is ~5,800. */
@@ -354,13 +355,16 @@ async function gatherReportData(orgId: string, vehicle: ReportVehicle, scope: Re
     prisma.fuelFilling.findMany({
       where:   { vehicleId, filledAt: { gte: from, lte: to } },
       orderBy: { filledAt: 'asc' },
-      select:  { filledAt: true, filledMl: true, finalFuelLevelMl: true, location: true, verdict: true },
+      select:  { filledAt: true, filledMl: true, observedRiseMl: true, initialFuelLevelMl: true,
+                 finalFuelLevelMl: true, location: true, verdict: true },
     }),
     prisma.fuelTheft.findMany({
       where:   { vehicleId, beganAt: { gte: new Date(Math.min(from.getTime(), dayFrom.getTime())), lte: new Date(Math.max(to.getTime(), dayTo.getTime())) },
                  OR: [{ drainCause: 'SIPHON' }, { reviewStatus: 'CONFIRMED_THEFT' }] },
       orderBy: { beganAt: 'asc' },
-      select:  { beganAt: true, stolenMl: true, cleanDropMl: true, finalFuelLevelMl: true, initialLocation: true, reviewStatus: true },
+      select:  { beganAt: true, verdict: true, drainCause: true, stolenMl: true, cleanDropMl: true,
+                 measuredDropMl: true, initialFuelLevelMl: true, finalFuelLevelMl: true,
+                 initialLocation: true, reviewStatus: true, dismissedAt: true },
     }),
     prisma.speedingIncident.findMany({
       where:   { vehicleId, startedAt: { gte: dayFrom, lte: dayTo } },
@@ -422,6 +426,22 @@ async function gatherReportData(orgId: string, vehicle: ReportVehicle, scope: Re
   const usedByCounter = counters.length > 1
     ? (counters[counters.length - 1].fuelUsedMl! - counters[0].fuelUsedMl!) / 1000
     : null
+  const dayFuelBalance = scope.mode === 'day' ? fuelBalance({
+    readings: fixes.map(f => asDaySeries({
+      t: f.capturedAt.getTime(), lat: f.lat, lng: f.lng, speedKmh: f.speedKmh, fuelMl: f.fuelLevelMl,
+    })),
+    fillings: fillings.map(f => ({
+      at: f.filledAt.getTime(), verdict: f.verdict, observedRiseMl: f.observedRiseMl, filledMl: f.filledMl,
+      initialFuelLevelMl: f.initialFuelLevelMl, finalFuelLevelMl: f.finalFuelLevelMl,
+    })),
+    drains: thefts.map(t => ({
+      at: t.beganAt.getTime(), verdict: t.verdict, drainCause: t.drainCause, cleanDropMl: t.cleanDropMl,
+      measuredDropMl: t.measuredDropMl, stolenMl: t.stolenMl, finalFuelLevelMl: t.finalFuelLevelMl,
+      reviewStatus: t.reviewStatus, dismissedAt: t.dismissedAt,
+    })),
+    from: from.getTime(),
+    to: to.getTime(),
+  }) : null
 
   // Arrival: the first fix inside the destination's radius after departure.
   // Without a destination point, the scope says (a day's trip: where it stopped).
@@ -482,6 +502,7 @@ async function gatherReportData(orgId: string, vehicle: ReportVehicle, scope: Re
         .map(f => ({ t: f.filledAt.getTime(), litres: f.filledMl / 1000, after: f.finalFuelLevelMl != null ? f.finalFuelLevelMl / 1000 : null, place: f.location })),
       drains: thefts.filter(t => inTrip(t.beganAt)).map(t => ({ t: t.beganAt.getTime(), litres: (t.cleanDropMl ?? t.stolenMl) / 1000, after: t.finalFuelLevelMl != null ? t.finalFuelLevelMl / 1000 : null,
                                  place: t.initialLocation, review: t.reviewStatus })),
+      balance: dayFuelBalance,
     },
     // Driver conduct, for the day.
     dashcam,
