@@ -5,7 +5,7 @@ import * as repo from './user.repository.js'
 import * as provisioning from './provisioning.service.js'
 import * as account from '../account/account.service.js'
 import { prisma } from '../../lib/prisma.js'
-import type { CreateUserDto, UpdateUserDto, ListUserQuery, AssignRoleDto,
+import type { CreateUserDto, UpdateUserDto, ListUserQuery, UserLoginReportQuery, AssignRoleDto,
               ProvisionUserDto, OrgProvisionUserDto, SetMembershipDto,
               SetUserStatusDto, SetUserRoleDto } from './user.schema.js'
 import { ASSIGNABLE_ROLE_SLUGS, WILDCARD } from '../../lib/permissions.js'
@@ -107,6 +107,21 @@ export const list: RequestHandler = async (req, res, next) => {
       p(req, 'orgId'), req.query as unknown as ListUserQuery, req.user?.id,
     )
     sendSuccess(res, data, 200, { total, page: Number(req.query['page']), limit: Number(req.query['limit']) })
+  } catch (err) { next(err) }
+}
+
+export const loginReport: RequestHandler = async (req, res, next) => {
+  try {
+    const report = await service.getLoginReport(
+      p(req, 'orgId'),
+      req.query as unknown as UserLoginReportQuery,
+      req.user?.id,
+    )
+    sendSuccess(res, report, 200, {
+      total: report.total,
+      page: Number(req.query['page']),
+      limit: Number(req.query['limit']),
+    })
   } catch (err) { next(err) }
 }
 

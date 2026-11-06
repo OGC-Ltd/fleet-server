@@ -2,7 +2,7 @@ import { NotFoundError, ConflictError } from '../../core/errors/errors.js'
 import * as repo from './user.repository.js'
 import { readRoster, writeRoster, invalidateRoster, invalidateRosterForUser } from './roster.cache.js'
 import { invalidateSubject } from '../../lib/authz/subject.js'
-import type { CreateUserDto, UpdateUserDto, ListUserQuery, AssignRoleDto } from './user.schema.js'
+import type { CreateUserDto, UpdateUserDto, ListUserQuery, UserLoginReportQuery, AssignRoleDto } from './user.schema.js'
 import {
   groupScopeFor, groupCacheKey,
 } from './user-group.scope.js'
@@ -49,6 +49,18 @@ export async function listUsers(orgId: string, query: ListUserQuery, actorUserId
   await writeRoster(orgId, variant, fresh)
 
   return fresh
+}
+
+export async function getLoginReport(
+  orgId: string,
+  query: UserLoginReportQuery,
+  actorUserId?: string,
+) {
+  const scope = await groupScopeFor(actorUserId, orgId)
+  const visibleRoleSlug = actorUserId
+    ? await visibleRoleSlugFor(actorUserId, orgId)
+    : null
+  return repo.findLoginReport(orgId, query, scope, visibleRoleSlug ?? undefined)
 }
 
 export async function getUser(orgId: string, userId: string, actorUserId?: string) {

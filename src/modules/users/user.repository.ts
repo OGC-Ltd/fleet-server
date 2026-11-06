@@ -1,5 +1,5 @@
 import { prisma } from '../../lib/prisma.js'
-import type { CreateUserDto, UpdateUserDto, ListUserQuery } from './user.schema.js'
+import type { CreateUserDto, UpdateUserDto, ListUserQuery, UserLoginReportQuery } from './user.schema.js'
 import { UNSCOPED, groupWhere, type GroupScope } from './user-group.scope.js'
 
 const selectUser = (orgId: string) => ({
@@ -12,6 +12,7 @@ const selectUser = (orgId: string) => ({
   employeeId: true,
   status: true,
   createdAt: true,
+  lastLoginAt: true,
   updatedAt: true,
   // Group memberships are part of the roster so administrators can see and
   // manage the same access boundary used to narrow it.
@@ -146,6 +147,64 @@ export async function findAll(
     prisma.user.count({ where }),
   ])
   return { data: data.map(withGroupAliases), total }
+}
+
+export async function findLoginReport(
+  orgId: string,
+  query: UserLoginReportQuery,
+  scope: GroupScope,
+  visibleRoleSlug?: string,
+) {
+  const from = new Date(`${query.from}T00:00:00+03:00`)
+  const until = new Date(new Date(`${query.to}T00:00:00+03:00`).getTime() + 24 * 60 * 60 * 1000)
+  const userWhere = rosterWhere(
+    orgId,
+    { page: 1, limit: 1, access: 'system' },
+    scope,
+    visibleRoleSlug,
+  )
+  const eventWhere = {
+    loggedInAt: { gte: from, lt: until },
+    user: { is: userWhere },
+  }
+  const [systemUsers, everLoggedIn, total, rows] = await prisma.$transaction([
+    prisma.user.count({ where: userWhere }),
+    prisma.user.count({ where: { ...userWhere, lastLoginAt: { not: null } } }),
+    prisma.userLoginEvent.count({ where: eventWhere }),
+    prisma.userLoginEvent.findMany({
+      where: eventWhere,
+      orderBy: [{ loggedInAt: 'desc' }, { id: 'desc' }],
+      skip: (query.page - 1) * query.limit,
+      take: query.limit,
+      select: {
+        id: true,
+        loggedInAt: true,
+        user: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+            groups: {
+              where: { group: { organisations: { some: { organisationId: orgId } } } },
+              select: { group: { select: { name: true } } },
+            },
+          },
+        },
+      },
+    }),
+  ])
+  return {
+    rows: rows.map(({ user, ...event }) => ({
+      ...event,
+      user: {
+        ...user,
+        groups: user.groups.map(({ group }) => group.name).sort((a, b) => a.localeCompare(b)),
+      },
+    })),
+    total,
+    systemUsers,
+    everLoggedIn,
+  }
 }
 
 /**
