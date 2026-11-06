@@ -157,27 +157,36 @@ export interface MovementReport {
   edited?: { by: string; at: number; changed: number; removed: number }
 }
 
+const MORL_FALLBACK: MorlFence = {
+  name: 'MORL',
+  geometry: { type: 'CIRCLE', centerLat: -0.290588, centerLng: 36.044567, radiusM: 1_000 },
+  centre: { lat: -0.290588, lng: 36.044567 },
+}
+
 /**
- * The organisation's MORL fence: by name, as drawn on the map. Without one,
- * the HQ yard ("Menengai Yard - Nakuru HQ") is read as MORL HQ, even with its
- * alerts switched off (operator, 2026-11-02): the refinery is there.
+ * Menengai Yard is the MORL reference for reports. It is a reporting
+ * destination, so its geometry remains usable even when the geofence is
+ * inactive for live alerts. The configured point is the fallback if the fence
+ * is absent or has no usable geometry.
  */
-export async function findMorl(orgId: string): Promise<MorlFence | null> {
-  const select = { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true }
+export async function findMorlDestination(orgId: string): Promise<MorlFence | null> {
   const fences = await prisma.geofence.findMany({
-    where:  { organisationId: orgId, isActive: true, name: { contains: 'MORL', mode: 'insensitive' } },
-    select, orderBy: { name: 'asc' },
+    where: { organisationId: orgId, name: { equals: 'Menengai Yard', mode: 'insensitive' } },
+    select: { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true },
+    orderBy: { externalId: 'asc' },
   })
-  // The one named MORL itself, before "MORL Farm" and the like.
-  const named = fences.find(f => /^\s*MORL\s*$/i.test(f.name)) ?? fences.find(f => /\bMORL\b/i.test(f.name) && !/farm/i.test(f.name)) ?? fences[0]
-  const hq = named ? undefined : (await prisma.geofence.findMany({
-    where: { organisationId: orgId, name: { contains: 'HQ', mode: 'insensitive' } },
-    select, orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
-  })).filter(f => /\bHQ\b/i.test(f.name))
-    // The yard's HQ, never a customer's: "Menengai: Naivas HQ Nairobi" sorts first.
-    .sort((a, b) => Number(/yard/i.test(b.name)) - Number(/yard/i.test(a.name)))[0]
-  const pick = named ?? (hq && { ...hq, name: 'MORL HQ' })
-  return pick ? fenceOf(pick) : null
+  for (const fence of fences) {
+    if (!/^Menengai Yard$/i.test(fence.name)) continue
+    const destination = fenceOf(fence)
+    if (destination) return { ...destination, name: 'MORL' }
+  }
+  const org = await prisma.organisation.findUnique({ where: { id: orgId }, select: { code: true } })
+  return String(org?.code ?? '').toUpperCase() === 'MENENGAI' ? MORL_FALLBACK : null
+}
+
+/** The movement and tankers reports share the same Menengai MORL boundary. */
+export async function findMorl(orgId: string): Promise<MorlFence | null> {
+  return findMorlDestination(orgId)
 }
 
 type FenceRow = { name: string; type: string; centerLat: number | null; centerLng: number | null; radiusM: number | null; polygonCoords: unknown; widthM: number | null }
@@ -237,20 +246,6 @@ export function fenceOf(pick: FenceRow): MorlFence | null {
     ? { type: 'LINE', pathCoords: coords, widthM: pick.widthM }
     : { type: 'POLYGON', polygonCoords: coords }
   return { name: pick.name, geometry, centre }
-}
-
-/** Finds the Menengai Yard destination for Tankers, without changing Movements' MORL fallback. */
-export async function findMorlDestination(orgId: string): Promise<MorlFence | null> {
-  const fences = await prisma.geofence.findMany({
-    where: { organisationId: orgId, isActive: true, name: { contains: 'Menengai Yard', mode: 'insensitive' } },
-    select: { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true },
-    orderBy: { name: 'asc' },
-  })
-  for (const fence of fences) {
-    const destination = fenceOf(fence)
-    if (destination) return destination
-  }
-  return null
 }
 
 /** Place names for the rows: cached first, then a few paced lookups, bounded in time. */
