@@ -45,6 +45,7 @@ beforeAll(async () => {
   ;(prismaMock.geofence.findMany as any).mockResolvedValue([
     { name: 'MORL Farm', type: 'CIRCLE', centerLat: -0.1989, centerLng: 35.8661, radiusM: 2000, polygonCoords: null, widthM: null },
     { name: 'MORL', type: 'CIRCLE', centerLat: MORL.lat, centerLng: MORL.lng, radiusM: 800, polygonCoords: null, widthM: null },
+    { name: 'Menengai Yard', type: 'CIRCLE', centerLat: MORL.lat, centerLng: MORL.lng, radiusM: 800, polygonCoords: null, widthM: null },
   ])
   // Where each unit was when the window began.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -187,6 +188,7 @@ describe('the movement report', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.geofence.findMany as any).mockResolvedValue([
       { name: 'MORL', type: 'CIRCLE', centerLat: MORL.lat, centerLng: MORL.lng, radiusM: 800, polygonCoords: null, widthM: null },
+      { name: 'Menengai Yard', type: 'CIRCLE', centerLat: MORL.lat, centerLng: MORL.lng, radiusM: 800, polygonCoords: null, widthM: null },
     ])
     raw.mockResolvedValueOnce([{ vehicle_id: 'KCV039A', lat: -1.90, lng: 39.65 }])
        .mockResolvedValueOnce([{ vehicle_id: 'KCV039A', lat: -2.6, lng: 39.65, speed_kmh: 0, captured_at: new Date(to - 10 * 60_000) }])
@@ -307,32 +309,38 @@ describe('the movement report as edited on the Reports page', () => {
 })
 
 describe('without a MORL fence', () => {
-  it('uses a Menengai Yard geofence as the Tankers Report destination', async () => {
+  it('uses an exact Menengai Yard geofence as MORL even when it is inactive', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.geofence.findMany as any).mockResolvedValueOnce([
-      { name: 'Menengai Yard - Nakuru HQ', type: 'CIRCLE', centerLat: MORL.lat, centerLng: MORL.lng, radiusM: 800, polygonCoords: null, widthM: null },
+      { name: 'Menengai Yard', type: 'CIRCLE', centerLat: MORL.lat, centerLng: MORL.lng, radiusM: 800, polygonCoords: null, widthM: null },
     ])
     expect(await findMorlDestination('org1')).toMatchObject({
-      name: 'Menengai Yard - Nakuru HQ',
+      name: 'MORL',
       centre: { lat: MORL.lat, lng: MORL.lng },
       geometry: { type: 'CIRCLE', radiusM: 800 },
     })
     expect(prismaMock.geofence.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ organisationId: 'org1', isActive: true }),
+      where: { organisationId: 'org1', name: { equals: 'Menengai Yard', mode: 'insensitive' } },
     }))
   })
 
-  it('reads the HQ yard as MORL HQ, even with its alerts switched off', async () => {
+  it('uses the requested 1 km coordinate circle when the exact Yard fence is missing', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ name: 'Menengai Oil Refineries Ltd', code: 'MENENGAI' })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const findMany = prismaMock.geofence.findMany as any
-    findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([
-      { name: 'Menengai Yard - Nakuru HQ', type: 'CIRCLE', centerLat: MORL.lat, centerLng: MORL.lng, radiusM: 800, polygonCoords: null, widthM: null },
-    ])
-    const r = await getMovementReport('org1', 2)
-    expect(r.morl).toBe('MORL HQ')
-    const at = r.groups.flatMap(g => g.rows).find(x => x.plate === 'KCF 180A')!
-    expect(at).toMatchObject({ state: 'at', location: 'MORL HQ' })
+    ;(prismaMock.geofence.findMany as any).mockResolvedValueOnce([])
+    expect(await findMorlDestination('org1')).toMatchObject({
+      name: 'MORL',
+      centre: { lat: -0.290588, lng: 36.044567 },
+      geometry: { type: 'CIRCLE', centerLat: -0.290588, centerLng: 36.044567, radiusM: 1000 },
+    })
+  })
+
+  it('does not use Menengai coordinates for another organisation', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ code: 'SUKARI' })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.geofence.findMany as any).mockResolvedValueOnce([])
+    expect(await findMorlDestination('org2')).toBeNull()
   })
 })
