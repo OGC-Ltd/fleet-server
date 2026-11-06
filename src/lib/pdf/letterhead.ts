@@ -165,9 +165,15 @@ export class ReportWriter {
    */
   table(cols: Col[], head: string[], rows: Cell[][], o: { x?: number; width?: number; size?: number; fills?: Array<string | null> } = {}) {
     const x = o.x ?? SIDE, width = o.width ?? this.sheet.body, size = o.size ?? 8.2
-    const fixed = cols.reduce((a, c) => a + c.w, 0)
+    // A table made for a wide page and printed upright (the operator picks the
+    // way up, 6 Nov 2026): the set widths shrink together so each column left
+    // to fill keeps at least 24 mm, and nothing runs off the page.
     const flex = cols.filter(c => c.w === 0).length
-    const widths = cols.map(c => (c.w === 0 ? (width - fixed) / flex : c.w))
+    const set = cols.reduce((a, c) => a + c.w, 0)
+    const room = Math.max(0, width - flex * 24 * MM)
+    const k = set > room && set > 0 ? room / set : 1
+    const fixed = set * k
+    const widths = cols.map(c => (c.w === 0 ? (width - fixed) / flex : c.w * k))
     const pad = 1.4 * MM
     const rowH = Math.max(11.2, size * 1.37)
     const cellsAt = (yy: number, items: Cell[], f: { font?: string; size: number; color?: string; wrap?: boolean }) => {

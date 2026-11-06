@@ -247,10 +247,10 @@ export function tatPeriodWords(from: string, to: string = from): string {
 }
 
 /** Landscape always, for the sheet's fourteen columns. */
-export async function renderTatFuelPdf(b: TatFuelPdfBody, o: { orgCode: string; now?: number }): Promise<Buffer> {
+export async function renderTatFuelPdf(b: TatFuelPdfBody, o: { orgCode: string; now?: number; landscape?: boolean }): Promise<Buffer> {
   const now = o.now ?? Date.now()
   const reportNo = templateReportNo('TF', o.orgCode, now)
-  const { doc, done, w } = open(`TAT and Fuel Report ${reportNo}`, true)
+  const { doc, done, w } = open(`TAT and Fuel Report ${reportNo}`, o.landscape ?? true)
   const s = tatSummary(b.rows)
   const date = (b.to ?? b.day).split('-').reverse().join('/')
   const period = tatPeriodWords(b.day, b.to)
