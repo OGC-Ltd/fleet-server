@@ -78,19 +78,26 @@ export async function issueSession(
   user: { id: string; email: string | null },
   ctx: SessionContext,
   familyId?: string,
+  recordLogin = false,
 ): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
   const refreshToken = mintRefreshToken()
-  const session = await prisma.authSession.create({
-    data: {
-      userId:    user.id,
-      familyId:  familyId ?? crypto.randomUUID(),
-      tokenHash: sha256(refreshToken),
-      expiresAt: new Date(Date.now() + env.REFRESH_TTL_S * 1000),
-      userAgent: ctx.userAgent?.slice(0, 512) ?? null,
-      ip:        ctx.ip ?? null,
-    },
-    select: { id: true },
-  })
+  const issuedAt = new Date()
+  const data = {
+    userId:    user.id,
+    familyId:  familyId ?? crypto.randomUUID(),
+    tokenHash: sha256(refreshToken),
+    issuedAt,
+    expiresAt: new Date(issuedAt.getTime() + env.REFRESH_TTL_S * 1000),
+    userAgent: ctx.userAgent?.slice(0, 512) ?? null,
+    ip:        ctx.ip ?? null,
+  }
+  const session = recordLogin
+    ? (await prisma.$transaction([
+        prisma.authSession.create({ data, select: { id: true } }),
+        prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: issuedAt }, select: { id: true } }),
+        prisma.userLoginEvent.create({ data: { userId: user.id, loggedInAt: issuedAt }, select: { id: true } }),
+      ]))[0]
+    : await prisma.authSession.create({ data, select: { id: true } })
 
   return {
     accessToken: signAccessToken(user, session.id),
@@ -125,7 +132,7 @@ export async function login(dto: LoginDto, ctx: SessionContext = {}) {
   if (user.status !== 'ACTIVE') throw new UnauthorizedError(`Account ${user.status.toLowerCase()}`)
 
   const { passwordHash: _ph, ...safeUser } = user
-  return { ...(await issueSession(user, ctx)), user: safeUser as SafeUser }
+  return { ...(await issueSession(user, ctx, undefined, true)), user: safeUser as SafeUser }
 }
 
 /**

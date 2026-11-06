@@ -54,6 +54,7 @@ export function makeUser(overrides: Partial<User> = {}): User {
     passwordChangeCount: 0,
     tourSeenVersion: null,
     alertsReadAt: null,
+    lastLoginAt: null,
     createdAt: now(),
     updatedAt: now(),
     deletedAt: null,
