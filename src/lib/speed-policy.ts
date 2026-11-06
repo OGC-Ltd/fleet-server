@@ -50,6 +50,17 @@ export interface SpeedPolicy {
   premises?: Readonly<Partial<Record<ZoneCategory, readonly [number, number][]>>>
 }
 
+/** Per-unit limits keyed by normalized registration plate. */
+const VEHICLE_SPEED_LIMITS: ReadonlyMap<string, number> = new Map([
+  ['KBR316T', 140],
+  ['KBU666C', 140],
+])
+
+export function vehicleSpeedLimitFor(registrationPlate: string | null | undefined): number | null {
+  const plate = registrationPlate?.replace(/\s+/g, '').toUpperCase()
+  return plate ? VEHICLE_SPEED_LIMITS.get(plate) ?? null : null
+}
+
 /**
  * West Kenya and its two mills (set 2026-11-04): the operator's list of
  * non-commercial vehicles, stored as the SALOON type, drive at 110 km/h
@@ -84,7 +95,7 @@ export const SPEED_POLICIES: Readonly<Record<string, SpeedPolicy>> = {
  * 'zone' and 'road' are a place-dependent rule, inside / outside its zones;
  * 'org' is an org rule that is one number everywhere.
  */
-export type LimitSource = 'type' | 'fleet' | 'zone' | 'road' | 'org'
+export type LimitSource = 'vehicle' | 'type' | 'fleet' | 'zone' | 'road' | 'org'
 
 export interface ZoneLimit {
   kmh:    number

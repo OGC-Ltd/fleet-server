@@ -113,6 +113,27 @@ describe('the limit', () => {
     expect(overspeedLimitFor('SOMETHING_NEW')).toBe(env.OVERSPEED_LIMIT_KMH)
   })
 
+  it('uses the 140 km/h per-unit override for KBR 316T and KBU 666C', () => {
+    expect(overspeedLimitFor('UNSPECIFIED', undefined, 'KBR 316T')).toBe(140)
+    expect(overspeedLimitFor('UNSPECIFIED', undefined, 'KBU666C')).toBe(140)
+    expect(overspeedLimitFor('UNSPECIFIED', undefined, 'OTHER')).toBe(env.OVERSPEED_LIMIT_KMH)
+  })
+
+  it('flags a target unit only after it exceeds 140 km/h for the configured debounce', () => {
+    const ctx = { ...CTX, registrationPlate: 'KBR 316T' }
+    let atLimit
+    for (let i = 0; i < env.OVERSPEED_MIN_FRAMES; i++) {
+      atLimit = deriveAlertFlags(frame({ speedKmh: 140 }), ctx)
+    }
+    expect(atLimit!.overspeeding).toBeUndefined()
+
+    let overLimit
+    for (let i = 0; i < env.OVERSPEED_MIN_FRAMES; i++) {
+      overLimit = deriveAlertFlags(frame({ speedKmh: 141 }), ctx)
+    }
+    expect(overLimit!.overspeeding).toBe(true)
+  })
+
   it('is the same number the Speeding screen and the conduct policy use', () => {
     // One value with two readers. While these were separate literals the
     // platform could suspend a driver against a limit it never alerted on.

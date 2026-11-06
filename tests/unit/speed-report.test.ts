@@ -59,6 +59,9 @@ describe('limitFor', () => {
   it('holds a listed light vehicle to its rule, whatever Wialon has', () => {
     expect(limitFor('SALOON', policy, 80, 80)).toBe(110)
   })
+  it('uses a per-vehicle server limit ahead of Wialon and type policies', () => {
+    expect(limitFor('SALOON', policy, 110, 80, 140)).toBe(140)
+  })
   it('takes the limit set on the Wialon unit, as the sheet does', () => {
     expect(limitFor('UNSPECIFIED', policy, 70, 80)).toBe(70)
   })

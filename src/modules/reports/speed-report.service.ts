@@ -24,7 +24,7 @@ import { prisma } from '../../lib/prisma.js'
 import { reportDb } from '../../lib/report-db.js'
 import { overspeedLimitFor } from '../../lib/derived-alerts.js'
 import { fleetDayBounds } from '../../lib/provider-time.js'
-import { speedPolicyFor, warmSpeedPolicy, type SpeedPolicy } from '../../lib/speed-policy.js'
+import { speedPolicyFor, vehicleSpeedLimitFor, warmSpeedPolicy, type SpeedPolicy } from '../../lib/speed-policy.js'
 import { WialonClient } from '../../providers/wialon/wialon.client.js'
 import { vehicleHeading } from './tat-fuel-report.service.js'
 
@@ -123,7 +123,10 @@ export function mileageKm(messages: SpeedMessage[]): number {
 }
 
 /** The limit a unit is reported against. A Wialon limit of 0 is none set. Pure. */
-export function limitFor(type: string, policy: SpeedPolicy | null, wialonKmh: number | null, fallbackKmh: number): number {
+export function limitFor(
+  type: string, policy: SpeedPolicy | null, wialonKmh: number | null, fallbackKmh: number, vehicleLimitKmh: number | null = null,
+): number {
+  if (vehicleLimitKmh != null && vehicleLimitKmh > 0) return vehicleLimitKmh
   const rule = policy?.byType?.[type.toUpperCase()]
   if (rule) return rule.outsideKmh
   return wialonKmh != null && wialonKmh > 0 ? wialonKmh : fallbackKmh
@@ -216,7 +219,10 @@ async function buildReport(orgId: string, day: string, allowed: Set<string> | nu
   const toSec = Math.floor(bounds.to.getTime() / 1000) - 1
   const planned = units.flatMap((u) => {
     const wialonId = wialonIdOf(u.deviceId)
-    const limitKmh = limitFor(u.vehicleType, policy, wialonId == null ? null : limits.get(wialonId) ?? null, overspeedLimitFor(u.vehicleType))
+    const limitKmh = limitFor(
+      u.vehicleType, policy, wialonId == null ? null : limits.get(wialonId) ?? null,
+      overspeedLimitFor(u.vehicleType), vehicleSpeedLimitFor(u.registrationPlate),
+    )
     const seen = fastest.get(u.id)
     // No rows of ours says nothing about Wialon, so it is read there all the same.
     const worth = wialonId != null
