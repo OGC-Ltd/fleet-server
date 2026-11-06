@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest'
 import { buildEndOfShift, shiftStart, shiftEnd, alarmKind, parseSale, exitZone, type ShiftInput, type ShiftUnit } from '../../src/modules/reports/end-of-shift.js'
 import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, dur } from '../../src/modules/reports/end-of-shift.pdf.js'
+import { DASH } from '../../src/lib/pdf/letterhead.js'
 import { toShiftUnit, daysOf, plateIn } from '../../src/modules/reports/end-of-shift.data.js'
 import { endOfShiftQuerySchema, shiftDocSchema, endOfShiftBodySchema } from '../../src/modules/reports/report.schema.js'
 
@@ -264,5 +265,30 @@ describe('end of shift: the document the page edits', () => {
   it('refuses what is not a document', () => {
     expect(shiftDocSchema.safeParse({ ...doc(), blocks: [{ kind: 'script', text: 'x' }] }).success).toBe(false)
     expect(shiftDocSchema.safeParse({ ...doc(), blocks: Array(301).fill({ kind: 'note', text: 'x' }) }).success).toBe(false)
+  })
+})
+
+describe('end of shift: distance covered and fuel consumed (operator, 7 Nov 2026)', () => {
+  const overview = (usage: ShiftInput['usage']) => {
+    const d = endOfShiftDoc(buildEndOfShift({ ...fixture, usage }), { orgName: 'West Sugar', reportNo: 'R', generatedAt: NOW })
+    return d.blocks.filter((b) => b.kind === 'figures')[1] as { items: Array<{ label: string; value: string }> }
+  }
+
+  it('sums each unit, counting the units that moved and the units whose probe read a burn', () => {
+    const r = buildEndOfShift({ ...fixture, usage: [
+      { vehicleId: 'v1', km: 120.4, fuelL: 40.2 }, { vehicleId: 'v2', km: 0, fuelL: null },
+      { vehicleId: 'v3', km: 1003.15, fuelL: null }, { vehicleId: 'v4', km: null, fuelL: 3 },
+    ] })
+    expect(r.usage).toEqual({ km: 1123.6, kmUnits: 2, fuelL: 43.2, fuelUnits: 2 })
+    expect(overview([{ vehicleId: 'v1', km: 1123.6, fuelL: 43.2 }]).items).toEqual([
+      { label: 'Distance covered', value: '1,123.6 km · 1 unit' },
+      { label: 'Fuel consumed', value: '43.2 L · 1 unit' },
+    ])
+  })
+
+  it('a dash when it could not be read, nought when nothing moved', () => {
+    expect(overview(null).items.map((i) => i.value)).toEqual([DASH, DASH])
+    expect(buildEndOfShift({ ...fixture, usage: null }).usage).toBeNull()
+    expect(overview([]).items.map((i) => i.value)).toEqual(['0.0 km · 0 units', '0.0 L · 0 units'])
   })
 })
