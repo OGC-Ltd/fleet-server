@@ -220,16 +220,19 @@ const TAT_WIDTHS = [20, 48, 14, 17, 14, 20, 15, 14, 25, 10, 11, 13, 30, 14]
 const TAT_WRAP = new Set([0, 1, 8, 12, 13])
 const TAT_FIGURES = new Set([2, 3, 4, 5, 6, 7, 9, 10, 11])
 
-// As Vehicle analytics writes them: litres to 0.1, kilometres to 0.01.
-const litres = (v: number | null | undefined) => (v == null ? DASH : v.toFixed(1))
-const kms = (v: number | null | undefined) => (v == null ? DASH : v.toFixed(2))
-const whole = (v: number | null | undefined) => (v == null ? DASH : String(Math.round(v)))
+// As Vehicle analytics writes them: litres to 0.1, kilometres to 0.01. No
+// figure reads 0.00, and each word of a station starts with a capital (operator, 7 Nov 2026).
+const NONE = '0.00'
+const stationWords = (s: string) => s.toLowerCase().replace(/(^|[\s(/-])(\p{L})/gu, (_, a: string, b: string) => a + b.toUpperCase())
+const litres = (v: number | null | undefined) => (v == null ? NONE : v.toFixed(1))
+const kms = (v: number | null | undefined) => (v == null ? NONE : v.toFixed(2))
+const whole = (v: number | null | undefined) => (v == null ? NONE : String(Math.round(v)))
 
 export function tatCells(r: TatPdfRow): string[] {
   const f = r.fuel
   return [
     r.plate, tripWords(r), litres(f?.initial), litres(f?.topUps), litres(f?.total), litres(f?.consumption), litres(f?.theft), litres(f?.final),
-    r.station || DASH, kms(r.km), r.rate == null ? DASH : r.rate.toFixed(2), whole(r.tankL), r.comment, r.base,
+    r.station ? stationWords(r.station) : DASH, kms(r.km), r.rate == null ? NONE : r.rate.toFixed(2), whole(r.tankL), r.comment, r.base,
   ]
 }
 
@@ -273,6 +276,8 @@ export async function renderTatFuelPdf(b: TatFuelPdfBody, o: { orgCode: string; 
   for (const [group, rows] of groups) {
     w.room(60)
     w.h2(`${k++}. ${group}`, `${num(rows.length)} row${rows.length === 1 ? '' : 's'}`)
+    // Rows without a finished trip at the bottom of the section (operator, 7 Nov 2026)
+    rows.sort((a, c) => (a.returnedAt == null ? 1 : 0) - (c.returnedAt == null ? 1 : 0))
     w.table(cols, TAT_HEADS, rows.map(r => tatCells(r).map((text, i): Cell => ({ text, bold: i === 0 }))), { size: 6.8 })
   }
   w.y += 2 * MM
