@@ -125,6 +125,51 @@ export function requirePermission(slug: string | PermissionResolver): RequestHan
   }
 }
 
+/** Require at least one permission for this route, in the path organisation. */
+export function requireAnyPermission(slugs: readonly string[]): RequestHandler {
+  if (!slugs.length) throw new Error('requireAnyPermission needs at least one permission')
+
+  return async (req, _res, next) => {
+    try {
+      const userId = req.user?.id
+      if (!userId) throw new UnauthorizedError('Not authenticated')
+
+      const orgId = (req.params['orgId'] as string | undefined) ?? null
+      const subject = await resolveSubject(userId)
+      const allowed = orgId === null
+        ? subject.isPlatform && slugs.some(need => can(subject, null, need))
+        : canReachOrg(subject, orgId) && slugs.some(need => can(subject, orgId, need))
+
+      if (!allowed) {
+        const detail = {
+          userId, orgId, need: slugs.join(' or '),
+          route: `${req.method} ${req.baseUrl}${req.route?.path ?? req.path}`,
+          scope: orgId === null ? 'platform' : 'organisation',
+        }
+        if (!env.AUTHZ_ENFORCE) {
+          logger.warn(detail, 'authz: WOULD DENY (shadow mode) — allowing')
+        } else {
+          logger.info(detail, 'authz: denied')
+          throw new ForbiddenError(`Missing permission: ${slugs.join(' or ')}`)
+        }
+      }
+
+      if (orgId) {
+        req.authz = {
+          userId,
+          orgId,
+          isPlatform: subject.isPlatform,
+          vehicleIds: scopeToApply(subject, orgId, 'requireAnyPermission'),
+        }
+      }
+
+      next()
+    } catch (err) {
+      next(err)
+    }
+  }
+}
+
 /**
  * Require a permission, with NO shadow mode.
  *

@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
-import { requirePermission } from '../../middleware/authorize.js'
+import { requireAnyPermission, requirePermission } from '../../middleware/authorize.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
 import { ingestLimiter } from '../../middleware/rateLimiter.js'
 import {
@@ -62,8 +62,10 @@ router.get('/reports/speed', requirePermission('telemetry:read'), validateQuery(
 router.get('/reports/probe-disconnections', requirePermission('telemetry:read'), validateQuery(probeReportQuerySchema), ctrl.getProbeReportData)
 router.get('/reports/recovery', requirePermission('telemetry:read'), validateQuery(recoveryReportQuerySchema), ctrl.getRecoveryReport)
 router.get('/reports/recovery.pdf', requirePermission('telemetry:read'), validateQuery(recoveryReportQuerySchema), ctrl.downloadRecoveryReport)
-// The rows the page made, for one organisation or several together, drawn on the letterhead
-router.post('/reports/document.pdf', requirePermission('telemetry:read'), validateBody(reportDocSchema), ctrl.downloadReportDoc)
+// The rows the page made, for one organisation or several together, drawn on the letterhead.
+// User-read users need this renderer for the group-scoped Login Activity report;
+// telemetry-read report users retain access to their existing editable reports.
+router.post('/reports/document.pdf', requireAnyPermission(['telemetry:read', 'user:read']), validateBody(reportDocSchema), ctrl.downloadReportDoc)
 router.post('/reports/dormant-assets.pdf', requirePermission('telemetry:read'), validateBody(dormantPdfBodySchema), ctrl.downloadDormantPdf)
 router.post('/reports/geofences.pdf', requirePermission('telemetry:read'), validateBody(geofencePdfBodySchema), ctrl.downloadGeofencePdf)
 router.post('/reports/tat-fuel.pdf', requirePermission('telemetry:read'), validateBody(tatFuelPdfBodySchema), ctrl.downloadTatFuelPdf)

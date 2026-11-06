@@ -2,7 +2,7 @@ import { prisma } from '../../lib/prisma.js'
 import type { CreateUserDto, UpdateUserDto, ListUserQuery, UserLoginReportQuery } from './user.schema.js'
 import { UNSCOPED, groupWhere, type GroupScope } from './user-group.scope.js'
 
-const selectUser = (orgId: string) => ({
+const selectUser = (orgId: string, scope: GroupScope = UNSCOPED) => ({
   id: true,
   organisationId: true,
   fullName: true,
@@ -17,7 +17,10 @@ const selectUser = (orgId: string) => ({
   // Group memberships are part of the roster so administrators can see and
   // manage the same access boundary used to narrow it.
   groups: {
-    where: { group: { organisations: { some: { organisationId: orgId } } } },
+    where: {
+      group: { organisations: { some: { organisationId: orgId } } },
+      ...(!scope.unscoped ? { groupId: { in: scope.groupIds } } : {}),
+    },
     select: { group: { select: { id: true, slug: true, name: true } } },
   },
   // The password history the account page and the admin roster both show.
@@ -29,7 +32,7 @@ const selectUser = (orgId: string) => ({
   // Roles held IN THIS organisation. The roster's whole job is showing who can
   // do what, and a list of names with no roles beside them does not.
   userRoles: {
-    where: { revokedAt: null },
+    where: { revokedAt: null, role: { organisationId: orgId } },
     select: { assignedAt: true, role: { select: { id: true, slug: true, name: true, organisationId: true } } },
   },
   // Which organisations this person actually reaches. The roster is scoped by
@@ -143,7 +146,7 @@ export async function findAll(
   const where = rosterWhere(orgId, query, scope, visibleRoleSlug)
 
   const [data, total] = await prisma.$transaction([
-    prisma.user.findMany({ where, skip, take: limit, select: selectUser(orgId), orderBy: { createdAt: 'desc' } }),
+    prisma.user.findMany({ where, skip, take: limit, select: selectUser(orgId, scope), orderBy: { createdAt: 'desc' } }),
     prisma.user.count({ where }),
   ])
   return { data: data.map(withGroupAliases), total }
@@ -185,8 +188,22 @@ export async function findLoginReport(
             fullName: true,
             email: true,
             groups: {
-              where: { group: { organisations: { some: { organisationId: orgId } } } },
+              where: {
+                group: { organisations: { some: { organisationId: orgId } } },
+                ...(!scope.unscoped ? { groupId: { in: scope.groupIds } } : {}),
+              },
               select: { group: { select: { name: true } } },
+            },
+            userRoles: {
+              where: {
+                revokedAt: null,
+                role: { organisationId: orgId },
+              },
+              select: {
+                id: true,
+                assignedAt: true,
+                role: { select: { id: true, name: true, slug: true, organisationId: true } },
+              },
             },
           },
         },
@@ -199,6 +216,7 @@ export async function findLoginReport(
       user: {
         ...user,
         groups: user.groups.map(({ group }) => group.name).sort((a, b) => a.localeCompare(b)),
+        roles: user.userRoles.map(({ role }) => role.name).sort((a, b) => a.localeCompare(b)),
       },
     })),
     total,
@@ -278,10 +296,14 @@ export async function findById(
         : {}),
     },
     select: {
-      ...selectUser(orgId),
+      ...selectUser(orgId, scope),
       userRoles: {
-        where: { revokedAt: null },
-        select: { id: true, assignedAt: true, role: { select: { id: true, name: true, slug: true } } },
+        where: { revokedAt: null, role: { organisationId: orgId } },
+        select: {
+          id: true,
+          assignedAt: true,
+          role: { select: { id: true, name: true, slug: true, organisationId: true } },
+        },
       },
     },
   })
@@ -295,14 +317,14 @@ export async function create(orgId: string, dto: CreateUserDto) {
   }).then(withGroupAliases)
 }
 
-export async function update(orgId: string, userId: string, dto: UpdateUserDto) {
+export async function update(orgId: string, userId: string, dto: UpdateUserDto, scope: GroupScope = UNSCOPED) {
   // The service has already checked organisation reach and group visibility.
   // Profile fields belong to the account, even when the caller reaches it
   // through a live organisation membership rather than its home organisation.
   return prisma.user.update({
     where: { id: userId },
     data: dto,
-    select: selectUser(orgId),
+    select: selectUser(orgId, scope),
   }).then(withGroupAliases)
 }
 
