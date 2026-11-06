@@ -39,12 +39,13 @@
 import { env } from '../config/env.js'
 import { eventBus } from './event-bus.js'
 import { overspeedLimitFor } from './derived-alerts.js'
-import { zoneLimitAt, type LimitSource, type ZoneLimit } from './speed-policy.js'
+import { vehicleSpeedLimitFor, zoneLimitAt, type LimitSource, type ZoneLimit } from './speed-policy.js'
 import type { VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
 
 export interface EpisodeContext {
   orgId:       string
   vehicleId:   string
+  registrationPlate?: string | null
   vehicleType: string | null
   driverId:    string | null
   driverName:  string | null
@@ -119,7 +120,8 @@ function haversineM(aLat: number, aLng: number, bLat: number, bLng: number): num
  * was applied, and because OVERSPEED_LIMIT_BY_TYPE is a deploy-time string that
  * somebody will change.
  */
-function limitSourceFor(vehicleType: string | null, limit: number, zone: ZoneLimit | null): LimitSource {
+function limitSourceFor(vehicleType: string | null, registrationPlate: string | null | undefined, limit: number, zone: ZoneLimit | null): LimitSource {
+  if (vehicleSpeedLimitFor(registrationPlate) != null) return 'vehicle'
   if (zone) return zone.source
   return vehicleType && limit !== env.OVERSPEED_LIMIT_KMH ? 'type' : 'fleet'
 }
@@ -175,7 +177,7 @@ export function noteSpeedFrame(frame: VehicleTelemetryFrame, ctx: EpisodeContext
   const speed = frame.speedKmh
   const atMs  = frame.capturedAt.getTime()
   const zone  = zoneLimitAt(ctx.orgId, ctx.vehicleType, frame.lat, frame.lng)
-  const limit = zone?.kmh ?? overspeedLimitFor(ctx.vehicleType)
+  const limit = overspeedLimitFor(ctx.vehicleType, { orgId: ctx.orgId, lat: frame.lat, lng: frame.lng }, ctx.registrationPlate)
   const ep    = open.get(ctx.vehicleId)
 
   // A frame with no speed reading says nothing either way: it must not extend
@@ -189,7 +191,7 @@ export function noteSpeedFrame(frame: VehicleTelemetryFrame, ctx: EpisodeContext
       open.set(ctx.vehicleId, {
         ctx,
         limitKmh:    limit,
-        limitSource: limitSourceFor(ctx.vehicleType, limit, zone),
+        limitSource: limitSourceFor(ctx.vehicleType, ctx.registrationPlate, limit, zone),
         // The FIRST over-limit frame. The debounce decides whether the episode
         // is real; it does not decide when it began.
         startedAtMs: atMs,

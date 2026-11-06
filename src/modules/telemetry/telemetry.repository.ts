@@ -1080,7 +1080,7 @@ export async function findFleetSnapshot(orgId: string) {
         // A Map lookup on a string parsed once at boot — free.
         // Where the org's limit depends on place (lib/speed-policy), the one
         // at the unit's last fix.
-        speedLimitKmh:  overspeedLimitFor(v.vehicleType, { orgId, lat: ping?.lat, lng: ping?.lng }),
+        speedLimitKmh:  overspeedLimitFor(v.vehicleType, { orgId, lat: ping?.lat, lng: ping?.lng }, v.registrationPlate),
         driver:             v.assignments[0]?.user.fullName          ?? null,
         driverRatingScore:  v.assignments[0]?.user.driverRatingScore ?? null,
         lat:            ping?.lat          ?? null,

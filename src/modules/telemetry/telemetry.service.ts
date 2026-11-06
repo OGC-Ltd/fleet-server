@@ -19,7 +19,7 @@ import { tripGeometry } from '../../lib/dispatch-trip.js'
 import { fleetDayStart, fleetDayKey, fleetDayBounds as sharedFleetDayBounds } from '../../lib/provider-time.js'
 import { prisma } from '../../lib/prisma.js'
 import { overspeedLimitFor } from '../../lib/derived-alerts.js'
-import { warmSpeedPolicy, speedPolicyFor } from '../../lib/speed-policy.js'
+import { warmSpeedPolicy, speedPolicyFor, vehicleSpeedLimitFor } from '../../lib/speed-policy.js'
 
 /** Fleet-local midnight as an ISO string, so it compares against `departedAt`
  *  (which is already an ISO instant) without re-parsing per vehicle. */
@@ -259,9 +259,10 @@ export async function getVehicleDaySeries(vehicleId: string, orgId: string, q: D
   // Absent for every other org: the unit's one limit is on the snapshot.
   await warmSpeedPolicy(orgId)
   let lim: number[] | undefined
-  if (speedPolicyFor(orgId)) {
-    const v = await db.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleType: true } })
+  const v = await db.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleType: true, registrationPlate: true } })
+  if (speedPolicyFor(orgId) || vehicleSpeedLimitFor(v?.registrationPlate) != null) {
     const type = v?.vehicleType ?? null
+    const plate = v?.registrationPlate ?? null
     // Each position asked once. A parked unit reports the same (5-dp) spot
     // hundreds of times a day, and this was the whole cost of the route on
     // Mufindi (27 Sep: 0.6–1.0 s of a 0.8–1.3 s response, against 10–23 ms
@@ -272,7 +273,7 @@ export async function getVehicleDaySeries(vehicleId: string, orgId: string, q: D
       const key = `${lat},${lng}`
       let kmh = byPlace.get(key)
       if (kmh === undefined) {
-        kmh = overspeedLimitFor(type, { orgId, lat, lng })
+        kmh = overspeedLimitFor(type, { orgId, lat, lng }, plate)
         byPlace.set(key, kmh)
       }
       return kmh
