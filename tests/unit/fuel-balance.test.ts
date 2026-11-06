@@ -16,6 +16,15 @@ describe('fuelBalance', () => {
     const b = fuelBalance({ readings: [...flat(100, 0), ...flat(120, 50)], fillings: [fill(20)], drains: [drain(30)], ...span })
     expect(b).toMatchObject({ startL: 100, endL: 120, filledL: 50, theftL: 10, consumedL: 20, unrecordedL: 0 })
   })
+  it('matches the captured Fuel Report period balance', () => {
+    const b = fuelBalance({
+      readings: [...flat(98.5, 0), ...flat(126.8, 50)],
+      fillings: [fill(25, { observedRiseMl: 45_900 })],
+      drains: [],
+      ...span,
+    })
+    expect(b).toMatchObject({ startL: 98.5, endL: 126.8, filledL: 45.9, consumedL: 17.6 })
+  })
   it('takes the middle of the first and last 7, past a dead probe', () => {
     const b = fuelBalance({ readings: [at(0, 0.1), at(1, 100), at(2, 500), at(3, 101), at(4, 99), at(5, 100), at(6, 100), at(7, 100)], fillings: [], drains: [], ...span })
     expect(b.startL).toBe(100)
