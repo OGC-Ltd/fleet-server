@@ -1,5 +1,6 @@
 import PDFDocument from 'pdfkit'
 import { MM, SIDE, C, F, DASH, num, drawLetterhead, ReportWriter, sheetOf } from '../../lib/pdf/letterhead.js'
+import { lat2y, lon2x, tile as loadOsmTile } from '../usage-review/usage-review.pdf.js'
 import type { getRecoveryVehicleReport } from './recovery-report.service.js'
 
 type RecoveryReport = Awaited<ReturnType<typeof getRecoveryVehicleReport>>
@@ -18,37 +19,106 @@ const durationLabel = (ms: number) => {
   return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min`
 }
 
-function drawRoute(doc: Doc, vehicle: RecoveryVehicle, y: number, width: number, height: number) {
+const TILE_SIZE = 256
+const MAP_SCALE = 0.55
+const MAX_MAP_TILES = 48
+const MAX_MAP_ZOOM = 15
+const MIN_MAP_ZOOM = 3
+
+interface RecoveryMap {
+  z: number
+  x0: number
+  y0: number
+  scale: number
+  tiles: { x: number; y: number; image: Buffer | null }[]
+}
+
+async function prepareRecoveryMap(
+  route: RecoveryVehicle['route'], width: number, height: number,
+): Promise<RecoveryMap | null> {
+  if (!route.length) return null
+
+  let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity
+  for (const [lat, lng] of route) {
+    minLng = Math.min(minLng, lng)
+    maxLng = Math.max(maxLng, lng)
+    minLat = Math.min(minLat, lat)
+    maxLat = Math.max(maxLat, lat)
+  }
+  const pixelWidth = width / MAP_SCALE, pixelHeight = height / MAP_SCALE
+  let z = MAX_MAP_ZOOM
+  for (; z > MIN_MAP_ZOOM; z--) {
+    const dx = lon2x(maxLng, z) - lon2x(minLng, z)
+    const dy = lat2y(minLat, z) - lat2y(maxLat, z)
+    if (dx <= pixelWidth * 0.84 && dy <= pixelHeight * 0.84) break
+  }
+
+  const centerX = (lon2x(minLng, z) + lon2x(maxLng, z)) / 2
+  const centerY = (lat2y(maxLat, z) + lat2y(minLat, z)) / 2
+  const x0 = centerX - pixelWidth / 2, y0 = centerY - pixelHeight / 2
+  const worldTiles = 2 ** z
+  const tiles: RecoveryMap['tiles'] = []
+  for (let tileY = Math.floor(y0 / TILE_SIZE); tileY <= Math.floor((y0 + pixelHeight) / TILE_SIZE); tileY++) {
+    if (tileY < 0 || tileY >= worldTiles) continue
+    for (let tileX = Math.floor(x0 / TILE_SIZE); tileX <= Math.floor((x0 + pixelWidth) / TILE_SIZE); tileX++) {
+      tiles.push({ x: tileX, y: tileY, image: null })
+    }
+  }
+  if (tiles.length <= MAX_MAP_TILES) {
+    for (let index = 0; index < tiles.length; index += 6) {
+      await Promise.all(tiles.slice(index, index + 6).map(async (item) => {
+        const wrappedX = ((item.x % worldTiles) + worldTiles) % worldTiles
+        item.image = await loadOsmTile(z, wrappedX, item.y)
+      }))
+    }
+  } else {
+    tiles.length = 0
+  }
+  return { z, x0, y0, scale: MAP_SCALE, tiles }
+}
+
+function drawRoute(
+  doc: Doc, vehicle: RecoveryVehicle, map: RecoveryMap | null,
+  y: number, width: number, height: number,
+) {
   const x = SIDE
+  doc.save().rect(x, y, width, height).clip()
+  doc.rect(x, y, width, height).fill(C.shade)
+  if (map) {
+    const tileSize = TILE_SIZE * map.scale
+    for (const tile of map.tiles) {
+      if (!tile.image) continue
+      try {
+        doc.image(tile.image, x + (tile.x * TILE_SIZE - map.x0) * map.scale,
+          y + (tile.y * TILE_SIZE - map.y0) * map.scale, { width: tileSize, height: tileSize })
+      } catch {
+        // Skip an unreadable tile; the route remains available over the plain ground.
+      }
+    }
+  }
+  doc.restore()
   doc.save().rect(x, y, width, height).lineWidth(0.6).strokeColor(C.rule).stroke().restore()
   const points = vehicle.route
   if (!points.length) return
 
-  const pad = 12 * MM
-  const lngs = points.map(p => p[1])
-  const lats = points.map(p => p[0])
-  const minLng = Math.min(...lngs), maxLng = Math.max(...lngs)
-  const minLat = Math.min(...lats), maxLat = Math.max(...lats)
-  const spanLng = Math.max(maxLng - minLng, 0.00001)
-  const spanLat = Math.max(maxLat - minLat, 0.00001)
-  const scale = Math.min((width - 2 * pad) / spanLng, (height - 2 * pad) / spanLat)
-  const midLng = (minLng + maxLng) / 2, midLat = (minLat + maxLat) / 2
-  const xy = ([lat, lng]: [number, number]) => [
-    x + width / 2 + (lng - midLng) * scale,
-    y + height / 2 - (lat - midLat) * scale,
-  ] as const
+  const xy = ([lat, lng]: [number, number]) => map
+    ? [x + (lon2x(lng, map.z) - map.x0) * map.scale, y + (lat2y(lat, map.z) - map.y0) * map.scale] as const
+    : [x + width / 2, y + height / 2] as const
 
-  doc.save().lineWidth(2).lineCap('round').lineJoin('round').strokeColor(C.route)
+  doc.save().lineWidth(2.2).lineCap('round').lineJoin('round').strokeColor('#111111')
   points.forEach((point, index) => {
     const [px, py] = xy(point)
     if (index === 0) doc.moveTo(px, py)
     else doc.lineTo(px, py)
   })
   doc.stroke().restore()
-  for (const [point, color] of [[points[0]!, C.good], [points[points.length - 1]!, C.flag]] as const) {
+  for (const [point, fill] of [[points[0]!, '#ffffff'], [points[points.length - 1]!, '#111111']] as const) {
     const [px, py] = xy(point)
-    doc.save().circle(px, py, 3.2).fill(color).restore()
+    doc.save().circle(px, py, 3.4).fill(fill).lineWidth(1.2).strokeColor('#111111').stroke().restore()
   }
+  doc.save().rect(x + width - 95, y + height - 12, 91, 9).fillOpacity(0.88).fill('#ffffff').fillOpacity(1).restore()
+  doc.font(F.reg).fontSize(5.5).fillColor('#111111')
+    .text('© OpenStreetMap contributors', x + width - 92, y + height - 10, { lineBreak: false })
 }
 
 export const recoveryReportFileName = (day: string, vehicle?: string) =>
@@ -71,7 +141,7 @@ export async function renderRecoveryReportPdf(report: RecoveryReport, landscape 
   w.y += 21
   w.hr(SIDE, SIDE + sheet.body, w.y, C.ink, 1)
   w.y += 2 * MM
-  w.note('Daily distance and stops are measured from GPS fixes. Fuel used is taken from the vehicle fuel counter or probe when available. The route sketch joins recorded GPS positions; it is not a road map.')
+  w.note('Daily distance and stops are measured from GPS fixes. Fuel used is taken from the vehicle fuel counter or probe when available. The route follows recorded GPS positions over a grayscale OpenStreetMap background.')
   w.runningHead = { title: 'Daily Recovery Vehicle Report', right: report.day }
 
   for (const [index, vehicle] of report.vehicles.entries()) {
@@ -96,7 +166,8 @@ export async function renderRecoveryReportPdf(report: RecoveryReport, landscape 
     w.h2('Recorded route', 'GPS trace · start to end')
     const routeHeight = 75 * MM
     w.room(routeHeight + 20)
-    drawRoute(doc, vehicle, w.y, sheet.body, routeHeight)
+    const routeMap = await prepareRecoveryMap(vehicle.route, sheet.body, routeHeight)
+    drawRoute(doc, vehicle, routeMap, w.y, sheet.body, routeHeight)
     w.y += routeHeight + 2
     const start = vehicle.route[0]
     const end = vehicle.route[vehicle.route.length - 1]

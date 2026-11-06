@@ -32,7 +32,9 @@ unmeasured values are `null`, not zero.
 
 - **Distance** uses the trip report's measured moving GPS segments.
 - **Route** is the day's recorded GPS trace, as `[latitude, longitude]` points.
-  The PDF plots that trace without a basemap.
+  The PDF overlays the trace on a grayscale OpenStreetMap basemap and includes
+  the required map attribution. If map tiles are unavailable, it still draws
+  the GPS trace on a plain background.
 - **Fuel consumed** uses the existing day-report fuel counter/probe calculation.
   It is `null` when the day's readings cannot support a measurement.
 - **Stops** are GPS stands of at least five minutes. `stopsTotal` counts all

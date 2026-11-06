@@ -46,8 +46,12 @@ RUN npm pkg delete devDependencies.prisma devDependencies.typescript \
  && ! npm ls --omit=dev --omit=peer --all 2>&1 | grep -iE "extraneous|missing|invalid"
 
 FROM ${NODE_IMAGE} AS base
-RUN apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get -y upgrade --no-install-recommends \
+# Avoid the redirect/retry path in CVE-2026-109518 while updating vulnerable APT.
+RUN apt-get -o Acquire::Retries=0 update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=0 -y upgrade --no-install-recommends \
+ && APT_VERSION="$(dpkg-query -W -f='${Version}' apt)" \
+ && { dpkg --compare-versions "$APT_VERSION" ge 2.6.2 \
+      || { echo "APT $APT_VERSION is vulnerable to CVE-2026-109518; version 2.6.2 or newer is required" >&2; exit 1; }; } \
  && rm -rf /var/lib/apt/lists/* \
  && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /opt/yarn-* \
            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg \
