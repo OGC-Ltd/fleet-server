@@ -239,6 +239,20 @@ export function fenceOf(pick: FenceRow): MorlFence | null {
   return { name: pick.name, geometry, centre }
 }
 
+/** Finds the Menengai Yard destination for Tankers, without changing Movements' MORL fallback. */
+export async function findMorlDestination(orgId: string): Promise<MorlFence | null> {
+  const fences = await prisma.geofence.findMany({
+    where: { organisationId: orgId, isActive: true, name: { contains: 'Menengai Yard', mode: 'insensitive' } },
+    select: { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true },
+    orderBy: { name: 'asc' },
+  })
+  for (const fence of fences) {
+    const destination = fenceOf(fence)
+    if (destination) return destination
+  }
+  return null
+}
+
 /** Place names for the rows: cached first, then a few paced lookups, bounded in time. */
 async function nameRows(rows: MovementRow[]) {
   for (const r of rows) if (r.lat != null && r.lng != null && r.state !== 'at') r.location = cachedPlace(r.lat, r.lng)

@@ -15,7 +15,7 @@ vi.mock('../../src/lib/geocode.js', () => ({
 }))
 
 import { prismaMock } from '../helpers/prisma.mock.js'
-import { getMovementReport, editedMovementReport, countRows, byPlate, typeHeading, siteNameOf, findHomeFence, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
+import { getMovementReport, editedMovementReport, countRows, byPlate, typeHeading, siteNameOf, findHomeFence, findMorlDestination, type MovementReport } from '../../src/modules/reports/movement-report.service.js'
 import { editedMovementReportSchema, movementPdfBodySchema, movementReportQuerySchema, MOVEMENT_MAX_REPORTS } from '../../src/modules/reports/report.schema.js'
 import { directionWords, renderMovementReportPdf, renderMovementReportsPdf, movementReportsFileName, movementReportNo, movementFileName, DIRECTION, isMoving, isLoading, locationFill, AT_MORL_FILL, MOVING_FILL, LOADING_FILL } from '../../src/modules/reports/movement-report.pdf.js'
 
@@ -307,6 +307,21 @@ describe('the movement report as edited on the Reports page', () => {
 })
 
 describe('without a MORL fence', () => {
+  it('uses a Menengai Yard geofence as the Tankers Report destination', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.geofence.findMany as any).mockResolvedValueOnce([
+      { name: 'Menengai Yard - Nakuru HQ', type: 'CIRCLE', centerLat: MORL.lat, centerLng: MORL.lng, radiusM: 800, polygonCoords: null, widthM: null },
+    ])
+    expect(await findMorlDestination('org1')).toMatchObject({
+      name: 'Menengai Yard - Nakuru HQ',
+      centre: { lat: MORL.lat, lng: MORL.lng },
+      geometry: { type: 'CIRCLE', radiusM: 800 },
+    })
+    expect(prismaMock.geofence.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ organisationId: 'org1', isActive: true }),
+    }))
+  })
+
   it('reads the HQ yard as MORL HQ, even with its alerts switched off', async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ name: 'Menengai Oil Refineries Ltd', code: 'MENENGAI' })
