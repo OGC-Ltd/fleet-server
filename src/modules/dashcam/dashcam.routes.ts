@@ -4,6 +4,8 @@
  *   GET /api/v1/vss/cameras?org=<orgId>
  *   GET /api/v1/vss/alarms?org=<orgId>&since=<ISO>
  *   GET /api/v1/vss/file?org=<orgId>&k=<key>[&download=1]
+ *   GET  /api/v1/vss/alarms/:alarmId/feedback?org=<orgId>
+ *   POST /api/v1/vss/alarms/:alarmId/feedback?org=<orgId>   { verdict, note, vehicleId, plate, alarmAt }
  *
  * Mounted at /api/v1/vss with the organisation in the QUERY, because that is
  * the dashboard's contract (and vss.php's, on cPanel). `orgFromQuery` puts it
@@ -16,10 +18,11 @@ import { Router, type RequestHandler } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission } from '../../middleware/authorize.js'
 import { sendSuccess, sendError } from '../../core/response/response.js'
-import { BadRequestError } from '../../core/errors/errors.js'
+import { BadRequestError, ForbiddenError } from '../../core/errors/errors.js'
 import { logger } from '../../lib/logger.js'
 import { fetchVssFile, VssError, VSS_TOO_FREQUENT, VSS_LOGIN_LIMITED } from '../../providers/vss/index.js'
 import { cameraCount, getAlarms, fileFor } from './dashcam.service.js'
+import { ALARM_ID, feedbackBodySchema, feedbackFor, addFeedback } from './dashcam-feedback.js'
 
 const orgFromQuery: RequestHandler = (req, _res, next) => {
   const org = typeof req.query['org'] === 'string' ? req.query['org'] : ''
@@ -62,6 +65,32 @@ router.get('/alarms', ...guard, noStore, async (req, res, next) => {
     if (msg) return sendError(res, 502, msg)
     next(err)
   }
+})
+
+/** An alarm's id from the path, checked. */
+function alarmIdOf(req: Parameters<RequestHandler>[0]): string {
+  const id = String(req.params['alarmId'] ?? '')
+  if (!ALARM_ID.test(id)) throw new BadRequestError('Not an alarm id')
+  return id
+}
+
+// Feedback on an alarm: anyone who can see the alarms may read and add it.
+router.get('/alarms/:alarmId/feedback', ...guard, noStore, async (req, res, next) => {
+  try {
+    sendSuccess(res, { entries: await feedbackFor(req.params['orgId'] as string, alarmIdOf(req)) })
+  } catch (err) { next(err) }
+})
+
+router.post('/alarms/:alarmId/feedback', ...guard, async (req, res, next) => {
+  try {
+    const alarmId = alarmIdOf(req)
+    const parsed = feedbackBodySchema.safeParse(req.body ?? {})
+    if (!parsed.success) throw new BadRequestError('Pick a verdict; a note is up to 1,000 characters')
+    const scope = req.authz?.vehicleIds ?? null
+    if (scope && parsed.data.vehicleId && !scope.has(parsed.data.vehicleId)) throw new ForbiddenError('This unit is not in your scope')
+    const author = { id: req.user?.id ?? null, name: req.user?.fullName || req.user?.email || 'Unknown user' }
+    sendSuccess(res, { entry: await addFeedback(req.params['orgId'] as string, alarmId, parsed.data, author) }, 201)
+  } catch (err) { next(err) }
 })
 
 /**

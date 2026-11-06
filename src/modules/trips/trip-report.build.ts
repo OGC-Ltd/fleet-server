@@ -85,6 +85,16 @@ function segments(track: Fix[]): Segment[] {
   return segs
 }
 
+/**
+ * The distance the trip report and the recovery report show: the moving
+ * segments of a track, km to 0.1, null for a track of under two fixes. The end
+ * of shift report sums it over the fleet (operator, 7 Nov 2026).
+ */
+export function trackDistanceKm(track: Fix[]): number | null {
+  if (track.length < 2) return null
+  return round1(segments(track).filter(s => s.moving).reduce((a, s) => a + s.m, 0) / 1000)
+}
+
 interface RawStop { t: number; endT: number; ms: number; idleMs: number; lat: number; lng: number }
 
 function findStops(track: Fix[], segs: Segment[]): RawStop[] {
@@ -390,7 +400,7 @@ export function buildTripReport(d: ReportInput) {
     track: thin(track, ROUTE_POINTS).map(p => [p[1], p[2]] as [number, number]),
     map: d.map ?? null,
     summary: {
-      distanceKm: track.length > 1 ? round1(distanceM / 1000) : null,
+      distanceKm: trackDistanceKm(track),
       movingMs: track.length > 1 ? movingMs : null,
       stoppedMs: track.length > 1 ? Math.max(0, durationMs - movingMs) : null,
       idleMs: hasIgnition ? idleMs : null,

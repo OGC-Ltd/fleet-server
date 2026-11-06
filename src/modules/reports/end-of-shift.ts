@@ -78,6 +78,9 @@ export interface ShiftTicket {
   netWeightKg?: number | null; factoryNetWeightKg?: number | null; grossAt?: When; tokenAt?: When; productName?: string | null
 }
 
+/** One unit's distance and fuel burned over the shift, as the recovery report works them out (end-of-shift.data). */
+export interface ShiftUsage { vehicleId: string; km: number | null; fuelL: number | null }
+
 export interface ShiftInput {
   from: number
   to: number
@@ -95,6 +98,8 @@ export interface ShiftInput {
   sales?: ShiftFeedItem[]
   /** vehicleId → place name, for "Now near". */
   places?: Map<string, string>
+  /** Null when it could not be read. */
+  usage?: ShiftUsage[] | null
 }
 
 // ── vocabulary ────────────────────────────────────────────────────────────────
@@ -191,7 +196,7 @@ export interface BreachRow { plate: string; driver: string | null; times: number
 
 export function buildEndOfShift({
   from, to, units = [], fillings = [], thefts = [], speeding = [], harsh = [], alarms = null,
-  zones = [], tickets = null, sales = [], places = new Map(),
+  zones = [], tickets = null, sales = [], places = new Map(), usage = null,
 }: ShiftInput) {
   const inShift = (t: number) => Number.isFinite(t) && t >= from && t <= to
   const byId = new Map(units.map((v) => [v.vehicleId, v]))
@@ -382,9 +387,20 @@ export function buildEndOfShift({
 
   // Reporting = the tracker sent something since the shift began, not "engine on now".
   const reporting = units.filter((v) => v.seenAt != null && v.seenAt >= from).length
+
+  // Distance covered and fuel burned (operator, 7 Nov 2026): each unit's own
+  // figure, summed; the units counted are those that went somewhere, and those
+  // whose probe could say what they burned.
+  const moved = (usage ?? []).filter((u) => u.km != null && u.km > 0)
+  const burned = (usage ?? []).filter((u) => u.fuelL != null && u.fuelL > 0)
+  const totals = usage == null ? null : {
+    km: round1(moved.reduce((n, u) => n + u.km!, 0)), kmUnits: moved.length,
+    fuelL: round1(burned.reduce((n, u) => n + u.fuelL!, 0)), fuelUnits: burned.length,
+  }
   return {
     from, to,
     fleet: { units: units.length, reporting },
+    usage: totals,
     fuel: {
       refills: refills.length, refillL: sumL(refills), topRefills: [...refills].sort((a, b) => b.litres - a.litres).slice(0, TOP),
       drains, drainL: sumL(drains),

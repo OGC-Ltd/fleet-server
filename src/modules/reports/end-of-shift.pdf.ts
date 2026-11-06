@@ -97,6 +97,12 @@ export function endOfShiftDoc(r: EndOfShift, o: { orgName: string; reportNo: str
     { label: 'Policy breaches', value: num(r.breachTotal) },
     { label: `Reporting since ${since}`, value: `${num(r.fleet.reporting)} of ${num(r.fleet.units)}` },
   ] })
+  // A row of its own: in the row above the figures would be cut short.
+  const use = r.usage
+  b.push({ kind: 'figures', items: [
+    { label: 'Distance covered', value: use ? `${num(use.km, 1)} km · ${plural(use.kmUnits, 'unit')}` : DASH },
+    { label: 'Fuel consumed', value: use ? `${num(use.fuelL, 1)} L · ${plural(use.fuelUnits, 'unit')}` : DASH },
+  ] })
 
   // ── 2. escalated thefts ──
   b.push({ kind: 'h2', title: '2. Critical: escalated thefts', aside: `${theftN} of ${plural(r.fuel.drains.length, 'drain')} in the shift` })

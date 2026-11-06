@@ -329,6 +329,7 @@ model Organisation {
   fuelTheftFollowUps   FuelTheftFollowUp[]
   driverConductCases   DriverConductCase[]
   operatorIncidents    OperatorIncident[]
+  dashcamAlarmFeedback DashcamAlarmFeedback[]
   alertDecisions       AlertDecision[]
   vehicleInsights      VehicleInsight[]
 
@@ -3473,4 +3474,29 @@ model OperatorIncident {
 
   @@index([organisationId, at])
   @@map("operator_incidents")
+}
+
+/// Feedback on a dashcam alarm (operator, 7 Nov 2026): a verdict and a note,
+/// shared across the organisation, shown beside the alarm on the Dashcam
+/// Alarms page. Entries are kept; the newest is the alarm's verdict. The
+/// alarm lives on VSS, so the unit and its time are kept here too.
+model DashcamAlarmFeedback {
+  id             String    @id @default(cuid())
+  organisationId String    @map("organisation_id")
+  /// The alarm's VSS id.
+  alarmId        String    @map("alarm_id")
+  vehicleId      String?   @map("vehicle_id")
+  plate          String    @default("")
+  alarmAt        DateTime? @map("alarm_at")
+  /// genuine | false_alarm | coached
+  verdict        String
+  note           String    @default("")
+  authorId       String?   @map("author_id")
+  authorName     String    @default("") @map("author_name")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@index([organisationId, alarmId])
+  @@map("dashcam_alarm_feedback")
 }
