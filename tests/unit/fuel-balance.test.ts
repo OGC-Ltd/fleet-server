@@ -1,6 +1,6 @@
 /** The fuel figures Vehicle analytics gives, as the server works them out for TAT and Fuel. */
 import { describe, it, expect } from 'vitest'
-import { asDaySeries, fuelBalance, ruledOut, stopLitres, tripDistanceKm, type BalanceDrain, type BalanceFilling, type BalanceReading } from '../../src/modules/fuel/fuel-balance.js'
+import { asDaySeries, fuelBalance, reportableConsumptionL, ruledOut, stopLitres, tripDistanceKm, type BalanceDrain, type BalanceFilling, type BalanceReading } from '../../src/modules/fuel/fuel-balance.js'
 
 const MIN = 60_000
 const at = (m: number, fuelL: number | null, speedKmh = 0, lat = 0.5, lng = 34.5): BalanceReading => ({ t: m * MIN, lat, lng, speedKmh, fuelMl: fuelL == null ? null : fuelL * 1000 })
@@ -113,5 +113,15 @@ describe('ruledOut', () => {
     expect(ruledOut({ reviewStatus: 'CONFIRMED_THEFT', dismissedAt: when })).toBe(false)
     expect(ruledOut({ reviewStatus: 'UNDER_REVIEW', dismissedAt: when })).toBe(false)
     expect(ruledOut({ reviewStatus: null, dismissedAt: null })).toBe(false)
+  })
+})
+
+describe('reportableConsumptionL', () => {
+  it('prints a dash, not 0.0 L, for a unit that drove while the tank rose unexplained (KDX 130Y, 6 Nov)', () => {
+    expect(reportableConsumptionL({ consumedL: 0, unrecordedL: 1.1 }, 64.2)).toBe(null)
+    expect(reportableConsumptionL({ consumedL: 0, unrecordedL: 1.1 }, 2)).toBe(0)
+    expect(reportableConsumptionL({ consumedL: 0, unrecordedL: 0 }, 64.2)).toBe(0)
+    expect(reportableConsumptionL({ consumedL: 12.7, unrecordedL: 0 }, 64.2)).toBe(12.7)
+    expect(reportableConsumptionL({ consumedL: null, unrecordedL: null }, 64.2)).toBe(null)
   })
 })

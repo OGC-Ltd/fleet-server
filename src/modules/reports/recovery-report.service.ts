@@ -2,6 +2,7 @@ import { ConflictError } from '../../core/errors/errors.js'
 import { prisma } from '../../lib/prisma.js'
 import { fleetDayBounds, getDayReportData } from '../trips/trip-report.service.js'
 import { buildTripReport } from '../trips/trip-report.build.js'
+import { reportableConsumptionL } from '../fuel/fuel-balance.js'
 
 export const RECOVERY_VEHICLES = [
   { plate: 'KDX 130Y', recoveryType: 'mechanical' },
@@ -50,7 +51,7 @@ export async function getRecoveryVehicleReport(
       distanceKm: hasTelemetry ? report.summary.distanceKm : null,
       route: report.track,
       fuelConsumedL: hasTelemetry
-        ? (data.fuel.balance ? data.fuel.balance.consumedL : report.summary.fuelUsedL)
+        ? (data.fuel.balance ? reportableConsumptionL(data.fuel.balance, report.summary.distanceKm) : report.summary.fuelUsedL)
         : null,
       stopsTotal: hasTelemetry ? report.stopsTotal : null,
       stops: report.stops.map(stop => ({

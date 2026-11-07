@@ -304,7 +304,7 @@ export function lerp(x: number, x0: number, x1: number, y0: number, y1: number):
  */
 const CONFIRMED_REASONS: ReadonlySet<string> = new Set([
   'level-stayed-down', 'level-recovered',   // drains
-  'level-rose',                             // fillings
+  'level-rose', 'level-rose-late',          // fillings
 ])
 
 /** Did our own telemetry corroborate this, or are we relaying the claim? */
@@ -327,7 +327,7 @@ export const isConfirmed = (reason: string): boolean => CONFIRMED_REASONS.has(re
  * judgement, on nothing but data ageing out. See
  * `prisma/readjudicate-fuel.ts`, which is the only caller.
  */
-const NO_EVIDENCE_REASONS: ReadonlySet<string> = new Set(['insufficient-telemetry', 'filling-too-soon'])
+const NO_EVIDENCE_REASONS: ReadonlySet<string> = new Set(['insufficient-telemetry', 'filling-too-soon', 'probe-frozen'])
 
 /** True when this adjudication reports an absence of readings, not a finding. */
 export const isUncheckable = (a: Adjudication): boolean =>

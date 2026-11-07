@@ -16,7 +16,7 @@ import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { getProbeProfile } from './fuel-adjudication.service.js'
 import {
-  adjudicateFilling, FILL_HOLD_MINUTES, FILL_LOOKBEHIND_MINUTES, FILL_SETTLE_MINUTES,
+  adjudicateFilling, FILL_HOLD_MINUTES, FILL_LATE_MINUTES, FILL_LOOKBEHIND_MINUTES, FILL_SETTLE_MINUTES,
   type FillingClaim,
 } from './fuel-filling-adjudication.js'
 import { isConfirmed, isUncheckable } from './fuel-adjudication.js'
@@ -68,7 +68,8 @@ export async function judgeFilling(
   now: Date,
 ): Promise<Adjudication> {
   const from = new Date(filling.filledAt.getTime() - FILL_LOOKBEHIND_MINUTES * 60_000)
-  const to   = new Date(filling.filledAt.getTime() + (FILL_SETTLE_MINUTES + FILL_HOLD_MINUTES) * 60_000)
+  // To the late window too, for a probe that froze over the hold window.
+  const to   = new Date(filling.filledAt.getTime() + (FILL_LATE_MINUTES + FILL_HOLD_MINUTES) * 60_000)
 
   const rows = await prisma.vehicleTelemetry.findMany({
     where:   { vehicleId: filling.vehicleId, capturedAt: { gte: from, lte: to }, fuelLevelMl: { not: null } },
