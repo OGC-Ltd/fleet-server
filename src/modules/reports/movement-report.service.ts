@@ -106,14 +106,8 @@ export function groupingOf(name: string | null, plate: string | null): string | 
 export const BY_NAME_ORGS = new Set(['MENENGAI'])
 
 /** A vehicle type as a report's heading: TRUCK → Trucks; UNSPECIFIED → Other. */
-const TYPE_HEADING: Record<string, string> = {
-  TRUCK: 'Trucks', LORRY: 'Lorries', TRACTOR: 'Tractors', TRAILER: 'Trailers', PLANT: 'Plant',
-  SALOON: 'Saloons', BUS: 'Buses', COMPANY_VEHICLE: 'Company vehicles', UNSPECIFIED: 'Other',
-}
-export function typeHeading(type: string | null | undefined): string {
-  const t = String(type ?? 'UNSPECIFIED').toUpperCase()
-  return TYPE_HEADING[t] ?? t.charAt(0) + t.slice(1).toLowerCase().replace(/_/g, ' ')
-}
+import { typeHeading } from './vehicle-kind.js'
+export { typeHeading }
 
 /** A unit that is not reporting: no position in the window, or its last one from before it. */
 export const isOffline = (r: Pick<MovementRow, 'state' | 'stale'>) => r.state === 'no-fix' || r.stale

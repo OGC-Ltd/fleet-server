@@ -56,18 +56,8 @@ const READ_AT_ONCE = 4
 const CACHE_MS = 10 * 60_000
 /** A haulage unit with no stated type carries a tank at least this big. */
 const HAULAGE_TANK_L = 300
-/** A road registration; KTC.. is a tractor, KHMA a machine, KM.. a motorcycle. */
-export const ROAD_PLATE = /^K(?!TC|HM|M)[A-Z]{2}\s*\d{3}[A-Z]$/i
-/** Named for what it is, on a road plate like any truck's. */
-const NOT_A_TRUCK = /land\s*cruiser|hilux|prado|pick\s*-?\s*up|double\s*cab/i
-/** The kind of vehicle: its type, and an untyped unit on a road plate is a truck. Pure. */
-export function vehicleHeading(v: { type: string; plate: string; name: string }): string {
-  return v.type === 'UNSPECIFIED' && ROAD_PLATE.test(v.plate) && !NOT_A_TRUCK.test(v.name) ? 'Trucks' : typeHeading(v.type)
-}
-/** A prime mover, by its name on the register: every one is on the report (operator, 4 Nov 2026). */
-const PRIME_MOVER = /prime[\s-]*mover/i
-export const isPrimeMover = (name: string) => PRIME_MOVER.test(name)
-export const PRIME_MOVERS = 'Prime Movers'
+export { ROAD_PLATE, vehicleHeading, isPrimeMover, PRIME_MOVERS } from './vehicle-kind.js'
+import { ROAD_PLATE, vehicleHeading, isPrimeMover, PRIME_MOVERS } from './vehicle-kind.js'
 /** Whose fences read together: West Kenya's trucks deliver to each other's mills. */
 const FENCE_FAMILIES: readonly (readonly string[])[] = [['WESTSUGAR', 'KABRAS', 'NZOIA']]
 /** A mill's fence is named for a factory; this one is drawn over KABRAS FACTORY -WKS and wider, where the road passes. */
