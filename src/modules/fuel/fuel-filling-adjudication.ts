@@ -150,6 +150,22 @@ export const FILL_LOOKBEHIND_MINUTES = 20
  */
 export const FILL_BASELINE_TOLERANCE_ML = 2_000
 
+/**
+ * A probe whose reading does not move at all across the hold window while the
+ * engine runs is frozen, not steady: a running engine always burns a little.
+ *
+ * KDX 130Y, 6 Nov 2026: Wialon stamped a 13.8 L fill at 11:41 EAT, the probe
+ * then read exactly 126.864 L for over two hours while the truck drove, and
+ * only reached ~137 L at 14:00. The hold window saw the frozen value, ruled the
+ * fill REDISTRIBUTION, and the day's Recovery report printed 0.0 L for 64 km.
+ * So a frozen hold window is no evidence either way: the rise is read once the
+ * probe moves again, up to FILL_LATE_MINUTES after the claim.
+ */
+export const FILL_FROZEN_ML = 50
+
+/** How long after the claim a frozen probe may take to show the fill. */
+export const FILL_LATE_MINUTES = 240
+
 /** Readings needed either side before the series is worth believing. */
 const MIN_SAMPLES = 3
 
@@ -230,7 +246,8 @@ export function adjudicateFilling(
   // Readings from the settle window onwards: the pump has stopped and the tank
   // has had time to read its new steady state.
   const settled = new Date(claim.filledAt.getTime() + FILL_SETTLE_MINUTES * 60_000)
-  const after  = level.filter(s => s.capturedAt >= settled)
+  const holdEnd = new Date(settled.getTime() + FILL_HOLD_MINUTES * 60_000)
+  const after  = level.filter(s => s.capturedAt >= settled && s.capturedAt <= holdEnd)
 
   if (before.length < MIN_SAMPLES || after.length < MIN_SAMPLES) {
     // The provider saw fuel go in and we cannot check it. We relay the claim
@@ -284,6 +301,38 @@ export function adjudicateFilling(
     return {
       verdict: 'REFILL', recoveredMl: rise, reason: 'level-rose', confirmed: true,
       confidence: lerp(riseRatio, FILL_OBSERVED_MIN_RATIO, 1, 0.55, 0.95),
+    }
+  }
+
+  // The probe froze over the hold window: read the rise once it moves again.
+  // Only on a probe we trust (a swinging one is never "frozen"), and only with
+  // the engine running: a parked tank reads flat because it IS flat.
+  const frozen = !probeSwings(profile)
+    && samples.filter(s => s.engineOn === true && s.capturedAt >= settled && s.capturedAt <= holdEnd).length >= MIN_SAMPLES
+    && Math.max(...after.map(s => s.fuelLevelMl)) - Math.min(...after.map(s => s.fuelLevelMl)) <= FILL_FROZEN_ML
+  if (frozen) {
+    const stuck = after[after.length - 1]!.fuelLevelMl
+    const lateEnd = claim.filledAt.getTime() + FILL_LATE_MINUTES * 60_000
+    const thaw = level.find(s => s.capturedAt > holdEnd && s.capturedAt.getTime() <= lateEnd
+      && Math.abs(s.fuelLevelMl - stuck) > FILL_FROZEN_ML)
+    if (!thaw) {
+      if (now.getTime() < lateEnd) return { verdict: 'PENDING', recoveredMl: null, reason: 'probe-frozen', confirmed: false, confidence: null }
+      // Frozen throughout: we could not look. Relay the claim, as with no telemetry.
+      return { verdict: 'REFILL', recoveredMl: null, reason: 'probe-frozen', confirmed: false, confidence: 0.75 }
+    }
+    // The window starts at the first reading that moved and runs one hold window on.
+    const thawAt = thaw.capturedAt.getTime()
+    const lateTo = thawAt + FILL_HOLD_MINUTES * 60_000
+    if (now.getTime() < lateTo) return { verdict: 'PENDING', recoveredMl: null, reason: 'probe-frozen', confirmed: false, confidence: null }
+    const late = level.filter(s => s.capturedAt.getTime() >= thawAt && s.capturedAt.getTime() <= lateTo)
+    if (late.length >= MIN_SAMPLES) {
+      const lateRise = median(late.map(s => s.fuelLevelMl)) - baseline
+      if (claim.filledMl > 0 && lateRise >= claim.filledMl * FILL_OBSERVED_MIN_RATIO) {
+        return {
+          verdict: 'REFILL', recoveredMl: lateRise, reason: 'level-rose-late', confirmed: true,
+          confidence: lerp(lateRise / claim.filledMl, FILL_OBSERVED_MIN_RATIO, 1, 0.5, 0.85),
+        }
+      }
     }
   }
 

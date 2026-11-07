@@ -230,3 +230,37 @@ describe('adjudicateFilling — the capped baseline applies only to a trusted pr
       .toMatchObject({ verdict: 'REFILL', reason: 'level-rose' })
   })
 })
+
+describe('adjudicateFilling: a probe frozen while the engine runs (KDX 130Y, 6 Nov 2026)', () => {
+  const min = 60_000
+  /** Every 2 min from 20 min before the claim; engine on throughout. */
+  const run = (mls: number[]): LevelSample[] => mls.map((fuelLevelMl, i) => ({
+    capturedAt: new Date(FILLED.getTime() - 20 * min + i * 2 * min), fuelLevelMl, engineOn: true,
+  }))
+  // Frozen at the pre-fill level for 2 h, then the fill shows and holds.
+  const frozenThenRise = run([...Array<number>(70).fill(126_864), ...Array<number>(40).fill(139_000)])
+  const late = new Date(FILLED.getTime() + 5 * 60 * min)
+
+  it('reads the rise once the probe moves again', () => {
+    const out = adjudicateFilling({ filledAt: FILLED, filledMl: 13_800 }, frozenThenRise, late)
+    expect(out).toMatchObject({ verdict: 'REFILL', reason: 'level-rose-late', confirmed: true })
+    expect(out.recoveredMl).toBe(12_136)
+  })
+
+  it('waits while the probe is still frozen', () => {
+    const soon = new Date(FILLED.getTime() + 90 * min)
+    const out = adjudicateFilling({ filledAt: FILLED, filledMl: 13_800 }, frozenThenRise.filter((s) => s.capturedAt <= soon), soon)
+    expect(out).toMatchObject({ verdict: 'PENDING', reason: 'probe-frozen' })
+  })
+
+  it('still calls it undulation when the probe moves and the tank is no fuller', () => {
+    const out = adjudicateFilling({ filledAt: FILLED, filledMl: 13_800 },
+      run([...Array<number>(70).fill(126_864), ...Array<number>(40).fill(125_000)]), late)
+    expect(out).toMatchObject({ verdict: 'REDISTRIBUTION', reason: 'no-rise-observed' })
+  })
+
+  it('keeps a parked flat tank as no rise', () => {
+    const parked = run(Array<number>(110).fill(126_864)).map((s) => ({ ...s, engineOn: false }))
+    expect(adjudicateFilling({ filledAt: FILLED, filledMl: 13_800 }, parked, late).verdict).toBe('REDISTRIBUTION')
+  })
+})

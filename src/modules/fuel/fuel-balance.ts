@@ -152,3 +152,19 @@ export function fuelBalance(o: { readings: BalanceReading[]; fillings: BalanceFi
     kmPerL: consumedL != null && consumedL > 0 && distanceKm >= 1 ? distanceKm / consumedL : null,
   }
 }
+
+/**
+ * The litres a report may print for a day the unit drove.
+ *
+ * `consumedL` clamps a negative gap to 0: the tank ended fuller than the
+ * recorded refills explain, so fuel went in that the ledger does not know
+ * about. On a unit that moved, 0 L is then a figure nobody can believe
+ * (KDX 130Y, 6 Nov 2026: 64.2 km, a 13.8 L refill ruled redistribution, 0.0 L
+ * printed), so it is null and the report shows a dash instead.
+ */
+export const MOVED_KM = 5
+export function reportableConsumptionL(bal: Pick<FuelBalance, 'consumedL' | 'unrecordedL'>, km: number | null): number | null {
+  if (bal.consumedL == null) return null
+  if (bal.consumedL === 0 && (bal.unrecordedL ?? 0) > 0 && (km ?? 0) >= MOVED_KM) return null
+  return bal.consumedL
+}
