@@ -25,19 +25,14 @@ import { prisma } from '../../lib/prisma.js'
 import { fleetDayBounds } from '../../lib/provider-time.js'
 import { WialonClient } from '../../providers/wialon/wialon.client.js'
 import { wialonIdOf } from './speed-report.service.js'
-import { isPrimeMover, vehicleHeading } from './tat-fuel-report.service.js'
+import { isTruck } from './vehicle-kind.js'
+export { isTruck }
 
 /** Alerts closer than this are one disconnection. */
 export const RUN_GAP_MS = 30 * 60_000
 const SESSIONS = 5
 const PAGE = 5_000
 const CACHE_MS = 60 * 60_000
-/** Named a light vehicle, whatever its plate or type says. */
-const LIGHT_VEHICLE = /(?:^|[\s-])LV(?:[\s-]|$)/i
-/** A truck: the reports' own heading for one, or a prime mover by its name. Pure. */
-export function isTruck(v: { type: string; plate: string; name: string }): boolean {
-  return !LIGHT_VEHICLE.test(v.name) && (['Trucks', 'Lorries'].includes(vehicleHeading(v)) || isPrimeMover(v.name))
-}
 
 /** Wialon's message type in bits 8 to 15: this bit is the events, and leaves out data, SMS and commands. */
 const EVENT_BIT = 0x0400

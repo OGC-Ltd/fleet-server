@@ -44,6 +44,7 @@ import {
   type ProbeState,
 } from './fuel-probe-health.js'
 import { FUEL_SENSOR_TYPE } from './sensor-inventory.service.js'
+import { isTruck } from '../reports/vehicle-kind.js'
 import { messageClock, type MessageClock } from '../../lib/connection-state.js'
 
 /** A channel that is not fuel: no fault codes, so only two honest live states. */
@@ -79,6 +80,8 @@ export interface ProbeReportRow {
   /** The provider unit this is installed on — "which unit was it installed on". */
   deviceId:  string | null
   orgCode:   string
+  /** A truck by the reports' own rule (reports/vehicle-kind isTruck): the Faulty Probe Report can list trucks only. */
+  truck:     boolean
 
   /** The fuel probe, with the full DIED / SILENT / OK verdict. */
   fuelProbe: {
@@ -413,7 +416,7 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
       ...(opts.orgId ? { organisationId: opts.orgId } : {}),
     },
     select: {
-      id: true, registrationPlate: true, name: true, deviceId: true,
+      id: true, registrationPlate: true, name: true, deviceId: true, vehicleType: true,
       organisation: { select: { code: true } },
     },
   })
@@ -530,6 +533,7 @@ export async function buildProbeReport(opts: ProbeReportOptions = {}): Promise<P
       name:      v.name,
       deviceId:  v.deviceId,
       orgCode:   v.organisation?.code ?? '',
+      truck:     isTruck({ type: v.vehicleType, plate: v.registrationPlate, name: v.name ?? '' }),
       fuelProbe: {
         state:       verdict.state,
         reason:      trackerSilent ? 'tracker-silent' : verdict.reason,
