@@ -3429,6 +3429,7 @@ model DriverConductCase {
   seatbelt       Int       @default(0)
   phone          Int       @default(0)
   covered        Int       @default(0)
+  corner         Int       @default(0)
   /// The first incident of the day: "open for" runs from here.
   openedAt       DateTime  @map("opened_at")
   /// pending | done
@@ -3436,6 +3437,9 @@ model DriverConductCase {
   action         String?
   note           String    @default("")
   actedBy        String    @default("") @map("acted_by")
+  /// Who gave the feedback (a site manager, the driver), as the operator typed it;
+  /// actedBy is who recorded it.
+  feedbackBy     String    @default("") @map("feedback_by")
   actedAt        DateTime? @map("acted_at")
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
@@ -3468,6 +3472,8 @@ model OperatorIncident {
   details        String   @default("")
   loggedBy       String   @default("") @map("logged_by")
   loggedAt       DateTime @map("logged_at")
+  /// When an operator shared it (WhatsApp); null until then.
+  sharedAt       DateTime? @map("shared_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])

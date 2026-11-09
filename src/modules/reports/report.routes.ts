@@ -26,9 +26,10 @@ import {
 } from './report.schema.js'
 import * as ctrl from './report.controller.js'
 import * as conduct from './driver-conduct.controller.js'
+import * as ranged from './range-reports.controller.js'
 import {
   foundCasesSchema, importCasesSchema, caseActionSchema, listCasesQuerySchema,
-  incidentSchema, importIncidentsSchema,
+  incidentSchema, importIncidentsSchema, incidentSharedSchema, dayRangeQuerySchema,
 } from './driver-conduct.schema.js'
 
 const router = Router({ mergeParams: true })
@@ -60,6 +61,10 @@ router.post('/reports/tankers', requirePermission('telemetry:read'), validateBod
 router.get('/reports/tat-fuel', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), ctrl.getTatFuelReportData)
 router.get('/reports/speed', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), ctrl.getSpeedReportData)
 router.get('/reports/probe-disconnections', requirePermission('telemetry:read'), validateQuery(probeReportQuerySchema), ctrl.getProbeReportData)
+// Worked out here, not in the page (v47): fleet days from and to, inclusive.
+router.get('/reports/fuel-consumption-rate', requirePermission('telemetry:read'), validateQuery(dayRangeQuerySchema), ranged.fuelConsumptionRate)
+router.get('/reports/alarm-distribution', requirePermission('vehicle:read'), validateQuery(dayRangeQuerySchema), ranged.alarmDistribution)
+router.get('/reports/unauthorized-passengers', requirePermission('telemetry:read'), validateQuery(dayRangeQuerySchema), ranged.unauthorizedPassengers)
 router.get('/reports/recovery', requirePermission('telemetry:read'), validateQuery(recoveryReportQuerySchema), ctrl.getRecoveryReport)
 router.get('/reports/recovery.pdf', requirePermission('telemetry:read'), validateQuery(recoveryReportQuerySchema), ctrl.downloadRecoveryReport)
 // The rows the page made, for one organisation or several together, drawn on the letterhead.
@@ -88,6 +93,7 @@ router.get('/driver-conduct/incidents', conductRead, conduct.listIncidents)
 router.post('/driver-conduct/incidents/import', conductRead, validateBody(importIncidentsSchema), conduct.importIncidents)
 router.put('/driver-conduct/incidents/:incidentId', conductRead, validateBody(incidentSchema), conduct.saveIncident)
 router.delete('/driver-conduct/incidents/:incidentId', conductRead, conduct.deleteIncident)
+router.put('/driver-conduct/incidents/:incidentId/shared', conductRead, validateBody(incidentSharedSchema), conduct.setIncidentShared)
 
 // Branded PDF reports — the downloadable counterparts of the dashboard pages,
 // drawn server-side.

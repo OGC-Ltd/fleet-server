@@ -18,6 +18,8 @@ export const foundCaseSchema = z.object({
   group: z.string().max(120).nullish(),
   driver: text(160),
   accel: count, brake: count, seatbelt: count, phone: count, covered: count,
+  // Harsh cornering opens a case too (v47); an older page sends none.
+  corner: count.default(0),
   openedAt: ms,
 })
 export type FoundCase = z.infer<typeof foundCaseSchema>
@@ -31,6 +33,7 @@ export const storedCaseSchema = foundCaseSchema.extend({
   action: z.string().max(120).nullish(),
   note: text(1000),
   by: text(160),
+  feedbackBy: text(160),
   actedAt: ms.nullish(),
 })
 export type StoredCase = z.infer<typeof storedCaseSchema>
@@ -40,6 +43,8 @@ export const importCasesSchema = z.object({ cases: z.array(storedCaseSchema).max
 export const caseActionSchema = z.object({
   action: z.string().min(1).max(120).nullable(),
   note: z.string().max(1000).default(''),
+  /** Who gave the feedback, as the operator typed it; who recorded it comes from the session. */
+  feedbackBy: z.string().max(160).default(''),
 })
 export type CaseAction = z.infer<typeof caseActionSchema>
 
@@ -63,4 +68,11 @@ export const incidentSchema = z.object({
   loggedAt: ms.optional(),
 }).refine((e) => Boolean(e.vehicleId || e.plate), { message: 'A unit is needed', path: ['plate'] })
 export type IncidentBody = z.infer<typeof incidentSchema>
+/** An incident shared (true) or not (false). */
+export const incidentSharedSchema = z.object({ shared: z.boolean() })
+
+/** The range of a report the server works out: fleet days, Nairobi, inclusive. */
+export const dayRangeQuerySchema = z.object({ from: day, to: day })
+  .refine((q) => q.from <= q.to, { message: 'From must not be after to', path: ['from'] })
+
 export const importIncidentsSchema = z.object({ entries: z.array(incidentSchema).max(20_000) })

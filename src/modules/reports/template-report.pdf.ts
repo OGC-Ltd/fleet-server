@@ -18,6 +18,7 @@ const dmy = (ms: number) => dmyhm(ms).slice(0, 10)
 /** "2026-10-30 11:42:05", in Nairobi, as the sheets write it. */
 export const stampWords = (ms: number) => iso(ms).slice(0, 19).replace('T', ' ')
 
+/** No longer printed (operator, 9 Nov 2026: "remove these words this is a system generated"). */
 export const CONTACT_LINE = 'This is a system-generated report. For any queries about its contents, please contact OGC Monitoring at operations@offgridconsultingltd.com.'
 
 /** "TF-SUKARI-20261104-0504": what the report is, whose, and when. */
@@ -281,7 +282,6 @@ export async function renderTatFuelPdf(b: TatFuelPdfBody, o: { orgCode: string; 
     w.table(cols, TAT_HEADS, rows.map(r => tatCells(r).map((text, i): Cell => ({ text, bold: i === 0 }))), { size: 6.8 })
   }
   w.y += 2 * MM
-  w.note(CONTACT_LINE)
   w.footers(`${b.fleet} · TAT and Fuel Report · ${several(b) ? period : date}`)
   doc.end()
   return done
@@ -350,7 +350,6 @@ export async function renderSpeedPdf(b: SpeedPdfBody, o: { orgCode: string; land
     })), { size: 7.8 })
   }
   w.y += 2 * MM
-  w.note(CONTACT_LINE)
   w.footers(`${b.fleet} · Speed Report · ${date}`)
   doc.end()
   return done
@@ -457,7 +456,6 @@ export async function renderDeliveriesPdf(b: DeliveriesPdfBody, o: { orgCode: st
     }
   }
   w.y += 2 * MM
-  w.note(CONTACT_LINE)
   w.footers(`${b.fleet} · Deliveries Report · ${dmyhm(b.at)}`)
   doc.end()
   return done

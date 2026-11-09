@@ -22,12 +22,15 @@ export interface ConductCase {
   plate: string
   group: string | null
   driver: string
-  accel: number; brake: number; seatbelt: number; phone: number; covered: number
+  accel: number; brake: number; seatbelt: number; phone: number; covered: number; corner: number
   openedAt: number
   status: 'pending' | 'done'
   action: string | null
   note: string
+  /** Who recorded the action (the signed-in user). */
   by: string
+  /** Who gave the feedback, as the operator typed it. */
+  feedbackBy: string
   actedAt: number | null
 }
 
@@ -37,16 +40,16 @@ export const MAX_CASES = 10_000
 export function toCase(r: DriverConductCase): ConductCase {
   return {
     id: r.caseKey, day: r.day, unitKey: r.unitKey, plate: r.plate, group: r.groupName, driver: r.driver,
-    accel: r.accel, brake: r.brake, seatbelt: r.seatbelt, phone: r.phone, covered: r.covered,
+    accel: r.accel, brake: r.brake, seatbelt: r.seatbelt, phone: r.phone, covered: r.covered, corner: r.corner,
     openedAt: r.openedAt.getTime(),
     status: r.status === 'done' ? 'done' : 'pending',
-    action: r.action, note: r.note, by: r.actedBy, actedAt: r.actedAt?.getTime() ?? null,
+    action: r.action, note: r.note, by: r.actedBy, feedbackBy: r.feedbackBy, actedAt: r.actedAt?.getTime() ?? null,
   }
 }
 
 const counts = (f: FoundCase) => ({
   day: f.day, unitKey: f.unitKey, plate: f.plate, groupName: f.group ?? null, driver: f.driver,
-  accel: f.accel, brake: f.brake, seatbelt: f.seatbelt, phone: f.phone, covered: f.covered,
+  accel: f.accel, brake: f.brake, seatbelt: f.seatbelt, phone: f.phone, covered: f.covered, corner: f.corner ?? 0,
 })
 
 export async function listCases(orgId: string, q: { from?: string; to?: string } = {}): Promise<ConductCase[]> {
@@ -107,8 +110,8 @@ export async function recordAction(orgId: string, caseKey: string, a: CaseAction
   const row = await prisma.driverConductCase.update({
     where,
     data: a.action
-      ? { status: 'done', action: a.action, note: a.note.slice(0, 1000), actedBy: by, actedAt: new Date() }
-      : { status: 'pending', action: null, note: '', actedBy: '', actedAt: null },
+      ? { status: 'done', action: a.action, note: a.note.slice(0, 1000), actedBy: by, feedbackBy: (a.feedbackBy ?? '').trim().slice(0, 160), actedAt: new Date() }
+      : { status: 'pending', action: null, note: '', actedBy: '', feedbackBy: '', actedAt: null },
   })
   return toCase(row)
 }
@@ -134,6 +137,7 @@ const recorded = (c: StoredCase) => ({
   action: c.status === 'done' ? c.action ?? null : null,
   note: c.status === 'done' ? c.note : '',
   actedBy: c.status === 'done' ? c.by : '',
+  feedbackBy: c.status === 'done' ? c.feedbackBy ?? '' : '',
   actedAt: c.status === 'done' && c.actedAt ? new Date(c.actedAt) : null,
 })
 
@@ -161,13 +165,15 @@ export async function importCases(orgId: string, incoming: StoredCase[]): Promis
 export interface LoggedIncident {
   id: string; kind: string; other: string; at: number; vehicleId: string | null; plate: string
   driver: string; location: string; status: 'Online' | 'Offline'; details: string; by: string; loggedAt: number
+  /** When it was shared; null until then. */
+  sharedAt: number | null
 }
 
 export function toIncident(r: OperatorIncident): LoggedIncident {
   return {
     id: r.id, kind: r.kind, other: r.other, at: r.at.getTime(), vehicleId: r.vehicleId, plate: r.plate,
     driver: r.driver, location: r.location, status: r.status === 'Offline' ? 'Offline' : 'Online',
-    details: r.details, by: r.loggedBy, loggedAt: r.loggedAt.getTime(),
+    details: r.details, by: r.loggedBy, loggedAt: r.loggedAt.getTime(), sharedAt: r.sharedAt?.getTime() ?? null,
   }
 }
 
@@ -194,6 +200,13 @@ export async function saveIncident(orgId: string, e: IncidentBody, by: string): 
 export async function deleteIncident(orgId: string, id: string): Promise<void> {
   const { count } = await prisma.operatorIncident.deleteMany({ where: { id, organisationId: orgId } })
   if (!count) throw new NotFoundError('That incident was not found')
+}
+
+/** Mark an entry shared (now) or not shared. */
+export async function setIncidentShared(orgId: string, id: string, shared: boolean): Promise<LoggedIncident> {
+  const { count } = await prisma.operatorIncident.updateMany({ where: { id, organisationId: orgId }, data: { sharedAt: shared ? new Date() : null } })
+  if (!count) throw new NotFoundError('That incident was not found')
+  return toIncident((await prisma.operatorIncident.findUnique({ where: { id } }))!)
 }
 
 /** Entries a browser kept, brought here once; one held already (same id) is left as it is. */

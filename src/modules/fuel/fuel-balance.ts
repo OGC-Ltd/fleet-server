@@ -128,12 +128,32 @@ export function stopLitres(fillings: BalanceFilling[]): number[] {
 export function fuelBalance(o: { readings: BalanceReading[]; fillings: BalanceFilling[]; drains: BalanceDrain[]; from: number; to: number }): FuelBalance {
   const seen = new Set<number>()
   const rows = o.readings.filter(p => p.t >= o.from && p.t < o.to && !seen.has(p.t) && Boolean(seen.add(p.t)))
-  const inSpan = (at: number) => at >= o.from && at < o.to
 
   const levels = rows.map(p => p.fuelMl).filter(readsFuel)
-  const startL = levels.length ? r1(median(levels.slice(0, EDGE_READINGS)) / 1000) : null
-  const endL = levels.length ? r1(median(levels.slice(-EDGE_READINGS)) / 1000) : null
+  return balanceFrom({
+    startL: edgeLevelL(levels.slice(0, EDGE_READINGS)), endL: edgeLevelL(levels.slice(-EDGE_READINGS)),
+    distanceKm: tripDistanceKm(rows), fillings: o.fillings, drains: o.drains, from: o.from, to: o.to,
+  })
+}
 
+/** The tank at one edge of a period: the middle of up to 7 readings that read a tank. */
+export const EDGE_READING_COUNT = EDGE_READINGS
+export function edgeLevelL(mls: Array<number | null>): number | null {
+  const v = mls.filter(readsFuel)
+  return v.length ? r1(median(v) / 1000) : null
+}
+
+/**
+ * The balance once the edges and the distance are known: what the ledger put
+ * in and took out over [from, to). The range report (fuel-consumption-rate)
+ * reads its edges and distance straight from the database and comes here.
+ */
+export function balanceFrom(o: {
+  startL: number | null; endL: number | null; distanceKm: number
+  fillings: BalanceFilling[]; drains: BalanceDrain[]; from: number; to: number
+}): FuelBalance {
+  const { startL, endL, distanceKm } = o
+  const inSpan = (at: number) => at >= o.from && at < o.to
   const filledL = r1(stopLitres(o.fillings
     .filter(f => inSpan(f.at) && (f.verdict === 'REFILL' || f.verdict === 'PENDING' || f.verdict == null)))
     .reduce((n, l) => n + r1(l), 0))
@@ -144,7 +164,6 @@ export function fuelBalance(o: { readings: BalanceReading[]; fillings: BalanceFi
 
   const gap = startL != null && endL != null ? r1(startL + filledL - theftL - endL) : null
   const consumedL = gap == null ? null : Math.max(0, gap)
-  const distanceKm = tripDistanceKm(rows)
   return {
     startL, endL, filledL, theftL, consumedL,
     unrecordedL: gap == null ? null : Math.max(0, -gap),
