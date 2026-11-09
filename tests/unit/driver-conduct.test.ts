@@ -16,13 +16,13 @@ import { foundCasesSchema, caseActionSchema, incidentSchema, importCasesSchema }
 const T = Date.parse('2026-11-01T08:00:00Z')
 const found = (unit: string, day = '2026-11-01', over: object = {}) => ({
   id: `${unit}|${day}`, day, unitKey: unit, plate: unit, group: 'Tankers', driver: 'John Sialo',
-  accel: 1, brake: 0, seatbelt: 0, phone: 2, covered: 0, openedAt: T, ...over,
+  accel: 1, brake: 0, seatbelt: 0, phone: 2, covered: 0, corner: 0, openedAt: T, ...over,
 })
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const row = (over: any = {}) => ({
   id: 'c1', organisationId: 'org1', caseKey: 'KCK345G|2026-11-01', day: '2026-11-01', unitKey: 'KCK345G', plate: 'KCK 345G',
-  groupName: 'Tankers', driver: 'John Sialo', accel: 1, brake: 0, seatbelt: 0, phone: 2, covered: 0,
-  openedAt: new Date(T), status: 'pending', action: null, note: '', actedBy: '', actedAt: null,
+  groupName: 'Tankers', driver: 'John Sialo', accel: 1, brake: 0, seatbelt: 0, phone: 2, covered: 0, corner: 0,
+  openedAt: new Date(T), status: 'pending', action: null, note: '', actedBy: '', feedbackBy: '', actedAt: null,
   createdAt: new Date(T), updatedAt: new Date(T), ...over,
 })
 
@@ -60,9 +60,9 @@ describe('an action on a case', () => {
   it('is recorded as the signed-in user, now', async () => {
     prismaMock.driverConductCase.findUnique.mockResolvedValueOnce({ id: 'c1' } as never)
     prismaMock.driverConductCase.update.mockResolvedValueOnce(row({ status: 'done', action: 'Verbal warning', actedBy: 'Ann Operator', actedAt: new Date() }) as never)
-    const c = await recordAction('org1', 'KCK345G|2026-11-01', { action: 'Verbal warning', note: 'Called at 9' }, 'Ann Operator')
+    const c = await recordAction('org1', 'KCK345G|2026-11-01', { action: 'Verbal warning', note: 'Called at 9', feedbackBy: ' Site Manager ' }, 'Ann Operator')
     expect(prismaMock.driverConductCase.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: 'done', action: 'Verbal warning', note: 'Called at 9', actedBy: 'Ann Operator' }),
+      data: expect.objectContaining({ status: 'done', action: 'Verbal warning', note: 'Called at 9', actedBy: 'Ann Operator', feedbackBy: 'Site Manager' }),
     }))
     expect(c.status).toBe('done')
   })
@@ -70,15 +70,15 @@ describe('an action on a case', () => {
   it('a null action reopens it', async () => {
     prismaMock.driverConductCase.findUnique.mockResolvedValueOnce({ id: 'c1' } as never)
     prismaMock.driverConductCase.update.mockResolvedValueOnce(row() as never)
-    await recordAction('org1', 'KCK345G|2026-11-01', { action: null, note: '' }, 'Ann')
+    await recordAction('org1', 'KCK345G|2026-11-01', { action: null, note: '', feedbackBy: '' }, 'Ann')
     expect(prismaMock.driverConductCase.update).toHaveBeenCalledWith(expect.objectContaining({
-      data: { status: 'pending', action: null, note: '', actedBy: '', actedAt: null },
+      data: { status: 'pending', action: null, note: '', actedBy: '', feedbackBy: '', actedAt: null },
     }))
   })
 
   it('on a case of another organisation, or none, is not found', async () => {
     prismaMock.driverConductCase.findUnique.mockResolvedValueOnce(null)
-    await expect(recordAction('org1', 'X|2026-11-01', { action: 'Driver called', note: '' }, 'Ann')).rejects.toThrow(/not found/)
+    await expect(recordAction('org1', 'X|2026-11-01', { action: 'Driver called', note: '', feedbackBy: '' }, 'Ann')).rejects.toThrow(/not found/)
   })
 })
 
@@ -88,7 +88,7 @@ describe('a browser\'s cases brought over', () => {
       ['A|2026-11-01', { actedAt: new Date(T) }],
       ['B|2026-11-01', { actedAt: new Date(T + 10_000) }],
     ])
-    const c = (id: string, actedAt: number | null) => ({ ...found(id), status: 'done' as const, action: 'Driver called', note: '', by: 'Ann', actedAt })
+    const c = (id: string, actedAt: number | null) => ({ ...found(id), status: 'done' as const, action: 'Driver called', note: '', by: 'Ann', feedbackBy: '', actedAt })
     const { create, update } = planImport(stored, [c('A', T + 5_000), c('B', T), c('C', null)])
     expect(update.map((x) => x.id)).toEqual(['A|2026-11-01'])
     expect(create.map((x) => x.id)).toEqual(['C|2026-11-01'])
@@ -96,7 +96,7 @@ describe('a browser\'s cases brought over', () => {
 
   it('keeps who acted and when, as the browser had it', async () => {
     prismaMock.driverConductCase.findMany.mockResolvedValueOnce([] as never).mockResolvedValueOnce([] as never)
-    const out = await importCases('org1', [{ ...found('A'), status: 'done', action: 'Driver called', note: 'ok', by: 'Ann', actedAt: T + 1 }])
+    const out = await importCases('org1', [{ ...found('A'), status: 'done', action: 'Driver called', note: 'ok', by: 'Ann', feedbackBy: 'Site Manager', actedAt: T + 1 }])
     expect(out.added).toBe(1)
     expect(prismaMock.driverConductCase.createMany).toHaveBeenCalledWith(expect.objectContaining({
       data: [expect.objectContaining({ status: 'done', action: 'Driver called', actedBy: 'Ann', actedAt: new Date(T + 1) })],

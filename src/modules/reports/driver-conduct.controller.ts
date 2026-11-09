@@ -36,6 +36,13 @@ export const recordAction: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+/** PUT …/incidents/:incidentId/shared — shared on WhatsApp, or not. */
+export const setIncidentShared: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await service.setIncidentShared(p(req, 'orgId'), p(req, 'incidentId'), (req.body as { shared: boolean }).shared))
+  } catch (err) { next(err) }
+}
+
 /** POST …/cases/import — cases a browser kept, or an exported file. */
 export const importCases: RequestHandler = async (req, res, next) => {
   try {
