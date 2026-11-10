@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { flaggedUnits, flagWords, nearestPlace, placesOf, plateIn, type SnapshotUnit } from '../../src/modules/stop-watch/stop-watch.rules.js'
+import { flaggedUnits, flagWords, nearestPlace, placesOf, plateIn, withMovement, type SnapshotUnit } from '../../src/modules/stop-watch/stop-watch.rules.js'
 
 const NOW = Date.UTC(2026, 10, 10, 9, 0)
 const ago = (min: number) => new Date(NOW - min * 60_000).toISOString()
@@ -48,5 +48,23 @@ describe('nearestPlace and plateIn', () => {
   })
   it('reads the plate from a name', () => {
     expect(plateIn(null, 'Mahindra 9200 KTCC 787D')).toBe('KTCC 787D')
+  })
+})
+
+describe('withMovement', () => {
+  // The cached snapshot carries no `movement`; without it every unit was skipped
+  it('flags a stop read from a raw snapshot row once the run is attached', () => {
+    const { movement: _m, ...raw } = unit({})
+    expect(flaggedUnits([raw as SnapshotUnit], { authorised, noGo, now: NOW })).toEqual([])
+    const units = withMovement([{ ...raw, lastMovedAt: ago(30) }], (_id, lastMovedAt) =>
+      ({ state: 'resting', since: new Date(lastMovedAt as string).toISOString() }))
+    expect(flaggedUnits(units, { authorised, noGo, now: NOW })).toHaveLength(1)
+  })
+
+  it('passes the fix time and leaves movement null when the tracker knows nothing', () => {
+    let seen: number | null = null
+    const [u] = withMovement([{ vehicleId: 'v9', lat: 0, lng: 0, speedKmh: 0, capturedAt: ago(2) }], (_id, _l, fixMs) => { seen = fixMs; return null })
+    expect(seen).toBe(NOW - 2 * 60_000)
+    expect(u!.movement).toBeNull()
   })
 })

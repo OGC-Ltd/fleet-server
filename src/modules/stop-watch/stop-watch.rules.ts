@@ -156,6 +156,31 @@ export interface SnapshotUnit {
   movement?: { state: string; since: string } | null
 }
 
+/** A row of the CACHED snapshot (findFleetSnapshot): no `movement` on it yet. */
+export interface RawSnapshotRow extends Omit<SnapshotUnit, 'movement'> {
+  lastMovedAt?: string | Date | null
+}
+
+/**
+ * The cached snapshot's rows with each unit's current run attached.
+ *
+ * findFleetSnapshot does not carry `movement`: the /vehicles/snapshot handler
+ * (telemetry.service) adds it per request from lib/movement-state, and the
+ * browser's copy of these rules always read it from there. Reading the cache
+ * directly left every unit without a run, so flaggedUnits skipped all of them
+ * and no stop was ever flagged (10 Nov 2026).
+ */
+export function withMovement(
+  rows: readonly RawSnapshotRow[],
+  movementOf: (vehicleId: string, lastMovedAt: string | Date | null, fixMs: number | null) => { state: string; since: string } | null,
+): SnapshotUnit[] {
+  return rows.map((r) => {
+    const fixMs = r.capturedAt ? Date.parse(r.capturedAt) : NaN
+    const mv = movementOf(r.vehicleId, r.lastMovedAt ?? null, Number.isFinite(fixMs) ? fixMs : null)
+    return { ...r, movement: mv ? { state: mv.state, since: mv.since } : null }
+  })
+}
+
 export interface StopFlag {
   key: string
   vehicleId: string

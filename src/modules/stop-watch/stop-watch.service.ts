@@ -17,9 +17,10 @@ import { connectedUsersReaching, makeToast, toastUsers } from '../../lib/toasts.
 import { getFleetSnapshotCached } from '../telemetry/fleet-snapshot.cache.js'
 import { findAllAsGeoJSON } from '../geofences/geofence.repository.js'
 import { AUTHORISED, NO_GO } from './stop-watch.places.js'
+import { movementState } from '../../lib/movement-state.js'
 import {
-  ORG_CODE, flagWords, flaggedUnits, nearestPlace, placesOf, storePlaces,
-  type Nearest, type Place, type SnapshotUnit, type StopFlag,
+  ORG_CODE, flagWords, flaggedUnits, nearestPlace, placesOf, storePlaces, withMovement,
+  type Nearest, type Place, type RawSnapshotRow, type StopFlag,
 } from './stop-watch.rules.js'
 
 export const CHECK_MS = 60_000
@@ -74,9 +75,10 @@ export async function checkStops(now = Date.now()): Promise<void> {
     if (fc) zones = { at: now, places: placesOf(fc.features.filter((f) => f.properties.isActive !== false) as never) }
   }
   const snap = await getFleetSnapshotCached(orgId)
+  const units = withMovement(snap as unknown as RawSnapshotRow[], movementState)
   const authorised = [...fromFile, ...zones.places]
   const near = [...storePlaces(), ...authorised]
-  const flags: StopWatchFlag[] = flaggedUnits(snap as unknown as SnapshotUnit[], { authorised, noGo, now }).map((f) => ({
+  const flags: StopWatchFlag[] = flaggedUnits(units, { authorised, noGo, now }).map((f) => ({
     ...f,
     nearest: f.kind === 'nogo' ? null : nearestPlace(f.lat, f.lng, near),
     text: flagWords(f, now),
@@ -85,9 +87,12 @@ export async function checkStops(now = Date.now()): Promise<void> {
 
   let sent = 0
   for (const f of flags) {
-    if (!(await firstTime(f.key, now))) continue
+    // Who can hear it first: a stop raised while nobody is connected must not
+    // be marked announced, or the person who opens the app a minute later
+    // never hears of it (the 24 h key would already be spent).
     const people = await connectedUsersReaching(orgId, f.vehicleId)
     if (!people.length) continue
+    if (!(await firstTime(f.key, now))) continue
     toastUsers(people, makeToast({
       kind: 'stop',
       level: f.kind === 'nogo' ? 'critical' : 'warning',
