@@ -16,6 +16,7 @@ import { prisma } from '../../lib/prisma.js'
 import { logger }  from '../../lib/logger.js'
 import { initPushDispatcher, getPushDispatcher } from '../../lib/push-dispatcher.js'
 import { pushToast, toastOrg, toastUsers } from '../../lib/toasts.js'
+import { stampOrganisation } from '../../lib/push-org.js'
 
 // ─── VAPID initialisation ──────────────────────────────────────────────────
 // The actual signing/encryption/delivery (webpush.sendNotification) runs on a
@@ -94,7 +95,9 @@ class PushService {
 
   /** Every push is also a toast in the open web app (lib/toasts), sent
    *  whether or not Web Push is set up or the person turned it on. */
-  async broadcastToOrg(orgId: string, payload: PushPayload): Promise<void> {
+  async broadcastToOrg(orgId: string, raw: PushPayload): Promise<void> {
+    // The organisation's logo as the icon, its code for the toast (lib/push-org)
+    const payload = await stampOrganisation(raw, orgId)
     toastOrg(orgId, pushToast(payload, orgId))
     if (!this.isEnabled) return
     await this.deliver(await prisma.pushSubscription.findMany({
@@ -105,8 +108,10 @@ class PushService {
 
   /** Every device these people turned notifications on from, whichever
    *  organisation they were looking at when they did. */
-  async sendToUsers(userIds: string[], payload: PushPayload): Promise<void> {
+  async sendToUsers(userIds: string[], raw: PushPayload): Promise<void> {
     if (userIds.length === 0) return
+    // The logo of the organisation the payload names in data.orgId, when it names one
+    const payload = await stampOrganisation(raw)
     toastUsers(userIds, pushToast(payload))
     if (!this.isEnabled) return
     await this.deliver(await prisma.pushSubscription.findMany({
