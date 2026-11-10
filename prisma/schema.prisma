@@ -333,6 +333,8 @@ model Organisation {
   dashcamAlarmFeedback DashcamAlarmFeedback[]
   alertDecisions       AlertDecision[]
   vehicleInsights      VehicleInsight[]
+  plannerCustomers     PlannerCustomer[]
+  deliveryPlans        DeliveryPlan[]
 
   @@map("organisations")
 }
@@ -3545,4 +3547,88 @@ model DashcamAlarmFeedback {
 
   @@index([organisationId, alarmId])
   @@map("dashcam_alarm_feedback")
+}
+
+
+// ---------------------------------------------------------------------------
+// PLANNER — delivery sheets uploaded per truck and day (Menengai, 11 Nov 2026)
+// ---------------------------------------------------------------------------
+
+/// A customer from a delivery sheet, keyed by the sales system's CUSTOMER ID.
+/// Its geofence is drawn once, a circle at the sheet's coordinates, and kept:
+/// a later sheet reuses it, and a person may redraw it.
+model PlannerCustomer {
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  /// The sheet's CUSTOMER ID.
+  customerCode   String   @map("customer_code")
+  name           String
+  /// The sheet's LOCATION (a town or area), as written.
+  location       String   @default("")
+  lat            Float
+  lng            Float
+  /// The customer's fence. Not a foreign key: a fence deleted elsewhere is
+  /// drawn again on the next upload.
+  geofenceId     String?  @map("geofence_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organisation Organisation       @relation(fields: [organisationId], references: [id])
+  stops        DeliveryPlanStop[]
+
+  @@unique([organisationId, customerCode])
+  @@map("planner_customers")
+}
+
+/// One truck's delivery sheet for one day.
+model DeliveryPlan {
+  id             String    @id @default(cuid())
+  organisationId String    @map("organisation_id")
+  /// Matched from the sheet's plate; NULL when no unit carries it.
+  vehicleId      String?   @map("vehicle_id")
+  /// The plate as the sheet writes it.
+  plate          String
+  driverName     String    @default("") @map("driver_name")
+  /// Matched by name among the organisation's people; NULL when none is.
+  driverUserId   String?   @map("driver_user_id")
+  planDate       DateTime  @map("plan_date") @db.Date
+  /// When the sheet was printed (its Date: line).
+  sheetAt        DateTime? @map("sheet_at")
+  gatePass       String    @default("") @map("gate_pass")
+  tillNo         String    @default("") @map("till_no")
+  sourceFile     String    @default("") @map("source_file")
+  createdById    String?   @map("created_by")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organisation Organisation       @relation(fields: [organisationId], references: [id])
+  stops        DeliveryPlanStop[]
+
+  @@index([organisationId, planDate])
+  @@index([vehicleId, planDate])
+  @@map("delivery_plans")
+}
+
+/// A line of the sheet: one customer, its invoice, and what happened there.
+model DeliveryPlanStop {
+  id         String    @id @default(cuid())
+  planId     String    @map("plan_id")
+  sequence   Int
+  rep        String    @default("")
+  customerId String    @map("customer_id")
+  invoiceNo  String    @default("") @map("invoice_no")
+  amount     Decimal?  @db.Decimal(14, 2)
+  tonnage    Decimal?  @db.Decimal(10, 3)
+  /// FULL | PARTLY | REJECTED, set by a person after the run; NULL = open.
+  outcome    String?
+  remarks    String    @default("")
+  outcomeBy  String?   @map("outcome_by")
+  outcomeAt  DateTime? @map("outcome_at")
+
+  plan     DeliveryPlan    @relation(fields: [planId], references: [id], onDelete: Cascade)
+  customer PlannerCustomer @relation(fields: [customerId], references: [id])
+
+  @@unique([planId, sequence])
+  @@index([customerId])
+  @@map("delivery_plan_stops")
 }

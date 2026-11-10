@@ -112,6 +112,12 @@ export const PERMISSION_CATALOGUE = {
   // and technician keep telemetry for the screens they do see, and the
   // Logbook is not one of them.
   'logbook:read':          'Open the vehicle Logbook',
+  // The Planner (2026-11-11): a truck's delivery sheet for a day, its
+  // customers' geofences, and plan against actual. Read rides with the
+  // Logbook; write uploads sheets, redraws nothing (that is geofence:*),
+  // and marks each stop Full / Partly / Rejected.
+  'planner:read':          'View delivery plans',
+  'planner:write':         'Upload delivery plans and mark stops',
 
   // Repair reporting. A technician walks the yard with a list of faulty
   // probes, works through it, and files ONE report covering every unit they
@@ -209,7 +215,7 @@ const ORG_EVERYTHING: PermissionSlug[] = [
   'weighbridge:read', 'weighbridge:create', 'weighbridge:update', 'weighbridge:export',
   'fuel_filling:read', 'fuel_filling:create', 'fuel_review:read',
   'fuel_theft:read', 'fuel_theft:create',
-  'sensor:read', 'logbook:read',
+  'sensor:read', 'logbook:read', 'planner:read', 'planner:write',
   // The office reads what technicians file. A repair report nobody upstream
   // can open is a report that exists only in an inbox.
   //
@@ -354,7 +360,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'report:read', 'report:export', 'report:operations',
       'driver:read', 'driver:export',
       'fuel_filling:read', 'fuel_review:read', 'fuel_theft:read', 'fuel_audit:read',
-      'logbook:read',
+      'logbook:read', 'planner:read',
       'weighbridge:read', 'weighbridge:export',
       'geofence:read', 'route:read', 'dispatch:read',
       'repair:read', 'repair:flag', 'repair:book',
@@ -374,7 +380,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'dashboard:read', 'trip:read', 'sensor:read',
       'geofence:read', 'geofence:create', 'geofence:update',
       'fuel_theft:read', 'fuel_theft:create', 'fuel_theft:triage', 'fuel_audit:read', 'fuel_filling:read',
-      'fuel_review:read', 'logbook:read',
+      'fuel_review:read', 'logbook:read', 'planner:read',
       'driver:read',
       'report:read', 'report:export', 'report:operations',
       // Suspected malicious damage found in a repair (Repair Workflow 4.2).
@@ -388,7 +394,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       ...TRACKING, ...MAP_TOOLS, 'map:playback',
       'dashboard:read', 'trip:read', 'sensor:read',
       'geofence:read', 'fuel_theft:read', 'fuel_audit:read', 'fuel_filling:read',
-      'fuel_review:read', 'logbook:read',
+      'fuel_review:read', 'logbook:read', 'planner:read',
       'driver:read',
       'report:read', 'report:operations',
       'security_case:read',
@@ -404,7 +410,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     permissions: [
       ...TRACKING, ...MAP_TOOLS, 'map:playback',
       'dashboard:read', 'trip:read', 'fuel_filling:read', 'fuel_review:read',
-      'sensor:read', 'dispatch:read', 'logbook:read',
+      'sensor:read', 'dispatch:read', 'logbook:read', 'planner:read', 'planner:write',
       'weighbridge:read', 'report:operations',
     ],
   },
@@ -414,7 +420,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     permissions: [
       ...TRACKING, ...MAP_TOOLS, 'map:playback',
       'dashboard:read', 'trip:read', 'fuel_filling:read', 'fuel_review:read',
-      'sensor:read', 'dispatch:read', 'logbook:read',
+      'sensor:read', 'dispatch:read', 'logbook:read', 'planner:read', 'planner:write',
       'weighbridge:read', 'report:operations',
     ],
   },

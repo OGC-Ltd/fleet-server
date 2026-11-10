@@ -41,6 +41,7 @@ import analyticsRoutes from './modules/analytics/analytics.routes.js'
 import incidentsRoutes     from './modules/incidents/incidents.routes.js'
 import repairRoutes       from './modules/repairs/repairs.routes.js'
 import dashboardRoutes from './modules/dashboard/dashboard.routes.js'
+import plannerRoutes from './modules/planner/planner.routes.js'
 import * as dashboard from './modules/dashboard/dashboard.service.js'
 import { notificationsOrgRouter } from './modules/notifications/notifications.router.js'
 import * as notificationsCtrl from './modules/notifications/notifications.controller.js'
@@ -100,6 +101,8 @@ export function createApp() {
   // Reports the page makes and the server draws: a week of a family's geofence
   // visits runs past the usual limit. The parser below skips a body already read.
   app.use(/^\/api\/v1\/organisations\/[^/]+\/reports\/(?:dormant-assets|geofences|tat-fuel|speed|deliveries|document)\.pdf$/, express.json({ limit: '8mb' }))
+  // A delivery sheet, base64 (Planner): up to 2 MB of workbook.
+  app.use(/^\/api\/v1\/organisations\/[^/]+\/planner\/sheets(?:\/preview)?$/, express.json({ limit: '3mb' }))
   app.use(express.json({
     limit: '1mb',
     verify: (req, _res, buf) => { (req as { rawBody?: Buffer }).rawBody = buf },
@@ -311,6 +314,7 @@ export function createApp() {
   app.use(`${orgBase}/incidents`, incidentsRoutes)
   app.use(`${orgBase}/repairs`, repairRoutes)
   app.use(`${orgBase}/dashboard`, dashboardRoutes)
+  app.use(`${orgBase}/planner`, plannerRoutes)
 
   // Org-wide dashboard SSE stream + push subscription management
   app.get(`${orgBase}/live`, authenticate, requireOrgAccess, requirePermission('notification:read'), notificationsCtrl.dashboardStream)
