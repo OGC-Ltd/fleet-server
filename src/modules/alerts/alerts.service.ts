@@ -365,7 +365,7 @@ export async function reviewSpeeding(orgId: string, id: string, userId: string, 
   if (!check.ok) {
     throw new ForbiddenError(check.reason === 'not_a_member'
       ? 'Only an administrator of this organisation can escalate or de-escalate an overspeeding alert'
-      : 'Only a system administrator or the platform administrator can escalate or de-escalate an overspeeding alert')
+      : 'Only an admin or the system administrator can escalate or de-escalate an overspeeding alert')
   }
   const row = await prisma.speedingIncident.findFirst({
     where: { id, organisationId: orgId },

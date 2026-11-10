@@ -18,6 +18,7 @@ import userRoutes from './modules/users/user.routes.js'
 import userGroupRoutes from './modules/users/user-groups.routes.js'
 import { requireUserAdministrator } from './modules/users/user.authz.js'
 import roleRoutes from './modules/roles/role.routes.js'
+import iamRoutes from './modules/iam/iam.routes.js'
 import vehicleRoutes from './modules/vehicles/vehicle.routes.js'
 import routeAheadRoutes from './modules/route-ahead/route-ahead.routes.js'
 import cameraRoutes from './modules/camera/camera.routes.js'
@@ -232,6 +233,8 @@ export function createApp() {
   // The global routes are for super admins; org admins use the org-scoped
   // routes mounted below.
   app.use(`${v1}/user-groups`, userGroupRoutes)
+  // Access rights per person. The System Administrator only (iam.routes).
+  app.use(`${v1}/iam`, iamRoutes)
   app.get(`${v1}/permissions`, authenticate, validateQuery(listQuerySchema), roleCtrl.listPermissions)
 
   // Platform user provisioning — one person, several organisations, a different

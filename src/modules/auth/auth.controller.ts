@@ -2,7 +2,7 @@ import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import { UnauthorizedError } from '../../core/errors/errors.js'
 import { prisma } from '../../lib/prisma.js'
-import { resolveSubject } from '../../lib/authz/subject.js'
+import { permissionsIn, resolveSubject } from '../../lib/authz/subject.js'
 import * as authService from './auth.service.js'
 import { setAuthCookies, clearAuthCookies, REFRESH_COOKIE } from './auth.cookies.js'
 import type { LoginDto, RefreshDto } from './auth.schema.js'
@@ -103,9 +103,9 @@ export const meHandler: RequestHandler = async (req, res, next) => {
         const grant = subject.orgs.get(o.id)
         return {
           ...o,
-          permissions: [
-            ...new Set([...subject.platformPermissions, ...(grant?.permissions ?? [])]),
-          ],
+          // permissionsIn, not a merge done here: it is the one place a
+          // personal denial (IAM) is taken off a platform role's set.
+          permissions: [...permissionsIn(subject, o.id)],
           // null = the whole fleet. An array, however short, is the complete
           // list of what this person may see in that organisation.
           vehicleIds: subject.isPlatform ? null : (grant?.vehicleIds ? [...grant.vehicleIds] : null),

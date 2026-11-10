@@ -1,17 +1,17 @@
 /**
  * Every organisation gets the standard roles.
  *
- * The organisation-scoped roles in ROLE_DEFINITIONS (HR, System Administrator,
+ * The organisation-scoped roles in ROLE_DEFINITIONS (HR, Admin,
  * Fleet Manager … Technician) are rows keyed to one organisation, and until
  * now only `npm run seed:rbac` wrote them. An organisation created after the
  * last seed run therefore had none: its user page offered nothing but the one
  * role somebody there already held, which is how a new tenant came to show
- * "System Administrator" alone.
+ * "Admin" alone.
  *
  * This creates the MISSING ones and nothing else. A role that already exists
  * is not renamed and its permissions are not touched, so an operator's hand
  * tuning survives; that is seed:rbac --preserve, minus the script. Platform
- * roles (Director, Platform Administrator) are one row for every organisation
+ * roles (Director, System Administrator) are one row for every organisation
  * and are not written here.
  *
  * Called when an organisation is created, and once at boot so every existing

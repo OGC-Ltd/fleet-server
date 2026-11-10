@@ -61,6 +61,13 @@ export type Subject = {
   isPlatform: boolean
   platformPermissions: Set<string>
   orgs: Map<string, OrgGrant>
+  /**
+   * Rights taken from this person in ONE organisation that a platform role
+   * would otherwise give them there (a personal denial, IAM). Only platform
+   * roles need it: an organisation's own set simply has the right removed.
+   * Never applied to the holder of the wildcard.
+   */
+  denied?: Map<string, Set<string>>
 }
 
 /** The wire form. Sets and Maps do not survive JSON. */
@@ -69,6 +76,8 @@ type Serialised = {
   isPlatform: boolean
   platformPermissions: string[]
   orgs: Record<string, { permissions: string[]; vehicleIds: string[] | null }>
+  /** Absent on entries cached before personal grants existed. */
+  denied?: Record<string, string[]>
 }
 
 const serialise = (s: Subject): Serialised => ({
@@ -81,6 +90,7 @@ const serialise = (s: Subject): Serialised => ({
       vehicleIds:  g.vehicleIds ? [...g.vehicleIds] : null,
     }]),
   ),
+  denied: Object.fromEntries([...(s.denied ?? [])].map(([id, set]) => [id, [...set]])),
 })
 
 const deserialise = (r: Serialised): Subject => ({
@@ -93,6 +103,7 @@ const deserialise = (r: Serialised): Subject => ({
       vehicleIds:  g.vehicleIds ? new Set(g.vehicleIds) : null,
     }]),
   ),
+  denied: new Map(Object.entries(r.denied ?? {}).map(([id, slugs]) => [id, new Set(slugs)])),
 })
 
 // ---------------------------------------------------------------------------
@@ -157,7 +168,7 @@ export async function invalidateSubject(userId: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function loadSubject(userId: string): Promise<Subject> {
-  const [memberships, grants] = await Promise.all([
+  const [memberships, grants, personal] = await Promise.all([
     prisma.orgMembership.findMany({
       where:   { userId, revokedAt: null },
       select:  {
@@ -176,6 +187,11 @@ async function loadSubject(userId: string): Promise<Subject> {
           },
         },
       },
+    }),
+    // Rights given to or taken from this one person (IAM).
+    prisma.userPermissionGrant.findMany({
+      where:  { userId },
+      select: { organisationId: true, effect: true, permission: { select: { slug: true } } },
     }),
   ])
 
@@ -244,12 +260,73 @@ async function loadSubject(userId: string): Promise<Subject> {
     })
   }
 
-  return {
-    userId,
-    isPlatform: platformPermissions.size > 0,
-    platformPermissions,
-    orgs,
+  // Platform-ness is decided by ROLES alone, before personal grants touch the
+  // set: a grant can widen what somebody does, never where they reach.
+  const isPlatform = platformPermissions.size > 0
+  const denied = applyPersonalGrants(personal ?? [], { isPlatform, platformPermissions, orgs })
+
+  return { userId, isPlatform, platformPermissions, orgs, denied }
+}
+
+export type PersonalGrant = { organisationId: string | null; effect: string; permission: { slug: string } }
+
+/**
+ * Lay one person's own grants over what their roles gave them.
+ *
+ * Allowances first, denials last, so a denial always wins. A grant for one
+ * organisation applies only where the person already reaches it (a membership,
+ * or a platform role): it never opens a tenant. Two slugs are never personal:
+ * the wildcard, which is the System Administrator role and nothing else, and
+ * `vehicle:flagged_only`, which is a restriction read off the role.
+ *
+ * The holder of the wildcard is left exactly as they were. Nothing could be
+ * added, and a denial that did not bite would be a lie on the page.
+ *
+ * Returns the per-organisation denials a platform role still needs applied at
+ * question time, since its permissions are one set for every organisation.
+ */
+export function applyPersonalGrants(
+  personal: readonly PersonalGrant[],
+  into: { isPlatform: boolean; platformPermissions: Set<string>; orgs: Map<string, OrgGrant> },
+): Map<string, Set<string>> {
+  const denied = new Map<string, Set<string>>()
+  if (personal.length === 0 || into.platformPermissions.has(WILDCARD)) return denied
+
+  const usable = personal.filter((g) => g.permission.slug !== WILDCARD && g.permission.slug !== FLAGGED_ONLY)
+
+  for (const g of usable) {
+    if (g.effect !== 'allow') continue
+    const slug = g.permission.slug
+    if (g.organisationId === null) {
+      if (into.isPlatform) into.platformPermissions.add(slug)
+      for (const org of into.orgs.values()) org.permissions.add(slug)
+    } else {
+      let org = into.orgs.get(g.organisationId)
+      if (!org && into.isPlatform) {
+        // A platform role reaches the organisation without a membership row.
+        org = { permissions: new Set<string>(), vehicleIds: null }
+        into.orgs.set(g.organisationId, org)
+      }
+      org?.permissions.add(slug)
+    }
   }
+
+  for (const g of usable) {
+    if (g.effect !== 'deny') continue
+    const slug = g.permission.slug
+    if (g.organisationId === null) {
+      into.platformPermissions.delete(slug)
+      for (const org of into.orgs.values()) org.permissions.delete(slug)
+    } else {
+      into.orgs.get(g.organisationId)?.permissions.delete(slug)
+      if (into.isPlatform) {
+        const set = denied.get(g.organisationId) ?? new Set<string>()
+        set.add(slug)
+        denied.set(g.organisationId, set)
+      }
+    }
+  }
+  return denied
 }
 
 /** Units with an open repair job, per organisation asked about. */
@@ -335,6 +412,8 @@ export function canReachOrg(subject: Subject, orgId: string): boolean {
 export function permissionsIn(subject: Subject, orgId: string | null): Set<string> {
   const merged = new Set(subject.platformPermissions)
   if (orgId) for (const p of subject.orgs.get(orgId)?.permissions ?? []) merged.add(p)
+  // A personal denial in this one organisation, against a platform role.
+  if (orgId && !merged.has(WILDCARD)) for (const p of subject.denied?.get(orgId) ?? []) merged.delete(p)
   return merged
 }
 

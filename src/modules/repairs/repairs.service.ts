@@ -273,7 +273,7 @@ export async function assignItemToTechnician(itemId: string, orgId: string, user
   if (!assigner.ok) {
     throw new ForbiddenError(assigner.reason === 'not_a_member'
       ? 'Only an administrator of this organisation can assign a triage'
-      : 'Only a system administrator or the platform administrator can assign a triage')
+      : 'Only an admin or the system administrator can assign a triage')
   }
 
   if (technicianId) {
