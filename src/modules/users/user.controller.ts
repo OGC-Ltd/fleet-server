@@ -169,7 +169,7 @@ async function assertMayDelete(req: Parameters<RequestHandler>[0]): Promise<bool
   if (verdict.reason === 'protected') {
     throw new ForbiddenError(
       `An administrator cannot delete a ${ROLE_WORD[verdict.blockedBy ?? ''] ?? 'more senior'} account. `
-      + 'Ask the platform administrator.',
+      + 'Ask the system administrator.',
     )
   }
   if (verdict.reason === 'not_a_member') {
@@ -194,11 +194,11 @@ async function assertMayEdit(
   }
 }
 
-/** For the refusal sentence. The two System Administrator slugs share a name. */
+/** For the refusal sentence. `admin` and the legacy `system_admin` are both the organisation's Admin. */
 const ROLE_WORD: Record<string, string> = {
-  super_admin:  'platform administrator',
-  system_admin: 'system administrator',
-  admin:        'system administrator',
+  super_admin:  'system administrator',
+  system_admin: 'admin',
+  admin:        'admin',
   director:     'director',
 }
 

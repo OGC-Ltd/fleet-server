@@ -198,7 +198,7 @@ async function assertAssigner(orgId: string, userId: string) {
   if (!check.ok) {
     throw new ForbiddenError(check.reason === 'not_a_member'
       ? 'Only an administrator of this organisation can assign a follow-up'
-      : 'Only a system administrator or the platform administrator can assign a follow-up')
+      : 'Only an admin or the system administrator can assign a follow-up')
   }
 }
 

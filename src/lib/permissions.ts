@@ -251,16 +251,14 @@ export type RoleDefinition = {
 export const ROLE_DEFINITIONS: RoleDefinition[] = [
   // ── Platform ─────────────────────────────────────────────────────────────
   {
-    /* Renamed from "System Administrator", which is now the name of the
-     * ORG-SCOPED role above. Two roles cannot both be called that: the account
-     * page prints this one as "System Administrator · applies in every
-     * organisation" directly above a list of organisations each showing their
-     * own, and no reading of that tells you which one you actually hold or
-     * which one somebody should be given.
+    /* The one role that reaches every organisation, and the only holder of
+     * the wildcard. It has been "System Administrator", then "Platform
+     * Administrator" while the organisation's own administrator carried the
+     * first name; since 2026-11-10 that role is "Admin" and this one is the
+     * System Administrator again, which is what the operators call it.
      *
-     * The slug is untouched for the reason the rename above gives — every
-     * grant is joined on it. */
-    slug: 'super_admin', name: 'Platform Administrator', platform: true, vehicleScopable: false,
+     * The slug is untouched: every grant is joined on it. */
+    slug: 'super_admin', name: 'System Administrator', platform: true, vehicleScopable: false,
     description: 'Every organisation. All data and all administration. The super admin.',
     // The wildcard, deliberately alone: enumerating permissions here would mean
     // a permission added later is one the super admin silently lacks.
@@ -280,24 +278,22 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
 
   // ── Organisation administration ──────────────────────────────────────────
   /**
-   * The system administrator OF ONE ORGANISATION.
+   * The administrator OF ONE ORGANISATION: "Admin".
    *
-   * Renamed from "Admin". The name was the whole problem: the roster offered
-   * both this and the PLATFORM role, whose name is also System Administrator,
-   * and an operator reading a picker containing "Admin" and "System
-   * Administrator · all orgs" reasonably concluded that their organisation did
-   * not have a system administrator role — only a lesser "Admin" — and that the
-   * real one was the cross-tenant grant. It was the other way round: this is
-   * the role that administers an organisation, and it is seeded into every one
-   * of them.
+   * It was called "System Administrator" for a while, which is also what the
+   * role that reaches EVERY organisation is called, and two roles under one
+   * name could not be told apart on the roster. The operator asked for the one
+   * without access across all organisations to be "Admin" (2026-11-10); the
+   * name "System Administrator" now belongs to `super_admin` alone.
    *
    * The SLUG stays `admin`. Slugs are the key every grant, every seed run and
    * every permission row is joined on; changing it would orphan the grants of
    * everybody who already holds it and silently strip their access. A rename is
-   * a display change and must stay one.
+   * a display change and must stay one. Existing rows are renamed by migration
+   * 20261110120000: ensureCatalogueRoles only creates what is missing.
    */
   {
-    slug: 'admin', name: 'System Administrator', platform: false, vehicleScopable: false,
+    slug: 'admin', name: 'Admin', platform: false, vehicleScopable: false,
     description: 'Full access within this organisation, including its users.',
     permissions: [
       ...ORG_EVERYTHING,

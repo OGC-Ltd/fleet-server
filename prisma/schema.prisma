@@ -303,6 +303,7 @@ model Organisation {
 
   roles                Role[]
   memberships          OrgMembership[]
+  permissionGrants     UserPermissionGrant[]
   users                User[]
   userGroups           UserGroup[]
   groupOrganisations   UserGroupOrganisation[]
@@ -369,7 +370,8 @@ model Permission {
   resource String // e.g. "vehicle", "trip", "fuel_theft"
   action   String // e.g. "read", "create", "update", "delete"
 
-  roles RolePermission[]
+  roles      RolePermission[]
+  userGrants UserPermissionGrant[]
 
   @@unique([resource, action])
   @@map("permissions")
@@ -478,6 +480,8 @@ model User {
   // Audit — who assigned/unassigned
   assignmentsGranted   VehicleAssignment[] @relation("AssignedByUser")
   userRolesGranted     UserRole[]          @relation("UserRoleGrantedBy")
+  permissionGrants        UserPermissionGrant[] @relation("PermissionGrantUser")
+  permissionGrantsGiven   UserPermissionGrant[] @relation("PermissionGrantGivenBy")
   geofencesAssigned    VehicleGeofence[]   @relation("GeofenceAssignedBy")
   ingestApiKeysCreated IngestApiKey[]      @relation("ApiKeyCreatedBy")
 
@@ -523,6 +527,37 @@ model UserRole {
   // forbids two LIVE grants of one role while leaving history alone. That
   // is the constraint user.service.ts:34 already catches P2002 for.
   @@map("user_roles")
+}
+
+/// One access right given to, or taken from, ONE person, on top of whatever
+/// their role carries (the IAM page; lib/authz/subject merges these in).
+///
+/// `organisationId` NULL means every organisation the person can reach.
+/// `effect` is 'allow' or 'deny'; a denial wins over the role and over an
+/// allowance. A row is removed, not revoked, when the right goes back to
+/// "whatever the role says" — who gave it and when is on the row while it
+/// stands, and every change is logged by the service.
+///
+/// Uniqueness per (user, organisation, permission) is two PARTIAL unique
+/// indexes in the migration, because Postgres treats NULL organisations as
+/// distinct under a plain one.
+model UserPermissionGrant {
+  id             String   @id @default(cuid())
+  userId         String   @map("user_id")
+  organisationId String?  @map("organisation_id")
+  permissionId   String   @map("permission_id")
+  effect         String
+  grantedById    String?  @map("granted_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  user         User          @relation("PermissionGrantUser", fields: [userId], references: [id], onDelete: Cascade)
+  organisation Organisation? @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  permission   Permission    @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  grantedBy    User?         @relation("PermissionGrantGivenBy", fields: [grantedById], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([organisationId])
+  @@map("user_permission_grants")
 }
 
 /// Which organisations a person may reach, and how much of each fleet.
