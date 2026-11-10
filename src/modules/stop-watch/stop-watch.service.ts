@@ -100,7 +100,8 @@ export async function checkStops(now = Date.now()): Promise<void> {
       body: f.text,
       orgId,
       vehicleId: f.vehicleId,
-      data: { ...f },
+      // orgCode: the toast draws Menengai's logo (lib/push-org)
+      data: { ...f, orgCode: ORG_CODE },
     }))
     sent++
   }
