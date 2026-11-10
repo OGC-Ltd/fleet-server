@@ -28,7 +28,7 @@ import { prisma } from './prisma.js'
 import { logger } from './logger.js'
 import { publishNotification } from './notifications/notification.store.js'
 import { isInsideFence, haversineM, fenceBox, inBox, type FenceBox, type FenceGeometry } from './geofence.js'
-import { categorise, isEstateFeature, ringAreaHa, type ZoneCategory } from './zone-taxonomy.js'
+import { categoryOf, isEstateFeature, ringAreaHa, type ZoneCategory } from './zone-taxonomy.js'
 
 interface CachedZone {
   id:   string
@@ -389,6 +389,7 @@ async function getZones(orgId: string): Promise<CachedZone[]> {
     select: {
       id: true, name: true, type: true, mode: true, isActive: true,
       centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true,
+      purpose: true,
     },
   })
 
@@ -396,7 +397,7 @@ async function getZones(orgId: string): Promise<CachedZone[]> {
   for (const r of rows) {
     const geometry = toGeometry(r)
     if (!geometry) continue
-    const category = categorise(r.name)
+    const category = categoryOf(r)
     zones.push({
       id: r.id, name: r.name, geometry,
       keepOut: r.isActive && r.mode === 'BLOCKLIST',
