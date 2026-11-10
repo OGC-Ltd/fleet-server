@@ -1,4 +1,6 @@
 ﻿import { prisma } from '../../lib/prisma.js'
+import { Prisma } from '../../../generated/prisma/client.js'
+import { ConflictError } from '../../core/errors/errors.js'
 import type { CreateGeofence, UpdateGeofence, GeofenceListQuery } from './geofence.schema.js'
 
 export async function create(orgId: string, createdById: string, dto: CreateGeofence) {
@@ -6,14 +8,29 @@ export async function create(orgId: string, createdById: string, dto: CreateGeof
     data: {
       organisationId: orgId,
       name:           dto.name,
-      type:           dto.type,
       mode:           dto.mode ?? 'ALLOWLIST',
-      centerLat:      dto.type === 'CIRCLE'  ? dto.centerLat  : undefined,
-      centerLng:      dto.type === 'CIRCLE'  ? dto.centerLng  : undefined,
-      radiusM:        dto.type === 'CIRCLE'  ? dto.radiusM    : undefined,
-      polygonCoords:  dto.type === 'POLYGON' ? dto.polygonCoords : undefined,
+      purpose:        dto.purpose ?? null,
+      color:          dto.color?.toLowerCase() ?? null,
+      ...shapeColumns(dto),
     },
   })
+}
+
+type Shape =
+  | { type: 'CIRCLE', centerLat: number, centerLng: number, radiusM: number }
+  | { type: 'POLYGON', polygonCoords: Array<[number, number]> }
+  | { type: 'LINE', polygonCoords: Array<[number, number]>, widthM: number }
+
+/** Every geometry column for one shape, the ones it does not use set NULL. */
+function shapeColumns(s: Shape) {
+  return {
+    type:          s.type,
+    centerLat:     s.type === 'CIRCLE' ? s.centerLat : null,
+    centerLng:     s.type === 'CIRCLE' ? s.centerLng : null,
+    radiusM:       s.type === 'CIRCLE' ? s.radiusM : null,
+    polygonCoords: s.type === 'CIRCLE' ? Prisma.DbNull : s.polygonCoords,
+    widthM:        s.type === 'LINE' ? s.widthM : null,
+  }
 }
 
 export async function findAll(orgId: string, q: GeofenceListQuery) {
@@ -43,7 +60,7 @@ export async function findById(id: string, orgId: string) {
 // can classify a zone by the SAME rule the overlay colours it by. Re-exported
 // because `ZoneCategory` is part of this module's published shape.
 export { categorise, type ZoneCategory } from '../../lib/zone-taxonomy.js'
-import { categorise, ringAreaHa } from '../../lib/zone-taxonomy.js'
+import { categoryOf, ringAreaHa } from '../../lib/zone-taxonomy.js'
 
 /**
  * Every zone in the org as a GeoJSON FeatureCollection, ready to draw.
@@ -65,7 +82,9 @@ export async function findAllAsGeoJSON(orgId: string) {
     const properties = {
       id:       g.id,
       name:     g.name,
-      category: categorise(g.name),
+      category: categoryOf(g),
+      purpose:  g.purpose,
+      color:    g.color,
       fenceType: g.type,
       mode:     g.mode,
       isActive: g.isActive,
@@ -98,9 +117,20 @@ export async function findAllAsGeoJSON(orgId: string) {
 }
 
 export async function update(id: string, orgId: string, dto: UpdateGeofence) {
-  const fence = await prisma.geofence.findFirst({ where: { id, organisationId: orgId }, select: { id: true } })
+  const fence = await prisma.geofence.findFirst({ where: { id, organisationId: orgId }, select: { id: true, externalId: true } })
   if (!fence) return null
-  return prisma.geofence.update({ where: { id }, data: dto })
+  // A Wialon zone's name and shape are rewritten by the next import, so an
+  // edit to either would quietly undo itself. Its purpose and colour are ours
+  // (no import writes them), and so is whether it is enforced.
+  if (fence.externalId && (dto.name !== undefined || dto.type !== undefined)) {
+    throw new ConflictError('This fence comes from Wialon: change its name or shape there. Its purpose and colour can be changed here.')
+  }
+  const { type, centerLat, centerLng, radiusM, polygonCoords, widthM, color, ...rest } = dto
+  const shape = type ? shapeColumns({ type, centerLat, centerLng, radiusM, polygonCoords, widthM } as Shape) : {}
+  return prisma.geofence.update({
+    where: { id },
+    data: { ...rest, ...(color !== undefined ? { color: color?.toLowerCase() ?? null } : {}), ...shape },
+  })
 }
 
 export async function remove(id: string, orgId: string) {

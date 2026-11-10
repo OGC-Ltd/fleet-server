@@ -17,11 +17,22 @@
  * the category picks the overlay colour: an unrecognised name falls back to
  * `other` and still draws. This is presentation, never enforcement.
  */
-export type ZoneCategory =
-  | 'farm' | 'nursery' | 'commercial' | 'rainfed' | 'factory'
-  | 'logistics' | 'facility' | 'wetland' | 'water' | 'drain' | 'road'
-  | 'restricted' | 'sample' | 'shop' | 'customer'
-  | 'weighing' | 'fuel' | 'gate' | 'parking' | 'perimeter' | 'other'
+export const ZONE_CATEGORIES = [
+  'farm', 'nursery', 'commercial', 'rainfed', 'factory',
+  'logistics', 'facility', 'wetland', 'water', 'drain', 'road',
+  'restricted', 'sample', 'shop', 'customer',
+  'weighing', 'fuel', 'gate', 'parking', 'perimeter', 'other',
+] as const
+export type ZoneCategory = typeof ZONE_CATEGORIES[number]
+
+/**
+ * A fence's category: the purpose someone chose when they drew it, or, for a
+ * fence nobody gave one (every Wialon zone), what its name says.
+ */
+export function categoryOf(fence: { name: string, purpose?: string | null }): ZoneCategory {
+  const chosen = fence.purpose as ZoneCategory | null | undefined
+  return chosen && (ZONE_CATEGORIES as readonly string[]).includes(chosen) ? chosen : categorise(fence.name)
+}
 
 /**
  * These rules were written against ONE account's vocabulary and have now met
