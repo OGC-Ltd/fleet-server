@@ -17,6 +17,7 @@ import { startCacheWarmer } from './lib/warm-cache.js'
 import { warmRoadRoutes } from './lib/road-routes.js'
 import { startAiInsightWarmer } from './modules/dashboard/ai-insight.js'
 import { startVehicleInsightSweep } from './modules/vehicles/vehicle-insight.js'
+import { startStopWatch } from './modules/stop-watch/stop-watch.service.js'
 import { WialonLiveAdapter } from './providers/wialon/wialon.adapter.js'
 import { startRaiFactorySuiteReconciler } from './providers/raifactorysuite/raifactorysuite.reconciler.js'
 import { startRetentionSweep } from './lib/queues/retention.js'
@@ -71,6 +72,9 @@ async function main() {
   // Each unit's insight, rewritten in the background when its signals change,
   // so a click on the map reads it instantly (vehicles/vehicle-insight.ts).
   const stopVehicleInsightSweep = startVehicleInsightSweep()
+  // Menengai's unauthorised stops, checked here once a minute and toasted to
+  // whoever may see the unit (modules/stop-watch).
+  const stopStopWatch = startStopWatch()
   // (The live feed used to be seeded here into a shared in-memory ring. Each
   // SSE client now replays its OWN org's history from the durable store on
   // connect — see lib/sse.ts's replayDashboardFeed — so there is nothing to
@@ -161,6 +165,7 @@ async function main() {
     stopCacheWarmer()
     stopAiInsightWarmer()
     stopVehicleInsightSweep()
+    stopStopWatch()
     // Release movement lines still waiting in their five-minute window.
     flushAllMovementWindows()
     await stopPushDispatcher().catch((err) => logger.warn({ err }, 'Push worker thread shutdown failed'))

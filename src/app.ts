@@ -55,6 +55,7 @@ import * as userCtrl from './modules/users/user.controller.js'
 import { provisionUserSchema } from './modules/users/user.schema.js'
 import { trustProxy, parseProxyList } from './lib/trust-proxy.js'
 import * as alertsCtrl from './modules/alerts/alerts.controller.js'
+import * as stopWatchCtrl from './modules/stop-watch/stop-watch.service.js'
 import { listAlertsQuery, markReadSchema } from './modules/alerts/alerts.schema.js'
 
 /** A query value as a number, or NaN when absent or blank (`Number('')` is 0). */
@@ -311,6 +312,8 @@ export function createApp() {
   // Org-wide dashboard SSE stream + push subscription management
   app.get(`${orgBase}/live`, authenticate, requireOrgAccess, requirePermission('notification:read'), notificationsCtrl.dashboardStream)
   app.use(`${orgBase}/notifications`, notificationsOrgRouter)
+  // Menengai's units flagged now by the server's stop watch (Alerts page)
+  app.get(`${orgBase}/stop-watch`, authenticate, requireOrgAccess, requirePermission('notification:read'), stopWatchCtrl.current)
 
   app.use((_req, res) => {
     sendError(res, 404, 'Route not found')

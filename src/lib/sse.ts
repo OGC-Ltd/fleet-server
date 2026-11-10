@@ -543,3 +543,39 @@ export function closeDashboardStreamsForUser(userId: string, lastFrame?: string)
 export function emitAccessChanged(userId: string): number {
   return closeDashboardStreamsForUser(userId, frameOf('access_changed', { at: new Date().toISOString() }))
 }
+
+/** The people with a dashboard stream open now, whichever organisation each is looking at. */
+export function connectedDashboardUsers(): Set<string> {
+  const out = new Set<string>()
+  for (const [key, clients] of registry) {
+    if (!key.endsWith(':dashboard')) continue
+    for (const c of clients) if (c.userId) out.add(c.userId)
+  }
+  return out
+}
+
+/**
+ * One frame to these people's open dashboards, in whatever organisation each
+ * is looking at: a toast meant for a person, not for an organisation's map.
+ * Written at once rather than batched. Returns the streams written to.
+ */
+export function emitToUsers(userIds: Iterable<string>, event: string, data: unknown): number {
+  const want = new Set(userIds)
+  if (!want.size) return 0
+  const frame = frameOf(event, data)
+  let sent = 0
+  for (const [key, clients] of registry) {
+    if (!key.endsWith(':dashboard')) continue
+    for (const c of [...clients]) {
+      if (!c.userId || !want.has(c.userId)) continue
+      writeOrDrop(c, frame, clients)
+      sent++
+    }
+  }
+  return sent
+}
+
+/** A toast to everyone looking at this organisation (scoped viewers only for their units). */
+export function emitDashboardToast(orgId: string, data: unknown) {
+  broadcastDashboard(orgId, 'toast', data)
+}
