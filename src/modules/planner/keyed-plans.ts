@@ -108,7 +108,7 @@ export async function syncKeyedPlans(orgId: string, day: string, vehicles: Keyed
     // Plans already there: the day's keyed ones, and sheets/itineraries that win
     const near = await tx.deliveryPlan.findMany({
       where: { organisationId: orgId, planDate: { gte: dayBefore(day), lte: planDate } },
-      select: { id: true, plate: true, source: true, planDate: true },
+      select: { id: true, plate: true, source: true, planDate: true, vehicleId: true },
     })
     const keyed = near.filter((p) => p.source === KEYED_SOURCE && p.planDate.getTime() === planDate.getTime())
     const sheeted = new Set(near.filter((p) => p.source !== KEYED_SOURCE).map((p) => plateKey(p.plate)))
@@ -127,30 +127,57 @@ export async function syncKeyedPlans(orgId: string, day: string, vehicles: Keyed
       removed = gone.length
     }
 
-    for (const [k, { v, stops }] of want) {
-      const ids = new Map<string, string>()
-      for (const s of stops) {
-        const row = await tx.plannerCustomer.upsert({
-          where: { organisationId_customerCode: { organisationId: orgId, customerCode: s.code } },
-          create: { organisationId: orgId, customerCode: s.code, name: s.name, lat: s.lat, lng: s.lng, geofenceId: s.geofenceId },
-          update: { name: s.name, lat: s.lat, lng: s.lng, geofenceId: s.geofenceId },
-          select: { id: true },
-        })
-        ids.set(s.code, row.id)
+    // The customers the plans need: created when new, written only when changed
+    const all = new Map<string, KeyedStop>()
+    for (const { stops } of want.values()) for (const st of stops) all.set(st.code, st)
+    const had = all.size
+      ? await tx.plannerCustomer.findMany({
+        where: { organisationId: orgId, customerCode: { in: [...all.keys()] } },
+        select: { id: true, customerCode: true, name: true, lat: true, lng: true, geofenceId: true },
+      })
+      : []
+    const ids = new Map<string, string>()
+    for (const c of had) {
+      const st = all.get(c.customerCode)!
+      ids.set(c.customerCode, c.id)
+      if (c.name !== st.name || c.lat !== st.lat || c.lng !== st.lng || c.geofenceId !== st.geofenceId) {
+        await tx.plannerCustomer.update({ where: { id: c.id }, data: { name: st.name, lat: st.lat, lng: st.lng, geofenceId: st.geofenceId } })
       }
+    }
+    for (const st of all.values()) {
+      if (ids.has(st.code)) continue
+      const row = await tx.plannerCustomer.create({
+        data: { organisationId: orgId, customerCode: st.code, name: st.name, lat: st.lat, lng: st.lng, geofenceId: st.geofenceId },
+        select: { id: true },
+      })
+      ids.set(st.code, row.id)
+    }
+
+    const priorStops = keyed.length
+      ? await tx.deliveryPlanStop.findMany({
+        where: { planId: { in: keyed.map((p) => p.id) } },
+        orderBy: { sequence: 'asc' },
+        select: { planId: true, customerId: true, outcome: true, remarks: true, outcomeBy: true, outcomeAt: true, dueDay: true },
+      })
+      : []
+
+    for (const [k, { v, stops }] of want) {
       const vehicleId = (v.vehicleIds ?? []).find((id) => units.has(id)) ?? null
+      const plate = v.plate.trim()
       const prior = keyed.find((p) => plateKey(p.plate) === k) ?? null
-      const data = { vehicleId, plate: v.plate.trim(), planDate, source: KEYED_SOURCE, sourceFile: '' } satisfies Prisma.DeliveryPlanUncheckedUpdateInput
+      const kept = prior ? priorStops.filter((x) => x.planId === prior.id) : []
+      const order = stops.map((st) => ids.get(st.code)!)
+      // Unchanged: left alone, so its stops keep their ids (a stop open in the Planner stays valid)
+      if (prior && prior.plate === plate && prior.vehicleId === vehicleId
+        && kept.length === order.length && kept.every((x, i) => x.customerId === order[i])) continue
+
+      const data = { vehicleId, plate, planDate, source: KEYED_SOURCE, sourceFile: '' } satisfies Prisma.DeliveryPlanUncheckedUpdateInput
       const plan = prior
         ? await tx.deliveryPlan.update({ where: { id: prior.id }, data, select: { id: true } })
         : await tx.deliveryPlan.create({ data: { ...data, organisationId: orgId, createdById: userId }, select: { id: true } })
-      const kept = prior
-        ? await tx.deliveryPlanStop.findMany({ where: { planId: plan.id }, select: { customerId: true, outcome: true, remarks: true, outcomeBy: true, outcomeAt: true, dueDay: true } })
-        : []
       if (prior) await tx.deliveryPlanStop.deleteMany({ where: { planId: plan.id } })
       await tx.deliveryPlanStop.createMany({
-        data: stops.map((s, i) => {
-          const customerId = ids.get(s.code)!
+        data: order.map((customerId, i) => {
           const was = kept.find((x) => x.customerId === customerId)
           return {
             planId: plan.id, sequence: i + 1, customerId,

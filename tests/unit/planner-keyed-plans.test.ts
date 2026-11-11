@@ -37,7 +37,7 @@ describe('the day list kept in step with the Planner', () => {
   it('a vehicle with stops becomes one plan for that day, its stops tied to their fences', async () => {
     prismaMock.geofence.findMany.mockResolvedValue([fence('f1', 'Shop A'), fence('f2', 'Shop B')] as never)
     prismaMock.vehicle.findMany.mockResolvedValue([{ id: 'v1' }] as never)
-    prismaMock.plannerCustomer.upsert.mockImplementation(((a: { create: { customerCode: string } }) => Promise.resolve({ id: `c-${a.create.customerCode}` })) as never)
+    prismaMock.plannerCustomer.create.mockImplementation(((a: { data: { customerCode: string } }) => Promise.resolve({ id: `c-${a.data.customerCode}` })) as never)
     prismaMock.deliveryPlan.create.mockResolvedValue({ id: 'p1' } as never)
 
     const did = await syncKeyedPlans(ORG, DAY, [
@@ -51,20 +51,23 @@ describe('the day list kept in step with the Planner', () => {
     expect((made.planDate as Date).toISOString()).toBe('2026-11-12T00:00:00.000Z')
     const rows = prismaMock.deliveryPlanStop.createMany.mock.calls[0][0]!.data as Array<Record<string, unknown>>
     expect(rows.map((r) => [r.sequence, r.customerId])).toEqual([[1, 'c-GF:f1'], [2, 'c-GF:f2']])
-    expect(prismaMock.plannerCustomer.upsert.mock.calls[0][0].create).toMatchObject({ customerCode: 'GF:f1', geofenceId: 'f1' })
+    expect(prismaMock.plannerCustomer.create.mock.calls[0][0].data).toMatchObject({ customerCode: 'GF:f1', geofenceId: 'f1' })
     expect(prismaMock.geofence.create).not.toHaveBeenCalled()
   })
 
   it('a stop changed keeps the outcome marked on the stops that remain; a vehicle taken off loses its plan', async () => {
     prismaMock.geofence.findMany.mockResolvedValue([fence('f1', 'Shop A'), fence('f3', 'Shop C')] as never)
-    prismaMock.plannerCustomer.upsert.mockImplementation(((a: { create: { customerCode: string } }) => Promise.resolve({ id: `c-${a.create.customerCode}` })) as never)
+    prismaMock.plannerCustomer.findMany.mockResolvedValue([
+      { id: 'c-GF:f1', customerCode: 'GF:f1', name: 'Shop A', lat: -0.3, lng: 36.1, geofenceId: 'f1' },
+    ] as never)
+    prismaMock.plannerCustomer.create.mockImplementation(((a: { data: { customerCode: string } }) => Promise.resolve({ id: `c-${a.data.customerCode}` })) as never)
     prismaMock.deliveryPlan.findMany.mockResolvedValue([
       { id: 'p1', plate: 'KCA 224M', source: KEYED_SOURCE, planDate: new Date(`${DAY}T00:00:00Z`) },
       { id: 'p9', plate: 'KDE 127E', source: KEYED_SOURCE, planDate: new Date(`${DAY}T00:00:00Z`) },
     ] as never)
     prismaMock.deliveryPlan.update.mockResolvedValue({ id: 'p1' } as never)
     prismaMock.deliveryPlanStop.findMany.mockResolvedValue([
-      { customerId: 'c-GF:f1', outcome: 'FULL', remarks: 'paid', outcomeBy: 'u2', outcomeAt: new Date(), dueDay: null },
+      { planId: 'p1', customerId: 'c-GF:f1', outcome: 'FULL', remarks: 'paid', outcomeBy: 'u2', outcomeAt: new Date(), dueDay: null },
     ] as never)
 
     const did = await syncKeyedPlans(ORG, DAY, [{ plate: 'KCA 224M', customers: ['Shop A', 'Shop C'] }], 'u1')
@@ -88,6 +91,26 @@ describe('the day list kept in step with the Planner', () => {
     expect(did).toEqual({ made: 0, updated: 0, removed: 1 })
     expect(prismaMock.deliveryPlan.create).not.toHaveBeenCalled()
     expect(prismaMock.deliveryPlan.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['p1'] } } })
+  })
+
+  it('a plan whose stops did not change is left alone, its stops keeping their ids; known customers are not rewritten', async () => {
+    prismaMock.geofence.findMany.mockResolvedValue([fence('f1', 'Shop A')] as never)
+    prismaMock.vehicle.findMany.mockResolvedValue([{ id: 'v1' }] as never)
+    prismaMock.plannerCustomer.findMany.mockResolvedValue([
+      { id: 'c1', customerCode: 'GF:f1', name: 'Shop A', lat: -0.3, lng: 36.1, geofenceId: 'f1' },
+    ] as never)
+    prismaMock.deliveryPlan.findMany.mockResolvedValue([
+      { id: 'p1', plate: 'KCA 224M', source: KEYED_SOURCE, planDate: new Date(`${DAY}T00:00:00Z`), vehicleId: 'v1' },
+    ] as never)
+    prismaMock.deliveryPlanStop.findMany.mockResolvedValue([{ planId: 'p1', customerId: 'c1' }] as never)
+
+    const did = await syncKeyedPlans(ORG, DAY, [{ plate: 'KCA 224M', vehicleIds: ['v1'], customers: ['Shop A'] }], 'u1')
+
+    expect(did).toEqual({ made: 0, updated: 0, removed: 0 })
+    expect(prismaMock.deliveryPlanStop.deleteMany).not.toHaveBeenCalled()
+    expect(prismaMock.deliveryPlanStop.createMany).not.toHaveBeenCalled()
+    expect(prismaMock.plannerCustomer.update).not.toHaveBeenCalled()
+    expect(prismaMock.plannerCustomer.create).not.toHaveBeenCalled()
   })
 
   it('takes the day\'s lock before reading the plans', async () => {
