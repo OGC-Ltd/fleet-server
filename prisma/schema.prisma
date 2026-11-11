@@ -335,6 +335,8 @@ model Organisation {
   vehicleInsights      VehicleInsight[]
   plannerCustomers     PlannerCustomer[]
   deliveryPlans        DeliveryPlan[]
+  deliveryDays         DeliveryDay[]
+  deliveryOrders       DeliveryOrder[]
 
   @@map("organisations")
 }
@@ -3647,6 +3649,9 @@ model DeliveryPlanStop {
   windowTo   String?   @map("window_to")
   serviceMin Int?      @map("service_min")
   legKm      Float?    @map("leg_km")
+  /// "Mark for today" (operator, 11 Nov 2026): the fleet day this stop is due,
+  /// 'YYYY-MM-DD', for an order that takes two days. NULL = not marked.
+  dueDay     String?   @map("due_day")
 
   plan     DeliveryPlan    @relation(fields: [planId], references: [id], onDelete: Cascade)
   customer PlannerCustomer @relation(fields: [customerId], references: [id])
@@ -3654,4 +3659,37 @@ model DeliveryPlanStop {
   @@unique([planId, sequence])
   @@index([customerId])
   @@map("delivery_plan_stops")
+}
+
+/// The Deliveries report's list for a day (operator, 11 Nov 2026: "we don't
+/// want it to be kept in the browser"): the vehicles shared that day, each with
+/// its stops. Read through the Redis cache (modules/deliveries/delivery-days.cache).
+model DeliveryDay {
+  organisationId String   @map("organisation_id")
+  /// The fleet day, 'YYYY-MM-DD'.
+  day            String
+  /// [{ key, plate, vehicleIds, customers, pins?, group? }], as new-ui's lib/deliveryPlan keeps it.
+  vehicles       Json     @default("[]")
+  updatedById    String?  @map("updated_by")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@id([organisationId, day])
+  @@map("delivery_days")
+}
+
+/// Orders fulfilled typed over the report's own count, by plate ("8/10"):
+/// the last value typed, offered again on the next report.
+model DeliveryOrder {
+  organisationId String   @map("organisation_id")
+  plate          String
+  text           String
+  updatedById    String?  @map("updated_by")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@id([organisationId, plate])
+  @@map("delivery_orders")
 }

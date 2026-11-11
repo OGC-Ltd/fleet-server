@@ -42,6 +42,7 @@ import incidentsRoutes     from './modules/incidents/incidents.routes.js'
 import repairRoutes       from './modules/repairs/repairs.routes.js'
 import dashboardRoutes from './modules/dashboard/dashboard.routes.js'
 import plannerRoutes from './modules/planner/planner.routes.js'
+import deliveriesRoutes from './modules/deliveries/deliveries.routes.js'
 import * as dashboard from './modules/dashboard/dashboard.service.js'
 import { notificationsOrgRouter } from './modules/notifications/notifications.router.js'
 import * as notificationsCtrl from './modules/notifications/notifications.controller.js'
@@ -316,6 +317,7 @@ export function createApp() {
   app.use(`${orgBase}/repairs`, repairRoutes)
   app.use(`${orgBase}/dashboard`, dashboardRoutes)
   app.use(`${orgBase}/planner`, plannerRoutes)
+  app.use(`${orgBase}/deliveries`, deliveriesRoutes)
 
   // Org-wide dashboard SSE stream + push subscription management
   app.get(`${orgBase}/live`, authenticate, requireOrgAccess, requirePermission('notification:read'), notificationsCtrl.dashboardStream)
