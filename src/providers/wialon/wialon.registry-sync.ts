@@ -403,6 +403,17 @@ export async function syncWialonFleet(
   }
   const retry: Change[] = []
   for (const c of changes) if (!(await updateOne(c, false))) retry.push(c)
+  // Two units can SWAP names (Kasulu COMP 02 / LMV 04, 2026-11-11): each wants
+  // the plate the other holds, so neither order works. The rows still waiting
+  // first step aside to a placeholder that is unique by construction, then take
+  // their new plates.
+  for (const c of retry) {
+    const externalId = `wialon:${c.unit.id}`
+    await prisma.vehicle.update({
+      where: { externalId },
+      data:  { registrationPlate: `${c.unit.nm.trim()} · ${externalId} · renaming` },
+    }).catch(() => {})
+  }
   for (const c of retry) await updateOne(c, true)
 
   // The CLI has always pinged every unit; unchanged rows included.
