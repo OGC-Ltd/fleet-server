@@ -26,6 +26,7 @@ import { startFuelSync, startFuelAdjudication } from './lib/queues/fuel-events.j
 import { startParkedFallVerdicts } from './lib/queues/parked-falls.js'
 import { startFuelRateDigest } from './lib/queues/fuel-rate-digest.js'
 import { startTripBuild } from './lib/queues/trips.js'
+import { startWialonRegistrySync } from './lib/queues/wialon-registry.js'
 import { startOutboundWorker } from './lib/queues/outbound.js'
 import { disconnectRedis } from './lib/redis.js'
 import { flushAllMovementWindows } from './lib/notifications/movement-window.js'
@@ -132,6 +133,9 @@ async function main() {
   // Completed dispatches → measured trips. Nothing else writes that table
   // since the simulator was retired — see lib/queues/trips.
   const tripBuild = await startTripBuild()
+  // Units added, renamed or deleted in Wialon → vehicles rows, every 30 minutes.
+  // Replaces running `npm run sync:<fleet> -- --apply` by hand — see lib/queues/wialon-registry.
+  const wialonRegistry = await startWialonRegistrySync()
   // Mail and durable notifications, off the request thread. Unlike the three
   // above this one is NOT conditional on Redis in its effect: with no
   // REDIS_URL the publishers send inline exactly as they did before, so a
@@ -151,6 +155,7 @@ async function main() {
     await parkedFalls.stop().catch((err) => logger.warn({ err }, 'Parked fall verdicts shutdown failed'))
     await fuelRateDigest.stop().catch((err) => logger.warn({ err }, 'Fuel rate digest shutdown failed'))
     await tripBuild.stop().catch((err) => logger.warn({ err }, 'Trip build shutdown failed'))
+    await wialonRegistry.stop().catch((err) => logger.warn({ err }, 'Wialon registry sync shutdown failed'))
     // Before disconnectRedis below, so in-flight mail is finished rather than
     // having its connection pulled out from under it.
     await outbound.stop().catch((err) => logger.warn({ err }, 'Outbound worker shutdown failed'))

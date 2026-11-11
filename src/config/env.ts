@@ -544,6 +544,16 @@ const schema = z.object({
   // trailing window and does nothing when none have closed.
   TRIP_BUILD_CRON: z.string().optional().default('*/10 * * * *'),
 
+  // Wialon units → vehicles rows for every fleet whose registry is Wialon
+  // (lib/queues/wialon-registry.ts): new units created, renamed/regrouped ones
+  // updated, units deleted in Wialon deactivated. 'dry' logs what it would do
+  // and writes nothing. Set 'off' on additional instances so only ONE runs it.
+  WIALON_REGISTRY_SYNC: z.enum(['apply', 'dry', 'off']).optional().default('apply'),
+
+  // Every 30 minutes, off the quarter-hour the fuel sync uses. A quiet cycle
+  // is a handful of Wialon reads and writes nothing.
+  WIALON_REGISTRY_SYNC_CRON: z.string().optional().default('5,35 * * * *'),
+
   // Pump price for costing the fuel ledger (analytics/fuel-cost). NOTHING in
   // the schema records what fuel cost — a filling stores litres, not money —
   // so cost is always litres × a price supplied here, and the endpoint echoes
