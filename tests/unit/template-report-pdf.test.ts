@@ -1,7 +1,7 @@
 /** The Dormant Assets, Geofence and TAT and Fuel PDFs the server draws from the page's rows. */
 import { describe, it, expect } from 'vitest'
 import {
-  renderDormantPdf, renderGeofencePdf, renderTatFuelPdf, renderSpeedPdf, renderDeliveriesPdf, deliveriesFileName, deliveryCells, deliverySummary, customerCells, dormantFileName, geofenceFileName, tatFileName, tatPeriodWords, speedFileName, speedCells, speedSummary, peakLink, SPEED_HEADS,
+  renderDormantPdf, renderGeofencePdf, renderTatFuelPdf, renderSpeedPdf, renderDeliveriesPdf, deliveriesFileName, deliveryCells, sheetStopCells, SHEET_STOP_HEADS, deliverySummary, customerCells, dormantFileName, geofenceFileName, tatFileName, tatPeriodWords, speedFileName, speedCells, speedSummary, peakLink, SPEED_HEADS,
   sectionDays, DORMANT_SECTIONS, stampWords, visitDuration, endsNow, tripWords, tatSummary, tatCells, TAT_HEADS, templateReportNo,
 } from '../../src/modules/reports/template-report.pdf.js'
 import { dormantPdfBodySchema, geofencePdfBodySchema, tatFuelPdfBodySchema, speedPdfBodySchema, deliveriesPdfBodySchema } from '../../src/modules/reports/report.schema.js'
@@ -161,6 +161,21 @@ describe('Deliveries', () => {
     expect(pages(await renderDeliveriesPdf({ ...body, stops: false }, { orgCode: 'MENENGAI' }))).toBe(1)
     expect(pages(await renderDeliveriesPdf({ ...body, rows: [] }, { orgCode: 'MENENGAI' }))).toBe(1)
     expect(deliveriesFileName(body)).toBe('Deliveries Report Menengai Oil Refineries Ltd 2026-10-30 2000.pdf')
+  })
+  it('prints a Planner sheet\'s stops in the sheet\'s columns, customer ID and name first', async () => {
+    const cells = (n: string, result: string) => [n, '10000' + n, 'SAMPLE SHOP ' + n, 'NAKURU', 'INV' + n, '12,500', '1.25', result, n === '1' ? '9 min' : '', '4.2', n === '1' ? 'Full' : '', '']
+    const sheetRow = { ...back, plate: 'KDE 128E', run: '1/2 delivered', runSub: 'Sheet of 09.11.2026, driver JOHN DOE',
+      customers: [{ label: '100001 SAMPLE SHOP 1', at: at('2026-10-30T08:50:00'), sheet: cells('1', 'Delivered 08:50') },
+        { label: '100002 SAMPLE SHOP 2', at: null, sheet: cells('2', 'Not reached, closest 1.2 km') }] }
+    const sb = deliveriesPdfBodySchema.parse({ ...body, rows: [sheetRow, left] })
+    expect(SHEET_STOP_HEADS.slice(0, 3)).toEqual(['No.', 'Customer ID', 'Customer'])
+    const c = sheetStopCells(sb.rows[0]!.customers[0]!)
+    expect(c.map(x => x.text)).toEqual(cells('1', 'Delivered 08:50'))
+    expect(c[7]).toMatchObject({ bold: true })
+    expect(sheetStopCells(sb.rows[0]!.customers[1]!)[7]).not.toMatchObject({ bold: true })
+    expect(() => deliveriesPdfBodySchema.parse({ ...body, rows: [{ ...sheetRow, customers: [{ label: 'x', at: null, sheet: ['too', 'few'] }] }] })).toThrow()
+    expect(isPdf(await renderDeliveriesPdf(sb, { orgCode: 'MENENGAI' }))).toBe(true)
+    expect(isPdf(await renderDeliveriesPdf(sb, { orgCode: 'MENENGAI', landscape: true }))).toBe(true)
   })
   it('runs onto more pages for a long list', async () => {
     const many = Array.from({ length: 60 }, (_, i) => ({ ...left, plate: `KDE ${100 + i}E` }))

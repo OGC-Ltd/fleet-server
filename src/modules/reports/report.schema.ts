@@ -264,7 +264,13 @@ export const deliveriesPdfBodySchema = z.object({
     arrivedShort: z.string().max(40).nullable().optional(),
     /** The page's line over the vehicle's stops: delivered, left, back, how many not delivered. */
     run: pdfText.nullable().optional(),
-    customers: z.array(z.object({ label: pdfText, at: pdfTime.nullable(), note: pdfText.nullable().optional(), missing: z.boolean().optional() })).max(PDF_MAX_ROWS),
+    /** A Planner sheet's line under it: the sheet's day and its driver. */
+    runSub: pdfText.nullable().optional(),
+    customers: z.array(z.object({
+      label: pdfText, at: pdfTime.nullable(), note: pdfText.nullable().optional(), missing: z.boolean().optional(),
+      /** A Planner sheet's stop: its cells under SHEET_STOP_HEADS (No., Customer ID, Customer, ... Remarks), as the page wrote them. */
+      sheet: z.array(pdfText).length(12).optional(),
+    })).max(PDF_MAX_ROWS),
   })).max(PDF_MAX_ROWS),
 })
 export type DeliveriesPdfBody = z.infer<typeof deliveriesPdfBodySchema>

@@ -361,6 +361,16 @@ type DeliveryPdfRow = DeliveriesPdfBody['rows'][number]
 
 export const DELIVERY_HEADS = ['Reg', 'Time left MORL/STO', 'Orders fulfilled', 'Current location', 'Time arrived MORL/STO']
 const DELIVERY_WIDTHS = [22, 42, 24, 52, 44]
+/**
+ * A Planner sheet's stops (operator, 11 Nov 2026: "the pdf to contain the
+ * column for customer id, customer name etc"): the sheet's own columns, then
+ * what the truck did there. The page (new-ui lib/deliveriesReport
+ * sheetStopCells) writes the cells in this order.
+ */
+export const SHEET_STOP_HEADS = ['No.', 'Customer ID', 'Customer', 'Location', 'Invoice', 'Amount', 'Tonnage', 'Result', 'Time there', 'Km', 'Outcome', 'Remarks']
+const SHEET_STOP_WIDTHS = [6, 19, 20, 17, 12, 14, 14, 28, 17, 8, 15, 15]
+const SHEET_STOP_FIGURES = new Set([0, 5, 6, 9])
+const SHEET_RESULT = 7
 const DELIVERED = '#2e7d32'
 const NOT_DELIVERED = '#c62828'
 
@@ -399,6 +409,12 @@ export function customerCells(c: DeliveryPdfRow['customers'][number]): Cell[] {
       : c.at != null ? { text: c.note ?? `Delivered ${iso(c.at).slice(11, 16)}`, bold: true, color: DELIVERED }
         : { text: c.note ?? 'Not yet', color: NOT_DELIVERED },
   ]
+}
+
+/** A sheet stop's cells: the result green and bold when delivered, red when not. */
+export function sheetStopCells(c: DeliveryPdfRow['customers'][number]): Cell[] {
+  return (c.sheet ?? []).map((text, i): Cell => (i !== SHEET_RESULT ? { text }
+    : c.at != null ? { text, bold: true, color: DELIVERED } : { text, color: NOT_DELIVERED }))
 }
 
 export const deliveriesFileName = (b: Pick<DeliveriesPdfBody, 'fleet' | 'at'>) => {
@@ -443,6 +459,10 @@ export async function renderDeliveriesPdf(b: DeliveriesPdfBody, o: { orgCode: st
     sheet()
     w.h2('3. Customers by vehicle')
     const customerCols: Col[] = [{ w: 0, wrap: true }, { w: 68 * MM, wrap: true }]
+    const sheetUsed = SHEET_STOP_WIDTHS.reduce((a, x) => a + x, 0)
+    const sheetCols: Col[] = SHEET_STOP_WIDTHS.map((x, i) => ({
+      w: (x * w.sheet.body) / sheetUsed, ...(SHEET_STOP_FIGURES.has(i) ? { align: 'right' as const } : { wrap: true }),
+    }))
     for (const r of b.rows) {
       // A vehicle's name never sits alone at a page foot
       w.room(50)
@@ -451,7 +471,16 @@ export async function renderDeliveriesPdf(b: DeliveriesPdfBody, o: { orgCode: st
       w.line(r.plate, SIDE, w.y, w.sheet.body * 0.2, { font: F.bold, size: 8.2 })
       w.line(r.run ?? `${r.fulfilled}/${r.planned} delivered${left}`, SIDE + w.sheet.body * 0.2, w.y + 0.6, w.sheet.body * 0.8, { size: 7.6, color: C.mut, align: 'right' })
       w.y += 11
+      // A Planner sheet's day and driver, on a line of their own
+      if (r.runSub) {
+        w.line(r.runSub, SIDE, w.y - 1, w.sheet.body, { size: 7.6, color: C.mut })
+        w.y += 10
+      }
       if (!r.customers.length) { w.none('No customers given.'); continue }
+      if (r.customers.some(c => c.sheet)) {
+        w.table(sheetCols, SHEET_STOP_HEADS, r.customers.map(c => (c.sheet ? sheetStopCells(c) : [...customerCells(c), ...Array(SHEET_STOP_HEADS.length - 2).fill({ text: '' })])), { size: o.landscape ? 7.2 : 6.2 })
+        continue
+      }
       w.table(customerCols, ['Stop', 'Result'], r.customers.map(customerCells), { size: 7.8 })
     }
   }
