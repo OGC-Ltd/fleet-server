@@ -38,3 +38,21 @@ describe('categoryOf', () => {
     expect(categoryOf({ name: 'Main gate', purpose: 'nonsense' })).toBe('gate')
   })
 })
+
+describe('a geofence rule on the API', () => {
+  it('takes a rule on create, filling what was left out', () => {
+    const r = createGeofenceSchema.parse({
+      type: 'LINE', name: 'No-go road', polygonCoords: ring.slice(0, 2), widthM: 40, purpose: 'restricted',
+      rule: { vehicleTypes: ['TANKER'] },
+    })
+    expect(r.rule).toEqual({
+      trigger: 'enter', vehicleTypes: ['TANKER'], fleets: [], vehicleIds: [], hours: null,
+      alert: { type: 'nogo', severity: 'critical' },
+    })
+  })
+  it('clears a rule with null on a change, and refuses a bad one', () => {
+    expect(updateGeofenceSchema.parse({ rule: null }).rule).toBeNull()
+    expect(updateGeofenceSchema.safeParse({ rule: { trigger: 'leave' } }).success).toBe(false)
+    expect(updateGeofenceSchema.safeParse({ rule: { alert: { type: 'parking' } } }).success).toBe(false)
+  })
+})

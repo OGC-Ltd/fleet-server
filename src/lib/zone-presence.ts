@@ -29,6 +29,8 @@ import { logger } from './logger.js'
 import { publishNotification } from './notifications/notification.store.js'
 import { isInsideFence, haversineM, fenceBox, inBox, type FenceBox, type FenceGeometry } from './geofence.js'
 import { categoryOf, isEstateFeature, ringAreaHa, type ZoneCategory } from './zone-taxonomy.js'
+import { compileRule, readRule, type CompiledRule } from './fence-rules.js'
+import { checkFenceRules, type RuleZone } from './fence-rule-watch.js'
 
 interface CachedZone {
   id:   string
@@ -53,6 +55,12 @@ interface CachedZone {
   box: FenceBox
   /** Never named in the feed — see SILENT_ZONE_IDS. */
   silent: boolean
+  /**
+   * Who may not use this fence and what it raises (lib/fence-rules). Only on
+   * an active fence. A fence with a rule raises the rule's alert instead of
+   * the generic keep-out breach.
+   */
+  rule: CompiledRule | null
 }
 
 /**
@@ -91,6 +99,17 @@ function contains(z: CachedZone, lat: number, lng: number): boolean {
 }
 
 const zoneCache = new Map<string, { zones: CachedZone[]; loadedAt: number }>()
+
+/** The zones that carry a rule, worked out once per zone list. */
+const ruleZoneCache = new WeakMap<CachedZone[], RuleZone[]>()
+function ruleZonesOf(zones: CachedZone[]): RuleZone[] {
+  let hit = ruleZoneCache.get(zones)
+  if (!hit) {
+    hit = zones.flatMap((z) => (z.rule ? [{ id: z.id, name: z.name, rule: z.rule }] : []))
+    ruleZoneCache.set(zones, hit)
+  }
+  return hit
+}
 const ZONE_TTL_MS = 5 * 60_000
 
 /** vehicleId → geofence ids it was inside on the previous frame. */
@@ -389,7 +408,7 @@ async function getZones(orgId: string): Promise<CachedZone[]> {
     select: {
       id: true, name: true, type: true, mode: true, isActive: true,
       centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true,
-      purpose: true,
+      purpose: true, rule: true,
     },
   })
 
@@ -398,6 +417,7 @@ async function getZones(orgId: string): Promise<CachedZone[]> {
     const geometry = toGeometry(r)
     if (!geometry) continue
     const category = categoryOf(r)
+    const rule = r.isActive ? readRule(r.rule) : null
     zones.push({
       id: r.id, name: r.name, geometry,
       keepOut: r.isActive && r.mode === 'BLOCKLIST',
@@ -406,6 +426,7 @@ async function getZones(orgId: string): Promise<CachedZone[]> {
       areaHa: geometry.type === 'POLYGON' ? ringAreaHa(geometry.polygonCoords) : null,
       box: fenceBox(geometry),
       silent: SILENT_ZONE_IDS.has(r.id),
+      rule: rule ? compileRule(rule) : null,
     })
   }
   zoneCache.set(orgId, { zones, loadedAt: Date.now() })
@@ -458,6 +479,23 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
   const before = presence.get(p.vehicleId)
   presence.set(p.vehicleId, now)
 
+  // Geofence rules see every frame, the first included: an `inside` rule must
+  // fire for a unit already standing in its fence (lib/fence-rule-watch).
+  const ruled = ruleZonesOf(zones)
+  if (ruled.length > 0) {
+    await checkFenceRules({
+      orgId: p.orgId, vehicleId: p.vehicleId, plate: p.plate,
+      who: p.driverName ? `${p.plate} · ${p.driverName}` : p.plate,
+      at, lat, lng, inside: now, before,
+      // As couldHaveCrossed below: no speed at all is trusted as movement
+      moved: () => {
+        if (p.speedKmh == null) return true
+        const seen = lastMovingAt.get(p.vehicleId)
+        return seen != null && Math.abs(at - seen) <= MOVEMENT_GRACE_MS
+      },
+    }, ruled).catch((err) => logger.warn({ err, vehicleId: p.vehicleId }, 'Geofence rule check failed'))
+  }
+
   // First sighting: record where it is, announce nothing. Without this a
   // restart would report the whole fleet "arriving" where it already was.
   if (!before) return
@@ -501,7 +539,7 @@ export async function trackZonePresence(p: ZonePresenceInput): Promise<void> {
 
     // A keep-out breach is an incident and waits for nothing: it fires on the
     // raw crossing, the frame it happens.
-    if (z.keepOut && isIn && !before.has(z.id)) breached.push(z)
+    if (z.keepOut && !z.rule && isIn && !before.has(z.id)) breached.push(z)
 
     // Another fence names this place — no arrival or exit of its own.
     if (z.silent) continue
