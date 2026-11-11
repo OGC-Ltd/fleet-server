@@ -27,6 +27,40 @@ import type { SaveSheet, PlanListQuery, StopUpdate } from './planner.schema.js'
 import { fencePicks, type FencePick } from './fence-match.js'
 import type { PlannedStop } from './itinerary.js'
 import { cachedPlace, reverseGeocode } from '../../lib/geocode.js'
+import { geocodeAddress } from './address-geocode.js'
+import type { SheetProblem } from './sheet.js'
+
+/**
+ * Itinerary stops Wialon exported with a written address and no point
+ * ("C35, Londiani, Kenya"): placed by geocoding it (address-geocode.ts),
+ * unless the customer is already known, whose kept point wins. A road or
+ * area answer is marked `approx` and said in the problems so a person checks
+ * the fence; one nothing places is left for a point on the preview.
+ */
+export async function locateStops<T extends Pick<SheetStop, 'lat' | 'lng' | 'address' | 'located' | 'customerCode' | 'customerName' | 'row'>>(
+  orgId: string, stops: T[],
+): Promise<{ stops: T[], problems: SheetProblem[] }> {
+  const want = stops.filter((s) => (s.lat == null || s.lng == null) && s.address)
+  if (!want.length) return { stops, problems: [] }
+  const known = new Set((await prisma.plannerCustomer.findMany({
+    where: { organisationId: orgId, customerCode: { in: [...new Set(want.map((s) => s.customerCode))] } },
+    select: { customerCode: true },
+  })).map((c) => c.customerCode))
+  const problems: SheetProblem[] = []
+  const out: T[] = []
+  for (const s of stops) {
+    if ((s.lat != null && s.lng != null) || !s.address || known.has(s.customerCode)) { out.push(s); continue }
+    const got = await geocodeAddress(s.address)
+    if (!got) {
+      problems.push({ row: s.row, message: `${s.customerName}: "${s.address}" could not be placed; add its point.` })
+      out.push(s)
+      continue
+    }
+    if (!got.exact) problems.push({ row: s.row, message: `${s.customerName}: placed from "${s.address}", which is a road or area, not the shop; check its fence.` })
+    out.push({ ...s, lat: got.lat, lng: got.lng, located: got.exact ? 'address' : 'approx' })
+  }
+  return { stops: out, problems }
+}
 
 /** How long a preview waits for place names; the save waits longer, as it stores them. */
 export const PREVIEW_PLACES_MS = 6_000
@@ -139,7 +173,8 @@ async function knownCustomers(orgId: string, codes: string[]) {
 /** What a sheet holds, and what saving it would do. Writes nothing. */
 export async function previewSheet(orgId: string, fileName: string, data: string) {
   const read = readFile(data)
-  const sheet = { ...read, stops: await placeStops(read.stops, Boolean(read.route), PREVIEW_PLACES_MS) }
+  const located = await locateStops(orgId, read.stops)
+  const sheet = { ...read, problems: [...read.problems, ...located.problems], stops: await placeStops(located.stops, Boolean(read.route), PREVIEW_PLACES_MS) }
   const [vehicle, driver, known] = await Promise.all([
     vehicleFor(orgId, sheet.header.plate),
     driverFor(orgId, sheet.header.driverName),
@@ -212,10 +247,10 @@ export async function saveSheet(orgId: string, userId: string | null, body: Save
   if (!planDate) throw new BadRequestError(sheet.route ? 'The itinerary has no run dates; enter the day.' : 'The sheet has no Date; enter the day.')
   if (!sheet.stops.length) throw new BadRequestError(sheet.route ? 'The itinerary lists no stops.' : 'The sheet lists no customers.')
 
-  const stops = await placeStops(sheet.stops.map((s) => {
+  const stops = await placeStops((await locateStops(orgId, sheet.stops.map((s) => {
     const p = body.points?.[s.customerCode]
-    return p ? { ...s, lat: p.lat, lng: p.lng } : s
-  }), Boolean(sheet.route), SAVE_PLACES_MS)
+    return p ? { ...s, lat: p.lat, lng: p.lng, located: undefined } : s
+  }))).stops, Boolean(sheet.route), SAVE_PLACES_MS)
   const codes = [...new Set(stops.map((s) => s.customerCode))]
   const known = await knownCustomers(orgId, codes)
   const missing = stops.filter((s) => (s.lat == null || s.lng == null) && !known.byCode.has(s.customerCode))

@@ -52,6 +52,10 @@ export interface SheetStop {
   row: number
   /** A Wialon itinerary's plan for this stop; absent on a sales sheet. */
   planned?: PlannedStop
+  /** An itinerary stop's written address when it carried no point, for the service to geocode. */
+  address?: string
+  /** Where an itinerary stop's point came from; `approx` = a road or area, not the door. */
+  located?: 'sheet' | 'plus_code' | 'address' | 'approx'
 }
 
 export interface SheetProblem { row: number | null, message: string }

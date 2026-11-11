@@ -95,8 +95,8 @@ describe('a Wialon itinerary', () => {
   it('finds the truck in the itinerary name', () => {
     expect(plateOfRoute('VS - Menengai - KDE 268P')).toBe('KDE 268P')
     expect(plateOfRoute('VS - Menengai - KCS 078M - 2026-11-10 13:03')).toBe('KCS 078M')
-    expect(readAddress('-0.1434, 35.6833')).toEqual({ place: '', p: { lat: -0.1434, lng: 35.6833 } })
-    expect(readAddress('KIPKAREN 2 (0.6069, 34.9640)')).toEqual({ place: 'KIPKAREN 2', p: { lat: 0.6069, lng: 34.964 } })
+    expect(readAddress('-0.1434, 35.6833')).toEqual({ place: '', p: { lat: -0.1434, lng: 35.6833 }, query: '', plusCode: null })
+    expect(readAddress('KIPKAREN 2 (0.6069, 34.9640)')).toEqual({ place: 'KIPKAREN 2', p: { lat: 0.6069, lng: 34.964 }, query: '', plusCode: null })
   })
 
   it('reads its cells', () => {

@@ -18,6 +18,7 @@
  * day, as Wialon writes the date only once it changes. Pure: no database, no clock.
  */
 import type { DeliverySheet, SheetHeader, SheetProblem, SheetStop } from './sheet.js'
+import { decodePlusCode, findPlusCode } from './plus-code.js'
 
 export interface PlannedStop {
   /** Planned arrival, ISO +03:00. */
@@ -38,7 +39,8 @@ export interface ItineraryRoute {
   end: string | null
   /** Every leg, the return home included. */
   km: number | null
-  home: { name: string, lat: number, lng: number } | null
+  /** Its point is null when its Address is a street the service has not placed. */
+  home: { name: string, lat: number | null, lng: number | null } | null
 }
 
 const text = (v: unknown) => (v == null ? '' : String(v)).replace(/\s+/g, ' ').trim()
@@ -87,17 +89,37 @@ export function readMinutes(v: unknown): number | null {
   return (h ? Number(h[1]) * 60 : 0) + (mi ? Number(mi[1]) : 0)
 }
 
+/** The town in a written address: "C35, Londiani, Kenya" → "Londiani"; "WQ8F+7C Kisumu, Kenya" → "Kisumu". */
+export function townOf(address: string): string {
+  const code = findPlusCode(address)
+  const parts = (code ? address.replace(new RegExp(code.replace('+', '\\+'), 'i'), '') : address)
+    .split(',').map((x) => x.trim()).filter(Boolean)
+  if (parts.length > 1 && /^kenya$/i.test(parts[parts.length - 1])) parts.pop()
+  return parts[parts.length - 1] ?? ''
+}
+
+export interface AddressCell {
+  /** The place written in the cell, if any. */
+  place: string
+  p: { lat: number, lng: number } | null
+  /** The cell's text when it holds no point: a plus code or a street to geocode. */
+  query: string
+  plusCode: string | null
+}
+
 /**
- * An Address cell: "-0.288, 36.044", or "BUSIA (0.465675, 34.1008417)" with
- * the place written before the point in brackets.
+ * An Address cell: "-0.288, 36.044"; "BUSIA (0.465675, 34.1008417)" with
+ * the place before the point in brackets; or no point at all, "RWG9+WC9,
+ * Ahero, Kenya" (a plus code) or "C35, Londiani, Kenya" (a street, for the
+ * service to geocode).
  */
-export function readAddress(v: unknown): { place: string, p: { lat: number, lng: number } | null } {
+export function readAddress(v: unknown): AddressCell {
   const s = text(v)
   const bracketed = /^(.*?)\(\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/.exec(s)
-  if (bracketed) return { place: bracketed[1].trim(), p: { lat: Number(bracketed[2]), lng: Number(bracketed[3]) } }
-  const nums = s.match(/-?\d+(?:\.\d+)?/g)
-  if (!nums || nums.length !== 2) return { place: '', p: null }
-  return { place: '', p: { lat: Number(nums[0]), lng: Number(nums[1]) } }
+  if (bracketed) return { place: bracketed[1].trim(), p: { lat: Number(bracketed[2]), lng: Number(bracketed[3]) }, query: '', plusCode: null }
+  const bare = /^\s*(-?\d+\.\d+)\s*[, ]\s*(-?\d+\.\d+)\s*$/.exec(s)
+  if (bare) return { place: '', p: { lat: Number(bare[1]), lng: Number(bare[2]) }, query: '', plusCode: null }
+  return { place: s ? townOf(s) : '', p: null, query: s, plusCode: s ? findPlusCode(s) : null }
 }
 
 /**
@@ -123,7 +145,7 @@ const metres = (a: { lat: number, lng: number }, b: { lat: number, lng: number }
 }
 
 /** The customer key a named stop is kept by. */
-export const itineraryCode = (name: string) => `WL:${text(name).toUpperCase()}`.slice(0, 120)
+export const itineraryCode = (name: string) => `WL:${text(name).toUpperCase().replace(/[.,;:]+$/, "").trim()}`.slice(0, 120)
 
 export function readItinerary(rows: unknown[][], headingAt: number): DeliverySheet & { route: ItineraryRoute } {
   const problems: SheetProblem[] = []
@@ -161,7 +183,7 @@ export function readItinerary(rows: unknown[][], headingAt: number): DeliveryShe
   })
   const at = (row: unknown[], f: string) => (cols[f] == null ? null : row[cols[f]])
 
-  interface Line { row: number, name: string, client: string, place: string, p: { lat: number, lng: number } | null, planned: PlannedStop, weight: number | null, cost: number | null, comment: string }
+  interface Line extends AddressCell { row: number, name: string, client: string, planned: PlannedStop, weight: number | null, cost: number | null, comment: string, located: 'sheet' | 'plus_code' | null }
   const lines: Line[] = []
   for (let r = headingAt + 1; r < rows.length; r++) {
     const row = rows[r] ?? []
@@ -182,7 +204,19 @@ export function readItinerary(rows: unknown[][], headingAt: number): DeliveryShe
       weight: weight > 0 ? weight : null,
       cost: cost > 0 ? cost : null,
       comment: text(at(row, 'comment')),
+      located: null,
     })
+  }
+  for (const l of lines) if (l.p) l.located = 'sheet'
+
+  // Short plus codes: recovered against the nearest line that has a point
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]
+    if (l.p || !l.plusCode) continue
+    let ref: { lat: number, lng: number } | null = null
+    for (let d = 1; d < lines.length && !ref; d++) ref = lines[i - d]?.p ?? lines[i + d]?.p ?? null
+    const p = decodePlusCode(l.plusCode, ref)
+    if (p) { l.p = p; l.located = 'plus_code' }
   }
 
   // Home: the first line, and the last too when it comes back to it
@@ -190,7 +224,7 @@ export function readItinerary(rows: unknown[][], headingAt: number): DeliveryShe
   if (lines.length >= 2) {
     const first = lines[0]
     const last = lines[lines.length - 1]
-    if (first.p) route.home = { name: first.name, ...first.p }
+    route.home = { name: first.name, lat: first.p?.lat ?? null, lng: first.p?.lng ?? null }
     const back = last.name === first.name || (first.p && last.p && metres(first.p, last.p) < 300)
     body = lines.slice(1, back ? -1 : undefined)
   }
@@ -199,15 +233,16 @@ export function readItinerary(rows: unknown[][], headingAt: number): DeliveryShe
 
   const stops: SheetStop[] = body.map((l, i) => {
     let p = l.p
-    if (!p || (p.lat === 0 && p.lng === 0)) {
-      problems.push({ row: l.row, message: `${l.name}: no coordinates.` })
-      p = null
-    }
+    if (p && p.lat === 0 && p.lng === 0) p = null
+    // A street address is left for the service to geocode (planner.service locateStops)
+    if (!p && !l.query) problems.push({ row: l.row, message: `${l.name}: no coordinates.` })
+    else if (!p && l.plusCode) problems.push({ row: l.row, message: `${l.name}: plus code ${l.plusCode} could not be read.` })
     return {
       sequence: i + 1, rep: '', customerCode: itineraryCode(l.name), customerName: l.name,
       location: l.place, lat: p?.lat ?? null, lng: p?.lng ?? null, invoiceNo: '',
       amount: l.cost, tonnage: l.weight != null ? Math.round(l.weight) / 1000 : null,
       outcome: null, remarks: l.comment, row: l.row, planned: l.planned,
+      ...(p ? { located: l.located ?? 'sheet' } : l.query ? { address: l.query } : {}),
     }
   })
   if (!stops.length) problems.push({ row: null, message: 'The itinerary lists no stops.' })
