@@ -12,6 +12,8 @@ import { prisma } from '../../lib/prisma.js'
 import { BadRequestError } from '../../core/errors/errors.js'
 import { DAY_RE, type DaySave } from './deliveries.schema.js'
 import { readThrough, keep, dayKey, ordersKey, DAY_TTL_S, ORDERS_TTL_S } from './delivery-days.cache.js'
+import { syncKeyedPlans } from '../planner/keyed-plans.js'
+import { logger } from '../../lib/logger.js'
 
 /** How far back "Copy <day>'s list" looks, as the browser did. */
 export const LOOKBACK_DAYS = 14
@@ -53,6 +55,13 @@ export async function saveDay(orgId: string, day: string, userId: string | null,
   // Stamped after the write returned: later than any read that began before it
   const list = toList(day, row)
   await keep(dayKey(orgId, day), list, DAY_TTL_S, Date.now())
+  // The keyed vehicles as Planner plans (planner/keyed-plans). The list is
+  // saved either way: a failed sync is logged and put right by the next save.
+  try {
+    await syncKeyedPlans(orgId, day, body.vehicles, userId)
+  } catch (err) {
+    logger.error({ err, orgId, day }, 'deliveries: keyed plans could not be synced to the Planner')
+  }
   return list
 }
 

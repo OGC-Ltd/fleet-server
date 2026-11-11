@@ -18,6 +18,9 @@ const fakeRedis = {
 }
 vi.mock('../../src/lib/redis.js', () => ({ getCacheRedis: () => (redisOn ? fakeRedis : null) }))
 vi.mock('../../src/lib/prisma.js')
+// The Planner side has its own tests (planner-keyed-plans)
+const { syncKeyedPlans } = vi.hoisted(() => ({ syncKeyedPlans: vi.fn(async (..._a: unknown[]) => ({ made: 0, updated: 0, removed: 0 })) }))
+vi.mock('../../src/modules/planner/keyed-plans.js', () => ({ syncKeyedPlans }))
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { getDay, saveDay, lastDayBefore, getOrders, saveOrder, ORDERS_KEEP_DAYS } from '../../src/modules/deliveries/deliveries.service.js'
 import { dayKey, keep, DAY_TTL_S } from '../../src/modules/deliveries/delivery-days.cache.js'
@@ -42,6 +45,7 @@ describe('a day list: persisted, then read from the cache', () => {
 
     const read = await getDay(ORG, DAY)
     expect(read).toEqual(saved)
+    expect(syncKeyedPlans).toHaveBeenCalledWith(ORG, DAY, [KCA], 'u1')
     expect(prismaMock.deliveryDay.findUnique).not.toHaveBeenCalled()
   })
 
@@ -80,6 +84,12 @@ describe('a day list: persisted, then read from the cache', () => {
     await keep(dayKey(ORG, DAY), { vehicles: ['B'] }, DAY_TTL_S, 2000)
     await keep(dayKey(ORG, DAY), { vehicles: ['A'] }, DAY_TTL_S, 1000)
     expect(JSON.parse(store.get(dayKey(ORG, DAY))!).v.vehicles).toEqual(['B'])
+  })
+
+  it('the list is saved even when the Planner sync fails', async () => {
+    prismaMock.deliveryDay.upsert.mockResolvedValue({ vehicles: [KCA], updatedAt: at } as never)
+    syncKeyedPlans.mockRejectedValueOnce(new Error('db down'))
+    await expect(saveDay(ORG, DAY, 'u1', { vehicles: [KCA] })).resolves.toMatchObject({ vehicles: [KCA] })
   })
 
   it('refuses a day that is not YYYY-MM-DD', async () => {
