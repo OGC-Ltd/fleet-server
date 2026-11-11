@@ -25,6 +25,7 @@ import { BadRequestError, NotFoundError } from '../../core/errors/errors.js'
 import { readDeliverySheet, type DeliverySheet, type SheetStop } from './sheet.js'
 import type { SaveSheet, PlanListQuery, StopUpdate } from './planner.schema.js'
 import { fencePicks, type FencePick } from './fence-match.js'
+import type { PlannedStop } from './itinerary.js'
 
 /** A new customer's circle. */
 export const CUSTOMER_RADIUS_M = 100
@@ -120,6 +121,8 @@ export async function previewSheet(orgId: string, fileName: string, data: string
   return {
     fileName,
     header: sheet.header,
+    source: sheet.route ? 'itinerary' : 'sheet',
+    route: sheet.route ?? null,
     vehicle: vehicle ? { id: vehicle.id, plate: vehicle.registrationPlate, name: vehicle.name } : null,
     driver,
     replacesPlanId: replaces?.id ?? null,
@@ -170,9 +173,9 @@ export async function saveSheet(orgId: string, userId: string | null, body: Save
   const sheet = readFile(body.data)
   const plate = body.plate ?? sheet.header.plate
   const planDate = body.planDate ?? sheet.header.planDate
-  if (!plate) throw new BadRequestError('The sheet has no Truck Number; enter the plate.')
-  if (!planDate) throw new BadRequestError('The sheet has no Date; enter the day.')
-  if (!sheet.stops.length) throw new BadRequestError('The sheet lists no customers.')
+  if (!plate) throw new BadRequestError(sheet.route ? 'The itinerary names no truck; enter the plate.' : 'The sheet has no Truck Number; enter the plate.')
+  if (!planDate) throw new BadRequestError(sheet.route ? 'The itinerary has no run dates; enter the day.' : 'The sheet has no Date; enter the day.')
+  if (!sheet.stops.length) throw new BadRequestError(sheet.route ? 'The itinerary lists no stops.' : 'The sheet lists no customers.')
 
   const stops = sheet.stops.map((s) => {
     const p = body.points?.[s.customerCode]
@@ -267,6 +270,7 @@ export async function saveSheet(orgId: string, userId: string | null, body: Save
       vehicleId: vehicle?.id ?? null, plate, driverName, driverUserId: driver?.id ?? null, planDate: day,
       sheetAt: sheet.header.sheetAt ? new Date(sheet.header.sheetAt) : null,
       gatePass: sheet.header.gatePass, tillNo: sheet.header.tillNo, sourceFile: body.fileName ?? '',
+      ...routeColumns(sheet),
     }
     const plan = prior
       ? await tx.deliveryPlan.update({ where: { id: prior.id }, data: planData, select: { id: true } })
@@ -281,6 +285,7 @@ export async function saveSheet(orgId: string, userId: string | null, body: Save
           amount: s.amount, tonnage: s.tonnage,
           outcome: was?.outcome ?? s.outcome, remarks: was?.remarks || s.remarks,
           outcomeBy: was?.outcomeBy ?? null, outcomeAt: was?.outcomeAt ?? null,
+          ...plannedColumns(s.planned),
         }
       }),
     })
@@ -292,6 +297,31 @@ export async function saveSheet(orgId: string, userId: string | null, body: Save
 }
 
 const num = (d: unknown) => (d == null ? null : Number(d))
+
+/** A plan's itinerary columns; a sales sheet sets them back to empty. */
+export function routeColumns(sheet: Pick<DeliverySheet, 'route'>) {
+  const r = sheet.route
+  return {
+    source: r ? 'itinerary' : 'sheet',
+    routeName: r?.name ?? '',
+    plannedStart: r?.start ? new Date(r.start) : null,
+    plannedEnd: r?.end ? new Date(r.end) : null,
+    plannedKm: r?.km ?? null,
+    homeName: r?.home?.name ?? '',
+    homeLat: r?.home?.lat ?? null,
+    homeLng: r?.home?.lng ?? null,
+  }
+}
+
+export function plannedColumns(p: PlannedStop | undefined) {
+  return {
+    plannedAt: p?.at ? new Date(p.at) : null,
+    windowFrom: p?.windowFrom ?? null,
+    windowTo: p?.windowTo ?? null,
+    serviceMin: p?.serviceMin ?? null,
+    legKm: p?.legKm ?? null,
+  }
+}
 
 export async function listPlans(orgId: string, q: PlanListQuery) {
   const plans = await prisma.deliveryPlan.findMany({

@@ -19,6 +19,7 @@
  * still reads. Pure: no database, no clock.
  */
 import * as XLSX from 'xlsx'
+import { itineraryHeadingAt, readItinerary, type ItineraryRoute, type PlannedStop } from './itinerary.js'
 
 export type Outcome = 'FULL' | 'PARTLY' | 'REJECTED'
 
@@ -49,6 +50,8 @@ export interface SheetStop {
   remarks: string
   /** The spreadsheet row, 1-based, for messages. */
   row: number
+  /** A Wialon itinerary's plan for this stop; absent on a sales sheet. */
+  planned?: PlannedStop
 }
 
 export interface SheetProblem { row: number | null, message: string }
@@ -57,6 +60,8 @@ export interface DeliverySheet {
   header: SheetHeader
   stops: SheetStop[]
   problems: SheetProblem[]
+  /** Set when the workbook is a Wialon Logistics itinerary (itinerary.ts). */
+  route?: ItineraryRoute
 }
 
 const text = (v: unknown) => (v == null ? '' : String(v)).replace(/\s+/g, ' ').trim()
@@ -139,7 +144,7 @@ const ticked = (v: unknown) => {
   return s !== '' && s !== '0' && s !== 'NO' && s !== 'N'
 }
 
-/** Read a delivery sheet's first worksheet that has a CUSTOMER ID heading. */
+/** Read a delivery sheet's first worksheet that has a CUSTOMER ID heading, else a Wialon itinerary. */
 export function readDeliverySheet(file: Buffer | ArrayBuffer): DeliverySheet {
   const wb = XLSX.read(file, { type: 'buffer', cellDates: true })
   const problems: SheetProblem[] = []
@@ -149,7 +154,13 @@ export function readDeliverySheet(file: Buffer | ArrayBuffer): DeliverySheet {
     if (headingAt < 0) continue
     return readRows(rows, headingAt, problems)
   }
-  problems.push({ row: null, message: 'No CUSTOMER ID column heading was found in any sheet of the workbook.' })
+  // Not a sales sheet: a Wialon Logistics itinerary, by its Order + Estimated arrival headings
+  for (const name of wb.SheetNames) {
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[name], { header: 1, defval: null, raw: false, blankrows: true })
+    const headingAt = itineraryHeadingAt(rows)
+    if (headingAt >= 0) return readItinerary(rows, headingAt)
+  }
+  problems.push({ row: null, message: 'Neither a CUSTOMER ID heading (sales sheet) nor an Order / Estimated arrival heading (Wialon itinerary) was found in the workbook.' })
   return { header: { plate: '', planDate: null, sheetAt: null, driverName: '', gatePass: '', tillNo: '' }, stops: [], problems }
 }
 
