@@ -46,7 +46,7 @@ describe('a geofence rule on the API', () => {
       rule: { vehicleTypes: ['TANKER'] },
     })
     expect(r.rule).toEqual({
-      trigger: 'enter', vehicleTypes: ['TANKER'], fleets: [], vehicleIds: [], hours: null,
+      trigger: 'enter', vehicleTypes: ['TANKER'], fleets: [], vehicleIds: [], units: [], hours: null,
       alert: { type: 'nogo', severity: 'critical' },
     })
   })

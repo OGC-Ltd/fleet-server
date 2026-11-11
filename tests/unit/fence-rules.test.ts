@@ -166,6 +166,16 @@ describe('a geofence rule on live frames', () => {
     expect(alerts[0]!.text).toContain('a no-go zone for Tankers')
   })
 
+  it('applies to units picked one by one, and names them', async () => {
+    ;(prisma.geofence.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { ...ROAD, rule: { ...ROAD.rule, vehicleTypes: [], units: [{ id: `lorry${seq}`, plate: 'KBT 112R' }] } },
+    ])
+    const alerts = await drive('lorry', [{ pos: OFF, after: 0 }, { pos: ON, after: 1 }])
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]!.text).toBe('KBT 112R entered Tanker no-go road, a no-go zone for KBT 112R.')
+    expect(await drive('tanker', [{ pos: OFF, after: 0 }, { pos: ON, after: 1 }])).toHaveLength(1)   // still only the lorry's
+  })
+
   it('ignores a rule on an inactive fence', async () => {
     ;(prisma.geofence.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([{ ...ROAD, isActive: false }])
     expect(await drive('tanker', [{ pos: OFF, after: 0 }, { pos: ON, after: 1 }])).toHaveLength(0)
@@ -185,6 +195,10 @@ describe('the rule in words', () => {
     expect(ruleWords(rule({ trigger: 'inside', vehicleTypes: ['tanker', 'lorry'], hours: { from: '18:00', to: '06:00' }, alert: { severity: 'warning' } })))
       .toBe('TANKER units and LORRY units must not be inside between 18:00 and 06:00. Raise a no-go alert (warning).')
     expect(ruleWords(rule({}))).toBe('No unit may enter. Raise a no-go alert.')
+    const u = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `v${i}`, plate: `KCT 50${i}W` }))
+    expect(ruleWords(rule({ fleets: ['Tankers'], vehicleIds: ['x'], units: u(2) })))
+      .toBe('Tankers, KCT 500W and KCT 501W must not enter. Raise a no-go alert.')
+    expect(ruleWords(rule({ units: u(4) }))).toBe('4 chosen units must not enter. Raise a no-go alert.')
   })
 
   it('reads hours on the fleet clock, overnight included', () => {

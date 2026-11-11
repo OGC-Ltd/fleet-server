@@ -36,9 +36,11 @@ const clock = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'A time is HH:MM')
  *   fleets       Names of the fleets picked on the form (Menengai's lists live
  *                in new-ui data/fleetGroups), kept for the sentence only. The
  *                form turns each into its units, which go in vehicleIds.
- *   vehicleIds   Units it applies to by id.
- *                A unit matches when its type OR its id is listed. All three
- *                lists empty = every unit.
+ *   vehicleIds   The picked fleets' units, by id.
+ *   units        Units picked one by one on the form: id, and the plate the
+ *                sentence names them by.
+ *                A unit matches when its type or its id is listed. All lists
+ *                empty = every unit.
  *   hours        When the rule holds, on the fleet's clock (Nairobi). `from`
  *                after `to` runs overnight. Null = always.
  *   alert        What it raises.
@@ -48,7 +50,11 @@ export const fenceRuleSchema = z.object({
   vehicleTypes: z.array(z.string().trim().min(1).max(60)).max(40).default([]),
   fleets:       z.array(z.string().trim().min(1).max(60)).max(20).default([]),
   vehicleIds:   z.array(z.string().min(1).max(40)).max(2000).default([]),
-  hours:        z.object({ from: clock, to: clock }).refine((h) => h.from !== h.to, 'From and to are the same time').nullable().default(null),
+  units:        z.array(z.object({
+    id:    z.string().min(1).max(40),
+    plate: z.string().trim().min(1).max(80),
+  })).max(500).default([]),
+  hours:       z.object({ from: clock, to: clock }).refine((h) => h.from !== h.to, 'From and to are the same time').nullable().default(null),
   alert:        z.object({
     type:     z.enum(RULE_ALERT_TYPES).default('nogo'),
     severity: z.enum(RULE_SEVERITIES).default('critical'),
@@ -75,7 +81,7 @@ export interface CompiledRule extends FenceRule {
 
 export function compileRule(rule: FenceRule): CompiledRule {
   const types = new Set(rule.vehicleTypes.map(norm))
-  const ids = new Set(rule.vehicleIds)
+  const ids = new Set([...rule.vehicleIds, ...rule.units.map((u) => u.id)])
   return { ...rule, types, ids, everyone: types.size === 0 && ids.size === 0 && rule.fleets.length === 0 }
 }
 
@@ -101,14 +107,20 @@ export function ruleActiveAt(rule: Pick<FenceRule, 'hours'>, atMs: number): bool
 
 const ALERT_NAMES: Record<RuleAlertType, string> = { nogo: 'no-go zone' }
 
-/** "Tankers", "Tankers and LORRY units", "Every unit". */
-export function whoWords(rule: Pick<FenceRule, 'vehicleTypes' | 'fleets' | 'vehicleIds'>): string {
+/** Units picked one by one are named up to this many; more are counted. */
+const NAMED_UNITS = 3
+
+/** "Tankers", "Tankers and LORRY units", "KCT 507W and KCN 901F", "No unit". */
+export function whoWords(rule: Pick<FenceRule, 'vehicleTypes' | 'fleets' | 'vehicleIds'> & { units?: FenceRule['units'] }): string {
+  const units = rule.units ?? []
   const parts = [
     ...rule.fleets,
     ...rule.vehicleTypes.map((t) => `${t.trim().toUpperCase()} units`),
+    ...(units.length <= NAMED_UNITS ? units.map((u) => u.plate) : [`${units.length} chosen units`]),
   ]
-  const named = new Set(rule.fleets.length ? [] : rule.vehicleIds)
-  if (named.size) parts.push(`${named.size} chosen ${named.size === 1 ? 'unit' : 'units'}`)
+  // Ids with no fleet or plate to name them by (a rule written through the API)
+  const loose = new Set(rule.fleets.length ? [] : rule.vehicleIds)
+  if (loose.size) parts.push(`${loose.size} chosen ${loose.size === 1 ? 'unit' : 'units'}`)
   if (!parts.length) return 'No unit'
   return parts.length === 1 ? parts[0]! : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`
 }
