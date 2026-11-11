@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ZONE_CATEGORIES } from '../../lib/zone-taxonomy.js'
+import { fenceRuleSchema } from '../../lib/fence-rules.js'
 
 // [lng, lat] — the order polygonCoords is stored and read in (lib/geofence,
 // the GeoJSON projection, the Wialon sync). This used to validate [lat, lng],
@@ -18,6 +19,8 @@ const common = {
   mode:    z.enum(['ALLOWLIST', 'BLOCKLIST']).default('ALLOWLIST'),
   purpose: purpose.optional(),
   color:   color.optional(),
+  // Who may not use the fence and what it raises (lib/fence-rules).
+  rule:    fenceRuleSchema.nullable().optional(),
 }
 
 export const createGeofenceSchema = z.discriminatedUnion('type', [
@@ -52,6 +55,7 @@ export const updateGeofenceSchema = z.object({
   mode:          z.enum(['ALLOWLIST', 'BLOCKLIST']).optional(),
   purpose:       purpose.nullable().optional(),
   color:         color.nullable().optional(),
+  rule:          fenceRuleSchema.nullable().optional(),
   type:          z.enum(['CIRCLE', 'POLYGON', 'LINE']).optional(),
   centerLat:     z.number().min(-90).max(90).optional(),
   centerLng:     z.number().min(-180).max(180).optional(),

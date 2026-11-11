@@ -11,9 +11,16 @@ export async function create(orgId: string, createdById: string, dto: CreateGeof
       mode:           dto.mode ?? 'ALLOWLIST',
       purpose:        dto.purpose ?? null,
       color:          dto.color?.toLowerCase() ?? null,
+      rule:           ruleColumn(dto.rule) ?? Prisma.DbNull,
       ...shapeColumns(dto),
     },
   })
+}
+
+/** A rule for the Json column: undefined = leave it, null = clear it. */
+function ruleColumn(rule: UpdateGeofence['rule']) {
+  if (rule === undefined) return undefined
+  return rule === null ? Prisma.DbNull : (rule as Prisma.InputJsonValue)
 }
 
 type Shape =
@@ -85,6 +92,7 @@ export async function findAllAsGeoJSON(orgId: string) {
       category: categoryOf(g),
       purpose:  g.purpose,
       color:    g.color,
+      rule:     g.rule ?? null,
       fenceType: g.type,
       mode:     g.mode,
       isActive: g.isActive,
@@ -120,16 +128,21 @@ export async function update(id: string, orgId: string, dto: UpdateGeofence) {
   const fence = await prisma.geofence.findFirst({ where: { id, organisationId: orgId }, select: { id: true, externalId: true } })
   if (!fence) return null
   // A Wialon zone's name and shape are rewritten by the next import, so an
-  // edit to either would quietly undo itself. Its purpose and colour are ours
-  // (no import writes them), and so is whether it is enforced.
+  // edit to either would quietly undo itself. Its purpose, colour and rule are
+  // ours (no import writes them), and so is whether it is enforced.
   if (fence.externalId && (dto.name !== undefined || dto.type !== undefined)) {
     throw new ConflictError('This fence comes from Wialon: change its name or shape there. Its purpose and colour can be changed here.')
   }
-  const { type, centerLat, centerLng, radiusM, polygonCoords, widthM, color, ...rest } = dto
+  const { type, centerLat, centerLng, radiusM, polygonCoords, widthM, color, rule, ...rest } = dto
   const shape = type ? shapeColumns({ type, centerLat, centerLng, radiusM, polygonCoords, widthM } as Shape) : {}
   return prisma.geofence.update({
     where: { id },
-    data: { ...rest, ...(color !== undefined ? { color: color?.toLowerCase() ?? null } : {}), ...shape },
+    data: {
+      ...rest,
+      ...(color !== undefined ? { color: color?.toLowerCase() ?? null } : {}),
+      ...(rule !== undefined ? { rule: ruleColumn(rule) } : {}),
+      ...shape,
+    },
   })
 }
 

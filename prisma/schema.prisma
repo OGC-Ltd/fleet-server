@@ -1025,6 +1025,10 @@ model Geofence {
   purpose        String?
   /// #rrggbb the map draws the fence in. NULL = the purpose's own colour.
   color          String?
+  /// Who may not use the fence and the alert it raises: lib/fence-rules
+  /// (trigger, vehicleTypes, fleets, vehicleIds, hours, alert). NULL = no rule.
+  /// Evaluated on live frames by lib/fence-rule-watch.
+  rule           Json?
   isActive       Boolean                                   @default(true) @map("is_active")
   createdAt      DateTime                                  @default(now()) @map("created_at")
   updatedAt      DateTime                                  @updatedAt @map("updated_at")
