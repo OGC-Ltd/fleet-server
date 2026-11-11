@@ -34,6 +34,8 @@ export const planListQuerySchema = z.object({
 export const stopUpdateSchema = z.object({
   outcome: z.enum(['FULL', 'PARTLY', 'REJECTED']).nullable().optional(),
   remarks: z.string().max(500).optional(),
+  /** "Mark for today": the fleet day the stop is due, or null to clear it. */
+  dueDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
 })
 
 export const customerListQuerySchema = z.object({

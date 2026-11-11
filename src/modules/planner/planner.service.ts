@@ -448,6 +448,7 @@ export async function updateStop(orgId: string, planId: string, stopId: string, 
     data: {
       ...(marking ? { outcome: body.outcome, outcomeBy: body.outcome ? userId : null, outcomeAt: body.outcome ? new Date() : null } : {}),
       ...(body.remarks !== undefined ? { remarks: body.remarks } : {}),
+      ...(body.dueDay !== undefined ? { dueDay: body.dueDay } : {}),
     },
   })
   return { ...row, amount: num(row.amount), tonnage: num(row.tonnage) }
