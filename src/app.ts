@@ -58,6 +58,7 @@ import { provisionUserSchema } from './modules/users/user.schema.js'
 import { trustProxy, parseProxyList } from './lib/trust-proxy.js'
 import * as alertsCtrl from './modules/alerts/alerts.controller.js'
 import * as stopWatchCtrl from './modules/stop-watch/stop-watch.service.js'
+import * as idleWatchCtrl from './modules/idle-watch/idle-watch.service.js'
 import { listAlertsQuery, markReadSchema } from './modules/alerts/alerts.schema.js'
 
 /** A query value as a number, or NaN when absent or blank (`Number('')` is 0). */
@@ -321,6 +322,8 @@ export function createApp() {
   app.use(`${orgBase}/notifications`, notificationsOrgRouter)
   // Menengai's units flagged now by the server's stop watch (Alerts page)
   app.get(`${orgBase}/stop-watch`, authenticate, requireOrgAccess, requirePermission('notification:read'), stopWatchCtrl.current)
+  // Menengai's listed units idle 3 h of working time (Alerts page, corner badge)
+  app.get(`${orgBase}/idle-watch`, authenticate, requireOrgAccess, requirePermission('notification:read'), idleWatchCtrl.current)
 
   app.use((_req, res) => {
     sendError(res, 404, 'Route not found')
