@@ -368,7 +368,11 @@ export async function syncWialonFleet(
     }
   }
 
-  for (const c of changes) {
+  // Renames can chain: unit A takes the plate unit B is giving up in this same
+  // run (Kasulu, 2026-11-11: "MUFINDI: BUS 02" passed between two units). If A
+  // is written before B, A hits the unique plate. Such updates are retried once
+  // after every other update has gone through, by which time B has let go.
+  const updateOne = async (c: Change, final: boolean): Promise<boolean> => {
     const externalId = `wialon:${c.unit.id}`
     const { vehicleGroupCode, ...rest } = c.data
     const data = vehicleGroupCode ? { ...rest, vehicleGroupId: groupId.get(vehicleGroupCode as string)! } : rest
@@ -376,11 +380,30 @@ export async function syncWialonFleet(
       const row = await prisma.vehicle.update({ where: { externalId }, data, select: { id: true } })
       applied.updated++
       if (opts.positions === 'all') await writePosition(row.id, externalId, c.unit)
+      return true
     } catch (err) {
+      const plateClash = 'registrationPlate' in c.data && /Unique constraint/i.test(String(err))
+      if (plateClash && !final) return false
+      // Name the row in the way, so the log says what to fix.
+      let error = errorText(err)
+      if (plateClash) {
+        const holder = await prisma.vehicle.findUnique({
+          where:  { registrationPlate: c.data.registrationPlate as string },
+          select: { name: true, externalId: true, isActive: true, organisation: { select: { code: true } } },
+        }).catch(() => null)
+        if (holder) {
+          error = `plate "${c.data.registrationPlate}" is held by ${holder.organisation.code} "${holder.name}" ` +
+            `(${holder.externalId ?? 'no external id'}, ${holder.isActive ? 'active' : 'inactive'})`
+        }
+      }
       applied.failed++
-      applied.failures.push({ name: c.unit.nm, externalId, error: errorText(err) })
+      applied.failures.push({ name: c.unit.nm, externalId, error })
+      return true
     }
   }
+  const retry: Change[] = []
+  for (const c of changes) if (!(await updateOne(c, false))) retry.push(c)
+  for (const c of retry) await updateOne(c, true)
 
   // The CLI has always pinged every unit; unchanged rows included.
   if (opts.positions === 'all') {
