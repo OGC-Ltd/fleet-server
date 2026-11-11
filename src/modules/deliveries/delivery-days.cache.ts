@@ -24,25 +24,52 @@ export const ORDERS_TTL_S = 86_400
 export const dayKey = (orgId: string, day: string) => `dlv:day:${orgId}:${day}`
 export const ordersKey = (orgId: string) => `dlv:orders:${orgId}`
 
+/**
+ * ## Every entry carries the moment its Postgres read began
+ *
+ * Two writers can finish in Postgres in one order and reach Redis in the other,
+ * and a reader that loaded the old row just before a save can put it back after
+ * the save cached the new one. Either way Redis would serve an older list than
+ * Postgres holds, for days. So each entry is stored as `{ s, v }`, where `s` is
+ * when the Postgres read that produced `v` STARTED (a writer: after its write
+ * returned), and KEEP_SCRIPT replaces an entry only with one whose `s` is not
+ * older. A read that began before a write can never overwrite that write.
+ */
+type Entry<T> = { s: number; v: T }
+
+const KEEP_SCRIPT = `
+local cur = redis.call('GET', KEYS[1])
+if cur then
+  local ok, e = pcall(cjson.decode, cur)
+  if ok and type(e) == 'table' and tonumber(e.s) and tonumber(e.s) > tonumber(ARGV[2]) then return 0 end
+end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+return 1`
+
 /** The cached value, or undefined on a miss, no Redis, or a Redis error. */
 async function peek<T>(key: string): Promise<T | undefined> {
   const redis = getCacheRedis()
   if (!redis) return undefined
   try {
     const raw = await redis.get(key)
-    return raw == null ? undefined : (JSON.parse(raw) as T)
+    if (raw == null) return undefined
+    const e = JSON.parse(raw) as Entry<T>
+    return e && typeof e === 'object' && 's' in e ? e.v : undefined
   } catch (err) {
     logger.warn({ err, key }, 'Deliveries cache read failed, reading Postgres')
     return undefined
   }
 }
 
-/** Keep a value; a failure only means the next read goes to Postgres. */
-export async function keep(key: string, value: unknown, ttlS: number): Promise<void> {
+/**
+ * Keep a value read from Postgres at `stamp` (ms), unless the cache already
+ * holds one read later. A failure only means the next read goes to Postgres.
+ */
+export async function keep(key: string, value: unknown, ttlS: number, stamp: number): Promise<void> {
   const redis = getCacheRedis()
   if (!redis) return
   try {
-    await redis.set(key, JSON.stringify(value), 'EX', ttlS)
+    await redis.eval(KEEP_SCRIPT, 1, key, JSON.stringify({ s: stamp, v: value }), String(stamp), String(ttlS))
   } catch (err) {
     // A stale entry would outlive the write, so drop it rather than leave it
     logger.warn({ err, key }, 'Deliveries cache write failed, dropping the entry')
@@ -54,7 +81,8 @@ export async function keep(key: string, value: unknown, ttlS: number): Promise<v
 export async function readThrough<T>(key: string, ttlS: number, load: () => Promise<T>): Promise<T> {
   const hit = await peek<T>(key)
   if (hit !== undefined) return hit
+  const stamp = Date.now()
   const value = await load()
-  await keep(key, value, ttlS)
+  await keep(key, value, ttlS, stamp)
   return value
 }

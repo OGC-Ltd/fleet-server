@@ -50,8 +50,9 @@ export async function saveDay(orgId: string, day: string, userId: string | null,
     update: { vehicles, updatedById: userId },
     select: { vehicles: true, updatedAt: true },
   })
+  // Stamped after the write returned: later than any read that began before it
   const list = toList(day, row)
-  await keep(dayKey(orgId, day), list, DAY_TTL_S)
+  await keep(dayKey(orgId, day), list, DAY_TTL_S, Date.now())
   return list
 }
 
@@ -97,6 +98,7 @@ export async function saveOrder(orgId: string, plate: string, text: string, user
     await prisma.deliveryOrder.deleteMany({ where: { organisationId: orgId, plate: p } })
   }
   // Write-through from Postgres as it now stands, so every process reads the same
-  await keep(ordersKey(orgId), await loadOrders(orgId), ORDERS_TTL_S)
+  const stamp = Date.now()
+  await keep(ordersKey(orgId), await loadOrders(orgId), ORDERS_TTL_S, stamp)
   return getOrders(orgId, now)
 }

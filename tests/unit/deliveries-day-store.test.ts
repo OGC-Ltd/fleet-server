@@ -7,13 +7,20 @@ let failGet = false
 const fakeRedis = {
   get: vi.fn(async (k: string) => { if (failGet) throw new Error('down'); return store.get(k) ?? null }),
   set: vi.fn(async (k: string, v: string) => { store.set(k, v); return 'OK' }),
+  // KEEP_SCRIPT, as Redis runs it: replace only with an entry read no earlier
+  eval: vi.fn(async (_script: string, _n: number, k: string, value: string, stamp: string) => {
+    const cur = store.get(k)
+    if (cur && JSON.parse(cur).s > Number(stamp)) return 0
+    store.set(k, value)
+    return 1
+  }),
   del: vi.fn(async (k: string) => { store.delete(k); return 1 }),
 }
 vi.mock('../../src/lib/redis.js', () => ({ getCacheRedis: () => (redisOn ? fakeRedis : null) }))
 vi.mock('../../src/lib/prisma.js')
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { getDay, saveDay, lastDayBefore, getOrders, saveOrder, ORDERS_KEEP_DAYS } from '../../src/modules/deliveries/deliveries.service.js'
-import { dayKey } from '../../src/modules/deliveries/delivery-days.cache.js'
+import { dayKey, keep, DAY_TTL_S } from '../../src/modules/deliveries/delivery-days.cache.js'
 
 const ORG = 'org1'
 const DAY = '2026-11-11'
@@ -22,7 +29,7 @@ const at = new Date('2026-11-11T09:00:00Z')
 
 beforeEach(() => {
   store.clear(); redisOn = true; failGet = false
-  fakeRedis.get.mockClear(); fakeRedis.set.mockClear()
+  fakeRedis.get.mockClear(); fakeRedis.eval.mockClear()
 })
 
 describe('a day list: persisted, then read from the cache', () => {
@@ -31,7 +38,7 @@ describe('a day list: persisted, then read from the cache', () => {
     const saved = await saveDay(ORG, DAY, 'u1', { vehicles: [KCA] })
     expect(prismaMock.deliveryDay.upsert).toHaveBeenCalledOnce()
     expect(saved.vehicles).toEqual([KCA])
-    expect(JSON.parse(store.get(dayKey(ORG, DAY))!).vehicles).toEqual([KCA])
+    expect(JSON.parse(store.get(dayKey(ORG, DAY))!).v.vehicles).toEqual([KCA])
 
     const read = await getDay(ORG, DAY)
     expect(read).toEqual(saved)
@@ -51,6 +58,28 @@ describe('a day list: persisted, then read from the cache', () => {
     expect((await getDay(ORG, DAY)).vehicles).toEqual([KCA])
     redisOn = true; failGet = true
     expect((await getDay(ORG, DAY)).vehicles).toEqual([KCA])
+  })
+
+  it('a read that began before a save cannot put the old list back', async () => {
+    const KBB = { key: 'kbb', plate: 'KBB 880A', vehicleIds: ['v2'], customers: [] }
+    // The reader misses, starts its Postgres read, and is slow
+    let release!: (v: unknown) => void
+    prismaMock.deliveryDay.findUnique.mockReturnValue(new Promise((r) => { release = r }) as never)
+    const reading = getDay(ORG, DAY)
+    await new Promise((r) => setTimeout(r, 5))
+    // Meanwhile a save lands and caches the new list
+    prismaMock.deliveryDay.upsert.mockResolvedValue({ vehicles: [KCA, KBB], updatedAt: at } as never)
+    await saveDay(ORG, DAY, 'u1', { vehicles: [KCA, KBB] })
+    // The slow read now returns the old row and tries to cache it
+    release({ vehicles: [KCA], updatedAt: at })
+    await reading
+    expect(JSON.parse(store.get(dayKey(ORG, DAY))!).v.vehicles).toEqual([KCA, KBB])
+  })
+
+  it('two saves reaching Redis out of order: the later write stays', async () => {
+    await keep(dayKey(ORG, DAY), { vehicles: ['B'] }, DAY_TTL_S, 2000)
+    await keep(dayKey(ORG, DAY), { vehicles: ['A'] }, DAY_TTL_S, 1000)
+    expect(JSON.parse(store.get(dayKey(ORG, DAY))!).v.vehicles).toEqual(['B'])
   })
 
   it('refuses a day that is not YYYY-MM-DD', async () => {
