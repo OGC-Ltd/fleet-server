@@ -3672,10 +3672,6 @@ model DeliveryDay {
   vehicles       Json     @default("[]")
   updatedById    String?  @map("updated_by")
   updatedAt      DateTime @updatedAt @map("updated_at")
-  /// When this day's unfinished stops were carried to the next day's list
-  /// (deliveries/roll-over); NULL until then. Claimed once, so a stop taken
-  /// off the next day's list is never put back.
-  rolledAt       DateTime? @map("rolled_at")
 
   organisation Organisation @relation(fields: [organisationId], references: [id])
 
