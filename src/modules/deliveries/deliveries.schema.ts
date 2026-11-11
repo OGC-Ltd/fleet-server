@@ -17,10 +17,6 @@ const vehicle = z.object({
   customers: z.array(z.string().max(300)).max(500).default([]),
   pins: z.array(pin).max(500).optional(),
   group: z.string().max(120).optional(),
-  /** The stops carried over from an earlier day's list by deliveries/roll-over (names, or a pasted point's name). */
-  carried: z.array(z.string().max(300)).max(500).optional(),
-  /** The day they were carried from, 'YYYY-MM-DD'. */
-  carriedFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 })
 
 export const daySaveSchema = z.object({
