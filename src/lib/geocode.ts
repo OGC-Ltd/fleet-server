@@ -119,6 +119,38 @@ function composeLabel(addr: NominatimAddress): string | null {
   return parts.slice(0, 3).join(', ')
 }
 
+// ── local names OSM gets wrong ──────────────────────────────────────────────
+
+/**
+ * Places the fleets call by another name than OpenStreetMap does. Timsales'
+ * yard at Elburgon (HQ -0.3008, 35.8016) comes back as "Kasarani Mwatu,
+ * Molo" / "Kasarani Site, Molo", which nobody there calls it (operator,
+ * 2026-11-11). Applied on read, so labels already cached are fixed too; the
+ * Kasarani in Nairobi and the one at Rongai are far outside the radius.
+ */
+const RENAMES: Array<{ lat: number, lng: number, withinM: number, from: RegExp, to: string }> = [
+  { lat: -0.3008, lng: 35.8016, withinM: 5_000, from: /\bKasarani(?: Mwatu| Site)?\b/i, to: 'Elburgon' },
+]
+
+const metres = (aLat: number, aLng: number, bLat: number, bLng: number) => {
+  const rad = Math.PI / 180
+  const h = Math.sin((bLat - aLat) * rad / 2) ** 2
+    + Math.cos(aLat * rad) * Math.cos(bLat * rad) * Math.sin((bLng - aLng) * rad / 2) ** 2
+  return 2 * 6_371_000 * Math.asin(Math.min(1, Math.sqrt(h)))
+}
+
+/** A label with any local renaming applied for the point it describes. */
+export function localName(label: string | null, lat: number, lng: number): string | null {
+  if (!label) return label
+  let out = label
+  for (const r of RENAMES) {
+    if (metres(lat, lng, r.lat, r.lng) <= r.withinM) out = out.replace(r.from, r.to)
+  }
+  // "Elburgon, Elburgon, …" would read as a stutter
+  const parts = out.split(', ')
+  return parts.filter((p, i) => parts.findIndex((q) => q.toLowerCase() === p.toLowerCase()) === i).join(', ')
+}
+
 // ── public API ──────────────────────────────────────────────────────────────
 
 /**
@@ -131,14 +163,14 @@ function composeLabel(addr: NominatimAddress): string | null {
  * warm the cell in the background if it wants the next read to have it.
  */
 export function cachedPlace(lat: number, lng: number): string | null {
-  return memory.get(keyOf(lat, lng)) ?? null
+  return localName(memory.get(keyOf(lat, lng)) || null, lat, lng)
 }
 
 /** Nearest named place for a coordinate, or null when unresolvable. */
 export async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
   const key = keyOf(lat, lng)
   const hit = memory.get(key)
-  if (hit !== undefined) return hit || null   // '' caches a "no name here" answer
+  if (hit !== undefined) return localName(hit || null, lat, lng)   // '' caches a "no name here" answer
 
   if (Date.now() < breakerUntil) return null
   if (!(Math.abs(lat) <= 90 && Math.abs(lng) <= 180)) return null
@@ -150,7 +182,7 @@ export async function reverseGeocode(lat: number, lng: number): Promise<string |
   const result = queue.then(async () => {
     try {
       const again = memory.get(key)
-      if (again !== undefined) return again || null
+      if (again !== undefined) return localName(again || null, lat, lng)
       const url = `${NOMINATIM_BASE}?lat=${lat}&lon=${lng}&format=jsonv2&zoom=16&addressdetails=1`
       const res = await fetch(url, {
         headers: { 'User-Agent': 'fleet-server/1.0 (dashboard location labels)' },
@@ -161,7 +193,7 @@ export async function reverseGeocode(lat: number, lng: number): Promise<string |
       const label = body.address ? composeLabel(body.address) : null
       memory.set(key, label ?? '')
       scheduleSave()
-      return label
+      return localName(label, lat, lng)
     } catch (err) {
       breakerUntil = Date.now() + BREAKER_MS
       logger.warn({ err, lat, lng }, 'reverse geocode failed — breaker engaged')

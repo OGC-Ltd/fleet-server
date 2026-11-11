@@ -14,6 +14,7 @@
 import { logger } from '../../lib/logger.js'
 import { haversineM, type ReviewPlace } from './usage-review.compute.js'
 import { persistentStore } from './usage-review.store.js'
+import { localName } from '../../lib/geocode.js'
 
 const URL_BASE = 'https://nominatim.openstreetmap.org/reverse'
 const USER_AGENT = 'fleettrack-usage-review/1.0 (logistics.raioperations.com)'
@@ -77,8 +78,23 @@ async function lookupNow(lat: number, lng: number): Promise<PlaceName | null> {
   return { ...nameFromAddress(body.address), address: body.display_name ?? null }
 }
 
+/** The fleets' own name for a place OSM names otherwise (lib/geocode RENAMES), on every field. */
+function renamed(p: PlaceName | null, lat: number, lng: number): PlaceName | null {
+  if (!p) return p
+  return {
+    ...p,
+    name: localName(p.name, lat, lng) ?? p.name,
+    area: localName(p.area, lat, lng),
+    address: localName(p.address, lat, lng),
+  }
+}
+
 /** One lookup, through the shared queue and the cache. Never throws. */
 export function reverseGeocode(lat: number, lng: number): Promise<PlaceName | null> {
+  return lookupCached(lat, lng).then((p) => renamed(p, lat, lng))
+}
+
+function lookupCached(lat: number, lng: number): Promise<PlaceName | null> {
   const k = key(lat, lng)
   if (cache.has(k)) return Promise.resolve(cache.get(k) ?? null)
   const job = queue.then(async () => {
