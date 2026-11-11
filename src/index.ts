@@ -19,6 +19,7 @@ import { startAiInsightWarmer } from './modules/dashboard/ai-insight.js'
 import { startVehicleInsightSweep } from './modules/vehicles/vehicle-insight.js'
 import { startStopWatch } from './modules/stop-watch/stop-watch.service.js'
 import { startIdleWatch } from './modules/idle-watch/idle-watch.service.js'
+import { startDeliveryRollOver } from './modules/deliveries/roll-over.js'
 import { WialonLiveAdapter } from './providers/wialon/wialon.adapter.js'
 import { startRaiFactorySuiteReconciler } from './providers/raifactorysuite/raifactorysuite.reconciler.js'
 import { startRetentionSweep } from './lib/queues/retention.js'
@@ -79,6 +80,8 @@ async function main() {
   const stopStopWatch = startStopWatch()
   // Menengai's listed units idle 3 h of working time (modules/idle-watch).
   const stopIdleWatch = startIdleWatch()
+  // Each Deliveries list's unfinished stops carried to the next day, once, after midnight (modules/deliveries/roll-over).
+  const stopDeliveryRollOver = startDeliveryRollOver()
   // (The live feed used to be seeded here into a shared in-memory ring. Each
   // SSE client now replays its OWN org's history from the durable store on
   // connect — see lib/sse.ts's replayDashboardFeed — so there is nothing to
@@ -173,6 +176,7 @@ async function main() {
     stopCacheWarmer()
     stopAiInsightWarmer()
     stopVehicleInsightSweep()
+    stopDeliveryRollOver()
     stopStopWatch()
     stopIdleWatch()
     // Release movement lines still waiting in their five-minute window.
