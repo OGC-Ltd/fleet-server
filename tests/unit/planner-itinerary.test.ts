@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import * as XLSX from 'xlsx'
 import { readDeliverySheet } from '../../src/modules/planner/sheet.js'
-import { readKm, readMinutes, readWhen, itineraryCode } from '../../src/modules/planner/itinerary.js'
+import { readKm, readMinutes, readWhen, itineraryCode, plateOfRoute, readAddress } from '../../src/modules/planner/itinerary.js'
 import { plannedColumns, routeColumns } from '../../src/modules/planner/planner.service.js'
 
 /** A workbook laid out as Wialon Logistics exports an itinerary, made-up data. */
@@ -70,6 +70,33 @@ describe('a Wialon itinerary', () => {
       'No itinerary name with a truck on the sheet.',
       'No planned run dates on the sheet.',
     ])
+  })
+
+  it('reads the other layout: place (point) addresses, a date after the truck, a bare end time', () => {
+    const got = readDeliverySheet(book([
+      [null, 'Generated: 08:44'],
+      [null, 'Itinerary "VS - Menengai - KZZ 003C - 2026-11-10 13:03"'],
+      [null, '10.11.2026 06:00 — 06:06'],
+      [], HEAD,
+      ['1', 'DEPOT', 'DEPOT (-0.288, 36.044)', '10.11.2026 06:00', '10.11.2026 13:04', '10.11.2026 06:00 — 22:00', '0 m', '10 min', null, null, '0'],
+      ['2', 'A CUSTOMER', 'BORDER TOWN (0.465675, 34.1008417)', '10.11.2026 06:03', null, '10.11.2026 06:00 — 22:00', '231.8 km', '3 min', 10800, null, '0'],
+      ['3', 'DEPOT', 'DEPOT (-0.288, 36.044)', '10.11.2026 06:06', null, '10.11.2026 06:00 — 22:00', '231.8 km', '10 min', null, null, '0'],
+    ]))
+    expect(got.problems).toEqual([])
+    expect(got.header).toMatchObject({ plate: 'KZZ 003C', planDate: '2026-11-10' })
+    expect(got.route).toMatchObject({ start: '2026-11-10T06:00:00+03:00', end: '2026-11-10T06:06:00+03:00', km: 463.6, home: { name: 'DEPOT', lat: -0.288 } })
+    expect(got.stops).toHaveLength(1)
+    expect(got.stops[0]).toMatchObject({
+      customerName: 'A CUSTOMER', customerCode: 'WL:A CUSTOMER', location: 'BORDER TOWN', lat: 0.465675, lng: 34.1008417, tonnage: 10.8,
+      planned: { at: '2026-11-10T06:03:00+03:00', windowFrom: '06:00', windowTo: '22:00', serviceMin: 3, legKm: 231.8 },
+    })
+  })
+
+  it('finds the truck in the itinerary name', () => {
+    expect(plateOfRoute('VS - Menengai - KDE 268P')).toBe('KDE 268P')
+    expect(plateOfRoute('VS - Menengai - KCS 078M - 2026-11-10 13:03')).toBe('KCS 078M')
+    expect(readAddress('-0.1434, 35.6833')).toEqual({ place: '', p: { lat: -0.1434, lng: 35.6833 } })
+    expect(readAddress('KIPKAREN 2 (0.6069, 34.9640)')).toEqual({ place: 'KIPKAREN 2', p: { lat: 0.6069, lng: 34.964 } })
   })
 
   it('reads its cells', () => {

@@ -87,10 +87,32 @@ export function readMinutes(v: unknown): number | null {
   return (h ? Number(h[1]) * 60 : 0) + (mi ? Number(mi[1]) : 0)
 }
 
-const point = (v: unknown) => {
-  const nums = text(v).match(/-?\d+(?:\.\d+)?/g)
-  if (!nums || nums.length !== 2) return null
-  return { lat: Number(nums[0]), lng: Number(nums[1]) }
+/**
+ * An Address cell: "-0.288, 36.044", or "BUSIA (0.465675, 34.1008417)" with
+ * the place written before the point in brackets.
+ */
+export function readAddress(v: unknown): { place: string, p: { lat: number, lng: number } | null } {
+  const s = text(v)
+  const bracketed = /^(.*?)\(\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/.exec(s)
+  if (bracketed) return { place: bracketed[1].trim(), p: { lat: Number(bracketed[2]), lng: Number(bracketed[3]) } }
+  const nums = s.match(/-?\d+(?:\.\d+)?/g)
+  if (!nums || nums.length !== 2) return { place: '', p: null }
+  return { place: '', p: { lat: Number(nums[0]), lng: Number(nums[1]) } }
+}
+
+/**
+ * The truck in an itinerary's name: "VS - Menengai - KDE 268P", or
+ * "VS - Menengai - KCS 078M - 2026-11-10 13:03" where a date follows it.
+ * The last part with letters and digits that is not a date.
+ */
+export function plateOfRoute(name: string): string {
+  const parts = name.split(/\s+-\s+/).map((x) => x.trim())
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const x = parts[i]
+    if (/^\d{4}-\d{1,2}-\d{1,2}/.test(x) || /^\d{1,2}[./]\d{1,2}[./]\d{4}/.test(x)) continue
+    if (/[A-Z]/i.test(x) && /\d/.test(x)) return x
+  }
+  return parts[parts.length - 1] ?? ''
 }
 
 const metres = (a: { lat: number, lng: number }, b: { lat: number, lng: number }) => {
@@ -114,14 +136,16 @@ export function readItinerary(rows: unknown[][], headingAt: number): DeliveryShe
       const named = /Itinerary\s*["“”']([^"“”']+)["“”']/i.exec(s)
       if (named) {
         route.name = named[1].trim()
-        // "VS - Menengai - KDE 268P": the truck is the last part
-        header.plate = route.name.split(/\s+-\s+/).pop()!.trim()
+        header.plate = plateOfRoute(route.name)
         continue
       }
       const span = s.match(/\d{1,2}\.\d{1,2}\.\d{4}\s+\d{1,2}:\d{2}/g)
       if (span && span.length >= 1 && !route.start) {
         route.start = readWhen(span[0], null)
-        route.end = span[1] ? readWhen(span[1], null) : null
+        // The end with its own date, else a bare time on the start's day ("10.11.2026 06:00 — 06:06")
+        const endTime = /[—–-]\s*(\d{1,2}:\d{2})\s*$/.exec(s)
+        route.end = span[1] ? readWhen(span[1], null)
+          : endTime && route.start ? readWhen(endTime[1], route.start.slice(0, 10)) : null
       }
     }
   }
@@ -137,7 +161,7 @@ export function readItinerary(rows: unknown[][], headingAt: number): DeliveryShe
   })
   const at = (row: unknown[], f: string) => (cols[f] == null ? null : row[cols[f]])
 
-  interface Line { row: number, name: string, client: string, p: { lat: number, lng: number } | null, planned: PlannedStop, weight: number | null, cost: number | null, comment: string }
+  interface Line { row: number, name: string, client: string, place: string, p: { lat: number, lng: number } | null, planned: PlannedStop, weight: number | null, cost: number | null, comment: string }
   const lines: Line[] = []
   for (let r = headingAt + 1; r < rows.length; r++) {
     const row = rows[r] ?? []
@@ -147,7 +171,7 @@ export function readItinerary(rows: unknown[][], headingAt: number): DeliveryShe
     const weight = Number(text(at(row, 'weight')).replace(/[^0-9.]/g, ''))
     const cost = Number(text(at(row, 'cost')).replace(/[^0-9.]/g, ''))
     lines.push({
-      row: r + 1, name, client: text(at(row, 'client')), p: point(at(row, 'address')),
+      row: r + 1, name, client: text(at(row, 'client')), ...readAddress(at(row, 'address')),
       planned: {
         at: readWhen(at(row, 'arrival'), header.planDate),
         windowFrom: win[0] ? win[0].padStart(5, '0') : null,
@@ -181,7 +205,7 @@ export function readItinerary(rows: unknown[][], headingAt: number): DeliveryShe
     }
     return {
       sequence: i + 1, rep: '', customerCode: itineraryCode(l.name), customerName: l.name,
-      location: '', lat: p?.lat ?? null, lng: p?.lng ?? null, invoiceNo: '',
+      location: l.place, lat: p?.lat ?? null, lng: p?.lng ?? null, invoiceNo: '',
       amount: l.cost, tonnage: l.weight != null ? Math.round(l.weight) / 1000 : null,
       outcome: null, remarks: l.comment, row: l.row, planned: l.planned,
     }

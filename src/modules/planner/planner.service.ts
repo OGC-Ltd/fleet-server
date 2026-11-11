@@ -26,6 +26,40 @@ import { readDeliverySheet, type DeliverySheet, type SheetStop } from './sheet.j
 import type { SaveSheet, PlanListQuery, StopUpdate } from './planner.schema.js'
 import { fencePicks, type FencePick } from './fence-match.js'
 import type { PlannedStop } from './itinerary.js'
+import { cachedPlace, reverseGeocode } from '../../lib/geocode.js'
+
+/** How long a preview waits for place names; the save waits longer, as it stores them. */
+export const PREVIEW_PLACES_MS = 6_000
+export const SAVE_PLACES_MS = 30_000
+
+const pointWords = (lat: number, lng: number) => `${lat.toFixed(5)}, ${lng.toFixed(5)}`
+
+/**
+ * An itinerary names no LOCATION, so each stop's is the place at its
+ * coordinates (lib/geocode: cached, about one lookup a second), or the
+ * coordinates themselves when no name comes back within `waitMs`.
+ * A sales sheet's own LOCATION is kept as written.
+ */
+export async function placeStops<T extends Pick<SheetStop, 'lat' | 'lng' | 'location'>>(
+  stops: T[], itinerary: boolean, waitMs: number,
+): Promise<T[]> {
+  if (!itinerary) return stops
+  const named = new Map<string, string | null>()
+  const lookups: Promise<void>[] = []
+  for (const s of stops) {
+    if (s.location || s.lat == null || s.lng == null) continue
+    const k = `${s.lat},${s.lng}`
+    if (named.has(k)) continue
+    named.set(k, cachedPlace(s.lat, s.lng))
+    if (named.get(k) == null) {
+      const { lat, lng } = s
+      lookups.push(reverseGeocode(lat, lng).then((p) => { named.set(k, p) }, () => {}))
+    }
+  }
+  if (lookups.length) await Promise.race([Promise.all(lookups), new Promise((r) => setTimeout(r, waitMs))])
+  return stops.map((s) => (s.location || s.lat == null || s.lng == null ? s
+    : { ...s, location: named.get(`${s.lat},${s.lng}`) || pointWords(s.lat, s.lng) }))
+}
 
 /** A new customer's circle. */
 export const CUSTOMER_RADIUS_M = 100
@@ -104,7 +138,8 @@ async function knownCustomers(orgId: string, codes: string[]) {
 
 /** What a sheet holds, and what saving it would do. Writes nothing. */
 export async function previewSheet(orgId: string, fileName: string, data: string) {
-  const sheet = readFile(data)
+  const read = readFile(data)
+  const sheet = { ...read, stops: await placeStops(read.stops, Boolean(read.route), PREVIEW_PLACES_MS) }
   const [vehicle, driver, known] = await Promise.all([
     vehicleFor(orgId, sheet.header.plate),
     driverFor(orgId, sheet.header.driverName),
@@ -177,10 +212,10 @@ export async function saveSheet(orgId: string, userId: string | null, body: Save
   if (!planDate) throw new BadRequestError(sheet.route ? 'The itinerary has no run dates; enter the day.' : 'The sheet has no Date; enter the day.')
   if (!sheet.stops.length) throw new BadRequestError(sheet.route ? 'The itinerary lists no stops.' : 'The sheet lists no customers.')
 
-  const stops = sheet.stops.map((s) => {
+  const stops = await placeStops(sheet.stops.map((s) => {
     const p = body.points?.[s.customerCode]
     return p ? { ...s, lat: p.lat, lng: p.lng } : s
-  })
+  }), Boolean(sheet.route), SAVE_PLACES_MS)
   const codes = [...new Set(stops.map((s) => s.customerCode))]
   const known = await knownCustomers(orgId, codes)
   const missing = stops.filter((s) => (s.lat == null || s.lng == null) && !known.byCode.has(s.customerCode))
