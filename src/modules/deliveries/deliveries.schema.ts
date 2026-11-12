@@ -17,6 +17,12 @@ const vehicle = z.object({
   customers: z.array(z.string().max(300)).max(500).default([]),
   pins: z.array(pin).max(500).optional(),
   group: z.string().max(120).optional(),
+  /**
+   * Which of the tab's two reports the vehicle was added on: 'vs' Van Sales,
+   * 'fg' (or none, as every list saved before the split) Finished Goods.
+   * Both live in the one day list; zod would drop the tag if it were not named.
+   */
+  list: z.enum(['vs', 'fg']).optional(),
 })
 
 export const daySaveSchema = z.object({
