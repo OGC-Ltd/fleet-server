@@ -10,7 +10,7 @@
 import type { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { BadRequestError } from '../../core/errors/errors.js'
-import { DAY_RE, type DaySave } from './deliveries.schema.js'
+import { DAY_RE, MAX_RANGE_DAYS, type DaySave } from './deliveries.schema.js'
 import { readThrough, keep, dayKey, ordersKey, DAY_TTL_S, ORDERS_TTL_S } from './delivery-days.cache.js'
 import { syncKeyedPlans } from '../planner/keyed-plans.js'
 import { logger } from '../../lib/logger.js'
@@ -41,6 +41,29 @@ export async function getDay(orgId: string, day: string): Promise<DayList> {
   checkDay(day)
   return readThrough(dayKey(orgId, day), DAY_TTL_S, async () => toList(day,
     await prisma.deliveryDay.findUnique({ where: { organisationId_day: { organisationId: orgId, day } }, select: { vehicles: true, updatedAt: true } })))
+}
+
+/** The calendar days from `from` to `to`, both kept ("2026-11-11", "2026-11-12"). */
+export function daysBetween(from: string, to: string): string[] {
+  checkDay(from); checkDay(to)
+  if (from > to) throw new BadRequestError('from is after to')
+  const out: string[] = []
+  // Noon UTC steps whole calendar days; the keys are fleet days already, no zone to convert
+  for (let t = Date.parse(`${from}T12:00:00Z`), end = Date.parse(`${to}T12:00:00Z`); t <= end; t += 86_400_000) {
+    out.push(new Date(t).toISOString().slice(0, 10))
+    if (out.length > MAX_RANGE_DAYS) throw new BadRequestError(`${MAX_RANGE_DAYS} days at most`)
+  }
+  return out
+}
+
+/**
+ * Every day's list in a range, the last day included, each through its own
+ * cache entry (the same one getDay reads and saveDay writes), so a range never
+ * serves a list older than the day's own read would (operator, 12 Nov 2026:
+ * 11 to 12 Nov must show both days in full).
+ */
+export async function getDays(orgId: string, from: string, to: string): Promise<DayList[]> {
+  return Promise.all(daysBetween(from, to).map((day) => getDay(orgId, day)))
 }
 
 export async function saveDay(orgId: string, day: string, userId: string | null, body: DaySave): Promise<DayList> {

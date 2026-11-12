@@ -23,9 +23,20 @@ export const daySaveSchema = z.object({
   vehicles: z.array(vehicle).max(500),
 })
 
-export const dayBeforeQuerySchema = z.object({
-  before: z.string().regex(DAY_RE),
-})
+/** The longest range one read returns (a month); the report itself runs 7 days at most. */
+export const MAX_RANGE_DAYS = 31
+
+/**
+ * GET /days: `before` (the latest earlier day with a list), or `from` and `to`
+ * (every day of that range, both ends kept: 2026-11-11 to 2026-11-12 is two days).
+ */
+export const daysQuerySchema = z.object({
+  before: z.string().regex(DAY_RE).optional(),
+  from: z.string().regex(DAY_RE).optional(),
+  to: z.string().regex(DAY_RE).optional(),
+}).refine((q) => (q.before != null) !== (q.from != null || q.to != null), { message: 'Give before, or from and to' })
+  .refine((q) => q.before != null || (q.from != null && q.to != null), { message: 'from and to go together' })
+  .refine((q) => q.from == null || q.to == null || q.from <= q.to, { message: 'from is after to' })
 
 export const orderSaveSchema = z.object({
   /** "8/10"; empty forgets the plate's value. */
