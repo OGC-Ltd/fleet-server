@@ -13,8 +13,14 @@ export const saveDay: RequestHandler = async (req, res, next) => {
   try { sendSuccess(res, await svc.saveDay(p(req, 'orgId'), p(req, 'day'), req.user?.id ?? null, req.body as DaySave)) } catch (err) { next(err) }
 }
 
-export const lastDayBefore: RequestHandler = async (req, res, next) => {
-  try { sendSuccess(res, await svc.lastDayBefore(p(req, 'orgId'), (req.query as { before: string }).before)) } catch (err) { next(err) }
+/** ?before=day: the latest earlier day with a list. ?from=&to=: every day of the range, in order. */
+export const listDays: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as { before?: string; from?: string; to?: string }
+    sendSuccess(res, q.before != null
+      ? await svc.lastDayBefore(p(req, 'orgId'), q.before)
+      : await svc.getDays(p(req, 'orgId'), q.from as string, q.to as string))
+  } catch (err) { next(err) }
 }
 
 export const getOrders: RequestHandler = async (req, res, next) => {
