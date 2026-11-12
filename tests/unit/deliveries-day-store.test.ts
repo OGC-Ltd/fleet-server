@@ -24,7 +24,7 @@ vi.mock('../../src/modules/planner/keyed-plans.js', () => ({ syncKeyedPlans }))
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { getDay, getDays, daysBetween, saveDay, lastDayBefore, getOrders, saveOrder, ORDERS_KEEP_DAYS } from '../../src/modules/deliveries/deliveries.service.js'
 import { dayKey, keep, DAY_TTL_S } from '../../src/modules/deliveries/delivery-days.cache.js'
-import { daysQuerySchema, MAX_RANGE_DAYS } from '../../src/modules/deliveries/deliveries.schema.js'
+import { daysQuerySchema, daySaveSchema, MAX_RANGE_DAYS } from '../../src/modules/deliveries/deliveries.schema.js'
 
 const ORG = 'org1'
 const DAY = '2026-11-11'
@@ -106,6 +106,41 @@ describe('a day list: persisted, then read from the cache', () => {
     expect(got?.day).toBe('2026-11-09')
     const where = prismaMock.deliveryDay.findMany.mock.calls[0][0]!.where as { day: { gte: string; lt: string } }
     expect(where.day).toEqual({ gte: '2026-10-28', lt: DAY })
+  })
+})
+
+describe('Van Sales and Finished Goods in one day list (raitrack #81)', () => {
+  const VS = { key: 'kdm', plate: 'KDM 119L', vehicleIds: ['v3'], customers: ['MENENGAI_VS: JOJAC'], list: 'vs' as const }
+
+  it('a vehicle saved with list "vs" comes back with it, from the cache and from Postgres', async () => {
+    // Through the route's own validation, as PUT /days/:day receives it
+    const body = daySaveSchema.parse({ vehicles: [VS, KCA] })
+    expect(body.vehicles[0].list).toBe('vs')
+    expect(body.vehicles[1]).not.toHaveProperty('list')
+
+    prismaMock.deliveryDay.upsert.mockImplementation((async (a: { create: { vehicles: unknown } }) =>
+      ({ vehicles: a.create.vehicles, updatedAt: at })) as never)
+    await saveDay(ORG, DAY, 'u1', body)
+    const written = prismaMock.deliveryDay.upsert.mock.calls[0][0]
+    expect((written.create.vehicles as Array<{ list?: string }>).map((v) => v.list)).toEqual(['vs', undefined])
+    expect((written.update.vehicles as Array<{ list?: string }>)[0].list).toBe('vs')
+    expect(syncKeyedPlans).toHaveBeenCalledWith(ORG, DAY, body.vehicles, 'u1')
+
+    // Read back from the cache
+    expect((await getDay(ORG, DAY)).vehicles).toEqual([VS, KCA])
+    expect(prismaMock.deliveryDay.findUnique).not.toHaveBeenCalled()
+
+    // Read back from Postgres, the JSON column as stored
+    store.clear()
+    prismaMock.deliveryDay.findUnique.mockResolvedValue({ vehicles: JSON.parse(JSON.stringify(written.create.vehicles)), updatedAt: at } as never)
+    const read = await getDay(ORG, DAY)
+    expect(read.vehicles).toEqual([VS, KCA])
+    expect(read.vehicles.filter((v) => v.list === 'vs').map((v) => v.plate)).toEqual(['KDM 119L'])
+  })
+
+  it('takes "fg" or no tag; refuses any other', () => {
+    expect(daySaveSchema.parse({ vehicles: [{ ...KCA, list: 'fg' }] }).vehicles[0].list).toBe('fg')
+    expect(daySaveSchema.safeParse({ vehicles: [{ ...KCA, list: 'xx' }] }).success).toBe(false)
   })
 })
 
