@@ -3,7 +3,7 @@ import * as XLSX from 'xlsx'
 vi.mock('../../src/lib/prisma.js')
 vi.mock('../../src/lib/zone-presence.js', () => ({ invalidateZoneCache: vi.fn() }))
 import { prismaMock } from '../helpers/prisma.mock.js'
-import { customerState, saveSheet, MOVED_M } from '../../src/modules/planner/planner.service.js'
+import { customerState, saveSheet, fenceCustomer, MOVED_M } from '../../src/modules/planner/planner.service.js'
 
 const HEAD = ['NO.', 'REP', 'CUSTOMER ID', 'CUSTOMER NAME', 'LOCATION', 'COORDINATES', 'INVOICE NO.', 'AMOUNT', 'TONNAGE', 'FULL', 'PARTLY', 'REJECTED', 'REMARKS']
 function file(): string {
@@ -113,5 +113,35 @@ describe('saveSheet', () => {
     const r2 = await saveSheet('org', 'u1', { fileName: 'KZZ.xlsx', data: file(), fences: { 900001: 'new', 900002: 'w9' } })
     expect(r2).toMatchObject({ fencesReused: 1, fencesDrawn: 1 })
     expect(prismaMock.plannerCustomer.upsert.mock.calls.map((c) => c[0].create.geofenceId)).toEqual(['g-new', 'w9'])
+  })
+})
+
+describe('fenceCustomer', () => {
+  const body = { name: 'Kamau Stores', lat: -0.31, lng: 36.12, radiusM: 120 }
+
+  it('draws a circle where it is told, names a point-only customer after it and ties the two', async () => {
+    prismaMock.plannerCustomer.findFirst.mockResolvedValue({ id: 'c1', customerCode: 'PIN:-0.31000,36.12000', geofenceId: null } as never)
+    prismaMock.geofence.create.mockResolvedValue({ id: 'f1', name: 'Kamau Stores', centerLat: -0.31, centerLng: 36.12, radiusM: 120 } as never)
+    const r = await fenceCustomer('org1', 'c1', body)
+    expect(prismaMock.geofence.create.mock.calls[0][0].data).toMatchObject({ organisationId: 'org1', type: 'CIRCLE', centerLat: -0.31, centerLng: 36.12, radiusM: 120, name: 'Kamau Stores' })
+    expect(prismaMock.plannerCustomer.update.mock.calls[0][0]).toMatchObject({ where: { id: 'c1' }, data: { geofenceId: 'f1', name: 'Kamau Stores' } })
+    expect(r).toMatchObject({ customerId: 'c1', geofence: { id: 'f1' } })
+  })
+
+  it('a sheet customer keeps its own name', async () => {
+    prismaMock.plannerCustomer.findFirst.mockResolvedValue({ id: 'c2', customerCode: '10023', geofenceId: 'gone' } as never)
+    prismaMock.geofence.findFirst.mockResolvedValue(null)
+    prismaMock.geofence.create.mockResolvedValue({ id: 'f2' } as never)
+    await fenceCustomer('org1', 'c2', body)
+    expect(prismaMock.plannerCustomer.update.mock.calls[0][0].data).toEqual({ geofenceId: 'f2' })
+  })
+
+  it('refuses a customer whose fence is still there, and one of another organisation', async () => {
+    prismaMock.plannerCustomer.findFirst.mockResolvedValue({ id: 'c3', customerCode: 'PIN:1,1', geofenceId: 'f3' } as never)
+    prismaMock.geofence.findFirst.mockResolvedValue({ id: 'f3' } as never)
+    await expect(fenceCustomer('org1', 'c3', body)).rejects.toThrow(/already has a geofence/)
+    prismaMock.plannerCustomer.findFirst.mockResolvedValue(null)
+    await expect(fenceCustomer('org1', 'cx', body)).rejects.toThrow(/not found/i)
+    expect(prismaMock.geofence.create).not.toHaveBeenCalled()
   })
 })

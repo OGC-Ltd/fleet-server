@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 
 vi.mock('../../src/lib/prisma.js')
 import { prismaMock } from '../helpers/prisma.mock.js'
-import { keyedStops, fenceMiddle, syncKeyedPlans, KEYED_SOURCE } from '../../src/modules/planner/keyed-plans.js'
+import { keyedStops, fenceMiddle, syncKeyedPlans, customerWrite, KEYED_SOURCE } from '../../src/modules/planner/keyed-plans.js'
 
 const ORG = 'org1'
 const DAY = '2026-11-12'
@@ -117,5 +117,23 @@ describe('the day list kept in step with the Planner', () => {
     await syncKeyedPlans(ORG, DAY, [], null)
     expect(prismaMock.$executeRaw).toHaveBeenCalledOnce()
     expect(prismaMock.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.deliveryPlan.findMany.mock.invocationCallOrder[0])
+  })
+})
+
+describe('a point fenced in the Planner', () => {
+  const pin = { code: 'PIN:-0.30000,36.10000', name: '-0.30000, 36.10000', lat: -0.3, lng: 36.1, geofenceId: null }
+  const row = { customerCode: pin.code, name: pin.name, lat: -0.3, lng: 36.1, geofenceId: null as string | null }
+
+  it('keeps its fence and the name given it when the list is saved again', () => {
+    expect(customerWrite({ ...row, name: 'Kamau Stores', geofenceId: 'f9' }, pin)).toBeNull()
+  })
+
+  it('an unfenced point still follows the list', () => {
+    expect(customerWrite(row, { ...pin, name: 'Kamau' })).toEqual({ name: 'Kamau', lat: -0.3, lng: 36.1, geofenceId: null })
+  })
+
+  it('a geofence stop still follows its fence', () => {
+    const gf = { code: 'GF:f2', name: 'Shop B', lat: -0.3, lng: 36.1, geofenceId: 'f2' }
+    expect(customerWrite({ ...row, customerCode: 'GF:f2', name: 'Shop B', geofenceId: 'f1' }, gf)).toMatchObject({ geofenceId: 'f2' })
   })
 })

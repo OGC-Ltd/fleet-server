@@ -10,7 +10,8 @@
  *
  * A stop picked as a geofence is a planner customer keyed `GF:<fence id>`,
  * tied to that fence; a point pasted as coordinates is keyed
- * `PIN:<lat>,<lng>` with no fence (the Planner draws its fallback circle).
+ * `PIN:<lat>,<lng>` with no fence (the Planner draws its fallback circle)
+ * until someone fences it in the Planner, which this sync then keeps.
  * No fence is ever drawn or changed here.
  *
  * A sheet or a Wialon itinerary for the same plate wins: no keyed plan is made
@@ -46,6 +47,20 @@ export function fenceMiddle(f: Pick<FenceRow, 'centerLat' | 'centerLng' | 'polyg
 }
 
 const pinCode = (p: { lat: number, lng: number }) => `PIN:${p.lat.toFixed(5)},${p.lng.toFixed(5)}`
+
+interface CustomerRow { customerCode: string, name: string, lat: number, lng: number, geofenceId: string | null }
+
+/**
+ * What a kept customer should hold for this stop, or null when it already
+ * does. A point someone has since fenced in the Planner (operator, 12 Nov
+ * 2026: name it, save, the fence is drawn) keeps that fence and its name: the
+ * list only knows the bare point.
+ */
+export function customerWrite(c: CustomerRow, st: KeyedStop): Pick<KeyedStop, 'name' | 'lat' | 'lng' | 'geofenceId'> | null {
+  const fenced = c.customerCode.startsWith('PIN:') && c.geofenceId != null
+  const want = { name: fenced ? c.name : st.name, lat: st.lat, lng: st.lng, geofenceId: fenced ? c.geofenceId : st.geofenceId }
+  return c.name !== want.name || c.lat !== want.lat || c.lng !== want.lng || c.geofenceId !== want.geofenceId ? want : null
+}
 
 /**
  * One vehicle's stops, in the order they were picked: its geofences (by name;
@@ -138,11 +153,9 @@ export async function syncKeyedPlans(orgId: string, day: string, vehicles: Keyed
       : []
     const ids = new Map<string, string>()
     for (const c of had) {
-      const st = all.get(c.customerCode)!
       ids.set(c.customerCode, c.id)
-      if (c.name !== st.name || c.lat !== st.lat || c.lng !== st.lng || c.geofenceId !== st.geofenceId) {
-        await tx.plannerCustomer.update({ where: { id: c.id }, data: { name: st.name, lat: st.lat, lng: st.lng, geofenceId: st.geofenceId } })
-      }
+      const data = customerWrite(c, all.get(c.customerCode)!)
+      if (data) await tx.plannerCustomer.update({ where: { id: c.id }, data })
     }
     for (const st of all.values()) {
       if (ids.has(st.code)) continue
