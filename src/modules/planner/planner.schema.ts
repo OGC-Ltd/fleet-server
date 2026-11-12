@@ -48,6 +48,8 @@ export const customerFenceSchema = z.object({
 
 export const customerListQuerySchema = z.object({
   q: z.string().max(80).optional(),
+  /** "true": only customers tied to a geofence (Deliveries names its fenced points by them). */
+  fenced: z.enum(['true', 'false']).optional(),
 })
 
 export type PreviewSheet = z.infer<typeof previewSheetSchema>

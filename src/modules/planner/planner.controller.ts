@@ -45,7 +45,8 @@ export const remove: RequestHandler = async (req, res, next) => {
 
 export const customers: RequestHandler = async (req, res, next) => {
   try {
-    sendSuccess(res, await svc.listCustomers(p(req, 'orgId'), (req.query as { q?: string }).q))
+    const q = req.query as { q?: string, fenced?: string }
+    sendSuccess(res, await svc.listCustomers(p(req, 'orgId'), q.q, q.fenced === 'true'))
   } catch (err) { next(err) }
 }
 

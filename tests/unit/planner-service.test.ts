@@ -3,7 +3,7 @@ import * as XLSX from 'xlsx'
 vi.mock('../../src/lib/prisma.js')
 vi.mock('../../src/lib/zone-presence.js', () => ({ invalidateZoneCache: vi.fn() }))
 import { prismaMock } from '../helpers/prisma.mock.js'
-import { customerState, saveSheet, fenceCustomer, MOVED_M } from '../../src/modules/planner/planner.service.js'
+import { customerState, saveSheet, fenceCustomer, listCustomers, MOVED_M } from '../../src/modules/planner/planner.service.js'
 
 const HEAD = ['NO.', 'REP', 'CUSTOMER ID', 'CUSTOMER NAME', 'LOCATION', 'COORDINATES', 'INVOICE NO.', 'AMOUNT', 'TONNAGE', 'FULL', 'PARTLY', 'REJECTED', 'REMARKS']
 function file(): string {
@@ -143,5 +143,23 @@ describe('fenceCustomer', () => {
     prismaMock.plannerCustomer.findFirst.mockResolvedValue(null)
     await expect(fenceCustomer('org1', 'cx', body)).rejects.toThrow(/not found/i)
     expect(prismaMock.geofence.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('listCustomers', () => {
+  it('fenced: only customers tied to a geofence, all of them', async () => {
+    prismaMock.plannerCustomer.findMany.mockResolvedValue([] as never)
+    await listCustomers('org1', 'PIN:', true)
+    const a = prismaMock.plannerCustomer.findMany.mock.calls[0][0]!
+    expect(a.where).toMatchObject({ organisationId: 'org1', geofenceId: { not: null } })
+    expect(a.take).toBe(2000)
+  })
+
+  it('unfiltered by default', async () => {
+    prismaMock.plannerCustomer.findMany.mockResolvedValue([] as never)
+    await listCustomers('org1')
+    const a = prismaMock.plannerCustomer.findMany.mock.calls[0][0]!
+    expect(a.where).toEqual({ organisationId: 'org1' })
+    expect(a.take).toBe(200)
   })
 })
