@@ -38,11 +38,20 @@ export const stopUpdateSchema = z.object({
   dueDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
 })
 
+/** A fence for a customer that has none, drawn as a circle where the person says. */
+export const customerFenceSchema = z.object({
+  name:    z.string().trim().min(1).max(200),
+  lat:     z.number().min(-90).max(90),
+  lng:     z.number().min(-180).max(180),
+  radiusM: z.number().int().min(10).max(5_000).default(100),
+})
+
 export const customerListQuerySchema = z.object({
   q: z.string().max(80).optional(),
 })
 
 export type PreviewSheet = z.infer<typeof previewSheetSchema>
+export type CustomerFence = z.infer<typeof customerFenceSchema>
 export type SaveSheet    = z.infer<typeof saveSheetSchema>
 export type PlanListQuery = z.infer<typeof planListQuerySchema>
 export type StopUpdate   = z.infer<typeof stopUpdateSchema>

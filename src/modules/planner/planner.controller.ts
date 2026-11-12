@@ -1,7 +1,7 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as svc from './planner.service.js'
-import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate } from './planner.schema.js'
+import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, CustomerFence } from './planner.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -46,5 +46,11 @@ export const remove: RequestHandler = async (req, res, next) => {
 export const customers: RequestHandler = async (req, res, next) => {
   try {
     sendSuccess(res, await svc.listCustomers(p(req, 'orgId'), (req.query as { q?: string }).q))
+  } catch (err) { next(err) }
+}
+
+export const fenceCustomer: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await svc.fenceCustomer(p(req, 'orgId'), p(req, 'customerId'), req.body as CustomerFence), 201)
   } catch (err) { next(err) }
 }

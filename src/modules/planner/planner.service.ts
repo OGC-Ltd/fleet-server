@@ -21,9 +21,9 @@
  */
 import { prisma } from '../../lib/prisma.js'
 import { invalidateZoneCache } from '../../lib/zone-presence.js'
-import { BadRequestError, NotFoundError } from '../../core/errors/errors.js'
+import { BadRequestError, ConflictError, NotFoundError } from '../../core/errors/errors.js'
 import { readDeliverySheet, type DeliverySheet, type SheetStop } from './sheet.js'
-import type { SaveSheet, PlanListQuery, StopUpdate } from './planner.schema.js'
+import type { SaveSheet, PlanListQuery, StopUpdate, CustomerFence } from './planner.schema.js'
 import { fencePicks, type FencePick } from './fence-match.js'
 import type { PlannedStop } from './itinerary.js'
 import { cachedPlace, reverseGeocode } from '../../lib/geocode.js'
@@ -458,6 +458,39 @@ export async function removePlan(orgId: string, id: string) {
   const plan = await prisma.deliveryPlan.findFirst({ where: { id, organisationId: orgId }, select: { id: true } })
   if (!plan) throw new NotFoundError('Plan not found')
   await prisma.deliveryPlan.delete({ where: { id } })
+}
+
+/**
+ * A fence for a customer that has none (operator, 12 Nov 2026): a stop keyed
+ * in on Deliveries as bare coordinates, or one whose fence was deleted. A
+ * circle where the person says, named as they say; a point-only customer
+ * takes that name too, as its name was only its coordinates.
+ */
+export async function fenceCustomer(orgId: string, customerId: string, body: CustomerFence) {
+  const c = await prisma.plannerCustomer.findFirst({
+    where: { id: customerId, organisationId: orgId },
+    select: { id: true, customerCode: true, geofenceId: true },
+  })
+  if (!c) throw new NotFoundError('Customer not found')
+  if (c.geofenceId && await prisma.geofence.findFirst({ where: { id: c.geofenceId, organisationId: orgId }, select: { id: true } })) {
+    throw new ConflictError('This customer already has a geofence; redraw it on the Live Map.')
+  }
+  const geofence = await prisma.$transaction(async (tx) => {
+    const f = await tx.geofence.create({
+      data: {
+        organisationId: orgId, name: body.name, type: 'CIRCLE', mode: 'ALLOWLIST',
+        centerLat: body.lat, centerLng: body.lng, radiusM: body.radiusM, purpose: 'shop',
+      },
+      select: { id: true, name: true, centerLat: true, centerLng: true, radiusM: true },
+    })
+    await tx.plannerCustomer.update({
+      where: { id: c.id },
+      data: { geofenceId: f.id, ...(c.customerCode.startsWith('PIN:') ? { name: body.name } : {}) },
+    })
+    return f
+  })
+  invalidateZoneCache(orgId)
+  return { customerId: c.id, geofence }
 }
 
 export async function listCustomers(orgId: string, q?: string) {
