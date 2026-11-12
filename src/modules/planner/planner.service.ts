@@ -493,14 +493,16 @@ export async function fenceCustomer(orgId: string, customerId: string, body: Cus
   return { customerId: c.id, geofence }
 }
 
-export async function listCustomers(orgId: string, q?: string) {
+export async function listCustomers(orgId: string, q?: string, fenced = false) {
   const s = q?.trim()
   return prisma.plannerCustomer.findMany({
     where: {
       organisationId: orgId,
+      ...(fenced ? { geofenceId: { not: null } } : {}),
       ...(s ? { OR: [{ name: { contains: s, mode: 'insensitive' } }, { customerCode: { contains: s } }, { location: { contains: s, mode: 'insensitive' } }] } : {}),
     },
     orderBy: { name: 'asc' },
-    take: 200,
+    // Fenced points are few and Deliveries needs every one of them
+    take: fenced ? 2000 : 200,
   })
 }
