@@ -16,7 +16,7 @@
 
 import { describe, it, expect } from 'vitest'
 import {
-  parseMenengaiUnit, menengaiPlate, menengaiGroup, normalisePlate, formatPlate,
+  parseMenengaiUnit, menengaiPlate, menengaiGroup, menengaiCategory, menengaiDepartmentLabel, normalisePlate, formatPlate,
   parseWestSugarUnit, westSugarGroup,
 } from '../../src/providers/wialon/wialon.unit-name.js'
 
@@ -35,16 +35,27 @@ describe('business unit', () => {
 
 describe('department', () => {
   it('keeps the same department in two businesses apart', () => {
-    // The whole reason the group key carries the business unit: 71 Menengai
-    // units and 13 Rai MDF ones both lead with FG.
-    const men = menengaiGroup('FG - Menengai - KDJ 083J')
-    const mdf = menengaiGroup('FG - RAIMDF - KCP 070P')
+    // 71 Menengai units and 13 Rai MDF ones both lead with FG.
+    expect(menengaiDepartmentLabel('FG - Menengai - KDE 228P')).toBe('Menengai · FG')
+    expect(menengaiDepartmentLabel('FG - RAIMDF - KCP 070P')).toBe('Rai MDF · FG')
+  })
+})
 
-    expect(men.code).not.toBe(mdf.code)
-    expect(men.code).toBe('MENENGAI_MENENGAI_FG')
-    expect(mdf.code).toBe('MENENGAI_RAIMDF_FG')
-    expect(men.name).toBe('Menengai · FG')
-    expect(mdf.name).toBe('Rai MDF · FG')
+describe('vehicle group = category in the client fleet list', () => {
+  it('files a unit by its plate under the list tab, whatever its name says', () => {
+    // Named FG Menengai, listed by the client under RAI MDF FG.
+    expect(menengaiGroup('FG - Menengai - KDJ 083J')).toEqual({ code: 'MENENGAI_FL_RAI_MDF_FG', name: 'RAI MDF FG' })
+    expect(menengaiGroup('CPO - Menengai - KCC 386Z - FMB140')).toEqual({ code: 'MENENGAI_FL_TANKERS', name: 'Tankers' })
+    expect(menengaiGroup('VS Menengai CAMERA - KCS 078M').name).toBe('Van Sales')
+  })
+
+  it('finds machines by the short name the list uses', () => {
+    expect(menengaiCategory('Menengai - EXCAVATOR 001')).toBe('Equipment')
+    expect(menengaiCategory('JCB 1 H00052413')).toBe('Equipment')
+  })
+
+  it('puts a unit on no tab under "Not on the list"', () => {
+    expect(menengaiGroup('Menengai - LOGGER 01')).toEqual({ code: 'MENENGAI_FL_NOT_ON_THE_LIST', name: 'Not on the list' })
   })
 
   it('files the camera truck under its department, not a group of its own', () => {

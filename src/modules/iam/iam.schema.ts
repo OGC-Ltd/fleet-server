@@ -19,6 +19,14 @@ export const setGrantsSchema = z.object({
   changes: z.array(grantChangeSchema).min(1).max(300),
 })
 
+/** One organisation's fleet for one person: all of it, or these categories. */
+export const setFleetSchema = z.object({
+  organisationId:  z.string().min(1).max(64),
+  allVehicles:     z.boolean(),
+  vehicleGroupIds: z.array(z.string().min(1).max(64)).max(100).default([]),
+})
+
 export type ListUsersQuery = z.infer<typeof listUsersQuerySchema>
 export type GrantChange    = z.infer<typeof grantChangeSchema>
 export type SetGrantsDto   = z.infer<typeof setGrantsSchema>
+export type SetFleetDto    = z.infer<typeof setFleetSchema>

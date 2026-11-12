@@ -2,7 +2,7 @@ import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import { UnauthorizedError } from '../../core/errors/errors.js'
 import * as service from './iam.service.js'
-import type { ListUsersQuery, SetGrantsDto } from './iam.schema.js'
+import type { ListUsersQuery, SetFleetDto, SetGrantsDto } from './iam.schema.js'
 
 export const catalogue: RequestHandler = (_req, res, next) => {
   try {
@@ -30,5 +30,13 @@ export const setGrants: RequestHandler = async (req, res, next) => {
     if (!actorId) throw new UnauthorizedError('Not authenticated')
     const { changes } = req.body as SetGrantsDto
     sendSuccess(res, await service.setGrants(actorId, req.params['userId'] as string, changes))
+  } catch (err) { next(err) }
+}
+
+export const setFleet: RequestHandler = async (req, res, next) => {
+  try {
+    const actorId = req.user?.id
+    if (!actorId) throw new UnauthorizedError('Not authenticated')
+    sendSuccess(res, await service.setFleetAccess(actorId, req.params['userId'] as string, req.body as SetFleetDto))
   } catch (err) { next(err) }
 }

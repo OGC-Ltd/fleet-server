@@ -22,13 +22,14 @@ import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { BadRequestError, NotFoundError } from '../../core/errors/errors.js'
 import {
-  ALL_PERMISSIONS, FLAGGED_ONLY, PERMISSION_CATALOGUE, ROLE_DEFINITIONS, WILDCARD, splitSlug,
+  ALL_PERMISSIONS, FLAGGED_ONLY, PERMISSION_CATALOGUE, ROLE_DEFINITIONS, VEHICLE_SCOPABLE_ROLE_SLUGS, WILDCARD, splitSlug,
 } from '../../lib/permissions.js'
+import { MENENGAI_FLEET_LIST } from '../../providers/wialon/menengai-fleet-list.js'
 import {
   applyPersonalGrants, invalidateSubject, permissionsIn,
   type OrgGrant, type PersonalGrant, type Subject,
 } from '../../lib/authz/subject.js'
-import type { GrantChange, ListUsersQuery } from './iam.schema.js'
+import type { GrantChange, ListUsersQuery, SetFleetDto } from './iam.schema.js'
 
 // ---------------------------------------------------------------------------
 // Catalogue
@@ -178,7 +179,11 @@ export async function userAccess(userId: string) {
       },
       memberships: {
         where:  { revokedAt: null },
-        select: { organisation: { select: { id: true, name: true, code: true } } },
+        select: {
+          organisation:  { select: { id: true, name: true, code: true } },
+          allVehicles:   true,
+          vehicleScopes: { select: { vehicleId: true, vehicleGroupId: true } },
+        },
       },
       permissionGrants: {
         orderBy: { createdAt: 'asc' },
@@ -225,6 +230,8 @@ export async function userAccess(userId: string) {
 
   const everything = (set: Set<string>) => (set.has(WILDCARD) ? [...ALL_PERMISSIONS] : [...set])
 
+  const fleets = await fleetAccess(user, isPlatform, organisations.map((o) => o.id))
+
   return {
     user: { id: user.id, fullName: user.fullName, email: user.email, status: user.status },
     roles: distinctRoles(user.userRoles),
@@ -234,6 +241,7 @@ export async function userAccess(userId: string) {
       ...o,
       fromRoles: everything(permissionsIn(fromRoles, o.id)),
       effective: everything(permissionsIn(effective, o.id)),
+      fleet:     fleets.get(o.id)!,
     })),
     grants: user.permissionGrants.map((g) => ({
       organisationId: g.organisationId,
@@ -289,6 +297,138 @@ export async function setGrants(actorId: string, userId: string, changes: GrantC
 
   // The record of who changed what: the rows keep only what stands now.
   logger.info({ actorId, userId, changes }, 'iam: personal access rights changed')
+
+  await invalidateSubject(userId)
+  return userAccess(userId)
+}
+
+// ---------------------------------------------------------------------------
+// Fleet access: the whole fleet, or only some of its categories
+// ---------------------------------------------------------------------------
+
+/** Menengai's categories in the client's order, then anything else by name. */
+const LIST_ORDER = new Map(MENENGAI_FLEET_LIST.map((g, i) => [g.name, i]))
+
+type FleetCategory = { id: string; name: string; units: number }
+
+export type FleetAccess = {
+  /**
+   * May this person's fleet be narrowed here? Only under a role that is
+   * vehicleScopable (lib/permissions), and never under a platform role, which
+   * reaches every organisation whole.
+   */
+  narrowable: boolean
+  /** Why not, in words for the page. */
+  reason: string | null
+  allVehicles: boolean
+  /** The categories (vehicle groups) this person sees, when not the whole fleet. */
+  groupIds: string[]
+  /** Single units named on their own (through the Users API, not here). */
+  singleUnits: number
+  /** The organisation's categories and how many active units each holds. */
+  categories: FleetCategory[]
+}
+
+type AccessUser = {
+  userRoles: { role: { slug: string; organisationId: string | null } }[]
+  memberships: {
+    organisation: { id: string }
+    allVehicles: boolean
+    vehicleScopes: { vehicleId: string | null; vehicleGroupId: string | null }[]
+  }[]
+}
+
+async function fleetAccess(user: AccessUser, isPlatform: boolean, orgIds: string[]): Promise<Map<string, FleetAccess>> {
+  const [groups, counts] = await Promise.all([
+    prisma.vehicleGroup.findMany({
+      where:  { organisationId: { in: orgIds } },
+      select: { id: true, name: true, organisationId: true },
+    }),
+    prisma.vehicle.groupBy({
+      by:     ['vehicleGroupId'],
+      where:  { organisationId: { in: orgIds }, isActive: true },
+      _count: { _all: true },
+    }),
+  ])
+  const unitsIn = new Map(counts.map((c) => [c.vehicleGroupId, c._count._all]))
+
+  const out = new Map<string, FleetAccess>()
+  for (const orgId of orgIds) {
+    const m = user.memberships.find((x) => x.organisation.id === orgId)
+    const groupIds = m && !m.allVehicles
+      ? m.vehicleScopes.flatMap((s) => (s.vehicleGroupId ? [s.vehicleGroupId] : []))
+      : []
+    const roleSlugs = user.userRoles.filter((r) => r.role.organisationId === orgId).map((r) => r.role.slug)
+
+    let reason: string | null = null
+    if (isPlatform) reason = 'Their role covers every organisation, so they always see the whole fleet.'
+    else if (!m) reason = 'Not a member of this organisation.'
+    else if (roleSlugs.length === 0) reason = 'No role here yet.'
+    else if (!roleSlugs.every((s) => VEHICLE_SCOPABLE_ROLE_SLUGS.includes(s))) {
+      reason = 'This role always sees the whole fleet. Only Operator, Dispatch Manager and Logistics Manager can be limited to categories.'
+    }
+
+    // A category with no units is left off, unless this person holds it.
+    const categories = groups
+      .filter((g) => g.organisationId === orgId && ((unitsIn.get(g.id) ?? 0) > 0 || groupIds.includes(g.id)))
+      .map((g) => ({ id: g.id, name: g.name, units: unitsIn.get(g.id) ?? 0 }))
+      .sort((a, b) => (LIST_ORDER.get(a.name) ?? 999) - (LIST_ORDER.get(b.name) ?? 999) || a.name.localeCompare(b.name))
+
+    out.set(orgId, {
+      narrowable:  reason === null,
+      reason,
+      allVehicles: m ? m.allVehicles : true,
+      groupIds,
+      singleUnits: m && !m.allVehicles ? m.vehicleScopes.filter((s) => s.vehicleId).length : 0,
+      categories,
+    })
+  }
+  return out
+}
+
+/**
+ * Set which part of one organisation's fleet a person sees: all of it, or the
+ * named categories (operator, 2026-11-12: "assign an individual access to
+ * tankers or van sales or finished goods"). The category is what is stored, so
+ * a unit added to it later is seen too.
+ *
+ * Single units named through the Users API stay while narrowing, and go with
+ * everything else when the whole fleet is given back.
+ */
+export async function setFleetAccess(actorId: string, userId: string, dto: SetFleetDto) {
+  const access = await userAccess(userId)
+  const org = access.organisations.find((o) => o.id === dto.organisationId)
+  if (!org) throw new BadRequestError('This person is not a member of that organisation. Add them to it on the Users page first.')
+
+  const groupIds = [...new Set(dto.vehicleGroupIds)]
+  if (!dto.allVehicles) {
+    if (!org.fleet.narrowable) throw new BadRequestError(org.fleet.reason ?? 'This person always sees the whole fleet here.')
+    if (groupIds.length === 0) throw new BadRequestError('Pick at least one category, or give the whole fleet.')
+    const found = await prisma.vehicleGroup.count({ where: { id: { in: groupIds }, organisationId: org.id } })
+    if (found !== groupIds.length) throw new BadRequestError("One or more categories are not this organisation's.")
+  }
+
+  const membership = await prisma.orgMembership.findFirst({
+    where:  { userId, organisationId: org.id, revokedAt: null },
+    select: { id: true },
+  })
+  if (!membership) throw new NotFoundError('Membership')
+
+  await prisma.$transaction(async (tx) => {
+    await tx.orgMembership.update({ where: { id: membership.id }, data: { allVehicles: dto.allVehicles } })
+    if (dto.allVehicles) {
+      await tx.membershipVehicleScope.deleteMany({ where: { membershipId: membership.id } })
+      return
+    }
+    await tx.membershipVehicleScope.deleteMany({ where: { membershipId: membership.id, vehicleGroupId: { not: null } } })
+    await tx.membershipVehicleScope.createMany({
+      data: groupIds.map((vehicleGroupId) => ({ membershipId: membership.id, vehicleGroupId })),
+      skipDuplicates: true,
+    })
+  })
+
+  logger.info({ actorId, userId, organisationId: org.id, allVehicles: dto.allVehicles, vehicleGroupIds: groupIds },
+    'iam: fleet access changed')
 
   await invalidateSubject(userId)
   return userAccess(userId)

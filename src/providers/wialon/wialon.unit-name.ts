@@ -48,6 +48,8 @@ export interface MenengaiUnitName {
  * unit named "FG - RAIMDF - Menengai …" resolves deterministically rather
  * than by whichever branch happened to be written first.
  */
+import { MENENGAI_FLEET_LIST } from './menengai-fleet-list.js'
+
 const BUSINESS_UNITS: Array<[MenengaiBusinessUnit, RegExp]> = [
   ['RAIMDF',   /RAIMDF/i],
   ['MORL',     /\bMORL\b/i],
@@ -247,16 +249,100 @@ const BU_LABEL: Record<MenengaiBusinessUnit, string> = {
 }
 
 /**
- * Vehicle group for a unit: `<business unit>/<department>`.
+ * Business unit and department as a label ("Rai MDF · TR"). Menengai's vehicle
+ * groups used to be these, until 2026-11-12: see menengaiGroup.
+ */
+export function menengaiDepartmentLabel(name: string): string {
+  const { businessUnit, department } = parseMenengaiUnit(name)
+  return `${BU_LABEL[businessUnit]} · ${department}`
+}
+
+// ---------------------------------------------------------------------------
+// The client's fleet list (menengai-fleet-list), matched the way new-ui's
+// lib/fleetGroups vehicleKeys matches it, so the server and the app put a
+// unit in the same category.
+// ---------------------------------------------------------------------------
+
+/** "kcs 082m" → "KCS082M". */
+const keyOf = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '')
+
+/** new-ui lib/plate PLATE: a Kenyan plate, not inside a longer code. */
+const LIST_PLATE = /(?<![A-Za-z0-9])(K[A-Z]{2,3}) ?(\d{3}) ?([A-Z])(?![A-Z0-9])/
+
+function listPlateKey(text: string): string | null {
+  const m = LIST_PLATE.exec(text)
+  return m ? keyOf(`${m[1]}${m[2]}${m[3]}`) : null
+}
+
+/** A machine named in full under the list's short name: "FORKLIFT 04" → FL04. */
+const MACHINE_SHORT: Array<[RegExp, string]> = [
+  [/\b(?:W(?:HEEL)?\s*LOADER)\s*0*(\d{1,2})\b/i, 'WL'],
+  [/\bFORK\s*LIFT\s*0*(\d{1,2})\b/i, 'FL'],
+  [/\bEXCAVATOR\s*0*(\d{1,2})\b/i, 'EX'],
+  [/\bJCB\s*0*(\d{1,2})\b/i, 'JCB'],
+]
+
+/** Every key a unit name may be listed under (new-ui vehicleKeys, by name). */
+export function menengaiListKeys(name: string): Set<string> {
+  const keys = new Set<string>()
+  const plate = listPlateKey(name)
+  if (plate) keys.add(plate)
+  const whole = keyOf(name)
+  if (whole.length >= 3) keys.add(whole)
+  const tail = /(?:\s-\s|:|-)\s*([^:-]+)$/.exec(name)
+  if (tail) { const t = keyOf(tail[1]!); if (t.length >= 3) keys.add(t) }
+  for (const [re, short] of MACHINE_SHORT) {
+    const m = re.exec(name)
+    if (m) { keys.add(keyOf(`${short}${m[1]!.padStart(2, '0')}`)); break }
+  }
+  return keys
+}
+
+/** List key → category name, first tab wins. */
+let listIndex: Map<string, string> | null = null
+function categoryIndex(): Map<string, string> {
+  if (listIndex) return listIndex
+  const index = new Map<string, string>()
+  for (const g of MENENGAI_FLEET_LIST) {
+    for (const label of g.units) {
+      const k = listPlateKey(label.toUpperCase()) ?? keyOf(label)
+      if (!index.has(k)) index.set(k, g.name)
+    }
+  }
+  return (listIndex = index)
+}
+
+/** The unit's category in the client's list, or null when it is not on it. */
+export function menengaiCategory(name: string): string | null {
+  const index = categoryIndex()
+  for (const k of menengaiListKeys(name)) {
+    const hit = index.get(k)
+    if (hit) return hit
+  }
+  return null
+}
+
+/** Units on no tab of the client's list, as the app labels them. */
+export const MENENGAI_UNLISTED = 'Not on the list'
+
+/**
+ * Vehicle group for a unit: its category in the client's fleet list
+ * (Tankers, Finished Goods, Van Sales, …), or "Not on the list".
+ *
+ * Until 2026-11-12 this was `<business unit> · <department>` from the name.
+ * The operator wanted people's fleet access set by the categories Menengai
+ * uses, and the app has shown these categories since 2026-11-02; nothing else
+ * reads a vehicle's stored group. The old groups stay as rows with no units.
  *
  * The code is prefixed with the org code to match the convention every other
  * group in the database follows (`KASULU_TRACKED_UNITS`), and because
  * `vehicle_groups` is unique on (organisation_id, code) rather than on code.
  */
 export function menengaiGroup(name: string): { code: string; name: string } {
-  const { businessUnit, department } = parseMenengaiUnit(name)
+  const category = menengaiCategory(name) ?? MENENGAI_UNLISTED
   return {
-    code: `MENENGAI_${businessUnit}_${department}`.replace(/\s+/g, '_'),
-    name: `${BU_LABEL[businessUnit]} · ${department}`,
+    // "RAI MDF FG" → MENENGAI_FL_RAI_MDF_FG
+    code: `MENENGAI_FL_${category.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`,
+    name: category,
   }
 }

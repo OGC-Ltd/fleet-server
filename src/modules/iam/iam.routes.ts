@@ -17,7 +17,7 @@ import { requireRealAuth } from '../../middleware/requireRealAuth.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
 import { WILDCARD } from '../../lib/permissions.js'
 import * as ctrl from './iam.controller.js'
-import { listUsersQuerySchema, setGrantsSchema } from './iam.schema.js'
+import { listUsersQuerySchema, setFleetSchema, setGrantsSchema } from './iam.schema.js'
 
 const router = Router()
 
@@ -28,5 +28,7 @@ router.get('/catalogue', ctrl.catalogue)
 router.get('/users', validateQuery(listUsersQuerySchema), ctrl.listUsers)
 router.get('/users/:userId', ctrl.userAccess)
 router.put('/users/:userId/grants', requireRealAuth, validateBody(setGrantsSchema), ctrl.setGrants)
+// The whole fleet, or only some of its categories, in one organisation.
+router.put('/users/:userId/fleet', requireRealAuth, validateBody(setFleetSchema), ctrl.setFleet)
 
 export default router

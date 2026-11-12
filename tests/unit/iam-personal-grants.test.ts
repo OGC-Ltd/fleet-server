@@ -24,7 +24,7 @@ import {
   applyPersonalGrants, can, canReachOrg, permissionsIn, resolveSubject,
   type OrgGrant, type PersonalGrant,
 } from '../../src/lib/authz/subject.js'
-import { isGrantable, catalogue, setGrants } from '../../src/modules/iam/iam.service.js'
+import { isGrantable, catalogue, setGrants, setFleetAccess } from '../../src/modules/iam/iam.service.js'
 import { FLAGGED_ONLY, WILDCARD } from '../../src/lib/permissions.js'
 
 const ORG_A = 'org_a'
@@ -191,6 +191,10 @@ describe('setGrants refusals', () => {
   })
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const p = prismaMock as any
+  beforeEach(() => {
+    p.vehicleGroup.findMany.mockResolvedValue([])
+    p.vehicle.groupBy.mockResolvedValue([])
+  })
 
   it('refuses to change the System Administrator', async () => {
     p.user.findFirst.mockResolvedValue(user([dbRole('super_admin', null, WILDCARD)]))
@@ -203,7 +207,7 @@ describe('setGrants refusals', () => {
   it('refuses a right that is not personal', async () => {
     p.user.findFirst.mockResolvedValue(user(
       [dbRole('manager', ORG_A, 'map:read')],
-      [{ organisation: { id: ORG_A, name: 'A', code: 'A' } }],
+      [{ organisation: { id: ORG_A, name: 'A', code: 'A' }, allVehicles: true, vehicleScopes: [] }],
     ))
     await expect(setGrants('actor', 'u1', [{ organisationId: ORG_A, permission: WILDCARD, effect: 'allow' }]))
       .rejects.toThrow(/cannot be given to one person/)
@@ -212,10 +216,79 @@ describe('setGrants refusals', () => {
   it('refuses an organisation the person is not in', async () => {
     p.user.findFirst.mockResolvedValue(user(
       [dbRole('manager', ORG_A, 'map:read')],
-      [{ organisation: { id: ORG_A, name: 'A', code: 'A' } }],
+      [{ organisation: { id: ORG_A, name: 'A', code: 'A' }, allVehicles: true, vehicleScopes: [] }],
     ))
     await expect(setGrants('actor', 'u1', [{ organisationId: ORG_B, permission: 'report:read', effect: 'allow' }]))
       .rejects.toThrow(/not a member of that organisation/)
     expect(p.$transaction).not.toHaveBeenCalled()
+  })
+})
+
+describe('setFleetAccess: limiting a person to fleet categories', () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const p = prismaMock as any
+  const TANKERS = 'grp_tankers'
+  const VAN_SALES = 'grp_van_sales'
+  const person = (slug: string, allVehicles = true, groupIds: string[] = []) => ({
+    id: 'u1', fullName: 'A Person', email: 'a@example.test', status: 'active',
+    userRoles: [{ role: { slug, name: slug, organisationId: ORG_A, permissions: [] } }],
+    memberships: [{
+      organisation: { id: ORG_A, name: 'Menengai', code: 'MENENGAI' },
+      allVehicles,
+      vehicleScopes: groupIds.map((vehicleGroupId) => ({ vehicleId: null, vehicleGroupId })),
+    }],
+    permissionGrants: [],
+  })
+  beforeEach(() => {
+    p.vehicleGroup.findMany.mockResolvedValue([
+      { id: VAN_SALES, name: 'Van Sales', organisationId: ORG_A },
+      { id: TANKERS, name: 'Tankers', organisationId: ORG_A },
+      { id: 'grp_old', name: 'Menengai · VS', organisationId: ORG_A },
+    ])
+    p.vehicle.groupBy.mockResolvedValue([
+      { vehicleGroupId: TANKERS, _count: { _all: 53 } },
+      { vehicleGroupId: VAN_SALES, _count: { _all: 71 } },
+    ])
+  })
+
+  it('lists categories in the client order and leaves out empty ones', async () => {
+    p.user.findFirst.mockResolvedValue(person('operator'))
+    p.vehicleGroup.count.mockResolvedValue(1)
+    p.orgMembership.findFirst.mockResolvedValue({ id: 'm1' })
+    p.$transaction.mockResolvedValue(undefined)
+    const out = await setFleetAccess('actor', 'u1', { organisationId: ORG_A, allVehicles: false, vehicleGroupIds: [TANKERS] })
+    const fleet = out.organisations[0]!.fleet
+    expect(fleet.narrowable).toBe(true)
+    expect(fleet.categories.map((c) => c.name)).toEqual(['Tankers', 'Van Sales'])
+    expect(p.$transaction).toHaveBeenCalled()
+  })
+
+  it('refuses to narrow a role that always sees the whole fleet', async () => {
+    p.user.findFirst.mockResolvedValue(person('supervisor'))
+    await expect(setFleetAccess('actor', 'u1', { organisationId: ORG_A, allVehicles: false, vehicleGroupIds: [TANKERS] }))
+      .rejects.toThrow(/always sees the whole fleet/)
+    expect(p.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('refuses an empty choice of categories', async () => {
+    p.user.findFirst.mockResolvedValue(person('operator'))
+    await expect(setFleetAccess('actor', 'u1', { organisationId: ORG_A, allVehicles: false, vehicleGroupIds: [] }))
+      .rejects.toThrow(/at least one category/)
+  })
+
+  it("refuses another organisation's category", async () => {
+    p.user.findFirst.mockResolvedValue(person('operator'))
+    p.vehicleGroup.count.mockResolvedValue(0)
+    await expect(setFleetAccess('actor', 'u1', { organisationId: ORG_A, allVehicles: false, vehicleGroupIds: ['grp_elsewhere'] }))
+      .rejects.toThrow(/not this organisation/)
+    expect(p.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('gives the whole fleet back to any role', async () => {
+    p.user.findFirst.mockResolvedValue(person('supervisor', false, [TANKERS]))
+    p.orgMembership.findFirst.mockResolvedValue({ id: 'm1' })
+    p.$transaction.mockResolvedValue(undefined)
+    await setFleetAccess('actor', 'u1', { organisationId: ORG_A, allVehicles: true, vehicleGroupIds: [] })
+    expect(p.$transaction).toHaveBeenCalled()
   })
 })
