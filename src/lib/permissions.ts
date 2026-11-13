@@ -38,6 +38,11 @@ export const PERMISSION_CATALOGUE = {
   'map:layers':            'Toggle map layers',
   'map:fuel_alerts':       'See fuel alerts on the map',
   'map:filter':            'Filter units by type or feature',
+  // The map's Geofences menu (operator, 2026-11-13): its two switches, each a
+  // right of its own so IAM can take one away. They draw fences on the map
+  // only; the geofence list, report and editing stay with geofence:*.
+  'map:geofences':         'Show geofences on the map',
+  'map:custom_geos':       'Show custom geos on the map',
   'map:playback':          'Replay a vehicle journey',
   // A RESTRICTION, not a capability: in an organisation where a role holds
   // it, the units that role sees are only those with an open repair job
@@ -203,7 +208,7 @@ export function splitSlug(slug: string): { resource: string; action: string } {
 const TRACKING: PermissionSlug[] = [
   'vehicle:read', 'telemetry:read', 'map:read', 'notification:read',
 ]
-const MAP_TOOLS: PermissionSlug[] = ['map:layers', 'map:fuel_alerts', 'map:filter']
+const MAP_TOOLS: PermissionSlug[] = ['map:layers', 'map:fuel_alerts', 'map:filter', 'map:geofences', 'map:custom_geos']
 
 /** Everything a role confined to one organisation can be given. */
 const ORG_EVERYTHING: PermissionSlug[] = [
@@ -526,7 +531,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
      * them theirs.
      */
     permissions: [
-      ...TRACKING, 'map:layers', 'vehicle:flagged_only',
+      ...TRACKING, 'map:layers', 'map:geofences', 'map:custom_geos', 'vehicle:flagged_only',
       'sensor:read',
       'repair:read', 'repair:create', 'repair:resolve',
       // Repair Workflow: claim from the ControlTech queue; source the parts

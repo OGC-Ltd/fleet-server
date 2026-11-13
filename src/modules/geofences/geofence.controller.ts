@@ -3,6 +3,7 @@ import { sendSuccess } from '../../core/response/response.js'
 import { NotFoundError } from '../../core/errors/errors.js'
 import * as repo from './geofence.repository.js'
 import { invalidateZoneCache } from '../../lib/zone-presence.js'
+import { can, resolveSubject } from '../../lib/authz/subject.js'
 import type { CreateGeofence, UpdateGeofence, GeofenceListQuery } from './geofence.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -16,7 +17,13 @@ export const list: RequestHandler = async (req, res, next) => {
 
 export const geojson: RequestHandler = async (req, res, next) => {
   try {
-    const fc = await repo.findAllAsGeoJSON(p(req, 'orgId'))
+    const orgId = p(req, 'orgId')
+    const fc = await repo.findAllAsGeoJSON(orgId)
+    // Somebody whose only way in is `map:custom_geos` sees the fences drawn
+    // here, not the ones imported from Wialon (the map's Custom geos switch).
+    const subject = await resolveSubject(req.user!.id)
+    const every = can(subject, orgId, 'geofence:read') || can(subject, orgId, 'map:geofences')
+    if (!every) fc.features = fc.features.filter((f) => f.properties.source === 'app')
     sendSuccess(res, fc)
   } catch (err) { next(err) }
 }
