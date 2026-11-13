@@ -3745,6 +3745,11 @@ model FleetListVersion {
   uploadedById   String?  @map("uploaded_by_id")
   /// Who uploaded it, as named then
   uploadedByName String?  @map("uploaded_by_name")
+  /// The uploaded file itself, in S3 (lib/uploads, UPLOADS_S3_BUCKET); null on a reset row
+  fileKey        String?  @map("file_key")
+  fileSize       Int?     @map("file_size")
+  fileType       String?  @map("file_type")
+  fileSha256     String?  @map("file_sha256")
   createdAt      DateTime @default(now()) @map("created_at")
 
   @@index([organisationId, createdAt])

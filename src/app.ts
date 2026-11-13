@@ -106,6 +106,8 @@ export function createApp() {
   app.use(/^\/api\/v1\/organisations\/[^/]+\/reports\/(?:dormant-assets|geofences|tat-fuel|speed|deliveries|document)\.pdf$/, express.json({ limit: '8mb' }))
   // A delivery sheet, base64 (Planner): up to 2 MB of workbook.
   app.use(/^\/api\/v1\/organisations\/[^/]+\/planner\/sheets(?:\/preview)?$/, express.json({ limit: '3mb' }))
+  // A fleet list Excel, base64, kept in S3 as uploaded (fleet-list): up to 5 MB of file.
+  app.use(/^\/api\/v1\/organisations\/[^/]+\/fleet-list$/, express.json({ limit: '8mb' }))
   app.use(express.json({
     limit: '1mb',
     verify: (req, _res, buf) => { (req as { rawBody?: Buffer }).rawBody = buf },

@@ -11,9 +11,14 @@ const entrySchema = z.object({
   list:   text(120).default(''),
 }).strip()
 
-/** POST /organisations/:orgId/fleet-list: a fleet Excel as the page read it. */
+/**
+ * POST /organisations/:orgId/fleet-list: a fleet Excel as the page read it, and
+ * the file itself (base64), which is kept in S3 as uploaded (lib/uploads).
+ * 5 MB of file is ~6.7 M characters of base64.
+ */
 export const saveFleetListSchema = z.object({
   fileName:  text(200).min(1),
+  file:      z.string().min(10).max(7_000_000),
   entries:   z.record(text(32).min(1), entrySchema)
     .refine((e) => Object.keys(e).length > 0, 'The file has no units')
     .refine((e) => Object.keys(e).length <= 5000, 'At most 5000 units'),

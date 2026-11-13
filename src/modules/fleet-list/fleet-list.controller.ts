@@ -19,6 +19,11 @@ export const save: RequestHandler = async (req, res, next) => {
   try { sendSuccess(res, await svc.save(org(req), actor(req), req.body as SaveFleetList), 201) } catch (err) { next(err) }
 }
 
+/** GET /organisations/:orgId/fleet-list/:id/file: { fileName, url, expiresIn } */
+export const file: RequestHandler = async (req, res, next) => {
+  try { sendSuccess(res, await svc.fileLink(org(req), req.params.id as string)) } catch (err) { next(err) }
+}
+
 /** POST /organisations/:orgId/fleet-list/reset */
 export const reset: RequestHandler = async (req, res, next) => {
   try { sendSuccess(res, await svc.reset(org(req), actor(req))) } catch (err) { next(err) }

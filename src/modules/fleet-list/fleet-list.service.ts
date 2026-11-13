@@ -10,6 +10,8 @@
  */
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
+import { NotFoundError, BadRequestError } from '../../core/errors/errors.js'
+import { decodeBase64File, fileUrl, isXlsx, putFile, removeFile, uploadKey, XLSX_TYPE } from '../../lib/uploads.js'
 import type { SaveFleetList } from './fleet-list.schema.js'
 
 /** How many past uploads the page is told about. */
@@ -19,6 +21,7 @@ type Row = {
   id: string; fileName: string | null; unitCount: number; createdAt: Date
   uploadedByName: string | null; entries: Prisma.JsonValue | null
   sheets: Prisma.JsonValue | null; conflicts: Prisma.JsonValue | null
+  fileKey?: string | null
 }
 const version = (r: Row) => ({
   id: r.id,
@@ -27,6 +30,8 @@ const version = (r: Row) => ({
   at: r.createdAt.getTime(),
   by: r.uploadedByName,
   reset: r.entries == null,
+  /** The uploaded file is kept (S3) and can be downloaded */
+  file: Boolean(r.fileKey),
 })
 
 /** The list in use (null: none uploaded, or put back to the built-in one) and the last uploads. */
@@ -47,21 +52,55 @@ export async function current(organisationId: string) {
 
 export type Actor = { id: string | null; name: string | null }
 
-/** Keep an upload; it is the list in use from now. */
+/**
+ * Keep an upload; it is the list in use from now. The file goes to S3 first and
+ * the row is written only once it is there, so no list is on record without
+ * its file. If the row then fails, the file is removed again.
+ */
 export async function save(organisationId: string, actor: Actor, body: SaveFleetList) {
-  await prisma.fleetListVersion.create({
-    data: {
-      organisationId,
-      fileName: body.fileName,
-      entries: body.entries,
-      unitCount: Object.keys(body.entries).length,
-      sheets: body.sheets,
-      conflicts: body.conflicts,
-      uploadedById: actor.id,
-      uploadedByName: actor.name,
-    },
+  const buf = decodeBase64File(body.file)
+  if (!isXlsx(buf)) throw new BadRequestError('This is not an Excel workbook (.xlsx).')
+  const stored = await putFile(uploadKey('fleet-lists', organisationId, body.fileName), buf, XLSX_TYPE, {
+    'organisation-id': organisationId,
+    ...(actor.id ? { 'uploaded-by-id': actor.id } : {}),
   })
+  try {
+    await prisma.fleetListVersion.create({
+      data: {
+        organisationId,
+        fileName: body.fileName,
+        entries: body.entries,
+        unitCount: Object.keys(body.entries).length,
+        sheets: body.sheets,
+        conflicts: body.conflicts,
+        uploadedById: actor.id,
+        uploadedByName: actor.name,
+        fileKey: stored.key,
+        fileSize: stored.size,
+        fileType: stored.type,
+        fileSha256: stored.sha256,
+      },
+    })
+  } catch (err) {
+    await removeFile(stored.key)
+    throw err
+  }
   return current(organisationId)
+}
+
+/**
+ * A short-lived link to download an uploaded fleet Excel as it was uploaded.
+ * Only this organisation's rows; a reset row or a row from before files were
+ * kept has none.
+ */
+export async function fileLink(organisationId: string, id: string) {
+  const row = await prisma.fleetListVersion.findFirst({
+    where: { id, organisationId },
+    select: { fileKey: true, fileName: true },
+  })
+  if (!row?.fileKey) throw new NotFoundError('Fleet list file')
+  const fileName = row.fileName || 'fleet-list.xlsx'
+  return { fileName, ...(await fileUrl(row.fileKey, fileName)) }
 }
 
 /** Back to the list built into the app; the uploads stay on record. */

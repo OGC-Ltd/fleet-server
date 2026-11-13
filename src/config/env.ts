@@ -308,6 +308,19 @@ const schema = z.object({
   GOOGLE_ROUTING_ENABLED: z.string().optional().default('false').transform(v => v === 'true'),
   GOOGLE_ROUTING_API_KEY: z.string().optional().default(''),
 
+  // ── uploaded files (lib/uploads) ────────────────────────────────────────
+  // Files people upload (the client's fleet list Excel) are kept in S3, never
+  // on the box's disk. Credentials come from the default AWS chain: the EC2
+  // instance role on the box. Never put AWS keys in .env.example (dev loads
+  // it and it is committed). Empty bucket: an upload that must keep its file
+  // is refused with a 503, rather than saved without it.
+  UPLOADS_S3_BUCKET: z.string().optional().default(''),
+  UPLOADS_S3_REGION: z.string().optional().default('af-south-1'),
+  // Only for an S3-compatible store in development (MinIO and the like); path-style addressing. Empty on the box.
+  UPLOADS_S3_ENDPOINT: z.string().optional().default(''),
+  // How long a download link to a kept file works.
+  UPLOADS_PRESIGN_SECONDS: z.coerce.number().int().min(30).max(3600).optional().default(300),
+
   // ── notification cache + retention (lib/redis, lib/queues) ───────────────
   // UNSET is a supported production state: the notification cache degrades to
   // Postgres and the BullMQ retention sweep does not run. The box is a
