@@ -316,6 +316,9 @@ const schema = z.object({
   // is refused with a 503, rather than saved without it.
   UPLOADS_S3_BUCKET: z.string().optional().default(''),
   UPLOADS_S3_REGION: z.string().optional().default('af-south-1'),
+  // The folder inside the bucket every key starts with. Prod: bucket
+  // ndoo-522505217087-af-south-1-an, folder "ndoo" (operator, 2026-11-14).
+  UPLOADS_S3_PREFIX: z.string().optional().default(''),
   // Only for an S3-compatible store in development (MinIO and the like); path-style addressing. Empty on the box.
   UPLOADS_S3_ENDPOINT: z.string().optional().default(''),
   // How long a download link to a kept file works.

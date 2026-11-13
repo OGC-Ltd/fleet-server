@@ -62,14 +62,16 @@ export function safeName(name: string): string {
 }
 
 /**
- * Where an upload lives: {kind}/{orgId}/{yyyy}/{mm}/{dd}/{time}-{random}-{name}.
- * Organisation first, so one organisation's files can be listed, exported or
- * removed by prefix; the random part keeps two uploads of one name apart.
+ * Where an upload lives: [{UPLOADS_S3_PREFIX}/]{kind}/{orgId}/{yyyy}/{mm}/{dd}/{time}-{random}-{name}.
+ * The prefix is the bucket's folder for this app (prod: "ndoo"). Organisation
+ * next, so one organisation's files can be listed, exported or removed by
+ * prefix; the random part keeps two uploads of one name apart.
  */
-export function uploadKey(kind: string, organisationId: string, fileName: string, at = new Date()): string {
+export function uploadKey(kind: string, organisationId: string, fileName: string, at = new Date(), prefix = env.UPLOADS_S3_PREFIX): string {
   const d = at.toISOString()
   const stamp = d.slice(11, 19).replace(/:/g, '')
-  return `${kind}/${organisationId}/${d.slice(0, 4)}/${d.slice(5, 7)}/${d.slice(8, 10)}/${stamp}-${randomBytes(6).toString('hex')}-${safeName(fileName)}`
+  const folder = String(prefix ?? '').replace(/^\/+|\/+$/g, '')
+  return `${folder ? `${folder}/` : ''}${kind}/${organisationId}/${d.slice(0, 4)}/${d.slice(5, 7)}/${d.slice(8, 10)}/${stamp}-${randomBytes(6).toString('hex')}-${safeName(fileName)}`
 }
 
 export type StoredFile = { key: string; size: number; type: string; sha256: string }

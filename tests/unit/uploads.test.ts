@@ -29,4 +29,11 @@ describe('uploaded files kept in S3 (lib/uploads)', () => {
     expect(k).toMatch(/^fleet-lists\/org1\/2026\/11\/13\/210509-[0-9a-f]{12}-MORL_FLEET\.xlsx$/)
     expect(uploadKey('fleet-lists', 'org1', 'a.xlsx')).not.toBe(uploadKey('fleet-lists', 'org1', 'a.xlsx'))
   })
+
+  it('keys sit under the bucket folder when one is set (prod: ndoo)', () => {
+    const at = new Date('2026-11-14T08:00:00Z')
+    expect(uploadKey('fleet-lists', 'org1', 'a.xlsx', at, 'ndoo')).toMatch(/^ndoo\/fleet-lists\/org1\/2026\/11\/14\/080000-[0-9a-f]{12}-a\.xlsx$/)
+    expect(uploadKey('fleet-lists', 'org1', 'a.xlsx', at, '/ndoo/')).toMatch(/^ndoo\/fleet-lists\//)
+    expect(uploadKey('fleet-lists', 'org1', 'a.xlsx', at, '')).toMatch(/^fleet-lists\//)
+  })
 })
