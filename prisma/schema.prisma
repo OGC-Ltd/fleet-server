@@ -3728,3 +3728,25 @@ model IdleEpisode {
   @@index([organisationId, endedAt])
   @@map("idle_episodes")
 }
+
+/// The client's fleet list (driver, status and TYPE by plate) for an organisation, uploaded
+/// once for every user (operator, 2026-11-13). Every upload is kept and none is changed; the
+/// newest row is the list in use, and a row with no entries puts the built-in list back.
+model FleetListVersion {
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  /// null on a reset row
+  fileName       String?  @map("file_name")
+  /// plate -> { driver, status, type, list }; null: back to the built-in list
+  entries        Json?
+  unitCount      Int      @default(0) @map("unit_count")
+  sheets         Json?
+  conflicts      Json?
+  uploadedById   String?  @map("uploaded_by_id")
+  /// Who uploaded it, as named then
+  uploadedByName String?  @map("uploaded_by_name")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([organisationId, createdAt])
+  @@map("fleet_list_versions")
+}

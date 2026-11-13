@@ -42,6 +42,7 @@ import incidentsRoutes     from './modules/incidents/incidents.routes.js'
 import repairRoutes       from './modules/repairs/repairs.routes.js'
 import dashboardRoutes from './modules/dashboard/dashboard.routes.js'
 import plannerRoutes from './modules/planner/planner.routes.js'
+import fleetListRoutes from './modules/fleet-list/fleet-list.routes.js'
 import deliveriesRoutes from './modules/deliveries/deliveries.routes.js'
 import * as dashboard from './modules/dashboard/dashboard.service.js'
 import { notificationsOrgRouter } from './modules/notifications/notifications.router.js'
@@ -317,6 +318,8 @@ export function createApp() {
   app.use(`${orgBase}/repairs`, repairRoutes)
   app.use(`${orgBase}/dashboard`, dashboardRoutes)
   app.use(`${orgBase}/planner`, plannerRoutes)
+  // The client's fleet list, one per organisation for every user (operator, 2026-11-13)
+  app.use(`${orgBase}/fleet-list`, fleetListRoutes)
   app.use(`${orgBase}/deliveries`, deliveriesRoutes)
 
   // Org-wide dashboard SSE stream + push subscription management
