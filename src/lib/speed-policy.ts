@@ -54,6 +54,7 @@ export interface SpeedPolicy {
 const VEHICLE_SPEED_LIMITS: ReadonlyMap<string, number> = new Map([
   ['KBR316T', 140],
   ['KBU666C', 140],
+  ['KCV507R', 140],
 ])
 
 export function vehicleSpeedLimitFor(registrationPlate: string | null | undefined): number | null {
