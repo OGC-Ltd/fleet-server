@@ -3693,3 +3693,38 @@ model DeliveryOrder {
   @@id([organisationId, plate])
   @@map("delivery_orders")
 }
+
+/// One idle stop of one unit, as the idle watch raised it (modules/idle-watch),
+/// kept after it ends so the Alerts page can list past ones (operator,
+/// 2026-11-13). `key` is the watch's own: the same while the unit stands.
+model IdleEpisode {
+  id             String    @id @default(cuid())
+  key            String    @unique
+  organisationId String    @map("organisation_id")
+  vehicleId      String    @map("vehicle_id")
+  plate          String
+  size           String    @default("")
+  designation    String    @default("")
+  /// When it stopped; sinceExact false: at least then (the server did not see it stop).
+  since          DateTime
+  sinceExact     Boolean   @default(true) @map("since_exact")
+  /// When the watch first raised it, last saw it standing, and saw it go.
+  alertedAt      DateTime  @default(now()) @map("alerted_at")
+  lastSeenAt     DateTime  @default(now()) @map("last_seen_at")
+  endedAt        DateTime? @map("ended_at")
+  /// Working time stood (the rule's measure) and the whole stop, in minutes, at the last check.
+  idleMinutes    Int       @default(0) @map("idle_minutes")
+  standingMinutes Int      @default(0) @map("standing_minutes")
+  /// 'critical' once it reached the critical mark, even if seen again below it.
+  severity       String    @default("warning")
+  lat            Float
+  lng            Float
+  /// The nearest named place and how far from it, as the alert said.
+  place          String?
+  placeMetres    Int?      @map("place_metres")
+  engineOn       Boolean?  @map("engine_on")
+
+  @@index([organisationId, since])
+  @@index([organisationId, endedAt])
+  @@map("idle_episodes")
+}

@@ -326,6 +326,8 @@ export function createApp() {
   app.get(`${orgBase}/stop-watch`, authenticate, requireOrgAccess, requirePermission('notification:read'), stopWatchCtrl.current)
   // Menengai's listed units idle 3 h of working time (Alerts page, corner badge)
   app.get(`${orgBase}/idle-watch`, authenticate, requireOrgAccess, requirePermission('notification:read'), idleWatchCtrl.current)
+  // The idle alerts kept, for the Alerts page's history (operator, 2026-11-13).
+  app.get(`${orgBase}/idle-watch/history`, authenticate, requireOrgAccess, requirePermission('notification:read'), idleWatchCtrl.history)
 
   app.use((_req, res) => {
     sendError(res, 404, 'Route not found')

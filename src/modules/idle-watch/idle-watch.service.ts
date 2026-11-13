@@ -7,6 +7,9 @@
  */
 
 import type { RequestHandler } from 'express'
+import { z } from 'zod'
+import { BadRequestError } from '../../core/errors/errors.js'
+import { HISTORY_LIMIT, listEpisodes, saveEpisodes } from './idle-watch.store.js'
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { movementState } from '../../lib/movement-state.js'
@@ -93,6 +96,9 @@ export async function checkIdle(now = Date.now()): Promise<void> {
   const before = state.alerts.length
   state = { orgId, status: 'done', alerts, notReporting: watch.notReporting, notOnPlatform: watch.notOnPlatform, checkedAt: now, message: null }
   if (alerts.length !== before) logger.info({ idle: alerts.length }, 'idle watch: idle units changed')
+  // Kept for the Alerts page's history. A failed write is logged, not fatal:
+  // the live list above is already answered from memory.
+  await saveEpisodes(orgId, alerts, now).catch((err) => logger.warn({ err }, 'idle watch: could not save idle episodes'))
 }
 
 /** Start the background check. Returns a stop function. */
@@ -138,4 +144,52 @@ export const current: RequestHandler = (req, res) => {
       rule: RULE,
     },
   })
+}
+
+const DAY = 24 * 3_600_000
+
+/** ?from=2026-11-11&to=2026-11-12: whole Nairobi days, both included. */
+const historyQuery = z.object({
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  to:   z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  q:    z.string().trim().max(64).optional(),
+})
+
+/** Midnight in Nairobi (UTC+3) on that day, as a UTC instant. */
+const nairobiMidnight = (day: string) => new Date(Date.parse(`${day}T00:00:00+03:00`))
+
+/**
+ * GET /organisations/:orgId/idle-watch/history?from=&to=&q=: the idle alerts
+ * kept (idle-watch.store) that overlap those days, newest first, within the
+ * caller's scope. With no days, the last 7. Any organisation may ask; only
+ * Menengai has any.
+ */
+export const history: RequestHandler = async (req, res, next) => {
+  try {
+    const parsed = historyQuery.safeParse(req.query)
+    if (!parsed.success) throw new BadRequestError('from and to are days, like 2026-11-11')
+    const now = Date.now()
+    const today = new Date(now + 3 * 3_600_000).toISOString().slice(0, 10)
+    const toDay = parsed.data.to ?? today
+    const fromDay = parsed.data.from ?? new Date(nairobiMidnight(toDay).getTime() - 6 * DAY + 3 * 3_600_000).toISOString().slice(0, 10)
+    const from = nairobiMidnight(fromDay)
+    const to = new Date(nairobiMidnight(toDay).getTime() + DAY - 1)
+    if (to < from) throw new BadRequestError('to is before from')
+    if (to.getTime() - from.getTime() > 92 * DAY) throw new BadRequestError('Ask for three months at most')
+
+    const { rows, more } = await listEpisodes(String(req.params.orgId), {
+      from, to, q: parsed.data.q, vehicleIds: req.authz?.vehicleIds ?? null,
+    })
+    res.json({
+      data: rows.map((r) => ({
+        key: r.key, vehicleId: r.vehicleId, plate: r.plate, size: r.size, designation: r.designation,
+        since: r.since.getTime(), sinceExact: r.sinceExact,
+        alertedAt: r.alertedAt.getTime(), lastSeenAt: r.lastSeenAt.getTime(), endedAt: r.endedAt?.getTime() ?? null,
+        idleMs: r.idleMinutes * 60_000, standingMs: r.standingMinutes * 60_000,
+        severity: r.severity, lat: r.lat, lng: r.lng, engineOn: r.engineOn,
+        nearest: r.place ? { name: r.place, metres: r.placeMetres ?? 0 } : null,
+      })),
+      meta: { from: fromDay, to: toDay, more, limit: HISTORY_LIMIT, rule: RULE },
+    })
+  } catch (err) { next(err) }
 }

@@ -2,7 +2,8 @@
  * The idle watch's rules: Menengai's listed units standing still too long
  * (fleet list of 10 Nov 2026; first built in the browser, new-ui PR #56).
  *
- * A unit is idle when it has not moved for 3 hours of WORKING time:
+ * A unit is idle when it has not moved for 2 hours of WORKING time (3 until
+ * 2026-11-13, when the operator lowered it):
  *   - working time is the day shift, 07:30 to 19:30 Nairobi time, so a truck
  *     parked at 18:00 and away at 08:00 has stood 1 h, and is never flagged;
  *   - a unit in the yard or a depot (MORL or the Nairobi depot, 1 km round
@@ -19,7 +20,7 @@
 import { placeAt, plateIn, type Place } from '../stop-watch/stop-watch.rules.js'
 
 export const ORG_CODE = 'MENENGAI'
-export const IDLE_MS = 3 * 3_600_000
+export const IDLE_MS = 2 * 3_600_000
 export const CRITICAL_MS = 6 * 3_600_000
 /** Silent longer than this: not reporting, not judged (new-ui lib/vehicleMap DARK_AFTER_MS). */
 export const DARK_MS = 24 * 3_600_000

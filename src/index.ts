@@ -77,7 +77,7 @@ async function main() {
   // Menengai's unauthorised stops, checked here once a minute and toasted to
   // whoever may see the unit (modules/stop-watch).
   const stopStopWatch = startStopWatch()
-  // Menengai's listed units idle 3 h of working time (modules/idle-watch).
+  // Menengai's listed units idle 2 h of working time (modules/idle-watch).
   const stopIdleWatch = startIdleWatch()
   // (The live feed used to be seeded here into a shared in-memory ring. Each
   // SSE client now replays its OWN org's history from the durable store on

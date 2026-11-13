@@ -39,13 +39,13 @@ describe('idleUnits', () => {
     expect(warn.alerts[0]).toMatchObject({ severity: 'warning', idleMs: 3.5 * 3_600_000 })
   })
 
-  it('leaves out a unit parked overnight, one under 3 h, one moving, and one in the yard or a depot', () => {
-    // Parked 18:00: by 08:30 that is 1 h 30 min of the evening and 1 h of the morning
-    const morning = at('2026-11-11T08:30:00')
-    const overnight = idleUnits([unit({ capturedAt: iso('2026-11-11T08:25:00'), movement: { state: 'resting', since: iso('2026-11-10T18:00:00'), exact: true } })], { list, excluded, now: morning })
+  it('leaves out a unit parked overnight, one under 2 h, one moving, and one in the yard or a depot', () => {
+    // Parked 18:00: by 07:50 that is 1 h 30 min of the evening and 20 min of the morning
+    const morning = at('2026-11-11T07:50:00')
+    const overnight = idleUnits([unit({ capturedAt: iso('2026-11-11T07:45:00'), movement: { state: 'resting', since: iso('2026-11-10T18:00:00'), exact: true } })], { list, excluded, now: morning })
     expect(overnight.alerts).toEqual([])
     const units = [
-      unit({ vehicleId: 'a', movement: { state: 'resting', since: iso('2026-11-11T13:00:00'), exact: true } }),
+      unit({ vehicleId: 'a', movement: { state: 'resting', since: iso('2026-11-11T14:00:00'), exact: true } }),
       unit({ vehicleId: 'b', speedKmh: 45, movement: { state: 'moving', since: iso('2026-11-11T14:00:00'), exact: true } }),
     ]
     expect(idleUnits(units, { list, excluded, now: NOW }).alerts).toEqual([])
