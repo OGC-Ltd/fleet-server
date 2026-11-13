@@ -36,6 +36,7 @@ import type { GrantChange, ListUsersQuery, SetFleetDto } from './iam.schema.js'
 
 /** What each resource is called on the page. A resource not named here shows its own slug. */
 const RESOURCE_LABELS: Record<string, string> = {
+  access:        'Full access',
   vehicle:       'Vehicles',
   sensor:        'Sensors and probes',
   telemetry:     'Telemetry',

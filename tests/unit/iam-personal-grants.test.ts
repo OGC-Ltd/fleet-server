@@ -25,7 +25,7 @@ import {
   type OrgGrant, type PersonalGrant,
 } from '../../src/lib/authz/subject.js'
 import { isGrantable, catalogue, setGrants, setFleetAccess } from '../../src/modules/iam/iam.service.js'
-import { FLAGGED_ONLY, WILDCARD } from '../../src/lib/permissions.js'
+import { FLAGGED_ONLY, FULL_ACCESS, FULL_ACCESS_EXCLUDED, WILDCARD, fullAccessRights } from '../../src/lib/permissions.js'
 
 const ORG_A = 'org_a'
 const ORG_B = 'org_b'
@@ -304,5 +304,38 @@ describe('setFleetAccess: limiting a person to fleet categories', () => {
     p.$transaction.mockResolvedValue(undefined)
     await setFleetAccess('actor', 'u1', { organisationId: ORG_A, allVehicles: true, vehicleGroupIds: [] })
     expect(p.$transaction).toHaveBeenCalled()
+  })
+})
+
+describe('access:full: full access in one organisation', () => {
+  it('stands for every right in that organisation only', () => {
+    const into = member({ [ORG_A]: ['map:read'], [ORG_B]: ['map:read'] })
+    applyPersonalGrants([personal(ORG_A, FULL_ACCESS, 'allow')], into)
+    const a = into.orgs.get(ORG_A)!.permissions
+    for (const slug of fullAccessRights()) expect(a.has(slug)).toBe(true)
+    expect(a.has('user:assign_role')).toBe(true)
+    expect(into.orgs.get(ORG_B)!.permissions.has('report:read')).toBe(false)
+    expect(into.platformPermissions.size).toBe(0)
+  })
+
+  it('never narrows, never opens tenants, never messages or assigns', () => {
+    const into = member({ [ORG_A]: [] })
+    applyPersonalGrants([personal(ORG_A, FULL_ACCESS, 'allow')], into)
+    const a = into.orgs.get(ORG_A)!.permissions
+    for (const slug of FULL_ACCESS_EXCLUDED) expect(a.has(slug)).toBe(false)
+    expect(a.has(WILDCARD)).toBe(false)
+  })
+
+  it('a right taken away still bites', () => {
+    const into = member({ [ORG_A]: [] })
+    applyPersonalGrants([personal(ORG_A, FULL_ACCESS, 'allow'), personal(ORG_A, 'user:delete', 'deny')], into)
+    const a = into.orgs.get(ORG_A)!.permissions
+    expect(a.has('user:update')).toBe(true)
+    expect(a.has('user:delete')).toBe(false)
+  })
+
+  it('is grantable and listed first in the catalogue', () => {
+    expect(isGrantable(FULL_ACCESS)).toBe(true)
+    expect((catalogue().resources[0] as { resource: string }).resource).toBe('access')
   })
 })

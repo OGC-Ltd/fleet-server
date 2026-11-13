@@ -25,6 +25,12 @@
 
 /** `resource:action` -> human name. The seed writes exactly these. */
 export const PERMISSION_CATALOGUE = {
+  // FULL ACCESS in one organisation (user, 2026-11-14): one tick in IAM that
+  // stands for every right below except FULL_ACCESS_EXCLUDED. Expanded in
+  // lib/authz/subject (applyPersonalGrants) before denials, so a right taken
+  // away from the person still bites. Held by no role to start with.
+  'access:full':           'Full access in this organisation',
+
   // Live tracking. `map:read` is the map itself; the three below are the
   // controls on it, because an operator may be allowed to watch the fleet
   // without being allowed to re-colour it or to see fuel incidents.
@@ -271,6 +277,33 @@ export const FULL_ACCESS_RIGHTS: PermissionSlug[] = [
   'notification:all_events', 'notification:repair_tickets', 'notification:repair_flags',
   'user:read_all',
 ]
+
+/** The one right that stands for every other (see PERMISSION_CATALOGUE). */
+export const FULL_ACCESS = 'access:full'
+
+/**
+ * What FULL_ACCESS does NOT carry:
+ * - `vehicle:flagged_only` is a restriction: it would narrow the person.
+ * - `organisation:create` / `:delete` act on tenants, not inside one.
+ * - The rights that TELL somebody or HAND them work: full access must not
+ *   start mailing, pushing or assigning jobs to the person. IAM gives those
+ *   one by one.
+ * - The platform markers and the wildcard, never given to a person.
+ */
+export const FULL_ACCESS_EXCLUDED: ReadonlySet<string> = new Set([
+  'vehicle:flagged_only',
+  'organisation:create', 'organisation:delete',
+  'notification:push_control_room', 'notification:push_tickets',
+  'notification:push_completed', 'notification:push_stores',
+  'notification:fuel_audit_mail',
+  'repair:take_jobs', 'security_case:hold',
+  'platform:admin', 'platform:read_all',
+])
+
+/** Every right FULL_ACCESS stands for. */
+export function fullAccessRights(): string[] {
+  return (Object.keys(PERMISSION_CATALOGUE) as string[]).filter((s) => !FULL_ACCESS_EXCLUDED.has(s))
+}
 
 /** Everything a role confined to one organisation can be given. */
 const ORG_EVERYTHING: PermissionSlug[] = [

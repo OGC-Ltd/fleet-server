@@ -30,7 +30,7 @@
 import { prisma } from '../prisma.js'
 import { getCacheRedis } from '../redis.js'
 import { logger } from '../logger.js'
-import { FLAGGED_ONLY, WILDCARD } from '../permissions.js'
+import { FLAGGED_ONLY, FULL_ACCESS, WILDCARD, fullAccessRights } from '../permissions.js'
 import { emitAccessChanged } from '../sse.js'
 
 const KEY_PREFIX  = 'authz:v1'
@@ -294,7 +294,7 @@ export function applyPersonalGrants(
   into: { isPlatform: boolean; platformPermissions: Set<string>; orgs: Map<string, OrgGrant> },
 ): Map<string, Set<string>> {
   const denied = new Map<string, Set<string>>()
-  if (personal.length === 0 || into.platformPermissions.has(WILDCARD)) return denied
+  if (into.platformPermissions.has(WILDCARD)) return denied
 
   const usable = personal.filter((g) => g.permission.slug !== WILDCARD)
 
@@ -314,6 +314,16 @@ export function applyPersonalGrants(
       org?.permissions.add(slug)
     }
   }
+
+  // Full access (access:full, from a role or the person's own grant) stands
+  // for every right but FULL_ACCESS_EXCLUDED. Expanded before the denials, so
+  // a right taken away in IAM still bites.
+  const expand = (set: Set<string>) => {
+    if (!set.has(FULL_ACCESS)) return
+    for (const slug of fullAccessRights()) set.add(slug)
+  }
+  for (const org of into.orgs.values()) expand(org.permissions)
+  expand(into.platformPermissions)
 
   for (const g of usable) {
     if (g.effect !== 'deny') continue
