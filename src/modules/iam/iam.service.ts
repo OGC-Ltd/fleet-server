@@ -22,7 +22,7 @@ import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { BadRequestError, NotFoundError } from '../../core/errors/errors.js'
 import {
-  ALL_PERMISSIONS, FLAGGED_ONLY, PERMISSION_CATALOGUE, ROLE_DEFINITIONS, VEHICLE_SCOPABLE_ROLE_SLUGS, WILDCARD, splitSlug,
+  ALL_PERMISSIONS, FLAGGED_ONLY, PERMISSION_CATALOGUE, ROLE_DEFINITIONS, WILDCARD, splitSlug,
 } from '../../lib/permissions.js'
 import { MENENGAI_FLEET_LIST } from '../../providers/wialon/menengai-fleet-list.js'
 import {
@@ -313,9 +313,10 @@ type FleetCategory = { id: string; name: string; units: number }
 
 export type FleetAccess = {
   /**
-   * May this person's fleet be narrowed here? Only under a role that is
-   * vehicleScopable (lib/permissions), and never under a platform role, which
-   * reaches every organisation whole.
+   * May this person's fleet be narrowed here? Under any organisation role:
+   * the person's own setting overrides what the role would give (operator,
+   * 2026-11-14: "they should override the default one despite of the role").
+   * Never under a platform role, which reaches every organisation whole.
    */
   narrowable: boolean
   /** Why not, in words for the page. */
@@ -358,15 +359,9 @@ async function fleetAccess(user: AccessUser, isPlatform: boolean, orgIds: string
     const groupIds = m && !m.allVehicles
       ? m.vehicleScopes.flatMap((s) => (s.vehicleGroupId ? [s.vehicleGroupId] : []))
       : []
-    const roleSlugs = user.userRoles.filter((r) => r.role.organisationId === orgId).map((r) => r.role.slug)
-
     let reason: string | null = null
     if (isPlatform) reason = 'Their role covers every organisation, so they always see the whole fleet.'
     else if (!m) reason = 'Not a member of this organisation.'
-    else if (roleSlugs.length === 0) reason = 'No role here yet.'
-    else if (!roleSlugs.every((s) => VEHICLE_SCOPABLE_ROLE_SLUGS.includes(s))) {
-      reason = 'This role always sees the whole fleet. Only Operator, Dispatch Manager and Logistics Manager can be limited to categories.'
-    }
 
     // A category with no units is left off, unless this person holds it.
     const categories = groups

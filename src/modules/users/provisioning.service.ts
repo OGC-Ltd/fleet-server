@@ -27,7 +27,6 @@ import { logger } from '../../lib/logger.js'
 import { NotFoundError, ValidationError, ConflictError } from '../../core/errors/errors.js'
 import { invalidateSubject } from '../../lib/authz/subject.js'
 import { invalidateRosterForUser } from './roster.cache.js'
-import { VEHICLE_SCOPABLE_ROLE_SLUGS } from '../../lib/permissions.js'
 import type { MembershipInput, ProvisionUserDto } from './user.schema.js'
 
 const BCRYPT_ROUNDS = 12
@@ -124,9 +123,12 @@ async function applyMembership(
     })
   }
 
-  if (!allVehicles && roles.some((role) => !VEHICLE_SCOPABLE_ROLE_SLUGS.includes(role.slug))) {
+  // Any organisation role may be limited to part of the fleet: the person's
+  // own setting overrides the role (operator, 2026-11-14). A platform role
+  // reaches every organisation whole, so a limit beside one would mean nothing.
+  if (!allVehicles && roles.some((role) => role.organisationId === null)) {
     throw new ValidationError({
-      memberships: [`${input.organisationId}: one or more assigned roles require access to the whole organisation`],
+      memberships: [`${input.organisationId}: a platform role always sees the whole fleet`],
     })
   }
 
@@ -331,7 +333,6 @@ export async function setRolesEverywhere(
     })
   }
   const orgSlugs = roleSlugs.filter((s) => !platformRoles.some((r) => r.slug === s))
-  const scopable = orgSlugs.every((s) => VEHICLE_SCOPABLE_ROLE_SLUGS.includes(s))
 
   const held = await prisma.orgMembership.findMany({
     where:  { userId, revokedAt: null },
@@ -342,7 +343,9 @@ export async function setRolesEverywhere(
     },
   })
   const inputs: MembershipInput[] = held.map((m) => {
-    const keep = scopable && !m.allVehicles
+    // The person's fleet limit stays whatever the new role is (operator,
+    // 2026-11-14). It used to be widened for a role outside the three.
+    const keep = !m.allVehicles
     return {
       organisationId:  m.organisationId,
       roleSlugs:       orgSlugs,

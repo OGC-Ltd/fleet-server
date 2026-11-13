@@ -263,11 +263,16 @@ describe('setFleetAccess: limiting a person to fleet categories', () => {
     expect(p.$transaction).toHaveBeenCalled()
   })
 
-  it('refuses to narrow a role that always sees the whole fleet', async () => {
-    p.user.findFirst.mockResolvedValue(person('supervisor'))
-    await expect(setFleetAccess('actor', 'u1', { organisationId: ORG_A, allVehicles: false, vehicleGroupIds: [TANKERS] }))
-      .rejects.toThrow(/always sees the whole fleet/)
-    expect(p.$transaction).not.toHaveBeenCalled()
+  it("narrows any organisation role: a person's own setting overrides the role (2026-11-14)", async () => {
+    for (const slug of ['supervisor', 'fleet_analyst', 'technician', 'admin', 'head_of_security']) {
+      p.user.findFirst.mockResolvedValue(person(slug))
+      p.vehicleGroup.count.mockResolvedValue(1)
+      p.orgMembership.findFirst.mockResolvedValue({ id: 'm1' })
+      p.$transaction.mockResolvedValue(undefined)
+      const out = await setFleetAccess('actor', 'u1', { organisationId: ORG_A, allVehicles: false, vehicleGroupIds: [TANKERS] })
+      expect(out.organisations[0]!.fleet).toMatchObject({ narrowable: true, reason: null })
+    }
+    expect(p.$transaction).toHaveBeenCalledTimes(5)
   })
 
   it('refuses an empty choice of categories', async () => {

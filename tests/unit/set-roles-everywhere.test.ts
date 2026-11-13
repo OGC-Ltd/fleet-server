@@ -158,7 +158,7 @@ describe('setRolesEverywhere', () => {
     expect(live()).toEqual(['supervisor@KASULU', 'supervisor@SUKARI'])
   })
 
-  it('keeps a vehicle restriction the new role allows, and widens one it does not', async () => {
+  it("keeps the person's vehicle restriction whatever the new role is (2026-11-14)", async () => {
     member('KASULU', false, ['v1'])
     grant('operator', 'KASULU')
 
@@ -167,8 +167,8 @@ describe('setRolesEverywhere', () => {
     expect(db.scopes.map((s) => s.vehicleId)).toEqual(['v1'])
 
     await setRolesEverywhere('u1', ['supervisor'], { fromOrgId: 'KASULU' })
-    expect(db.memberships[0]!.allVehicles).toBe(true)
-    expect(db.scopes).toEqual([])
+    expect(db.memberships[0]!.allVehicles).toBe(false)
+    expect(db.scopes.map((s) => s.vehicleId)).toEqual(['v1'])
   })
 
   it('refuses a platform role unless the caller may grant one', async () => {
