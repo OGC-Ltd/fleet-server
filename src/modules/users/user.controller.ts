@@ -16,7 +16,6 @@ import {
   canEditUser,
   canViewUser,
   canManageRoleSlugs,
-  roleSlugsFor,
 } from './user.authz.js'
 import { groupScopeFor } from './user-group.scope.js'
 import { forgetUser } from '../../middleware/auth.js'
@@ -65,19 +64,13 @@ async function assertCanManageRoleId(userId: string, orgId: string, roleId: stri
   })
   if (!role) throw new NotFoundError('Role')
 
-  const actorRoles = await roleSlugsFor(userId, orgId)
-  if (actorRoles.has('super_admin')) {
-    if (role.organisationId !== null && role.organisationId !== orgId) {
-      throw new ForbiddenError('The role does not belong to this organisation')
-    }
-    return
+  if (role.organisationId !== null && role.organisationId !== orgId) {
+    throw new ForbiddenError('The role does not belong to this organisation')
   }
-  if (
-    !actorRoles.has('admin')
-    || role.organisationId !== orgId
-    || !ASSIGNABLE_ROLE_SLUGS.includes(role.slug)
-  ) {
-    throw new ForbiddenError('Administrators may assign only roles below admin')
+  // Rights, not role names (2026-11-14): user:assign_role, role:assign_senior
+  // for Admin / Head of Section, the wildcard for a platform role.
+  if (!(await canManageRoleSlugs(userId, orgId, [role.slug]))) {
+    throw new ForbiddenError('You may not grant or revoke this role')
   }
 }
 
