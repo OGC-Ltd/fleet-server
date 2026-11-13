@@ -32,7 +32,6 @@ import { getCacheRedis } from '../redis.js'
 import { logger } from '../logger.js'
 import { FLAGGED_ONLY, WILDCARD } from '../permissions.js'
 import { emitAccessChanged } from '../sse.js'
-import { TICKET_FEED_ROLES } from '../notifications/restricted-sources.js'
 
 const KEY_PREFIX  = 'authz:v1'
 const EPOCH_KEY   = 'authz:epoch'
@@ -228,14 +227,6 @@ async function loadSubject(userId: string): Promise<Subject> {
     byGroup.set(v.vehicleGroupId, [...(byGroup.get(v.vehicleGroupId) ?? []), v.id])
   }
 
-  // Where a role is restricted to flagged units, the units with an open repair
-  // job, read fresh on every resolution. Cached with the rest, and dropped
-  // early by refreshFlaggedScopes when a job opens or closes.
-  const flaggedOrgs = memberships
-    .map((m) => m.organisationId)
-    .filter((orgId) => orgPermissions.get(orgId)?.has(FLAGGED_ONLY))
-  const flagged = await openRepairVehicles(flaggedOrgs)
-
   const orgs = new Map<string, OrgGrant>()
   for (const m of memberships) {
     let vehicleIds: Set<string> | null = null
@@ -246,16 +237,12 @@ async function loadSubject(userId: string): Promise<Subject> {
         if (s.vehicleGroupId) for (const id of byGroup.get(s.vehicleGroupId) ?? []) vehicleIds.add(id)
       }
     }
-    const open = flagged.get(m.organisationId)
-    if (open) {
-      const within = vehicleIds
-      vehicleIds = new Set([...open].filter((id) => !within || within.has(id)))
-    }
     orgs.set(m.organisationId, {
       // A membership with no role grants reaches the organisation and can do
       // nothing in it. That is deliberate: membership answers "which tenant",
       // roles answer "what may they do", and neither implies the other.
-      permissions: orgPermissions.get(m.organisationId) ?? new Set<string>(),
+      // A copy: personal grants below must not write into the role's set.
+      permissions: new Set(orgPermissions.get(m.organisationId) ?? []),
       vehicleIds,
     })
   }
@@ -264,6 +251,22 @@ async function loadSubject(userId: string): Promise<Subject> {
   // set: a grant can widen what somebody does, never where they reach.
   const isPlatform = platformPermissions.size > 0
   const denied = applyPersonalGrants(personal ?? [], { isPlatform, platformPermissions, orgs })
+
+  // Where the person is restricted to flagged units (by role, or by their own
+  // grant in IAM since 2026-11-14), the units with an open repair job, read
+  // fresh on every resolution. AFTER the personal grants, so IAM can set or
+  // clear the restriction. Cached with the rest, and dropped early by
+  // refreshFlaggedScopes when a job opens or closes.
+  const flaggedOrgs = [...orgs.entries()]
+    .filter(([, g]) => g.permissions.has(FLAGGED_ONLY))
+    .map(([orgId]) => orgId)
+  const flagged = await openRepairVehicles(flaggedOrgs)
+  for (const [orgId, open] of flagged) {
+    const grant = orgs.get(orgId)
+    if (!grant) continue
+    const within = grant.vehicleIds
+    grant.vehicleIds = new Set([...open].filter((id) => !within || within.has(id)))
+  }
 
   return { userId, isPlatform, platformPermissions, orgs, denied }
 }
@@ -275,9 +278,10 @@ export type PersonalGrant = { organisationId: string | null; effect: string; per
  *
  * Allowances first, denials last, so a denial always wins. A grant for one
  * organisation applies only where the person already reaches it (a membership,
- * or a platform role): it never opens a tenant. Two slugs are never personal:
- * the wildcard, which is the System Administrator role and nothing else, and
- * `vehicle:flagged_only`, which is a restriction read off the role.
+ * or a platform role): it never opens a tenant. One slug is never personal:
+ * the wildcard, which is the System Administrator role and nothing else.
+ * `vehicle:flagged_only`, a restriction, may be set or cleared like any
+ * other right since 2026-11-14 (the user: no hidden rules).
  *
  * The holder of the wildcard is left exactly as they were. Nothing could be
  * added, and a denial that did not bite would be a lie on the page.
@@ -292,7 +296,7 @@ export function applyPersonalGrants(
   const denied = new Map<string, Set<string>>()
   if (personal.length === 0 || into.platformPermissions.has(WILDCARD)) return denied
 
-  const usable = personal.filter((g) => g.permission.slug !== WILDCARD && g.permission.slug !== FLAGGED_ONLY)
+  const usable = personal.filter((g) => g.permission.slug !== WILDCARD)
 
   for (const g of usable) {
     if (g.effect !== 'allow') continue
@@ -356,15 +360,23 @@ export async function refreshFlaggedScopes(orgId: string): Promise<void> {
     const now = [...((await openRepairVehicles([orgId])).get(orgId) ?? [])].sort().join(',')
     if (lastFlagged.get(orgId) === now) return
     lastFlagged.set(orgId, now)
-    const holders = await prisma.userRole.findMany({
-      where: {
-        revokedAt: null,
-        role: { organisationId: orgId, permissions: { some: { permission: { slug: FLAGGED_ONLY } } } },
-      },
-      select:   { userId: true },
-      distinct: ['userId'],
-    })
-    for (const { userId } of holders) await invalidateSubject(userId)
+    // Restricted by role, or by their own grant (IAM). Over-inclusive on
+    // purpose: one denied by IAM is re-read for nothing, which is cheap.
+    const [byRole, byGrant] = await Promise.all([
+      prisma.userRole.findMany({
+        where: {
+          revokedAt: null,
+          role: { organisationId: orgId, permissions: { some: { permission: { slug: FLAGGED_ONLY } } } },
+        },
+        select:   { userId: true },
+        distinct: ['userId'],
+      }),
+      prisma.userPermissionGrant.findMany({
+        where:  { effect: 'allow', permission: { slug: FLAGGED_ONLY }, OR: [{ organisationId: orgId }, { organisationId: null }] },
+        select: { userId: true },
+      }),
+    ])
+    for (const userId of new Set([...byRole, ...byGrant].map((h) => h.userId))) await invalidateSubject(userId)
   } catch (err) {
     logger.warn({ err, orgId }, 'authz: could not refresh flagged-unit scopes')
   }
@@ -437,33 +449,40 @@ export function vehicleScopeIn(subject: Subject, orgId: string): Set<string> | n
   return grant.vehicleIds
 }
 
-/** What a technician's Live Feed carries: the repair workflow's notices,
- *  and the flag notices only they see (notifications/restricted-sources). */
-export const FLAGGED_ONLY_FEED_SOURCES = ['repair', 'repair_flag', 'repair_verified'] as const
+/** What a Live Feed limited to repair notices always carries: the repair
+ *  workflow's own notices. The restricted sources ride on their rights. */
+export const FLAGGED_ONLY_FEED_SOURCES = ['repair'] as const
+
+/** The restricted feed sources (notifications/restricted-sources) these rights open. */
+function restrictedSourcesHeld(subject: Subject, orgId: string): string[] {
+  return [
+    ...(can(subject, orgId, 'notification:repair_tickets') ? ['repair_ticket'] : []),
+    ...(can(subject, orgId, 'notification:repair_flags') ? ['repair_flag', 'repair_verified'] : []),
+  ]
+}
 
 /**
  * The feed sources this person is limited to in an organisation, or null for
- * every source. A role restricted to flagged units (technician) sees the
- * repair notifications on those units rather than the tracking feed
- * (operator, 2026-10-27).
+ * every source. Somebody restricted to flagged units who does NOT hold
+ * `notification:all_events` sees the repair notices on those units rather
+ * than the tracking feed (operator, 2026-10-27, for technicians; a right in
+ * IAM since 2026-11-14, held by every role to start with).
  */
 export async function feedSourcesFor(userId: string, orgId: string): Promise<string[] | null> {
   const subject = await resolveSubject(userId)
   if (subject.isPlatform) return null
-  return subject.orgs.get(orgId)?.permissions.has(FLAGGED_ONLY) ? [...FLAGGED_ONLY_FEED_SOURCES] : null
+  if (!subject.orgs.get(orgId)?.permissions.has(FLAGGED_ONLY)) return null
+  if (can(subject, orgId, 'notification:all_events')) return null
+  return [...FLAGGED_ONLY_FEED_SOURCES, ...restrictedSourcesHeld(subject, orgId)]
 }
 
 /**
  * The restricted feed sources this person may see in an organisation beyond
- * the common feed: repair_ticket for the operator, supervisor, Head of
- * Security and Assistant Head of Security there (operator, 2026-10-27).
- * Read from the role itself, not a permission: it is who you are in that
- * organisation that decides it.
+ * the common feed: repair tickets (`notification:repair_tickets`), and units
+ * flagged and repairs verified (`notification:repair_flags`). Both were the
+ * role by name until 2026-11-14: tickets for the operator, supervisor and
+ * security, flags for the technicians.
  */
 export async function feedGrantsFor(userId: string, orgId: string): Promise<string[]> {
-  const held = await prisma.userRole.findFirst({
-    where: { userId, revokedAt: null, role: { organisationId: orgId, slug: { in: [...TICKET_FEED_ROLES] } } },
-    select: { id: true },
-  })
-  return held ? ['repair_ticket'] : []
+  return restrictedSourcesHeld(await resolveSubject(userId), orgId)
 }

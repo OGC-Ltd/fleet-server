@@ -35,9 +35,10 @@ vi.mock('../../src/lib/prisma.js', () => ({ prisma: prismaMock }))
 vi.mock('../../src/modules/fuel/fuel-followup.service.js', () => ({ repairSignedOff: vi.fn() }))
 vi.mock('../../src/modules/repairs/repairs.workflow.notify.js', () => ({
   notifyWorkflow: vi.fn(async () => ({ to: [], accepted: [] })),
-  roleHolderEmails: vi.fn(async () => []),
-  HEAD_OF_SECURITY_ROLE: 'head_of_security',
-  TICKET_PUSH_ROLES: ['operator', 'head_of_security', 'asst_head_of_security'],
+  rightHolderEmails: vi.fn(async () => []),
+  SECURITY_RIGHT: 'security_case:hold',
+  TICKET_PUSH: ['notification:push_tickets'],
+  COMPLETED_PUSH: ['notification:push_completed'],
 }))
 
 import { assessmentSchema, checklistFor, flagUnitsSchema, queueFor, spotFixSchema, CHECKLISTS } from '../../src/modules/repairs/repairs.workflow.schema.js'
@@ -167,7 +168,7 @@ describe('one flag, several faults (2026-10-22)', () => {
     for (const [ref, ev] of tickets) {
       expect(ref.ticketNo).toMatch(/^RT-\d{4}-000\d\d$/)
       expect(ev.audience).toEqual([])
-      expect(ev.push).toEqual(['operator', 'head_of_security', 'asst_head_of_security'])
+      expect(ev.push).toEqual(['notification:push_tickets'])
       expect(ev.source).toBe('repair_ticket')
     }
   })
@@ -254,7 +255,7 @@ describe('a ticket for every fix, remote or physical (2026-10-27)', () => {
       expect(calls[0]![0].ticketNo).toBe(`RT-${new Date().getUTCFullYear()}-00077`)
       expect(calls[0]![1]).toMatchObject({
         key: path === 'remote' ? 'path-remote' : 'path-physical', audience: [], source: 'repair_ticket',
-        push: expect.arrayContaining(['operator']), text: expect.stringContaining('· ticket issued'),
+        push: ['notification:push_tickets'], text: expect.stringContaining('· ticket issued'),
       })
     })
 
@@ -281,7 +282,13 @@ describe('who hears about completion and verification (2026-10-27)', () => {
     await complete(ORG, 'job-1', 'u-1', { testResult: 'pass', fixNote: 'Pads replaced' }).catch(() => undefined)
     const [, ev] = vi.mocked(notifyWorkflow).mock.calls.find(([, e]) => e.key === 'completed')!
     expect(ev).toMatchObject({ source: 'repair_ticket', audience: ['channel'] })
-    expect(ev.push).toEqual(['operator', 'supervisor', 'head_of_security', 'asst_head_of_security'])
+    expect(ev.push).toEqual(['notification:push_completed'])
+  })
+
+  it('starts the two push rights on the roles that were pushed to by name (2026-11-14)', () => {
+    const holders = (right: string) => ROLE_DEFINITIONS.filter((r) => r.permissions.includes(right as never)).map((r) => r.slug).sort()
+    expect(holders('notification:push_tickets')).toEqual(['asst_head_of_security', 'head_of_security', 'operator'])
+    expect(holders('notification:push_completed')).toEqual(['asst_head_of_security', 'head_of_security', 'operator', 'supervisor'])
   })
 
   it('tells the technicians on the job once the Control Room verifies it', async () => {

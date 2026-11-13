@@ -1,5 +1,6 @@
 import { logger } from '../../lib/logger.js'
 import { prisma } from '../../lib/prisma.js'
+import { userHolds } from '../../lib/authz/holders.js'
 import { pushService } from '../notifications/notifications.service.js'
 
 /**
@@ -26,14 +27,12 @@ export interface NotifyRepairAssignmentInput {
 export async function notifyRepairAssignment(input: NotifyRepairAssignmentInput): Promise<AssignmentEmailResult> {
   if (input.assignedById === input.assignedToId) return { sent: false, reason: 'self-assignment' }
 
-  // Technicians are not mailed: the assignment reaches them in the app's Live
-  // Feed and bell (operator, 2026-10-27).
-  const technician = await prisma.userRole.findFirst({
-    where:  { userId: input.assignedToId, revokedAt: null, role: { slug: 'technician', organisationId: input.orgId } },
-    select: { id: true, user: { select: { fullName: true } } },
-  })
-  if (technician) {
-    return { sent: false, reason: 'in-app', ...(technician.user.fullName ? { assigneeName: technician.user.fullName } : {}) }
+  // Whoever holds repair:take_jobs (technicians to start with) is not
+  // mailed: the assignment reaches them in the app's Live Feed and bell
+  // (operator, 2026-10-27; a right since 2026-11-14).
+  if (await userHolds(input.assignedToId, input.orgId, 'repair:take_jobs')) {
+    const who = await prisma.user.findUnique({ where: { id: input.assignedToId }, select: { fullName: true } })
+    return { sent: false, reason: 'in-app', ...(who?.fullName ? { assigneeName: who.fullName } : {}) }
   }
 
   const [assigner, assignee, item] = await Promise.all([

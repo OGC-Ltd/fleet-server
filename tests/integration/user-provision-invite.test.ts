@@ -59,8 +59,8 @@ vi.mock('../../src/lib/authz/subject.js', async (importOriginal) => ({
           userId: 'usr_admin', isPlatform: false,
           platformPermissions: new Set<string>(),
           orgs: new Map([
-            [TEST_ORG_ID, { permissions: new Set(['user:create']), vehicleIds: null }],
-            ['org_two', { permissions: new Set(['user:create']), vehicleIds: null }],
+            [TEST_ORG_ID, { permissions: new Set(['user:create', 'user:assign_role']), vehicleIds: null }],
+            ['org_two', { permissions: new Set(['user:create', 'user:assign_role']), vehicleIds: null }],
           ]),
         }),
   invalidateSubject: vi.fn(async () => {}),

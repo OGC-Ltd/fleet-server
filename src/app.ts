@@ -16,7 +16,6 @@ import accountRoutes from './modules/account/account.routes.js'
 import orgRoutes from './modules/organisations/organisation.routes.js'
 import userRoutes from './modules/users/user.routes.js'
 import userGroupRoutes from './modules/users/user-groups.routes.js'
-import { requireUserAdministrator } from './modules/users/user.authz.js'
 import roleRoutes from './modules/roles/role.routes.js'
 import iamRoutes from './modules/iam/iam.routes.js'
 import vehicleRoutes from './modules/vehicles/vehicle.routes.js'
@@ -253,7 +252,6 @@ export function createApp() {
     `${v1}/users`,
     authenticate,
     requirePermissionStrict('user:create'),
-    requireUserAdministrator,
     validateBody(provisionUserSchema),
     userCtrl.provisionAcrossOrgs,
   )

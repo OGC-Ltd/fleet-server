@@ -14,12 +14,17 @@
  *
  * These assert the QUERY, not a result set, because the absence of a clause is
  * what is being checked and an absent clause returns rows that look fine.
+ *
+ * Since 2026-11-14 "a technician" is a holder of repair:take_jobs (a right in
+ * IAM that starts on the technician role), read through lib/authz/holders.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const prismaMock = vi.hoisted(() => ({ user: { findMany: vi.fn() } }))
 vi.mock('../../src/lib/prisma.js', () => ({ prisma: prismaMock }))
+const holdersOf = vi.hoisted(() => vi.fn(async () => [{ id: 't1', email: null, fullName: 'T' }]))
+vi.mock('../../src/lib/authz/holders.js', () => ({ holdersOf }))
 
 import { findAssignees } from '../../src/modules/repairs/repairs.repository.js'
 
@@ -59,22 +64,17 @@ describe('findAssignees — the organisation IS part of it', () => {
     ])
   })
 
-  it('requires the technician role to be granted IN THIS organisation', async () => {
-    // A technician of Kabras is not offered for a Menengai job, and a
-    // platform-wide grant (organisation_id NULL) is not accepted either --
-    // the only roles carrying one are super_admin and director, and neither
-    // may receive a triage.
+  it('offers only holders of repair:take_jobs IN THIS organisation', async () => {
+    // A technician of Kabras is not offered for a Menengai job.
     const where = await whereFor()
-    expect(where.userRoles.some).toEqual({
-      revokedAt: null,
-      role: { slug: 'technician', organisationId: ORG },
-    })
+    expect(holdersOf).toHaveBeenLastCalledWith(ORG, ['repair:take_jobs'])
+    expect(where.id).toEqual({ in: ['t1'] })
   })
 
   it('carries the organisation it was asked about, not a fixed one', async () => {
     const where = await whereFor('org-sukari')
     expect(where.OR[0]).toEqual({ organisationId: 'org-sukari' })
-    expect(where.userRoles.some.role.organisationId).toBe('org-sukari')
+    expect(holdersOf).toHaveBeenLastCalledWith('org-sukari', ['repair:take_jobs'])
   })
 })
 

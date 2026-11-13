@@ -8,6 +8,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { TEST_ORG_ID } from '../helpers/factories.js'
 
 vi.mock('../../src/lib/prisma.js')
+// Rights are read through resolveSubject since 2026-11-14; answer it from the
+// role rows this file mocks (tests/helpers/roles-subject).
+vi.mock('../../src/lib/authz/subject.js', async (orig) => {
+  const { withRoleRowSubjects } = await import('../helpers/roles-subject.js')
+  return withRoleRowSubjects(await orig<object>())
+})
 vi.mock('../../src/lib/queues/outbound.js', () => ({
   enqueueMail: vi.fn(async () => ({ sent: true })),
   isAccepted: vi.fn(() => true),
@@ -22,6 +28,7 @@ import { enqueueMail } from '../../src/lib/queues/outbound.js'
 import { sendFuelAuditReport, auditReportRecipients, AUDIT_REPORT_ROLE_SLUGS } from '../../src/modules/fuel/fuel-audit-mail.js'
 import { fuelAuditReportEmail } from '../../src/lib/mailer/templates.js'
 import { pushService } from '../../src/modules/notifications/notifications.service.js'
+import { ROLE_DEFINITIONS } from '../../src/lib/permissions.js'
 
 const signedOff = new Date('2026-10-01T09:30:00Z')
 
@@ -52,10 +59,15 @@ function mockAudit() {
   ] as never)
 }
 
-beforeEach(() => { vi.mocked(enqueueMail).mockClear(); vi.mocked(pushService.sendToUsers).mockClear() })
+beforeEach(() => {
+  vi.mocked(enqueueMail).mockClear(); vi.mocked(pushService.sendToUsers).mockClear()
+  // Every account below holds notification:fuel_audit_mail through its role
+  // (a right since 2026-11-14; tests/helpers/roles-subject reads these rows).
+  prismaMock.userRole.findMany.mockResolvedValue([{ role: { slug: 'head_of_security' } }] as never)
+})
 
 describe('Fuel Audit report recipients', () => {
-  it('asks for live grants of exactly the named roles, here or platform-wide, on active accounts', async () => {
+  it('sends to holders of notification:fuel_audit_mail on active accounts, which starts on exactly the named roles', async () => {
     prismaMock.user.findMany.mockResolvedValue([
       { id: 'u1', email: 'HOS@x.co', fullName: 'Head' }, { id: 'u1', email: 'hos@x.co', fullName: 'Head again' }, { id: 'u2', email: 'fm@x.co', fullName: null },
     ] as never)
@@ -64,6 +76,8 @@ describe('Fuel Audit report recipients', () => {
     const where = (prismaMock.user.findMany.mock.calls[0]![0] as { where: Record<string, unknown> }).where
     expect(where).toEqual(expect.objectContaining({ deletedAt: null, status: 'ACTIVE' }))
     expect(JSON.stringify(where)).toContain(TEST_ORG_ID)
+    const holding = ROLE_DEFINITIONS.filter((d) => d.permissions.includes('notification:fuel_audit_mail')).map((d) => d.slug).sort()
+    expect(holding).toEqual([...AUDIT_REPORT_ROLE_SLUGS].sort())
     expect([...AUDIT_REPORT_ROLE_SLUGS].sort()).toEqual([
       'admin', 'asst_head_of_security', 'director', 'dispatcher', 'fleet_analyst', 'fleet_manager',
       'head_of_security', 'manager', 'super_admin',

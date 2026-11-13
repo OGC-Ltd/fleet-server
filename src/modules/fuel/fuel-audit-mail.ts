@@ -14,19 +14,25 @@
  * progress, the probe inspection checklist, the spare parts with their cost,
  * and how it was signed off.
  *
- * Recipients are the people the operator named, by ROLE, in this organisation:
- * head of security, assistant head of security, fleet manager, dispatch
- * manager, fleet analyst, manager, system administrator; and the platform
- * roles, director and platform administrator. Only live grants on active,
- * undeleted accounts with an address.
+ * Recipients are the holders of `notification:fuel_audit_mail` here (a right in
+ * IAM since 2026-11-14). It starts on the roles the operator named: head of
+ * security, assistant head of security, fleet manager, dispatch manager,
+ * fleet analyst, manager, admin; and the platform roles, director and System
+ * Administrator. Only active, undeleted accounts with an address.
  */
 
 import { prisma } from '../../lib/prisma.js'
+import { holdersOf } from '../../lib/authz/holders.js'
 import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
 import { type FuelAuditReport } from '../../lib/mailer/templates.js'
 import { pushService } from '../notifications/notifications.service.js'
 
+/** The right whose holders are sent the report. */
+export const AUDIT_REPORT_RIGHT = 'notification:fuel_audit_mail'
+
+/** The roles that hold AUDIT_REPORT_RIGHT to start with (they were the
+ *  recipients by name until 2026-11-14; lib/permissions gives it to them). */
 export const AUDIT_REPORT_ROLE_SLUGS = [
   'head_of_security', 'asst_head_of_security', 'fleet_manager', 'dispatcher',
   'fleet_analyst', 'manager', 'admin', 'director', 'super_admin',
@@ -34,24 +40,7 @@ export const AUDIT_REPORT_ROLE_SLUGS = [
 
 /** Everybody the report goes to in `orgId`, one entry per address. */
 export async function auditReportRecipients(orgId: string): Promise<Array<{ id: string; email: string; name: string | null }>> {
-  const users = await prisma.user.findMany({
-    where: {
-      deletedAt: null,
-      status: 'ACTIVE',
-      email: { not: null },
-      userRoles: {
-        some: {
-          revokedAt: null,
-          role: {
-            slug: { in: [...AUDIT_REPORT_ROLE_SLUGS] },
-            // A role granted here, or a platform role (it reaches every org).
-            OR: [{ organisationId: orgId }, { organisationId: null }],
-          },
-        },
-      },
-    },
-    select: { id: true, email: true, fullName: true },
-  })
+  const users = await holdersOf(orgId, [AUDIT_REPORT_RIGHT], { withEmail: true, activeOnly: true })
   const seen = new Map<string, { id: string; email: string; name: string | null }>()
   for (const u of users) {
     const email = u.email?.trim().toLowerCase()

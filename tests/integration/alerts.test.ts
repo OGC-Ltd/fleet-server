@@ -87,14 +87,15 @@ beforeEach(() => {
   forgetAlertSummaries()
   calls.length = 0
   feed.publish.mockReset()
+  // An administrator in Alpha only: repair:assign there (a right since
+  // 2026-11-14; it was the admin role by name).
   who.subject = subject({
-    org_a: ['fuel_theft:read', 'analytics:read'],
+    org_a: ['fuel_theft:read', 'analytics:read', 'repair:assign'],
     org_b: ['fuel_theft:read'],
   })
   prismaMock.organisation.findMany.mockResolvedValue([
     { id: 'org_a', code: 'A', name: 'Alpha' }, { id: 'org_b', code: 'B', name: 'Beta' },
   ] as never)
-  // An administrator in Alpha only.
   prismaMock.userRole.findMany.mockResolvedValue([{ role: { slug: 'admin', organisationId: 'org_a' } }] as never)
   prismaMock.user.findFirst.mockResolvedValue({ organisationId: 'org_a', memberships: [] } as never)
   prismaMock.alertDecision.findMany.mockResolvedValue([])
@@ -160,12 +161,13 @@ describe('GET /api/v1/alerts', () => {
 
   it('lets the platform administrator decide everywhere, and an administrator only where a member', async () => {
     answer({})
-    prismaMock.userRole.findMany.mockResolvedValue([{ role: { slug: 'super_admin', organisationId: null } }] as never)
+    // The System Administrator: the wildcard, no membership anywhere.
+    who.subject = { ...subject({ org_a: ['fuel_theft:read'], org_b: ['fuel_theft:read'] }), isPlatform: true, platformPermissions: new Set(['platform:admin']) }
     let res = await request(app).get('/api/v1/alerts')
     expect(res.body.data.orgs.map((o: { canDecide: boolean }) => o.canDecide)).toEqual([true, true])
 
-    // Holds `admin` in Beta, but is no longer a member there.
-    prismaMock.userRole.findMany.mockResolvedValue([{ role: { slug: 'admin', organisationId: 'org_b' } }] as never)
+    // Holds repair:assign in Beta, but is no longer a member there.
+    who.subject = subject({ org_a: ['fuel_theft:read'], org_b: ['fuel_theft:read', 'repair:assign'] })
     prismaMock.user.findFirst.mockResolvedValue({ organisationId: 'org_a', memberships: [] } as never)
     res = await request(app).get('/api/v1/alerts')
     expect(res.body.data.orgs.map((o: { canDecide: boolean }) => o.canDecide)).toEqual([false, false])
@@ -262,6 +264,7 @@ describe('GET /api/v1/alerts/summary', () => {
     await request(app).get('/api/v1/alerts/summary')
     expect(calls.length).toBe(read)
 
+    who.subject = subject({ org_a: ['fuel_theft:read', 'analytics:read'], org_b: ['fuel_theft:read'], [TEST_ORG_ID]: ['repair:assign'] })
     prismaMock.userRole.findMany.mockResolvedValue([{ role: { slug: 'admin' } }] as never)
     prismaMock.user.findFirst.mockResolvedValue({ id: ME } as never)
     prismaMock.speedingIncident.findFirst.mockResolvedValue({
@@ -370,6 +373,8 @@ describe('POST /incidents/speeding/:id/review', () => {
   const URL = `/api/v1/organisations/${TEST_ORG_ID}/incidents/speeding/sp1/review`
 
   function asAdmin() {
+    // repair:assign here, which the admin role gives (a right since 2026-11-14).
+    who.subject = subject({ [TEST_ORG_ID]: ['fuel_theft:read', 'repair:assign'] })
     prismaMock.userRole.findMany.mockResolvedValue([{ role: { slug: 'admin' } }] as never)
     prismaMock.user.findFirst.mockResolvedValue({ id: ME } as never)
   }

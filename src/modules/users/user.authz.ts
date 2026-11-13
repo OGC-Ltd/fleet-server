@@ -1,55 +1,58 @@
 /**
- * Who may delete whom.
+ * Who may see, change and delete whom.
  *
- * ## The rule, as the operator stated it
+ * ## Rights, not role names (2026-11-14)
  *
- *   · The platform administrator and an organisation's admin may delete
- *     accounts.
- *   · Admins may delete accounts in their organisation and shared group.
- *   · Only accounts in the same GROUP — see user-group.scope.
- *   · An admin may NOT delete a system administrator, the platform
- *     administrator or a director.
+ * Until 2026-11-14 these rules were role NAMES typed here: only `admin` and
+ * `super_admin` could manage accounts at all; a supervisor saw operator
+ * accounts only; an operator was kept out of the directory; an admin could
+ * grant only the roles below admin, and could not edit or delete an Admin, a
+ * Director or a System Administrator. The user asked for every such hidden
+ * rule to be a right in IAM. Each is now decided by a permission, set per
+ * person:
  *
- * The last line is the only one that is not already implied by `user:delete`,
- * and it is the reason this file exists: a permission is a fact about the
- * person clicking, and no permission can express "except against these
- * people". `user:delete` is held only by `admin` and, through the wildcard,
- * by `super_admin`.
+ *   user:read / user:create / user:update / user:delete / user:assign_role
+ *       the route's own check, and nothing on top of it any more;
+ *   user:read_all          see every account, not only operators (every role
+ *                          holds it to start with);
+ *   user:manage_protected  edit or remove Admins, Directors and System
+ *                          Administrators (the System Administrator alone, by
+ *                          the wildcard, to start with);
+ *   role:assign_senior     grant the Admin and Head of Section roles (nobody
+ *                          but the System Administrator to start with).
  *
- * ## Seniority is the wrong word for it
- *
- * Admins cannot remove protected system administrators or directors. The
- * platform administrator is unrestricted.
+ * Two rules are not rights and stay: an account is acted on only inside an
+ * organisation it belongs to, and inside a GROUP the actor shares
+ * (user-group.scope); and the platform roles (System Administrator,
+ * Director), which reach every organisation, are granted only by the System
+ * Administrator, like the wildcard itself.
  */
 
 import { prisma } from '../../lib/prisma.js'
-import type { RequestHandler } from 'express'
-import { ForbiddenError, UnauthorizedError } from '../../core/errors/errors.js'
+import { can, resolveSubject } from '../../lib/authz/subject.js'
 import { groupScopeFor } from './user-group.scope.js'
-import { ASSIGNABLE_ROLE_SLUGS } from '../../lib/permissions.js'
+import { ASSIGNABLE_ROLE_SLUGS, PLATFORM_ROLE_SLUGS, WILDCARD } from '../../lib/permissions.js'
 
-/** Roles whose holders may delete an account at all. */
-export const DELETER_ROLE_SLUGS = ['admin', 'super_admin'] as const
-
-/** Platform roles reach every tenant without a membership. */
-const PLATFORM_ROLE_SLUGS = new Set<string>(['super_admin'])
+/** See every account in the directory, not only operator accounts. */
+export const READ_ALL_RIGHT = 'user:read_all'
+/** Edit or remove the accounts in PROTECTED_ROLE_SLUGS. */
+export const MANAGE_PROTECTED_RIGHT = 'user:manage_protected'
+/** Grant the organisation roles above ASSIGNABLE_ROLE_SLUGS (Admin, Head of Section). */
+export const ASSIGN_SENIOR_RIGHT = 'role:assign_senior'
 
 /**
- * Roles an ORG administrator may not delete.
+ * Accounts that only a holder of `user:manage_protected` may edit or delete.
  *
  * `system_admin` is in here as well as `admin`. The live database carries both
  * slugs and both display as "System Administrator", which is a trap of its
- * own — but for this rule the answer is the same either way, so the ambiguity
- * costs nothing: neither is deletable by an admin.
+ * own — but for this rule the answer is the same either way.
  */
-const PROTECTED_FROM_ADMIN = new Set<string>([
+export const PROTECTED_ROLE_SLUGS: ReadonlySet<string> = new Set([
   'super_admin', 'system_admin', 'admin', 'director',
 ])
 
-/** Roles an organisation administrator may not edit, including role grants. */
-const PROTECTED_FROM_EDIT = new Set<string>([
-  'super_admin', 'system_admin', 'admin', 'director',
-])
+/** The accounts somebody without `user:read_all` sees: operators. */
+export const READ_LIMITED_TO = 'operator'
 
 export type DeleteCheck =
   | { ok: true; platformAdmin: boolean }
@@ -72,75 +75,33 @@ export async function roleSlugsFor(userId: string, orgId: string | null): Promis
   return new Set(grants.map((g) => g.role.slug))
 }
 
-/** The role filter required by a supervisor's user roster. */
+/** The role filter on this person's user roster: null for every account. */
 export async function visibleRoleSlugFor(userId: string, orgId: string): Promise<string | null> {
-  const roles = await roleSlugsFor(userId, orgId)
-  if (!roles.has('supervisor')) return null
-  if (['super_admin', 'director', 'admin', 'manager', 'hr'].some((slug) => roles.has(slug))) return null
-  return 'operator'
+  return can(await resolveSubject(userId), orgId, READ_ALL_RIGHT) ? null : READ_LIMITED_TO
 }
 
-/** A supervisor may open only operator accounts in their organisation. */
+/** May `actorId` open `targetId`'s account? (The route already checked user:read.) */
 export async function canViewUser(actorId: string, targetId: string, orgId: string): Promise<boolean> {
-  const actorRoles = await roleSlugsFor(actorId, orgId)
-  const broadReader = ['super_admin', 'director', 'admin', 'manager', 'hr']
-    .some((slug) => actorRoles.has(slug))
-  if (
-    actorRoles.has('operator')
-    && !broadReader
-    && !actorRoles.has('supervisor')
-  ) return false
-  if (!actorRoles.has('supervisor') || broadReader) return true
-  return (await roleSlugsFor(targetId, orgId)).has('operator')
+  if (can(await resolveSubject(actorId), orgId, READ_ALL_RIGHT)) return true
+  return (await roleSlugsFor(targetId, orgId)).has(READ_LIMITED_TO)
 }
 
-/** Operators have no user-directory access, even if stale grants remain. */
-export const requireUserReader: RequestHandler = async (req, _res, next) => {
-  try {
-    const userId = req.user?.id
-    if (!userId) throw new UnauthorizedError('Not authenticated')
-    const orgParam = req.params['orgId']
-    const roles = await roleSlugsFor(userId, typeof orgParam === 'string' ? orgParam : null)
-    if (
-      roles.has('operator')
-      && !['super_admin', 'director', 'admin', 'manager', 'supervisor', 'hr'].some((slug) => roles.has(slug))
-    ) {
-      throw new ForbiddenError('Operators do not have user-directory access')
-    }
-    next()
-  } catch (err) {
-    next(err)
-  }
-}
-
-/** Only an admin or super admin may perform user-management writes. */
-export const requireUserAdministrator: RequestHandler = async (req, _res, next) => {
-  try {
-    const userId = req.user?.id
-    if (!userId) throw new UnauthorizedError('Not authenticated')
-    const orgParam = req.params['orgId']
-    const orgId = typeof orgParam === 'string' ? orgParam : null
-    const roles = await roleSlugsFor(userId, orgId)
-    if (roles.has('super_admin') || (orgId !== null && roles.has('admin'))) {
-      next()
-      return
-    }
-    throw new ForbiddenError('Only an admin or super admin can manage users')
-  } catch (err) {
-    next(err)
-  }
-}
-
-/** Admins may grant only roles explicitly ranked below admin. */
+/**
+ * May `actorId` grant these roles in `orgId`? They must hold
+ * `user:assign_role`. The roles below admin are open to them; Admin and Head
+ * of Section need `role:assign_senior`; a platform role needs the wildcard.
+ */
 export async function canManageRoleSlugs(
   actorId: string,
   orgId: string,
   roleSlugs: string[],
 ): Promise<boolean> {
-  const actorRoles = await roleSlugsFor(actorId, orgId)
-  if (actorRoles.has('super_admin')) return true
-  if (!actorRoles.has('admin')) return false
-  return roleSlugs.every((slug) => ASSIGNABLE_ROLE_SLUGS.includes(slug))
+  const subject = await resolveSubject(actorId)
+  if (can(subject, orgId, WILDCARD)) return true
+  if (!can(subject, orgId, 'user:assign_role')) return false
+  const senior = can(subject, orgId, ASSIGN_SENIOR_RIGHT)
+  return roleSlugs.every((slug) => ASSIGNABLE_ROLE_SLUGS.includes(slug)
+    || (senior && !PLATFORM_ROLE_SLUGS.includes(slug)))
 }
 
 /** Home organisation or a live membership — the roster's own rule. */
@@ -159,32 +120,38 @@ async function isMemberOf(userId: string, orgId: string): Promise<boolean> {
   return row !== null
 }
 
+/** The protected role `targetId` holds in `orgId`, if any. */
+async function protectedRoleOf(targetId: string, orgId: string): Promise<string | null> {
+  for (const slug of await roleSlugsFor(targetId, orgId)) {
+    if (PROTECTED_ROLE_SLUGS.has(slug)) return slug
+  }
+  return null
+}
+
 /**
  * May `actorId` delete `targetId` in `orgId`?
  *
- * The platform administrator passes the membership test on the actor side —
- * its remit is every organisation — and is still bound by the target one: a
- * delete is performed upon somebody who belongs somewhere.
+ * They must hold `user:delete` there. The System Administrator (the wildcard)
+ * passes the membership and group tests on the actor side — its remit is every
+ * organisation — and is still bound by the target one: a delete is performed
+ * upon somebody who belongs somewhere.
  */
 export async function canDeleteUser(
   actorId: string,
   targetId: string,
   orgId: string,
 ): Promise<DeleteCheck> {
-  const actorRoles = await roleSlugsFor(actorId, orgId)
-  const held = DELETER_ROLE_SLUGS.filter((s) => actorRoles.has(s))
-  if (held.length === 0) return { ok: false, reason: 'wrong_role' }
+  const subject = await resolveSubject(actorId)
+  if (!can(subject, orgId, 'user:delete')) return { ok: false, reason: 'wrong_role' }
 
-  const isPlatform = held.some((s) => PLATFORM_ROLE_SLUGS.has(s))
-  if (!isPlatform && !(await isMemberOf(actorId, orgId))) {
+  const platformAdmin = can(subject, orgId, WILDCARD)
+  if (!platformAdmin && !(await isMemberOf(actorId, orgId))) {
     return { ok: false, reason: 'not_a_member' }
   }
 
   if (!(await isMemberOf(targetId, orgId))) return { ok: false, reason: 'not_a_member' }
 
-  // The platform administrator is subject to none of the below: there is
-  // nobody above them for the rule to protect.
-  if (isPlatform) return { ok: true, platformAdmin: true }
+  if (platformAdmin) return { ok: true, platformAdmin: true }
 
   /**
    * Same group, as well as same organisation.
@@ -213,28 +180,24 @@ export async function canDeleteUser(
     }
   }
 
-  const targetRoles = await roleSlugsFor(targetId, orgId)
-  for (const slug of targetRoles) {
-    if (PROTECTED_FROM_ADMIN.has(slug)) return { ok: false, reason: 'protected', blockedBy: slug }
+  if (!can(subject, orgId, MANAGE_PROTECTED_RIGHT)) {
+    const blockedBy = await protectedRoleOf(targetId, orgId)
+    if (blockedBy) return { ok: false, reason: 'protected', blockedBy }
   }
   return { ok: true, platformAdmin: false }
 }
 
 /**
- * Prevent an organisation administrator from changing a protected account's
- * profile, status, membership, group membership, or role grants.
+ * May `actorId` change `targetId`'s profile, status, membership, groups or
+ * roles? Anybody may, as far as their route's own right goes, unless the
+ * target holds a protected role and the actor lacks `user:manage_protected`.
  */
 export async function canEditUser(
   actorId: string,
   targetId: string,
   orgId: string,
 ): Promise<EditCheck> {
-  const actorRoles = await roleSlugsFor(actorId, orgId)
-  if (actorRoles.has('super_admin')) return { ok: true }
-
-  const targetRoles = await roleSlugsFor(targetId, orgId)
-  for (const slug of targetRoles) {
-    if (PROTECTED_FROM_EDIT.has(slug)) return { ok: false, blockedBy: slug }
-  }
-  return { ok: true }
+  if (can(await resolveSubject(actorId), orgId, MANAGE_PROTECTED_RIGHT)) return { ok: true }
+  const blockedBy = await protectedRoleOf(targetId, orgId)
+  return blockedBy ? { ok: false, blockedBy } : { ok: true }
 }

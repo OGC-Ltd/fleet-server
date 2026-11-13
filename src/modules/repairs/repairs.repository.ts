@@ -1,5 +1,6 @@
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
+import { holdersOf } from '../../lib/authz/holders.js'
 import { NotFoundError } from '../../core/errors/errors.js'
 import { STAGE_FOR_OUTCOME } from './repairs.schema.js'
 import { withEffectiveStage, withEffectiveStages, stageFilter } from './effective-stage.js'
@@ -610,23 +611,22 @@ export type Assignee = {
   email:    string | null
 }
 
+/** Who a job can be handed to: members here holding repair:take_jobs (the
+ *  Technician role by name until 2026-11-14). */
 export async function findAssignees(orgId: string): Promise<Assignee[]> {
-  return prisma.user.findMany({
+  const holders = await holdersOf(orgId, ['repair:take_jobs'])
+  const members = await prisma.user.findMany({
     where: {
+      id:        { in: holders.map((h) => h.id) },
       deletedAt: null,
       status:    { notIn: ['SUSPENDED', 'TERMINATED'] },
       OR: [
         { organisationId: orgId },
         { memberships: { some: { organisationId: orgId, revokedAt: null } } },
       ],
-      userRoles: {
-        some: {
-          revokedAt: null,
-          role: { slug: 'technician', organisationId: orgId },
-        },
-      },
     },
     select:  { id: true, fullName: true, email: true },
     orderBy: [{ fullName: 'asc' }, { email: 'asc' }],
   })
+  return members
 }

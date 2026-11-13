@@ -461,19 +461,23 @@ export const listAssignableRoles: RequestHandler = async (req, res, next) => {
     // what it is: a grant that reaches every organisation, made from inside
     // one of them.
     const mayGrantPlatform = await callerMayGrantPlatformRoles(req.user?.id, orgId)
+    // Every organisation role, Admin and Head of Section included, for a
+    // holder of role:assign_senior (a right in IAM since 2026-11-14).
+    const mayGrantSenior = mayGrantPlatform
+      || (req.user?.id ? can(await resolveSubject(req.user.id), orgId, 'role:assign_senior') : false)
 
     const [catalogue, inUse, platform] = await Promise.all([
       prisma.role.findMany({
         where: {
           organisationId: orgId,
-          ...(!mayGrantPlatform ? { slug: { in: ASSIGNABLE_ROLE_SLUGS } } : {}),
+          ...(!mayGrantSenior ? { slug: { in: ASSIGNABLE_ROLE_SLUGS } } : {}),
         },
         select: { id: true, slug: true, name: true },
       }),
       prisma.role.findMany({
         where: {
           organisationId: orgId,
-          ...(!mayGrantPlatform ? { slug: { in: ASSIGNABLE_ROLE_SLUGS } } : {}),
+          ...(!mayGrantSenior ? { slug: { in: ASSIGNABLE_ROLE_SLUGS } } : {}),
           userRoles: { some: { revokedAt: null, user: { deletedAt: null } } },
         },
         select: { id: true, slug: true, name: true },

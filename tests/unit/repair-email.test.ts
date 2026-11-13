@@ -32,6 +32,9 @@ vi.mock('../../src/lib/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
 vi.mock('../../src/lib/prisma.js', () => ({ prisma: prismaMock }))
+// Whether the assignee holds repair:take_jobs (told in the app, not mailed).
+const takesJobs = vi.hoisted(() => ({ value: false }))
+vi.mock('../../src/lib/authz/holders.js', () => ({ userHolds: vi.fn(async () => takesJobs.value) }))
 vi.mock('../../src/lib/notifications/notification.store.js', () => ({
   publishNotificationDurable: vi.fn(),
 }))
@@ -66,6 +69,7 @@ const report = (): Parameters<typeof notifyRepairReport>[0] => ({
 beforeEach(() => {
   vi.clearAllMocks()
   envMock.REPAIR_NOTIFY_EMAILS = ''
+  takesJobs.value = false
   envMock.APP_BASE_URL = ''
   sendMailMock.mockResolvedValue({ sent: true })
   prismaMock.user.findUnique.mockReset()
@@ -155,8 +159,9 @@ describe('triage assignment notifications', () => {
     expect(pushMock.sendToUsers.mock.calls[0]![1].body).toContain('KBZ 431A')
   })
 
-  it('does not email a technician: they are told in the app', async () => {
-    prismaMock.userRole.findFirst.mockResolvedValue({ id: 'ur1', user: { fullName: 'Benson Otieno' } })
+  it('does not email a holder of repair:take_jobs: they are told in the app', async () => {
+    takesJobs.value = true
+    prismaMock.user.findUnique.mockResolvedValue({ fullName: 'Benson Otieno' })
 
     const result = await notifyRepairAssignment({
       itemId: 'r1', orgId: 'org-1', assignedById: 'u1', assignedToId: 'u2',

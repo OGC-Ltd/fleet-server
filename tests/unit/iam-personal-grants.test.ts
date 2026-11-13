@@ -82,10 +82,19 @@ describe('applyPersonalGrants: an organisation member', () => {
     }
   })
 
-  it('ignores the wildcard and the flagged-only restriction', () => {
+  it('ignores the wildcard', () => {
     const into = member({ [ORG_A]: ['map:read'] })
-    applyPersonalGrants([personal(ORG_A, WILDCARD, 'allow'), personal(null, FLAGGED_ONLY, 'allow')], into)
+    applyPersonalGrants([personal(ORG_A, WILDCARD, 'allow')], into)
     expect([...into.orgs.get(ORG_A)!.permissions]).toEqual(['map:read'])
+  })
+
+  it('sets and clears the flagged-only restriction like any right (2026-11-14)', () => {
+    const into = member({ [ORG_A]: ['map:read'] })
+    applyPersonalGrants([personal(null, FLAGGED_ONLY, 'allow')], into)
+    expect(into.orgs.get(ORG_A)!.permissions.has(FLAGGED_ONLY)).toBe(true)
+    const tech = member({ [ORG_A]: ['map:read', FLAGGED_ONLY] })
+    applyPersonalGrants([personal(ORG_A, FLAGGED_ONLY, 'deny')], tech)
+    expect(tech.orgs.get(ORG_A)!.permissions.has(FLAGGED_ONLY)).toBe(false)
   })
 })
 
@@ -163,10 +172,10 @@ describe('resolveSubject with personal grants', () => {
 })
 
 describe('what may be given to one person', () => {
-  it('refuses the wildcard, every platform right and the flagged-only restriction', () => {
+  it('refuses the wildcard and every platform right; the flagged-only restriction is grantable', () => {
     expect(isGrantable(WILDCARD)).toBe(false)
     expect(isGrantable('platform:read_all')).toBe(false)
-    expect(isGrantable(FLAGGED_ONLY)).toBe(false)
+    expect(isGrantable(FLAGGED_ONLY)).toBe(true)
     expect(isGrantable('not:a_permission')).toBe(false)
     expect(isGrantable('report:read')).toBe(true)
   })

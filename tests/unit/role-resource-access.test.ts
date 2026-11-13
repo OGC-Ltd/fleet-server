@@ -60,11 +60,12 @@ describe('screen access named on 2026-10-26', () => {
   it('gives technicians the map restricted to flagged units, Maintenance and the ControlTech queue', () => {
     // Map and Maintenance added 2026-10-27.
     const permissions = permissionsFor('technician')
-    for (const permission of ['repair:read', 'repair:claim', 'map:read', 'vehicle:flagged_only', 'sensor:read']) {
+    // map:filter since 2026-11-14: the Fleets tree gave it to them by a fixed rule.
+    for (const permission of ['repair:read', 'repair:claim', 'map:read', 'map:filter', 'vehicle:flagged_only', 'sensor:read']) {
       expect(permissions.has(permission), permission).toBe(true)
     }
     for (const permission of [
-      'map:filter', 'map:fuel_alerts', 'driver:read', 'weighbridge:read', 'analytics:read',
+      'map:fuel_alerts', 'driver:read', 'weighbridge:read', 'analytics:read',
       'alerts:read', 'fuel_theft:read', 'fuel_audit:read', 'fuel_filling:read', 'logbook:read',
       'repair:flag', 'repair:assess', 'repair:book', 'repair:verify', 'repair:work_any',
     ]) {

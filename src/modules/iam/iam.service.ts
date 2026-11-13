@@ -14,7 +14,6 @@
  *   - open an organisation the person does not already reach;
  *   - hand out the wildcard (`platform:admin`): that is the System
  *     Administrator role and is given on the Users page;
- *   - set `vehicle:flagged_only`, which is a restriction a role carries;
  *   - change the holder of the wildcard, who already has everything.
  */
 
@@ -22,7 +21,7 @@ import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { BadRequestError, NotFoundError } from '../../core/errors/errors.js'
 import {
-  ALL_PERMISSIONS, FLAGGED_ONLY, PERMISSION_CATALOGUE, ROLE_DEFINITIONS, WILDCARD, splitSlug,
+  ALL_PERMISSIONS, PERMISSION_CATALOGUE, ROLE_DEFINITIONS, WILDCARD, splitSlug,
 } from '../../lib/permissions.js'
 import { MENENGAI_FLEET_LIST } from '../../providers/wialon/menengai-fleet-list.js'
 import {
@@ -41,6 +40,7 @@ const RESOURCE_LABELS: Record<string, string> = {
   sensor:        'Sensors and probes',
   telemetry:     'Telemetry',
   map:           'Live map',
+  fleet:         'Fleet status counts',
   dashboard:     'Dashboard',
   notification:  'Live feed',
   trip:          'Trips',
@@ -72,7 +72,6 @@ const RESOURCE_LABELS: Record<string, string> = {
 export function isGrantable(slug: string): boolean {
   return slug in PERMISSION_CATALOGUE
     && slug !== WILDCARD
-    && slug !== FLAGGED_ONLY
     && splitSlug(slug).resource !== 'platform'
 }
 

@@ -44,15 +44,41 @@ export const PERMISSION_CATALOGUE = {
   'map:geofences':         'Show geofences on the map',
   'map:custom_geos':       'Show custom geos on the map',
   'map:playback':          'Replay a vehicle journey',
-  // A RESTRICTION, not a capability: in an organisation where a role holds
-  // it, the units that role sees are only those with an open repair job
+  // The map tools that used to be taken from technicians by a fixed rule
+  // (operator, 2026-10-27). Rights of their own since 2026-11-14 so IAM
+  // decides; every role starts with them (user: "full access").
+  'map:traffic':           'Show live traffic on the map',
+  'map:weather':           'Show live weather on the map',
+  'map:arrivals':          'Open Arrivals: drive times to a hub',
+  // A RESTRICTION, not a capability: in an organisation where a person holds
+  // it, the units they see are only those with an open repair job
   // (lib/authz/subject). A unit drops out once its job is resolved. Named by
-  // the operator for technicians (2026-10-27). Read straight off the role's
-  // grants, never through holds(): the wildcard must not narrow a super admin.
+  // the operator for technicians (2026-10-27). Read straight off the grants,
+  // never through holds(): the wildcard must not narrow a super admin. IAM
+  // may set or clear it per person since 2026-11-14.
   'vehicle:flagged_only':  'See only units with an open repair job',
+
+  // The fleet status counts at the top of the map, once hidden from
+  // technicians by a fixed rule.
+  'fleet:load_status':     'See the In transit and Empty counts',
+  'fleet:status_counts':   'See the Idling, Warning and Critical counts',
 
   'dashboard:read':        'View the dashboard summary',
   'notification:read':     'View the live feed',
+  // What the live feed carries. Each was a fixed rule on the role until
+  // 2026-11-14: a technician saw repair notices only; repair tickets went to
+  // the operator, supervisor and security; flags and verifications to the
+  // technicians. Every role starts with all three.
+  'notification:all_events':     'See every live feed event, not only repair notices',
+  'notification:repair_tickets': 'See repair ticket notices in the live feed',
+  'notification:repair_flags':   'See units flagged and repairs verified in the live feed',
+  // Who is TOLD, by push or mail. Kept on the roles that were told before
+  // (a right given to everyone would message everyone).
+  'notification:push_control_room': 'Get Control Room repair notices',
+  'notification:push_tickets':      'Get repair ticket numbers by push',
+  'notification:push_completed':    'Get completed repairs to verify by push',
+  'notification:push_stores':       'Get spare part requests',
+  'notification:fuel_audit_mail':   'Get the Fuel Audit report by email',
   'trip:read':             'View trips',
   'trip:create':           'Record trips',
   'cargo:read':            'View cargo manifests',
@@ -148,9 +174,17 @@ export const PERMISSION_CATALOGUE = {
   'repair:verify':         'Verify a completed repair, or void a job',
   'repair:parts_issue':    'Issue a spare part from stores',
   'repair:parts_source':   'Source a requested spare part',
+  // Being handed jobs. It was the Technician ROLE until 2026-11-14 (the
+  // triage assignee, the assignee picker, the assignment mail). Holders hear
+  // of their jobs in the app, not by push. Kept on technicians: given to
+  // everyone, every account would appear in the assignee picker.
+  'repair:take_jobs':      'Be handed repair jobs (told in the app, not by push)',
   // Opened by suspected malicious damage on a repair; never gates the repair.
   'security_case:read':    'View security investigations',
   'security_case:update':  'Update security investigations',
+  // Holding an investigation, and the security notices of the repair
+  // workflow. Was the Head of Security role by name until 2026-11-14.
+  'security_case:hold':    'Hold security investigations and get their notices',
 
   // Device credentials. Minting one is a way to write telemetry for a whole
   // organisation, so it stays with administration rather than operations.
@@ -164,8 +198,19 @@ export const PERMISSION_CATALOGUE = {
   'user:update':           'Amend users',
   'user:delete':           'Remove users',
   'user:assign_role':      'Grant and revoke roles',
+  // Until 2026-11-14 a supervisor saw only operator accounts, by role name.
+  // Every role starts with this one.
+  'user:read_all':         'See every account, not only operators',
+  // Until 2026-11-14 an organisation's admin could not edit or remove an
+  // Admin, a Director or a System Administrator, by role name. A guard over
+  // other people's accounts, so only the System Administrator holds it.
+  'user:manage_protected': 'Edit or remove Admins, Directors and System Administrators',
 
   'role:read':             'View roles',
+  // Until 2026-11-14 an admin could grant only the roles below admin, by
+  // role name. Platform roles (System Administrator, Director) stay with
+  // the System Administrator whatever this says: they reach every tenant.
+  'role:assign_senior':    'Grant the Admin and Head of Section roles',
   'role:create':           'Create roles',
   'role:update':           'Amend roles',
   'role:delete':           'Remove roles',
@@ -209,6 +254,23 @@ const TRACKING: PermissionSlug[] = [
   'vehicle:read', 'telemetry:read', 'map:read', 'notification:read',
 ]
 const MAP_TOOLS: PermissionSlug[] = ['map:layers', 'map:fuel_alerts', 'map:filter', 'map:geofences', 'map:custom_geos']
+
+/**
+ * Rights that were fixed rules on a role until 2026-11-14 (a technician
+ * lost the map's traffic, weather, geofence and arrivals tools, the In transit
+ * and Empty counts, the Idling/Warning/Critical counts and most of the live
+ * feed; a supervisor saw only operator accounts). The user asked for every
+ * hidden rule to be an IAM right, and for each new right to start as FULL
+ * ACCESS: every role below holds all of these, and IAM takes one away per
+ * person. Migration 20261114090000_iam_hidden_rules gives them to every role
+ * row already in the database.
+ */
+export const FULL_ACCESS_RIGHTS: PermissionSlug[] = [
+  'map:traffic', 'map:weather', 'map:arrivals',
+  'fleet:load_status', 'fleet:status_counts',
+  'notification:all_events', 'notification:repair_tickets', 'notification:repair_flags',
+  'user:read_all',
+]
 
 /** Everything a role confined to one organisation can be given. */
 const ORG_EVERYTHING: PermissionSlug[] = [
@@ -259,7 +321,7 @@ export type RoleDefinition = {
   permissions: PermissionSlug[]
 }
 
-export const ROLE_DEFINITIONS: RoleDefinition[] = [
+const ROLE_BASE: RoleDefinition[] = [
   // ── Platform ─────────────────────────────────────────────────────────────
   {
     /* The one role that reaches every organisation, and the only holder of
@@ -273,7 +335,10 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     description: 'Every organisation. All data and all administration. The super admin.',
     // The wildcard, deliberately alone: enumerating permissions here would mean
     // a permission added later is one the super admin silently lacks.
-    permissions: ['platform:admin'],
+    // The wildcard answers every check, but the Fuel Audit mail goes to the
+    // holders of the slug itself (lib/authz/holders), as it went to this
+    // role by name before 2026-11-14.
+    permissions: ['platform:admin', 'notification:fuel_audit_mail'],
   },
   {
     slug: 'director', name: 'Director', platform: true, vehicleScopable: false,
@@ -284,6 +349,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'organisation:read',
       'fuel_theft:triage',
       'fuel_audit:read',
+      'notification:fuel_audit_mail',
     ],
   },
 
@@ -315,6 +381,9 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'fuel_theft:triage',
       'fuel_audit:read',
       'user:create', 'user:update', 'user:delete', 'user:assign_role',
+      // Told of spare part requests (stores has no role of its own), and
+      // sent the Fuel Audit report: both were this role by name.
+      'notification:push_stores', 'notification:fuel_audit_mail',
       'ingest_key:read', 'ingest_key:create', 'ingest_key:update', 'ingest_key:delete',
     ],
   },
@@ -328,7 +397,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
   {
     slug: 'manager', name: 'Manager', platform: false, vehicleScopable: false,
     description: 'Everything within this organisation.',
-    permissions: [...ORG_EVERYTHING, 'fuel_theft:triage', 'fuel_audit:read'],
+    permissions: [...ORG_EVERYTHING, 'fuel_theft:triage', 'fuel_audit:read', 'notification:fuel_audit_mail'],
   },
 
   // ── Fleet operations ─────────────────────────────────────────────────────
@@ -337,7 +406,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     description: 'The whole fleet: vehicles, trips, routes, dispatch and fuel. Not its people.',
     // Manager minus the people: an organisation's fleet lead runs the units and
     // the work, and has no business reading or editing the user list.
-    permissions: [...ORG_EVERYTHING.filter((pm) => !pm.startsWith('user:') && !pm.startsWith('role:')), 'fuel_theft:triage', 'fuel_audit:read'],
+    permissions: [...ORG_EVERYTHING.filter((pm) => !pm.startsWith('user:') && !pm.startsWith('role:')), 'fuel_theft:triage', 'fuel_audit:read', 'notification:fuel_audit_mail'],
   },
 
   {
@@ -369,6 +438,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'weighbridge:read', 'weighbridge:export',
       'geofence:read', 'route:read', 'dispatch:read',
       'repair:read', 'repair:flag', 'repair:book',
+      'notification:push_control_room', 'notification:fuel_audit_mail',
     ],
   },
 
@@ -389,7 +459,8 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'driver:read',
       'report:read', 'report:export', 'report:operations',
       // Suspected malicious damage found in a repair (Repair Workflow 4.2).
-      'security_case:read', 'security_case:update',
+      'security_case:read', 'security_case:update', 'security_case:hold',
+      'notification:push_tickets', 'notification:push_completed', 'notification:fuel_audit_mail',
     ],
   },
   {
@@ -403,6 +474,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'driver:read',
       'report:read', 'report:operations',
       'security_case:read',
+      'notification:push_tickets', 'notification:push_completed', 'notification:fuel_audit_mail',
     ],
   },
 
@@ -427,6 +499,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'dashboard:read', 'trip:read', 'fuel_filling:read', 'fuel_review:read',
       'sensor:read', 'dispatch:read', 'logbook:read', 'planner:read', 'planner:write',
       'weighbridge:read', 'report:operations',
+      'notification:fuel_audit_mail',
     ],
   },
 
@@ -442,6 +515,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     permissions: [
       ...ORG_EVERYTHING.filter((pm) => !pm.startsWith('analytics:')),
       'alerts:read', 'fuel_audit:read',
+      'notification:push_control_room', 'notification:push_completed',
     ],
   },
   {
@@ -475,6 +549,7 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
       'weighbridge:read',
       'sensor:read',
       'fuel_filling:read', 'fuel_audit:read',
+      'notification:push_control_room', 'notification:push_tickets', 'notification:push_completed',
     ],
   },
 
@@ -531,7 +606,10 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
      * them theirs.
      */
     permissions: [
-      ...TRACKING, 'map:layers', 'map:geofences', 'map:custom_geos', 'vehicle:flagged_only',
+      // map:filter: the Fleets tree let a technician filter by a fixed rule
+      // until 2026-11-14; now it is the right, as for everyone else.
+      ...TRACKING, 'map:layers', 'map:filter', 'map:geofences', 'map:custom_geos', 'vehicle:flagged_only',
+      'repair:take_jobs',
       'sensor:read',
       'repair:read', 'repair:create', 'repair:resolve',
       // Repair Workflow: claim from the ControlTech queue; source the parts
@@ -566,6 +644,12 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     ],
   },
 ]
+
+/** Every role, each holding FULL_ACCESS_RIGHTS (the wildcard already covers them). */
+export const ROLE_DEFINITIONS: RoleDefinition[] = ROLE_BASE.map((r) =>
+  r.permissions.includes('platform:admin')
+    ? r
+    : { ...r, permissions: [...new Set([...r.permissions, ...FULL_ACCESS_RIGHTS])] })
 
 export const PLATFORM_ROLE_SLUGS: string[] =
   ROLE_DEFINITIONS.filter((r) => r.platform).map((r) => r.slug)

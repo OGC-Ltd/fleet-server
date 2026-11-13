@@ -31,8 +31,8 @@ import { assertNoOutstandingParts } from './repairs.overhaul.js'
 import { canReceiveTriage } from './repairs.authz.js'
 import { repairSignedOff } from '../fuel/fuel-followup.service.js'
 import { humanKind, STAGE_LABEL } from './repairs.service.js'
-import { notifyWorkflow, roleHolderEmails, HEAD_OF_SECURITY_ROLE, TICKET_PUSH_ROLES, type JobRef, type WorkflowEvent } from './repairs.workflow.notify.js'
-import { TICKET_FEED_ROLES } from '../../lib/notifications/restricted-sources.js'
+import { notifyWorkflow, rightHolderEmails, SECURITY_RIGHT, TICKET_PUSH, COMPLETED_PUSH, type JobRef, type WorkflowEvent } from './repairs.workflow.notify.js'
+import { holdersOf, userHolds } from '../../lib/authz/holders.js'
 import {
   checklistFor, queueFor, type Assessment, type Booking, type Complete, type Damage,
   type FaultCategory, type FlagUnits, type InvestigationUpdate, type PathBody, type SpotFix, type Verify,
@@ -171,7 +171,7 @@ async function tellTickets(jobs: Job[], how: string, by?: string) {
       key: 'ticket', severity: 'info', headline: 'Repair ticket issued',
       text: `ticket issued: ${how}`,
       lines: [{ label: group.length > 1 ? 'Tickets' : 'Ticket', value: tickets }, { label: 'Path', value: how }],
-      audience: [], push: TICKET_PUSH_ROLES, source: 'repair_ticket',
+      audience: [], push: TICKET_PUSH, source: 'repair_ticket',
     }, by)
   }
 }
@@ -191,7 +191,7 @@ function withTicket(ev: WorkflowEvent, job: { ticketNo: string | null; issued?: 
     text: ev.text.includes(job.ticketNo) ? ev.text : `${ev.text} · ticket issued`,
     lines: [...(ev.lines ?? []), { label: 'Ticket', value: job.ticketNo }],
     audience: ev.audience.filter((a) => a !== 'control_room'),
-    push: TICKET_PUSH_ROLES, source: 'repair_ticket',
+    push: TICKET_PUSH, source: 'repair_ticket',
   }
 }
 
@@ -1066,7 +1066,7 @@ export async function complete(orgId: string, itemId: string, userId: string, dt
       key: 'completed', severity: 'warning', headline: 'Repair completed: verify it',
       text: `completed and tested, awaiting the Control Room: ${dto.fixNote}`,
       lines: [{ label: 'What was done', value: dto.fixNote }],
-      audience: ['channel'], source: 'repair_ticket', push: TICKET_FEED_ROLES,
+      audience: ['channel'], source: 'repair_ticket', push: COMPLETED_PUSH,
     }, userId)
   }
   const item = await findItemById(itemId, orgId)
@@ -1278,10 +1278,10 @@ export async function updateInvestigation(orgId: string, id: string, userId: str
   const inv = await prisma.securityInvestigation.findFirst({ where: { id, organisationId: orgId } })
   if (!inv) throw new NotFoundError('Investigation not found')
   if (dto.assignedToId) {
-    const holders = await prisma.userRole.count({
-      where: { userId: dto.assignedToId, revokedAt: null, role: { slug: HEAD_OF_SECURITY_ROLE, organisationId: orgId } },
-    })
-    if (holders === 0) throw new UnprocessableError('An investigation is held by a Head of Security of this organisation')
+    // security_case:hold (the Head of Security role by name until 2026-11-14).
+    if (!(await userHolds(dto.assignedToId, orgId, SECURITY_RIGHT))) {
+      throw new UnprocessableError('An investigation is held by somebody allowed to hold security investigations here')
+    }
   }
   const at = new Date()
   const byName = await nameOf(prisma, userId)
@@ -1301,16 +1301,9 @@ export async function updateInvestigation(orgId: string, id: string, userId: str
   })
 }
 
-/** The Heads of Security an investigation can be handed to. */
+/** Who an investigation can be handed to: the holders of security_case:hold. */
 export async function securityHolders(orgId: string) {
-  return prisma.user.findMany({
-    where: {
-      deletedAt: null, status: { notIn: ['SUSPENDED', 'TERMINATED'] },
-      userRoles: { some: { revokedAt: null, role: { slug: HEAD_OF_SECURITY_ROLE, organisationId: orgId } } },
-    },
-    select: { id: true, fullName: true, email: true },
-    orderBy: { fullName: 'asc' },
-  })
+  return (await holdersOf(orgId, [SECURITY_RIGHT])).map(({ id, fullName, email }) => ({ id, fullName, email }))
 }
 
 // ── The daily chases (plan §6, sweep additions) ─────────────────────────────
@@ -1475,4 +1468,4 @@ export async function workflowSweep(now = new Date()) {
   logger.info({ adopted, ticketed, noShows: missed.length, unverified: staleCompleted.length, unclaimed: unclaimed.length, investigations: oldCases.length }, 'repair sweep: workflow checks done')
 }
 
-export { roleHolderEmails }
+export { rightHolderEmails }

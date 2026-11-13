@@ -5,6 +5,12 @@ import { makeUser, TEST_ORG_ID } from '../helpers/factories.js'
 import { authMock, authorizeMock } from '../helpers/auth-mock.js'
 
 vi.mock('../../src/lib/prisma.js')
+// Rights are read through resolveSubject since 2026-11-14; answer it from the
+// role rows this file mocks (tests/helpers/roles-subject).
+vi.mock('../../src/lib/authz/subject.js', async (orig) => {
+  const { withRoleRowSubjects } = await import('../helpers/roles-subject.js')
+  return withRoleRowSubjects(await orig<object>())
+})
 
 vi.mock('../../src/middleware/auth.ts', () => authMock())
 vi.mock('../../src/middleware/authorize.ts', () => authorizeMock())

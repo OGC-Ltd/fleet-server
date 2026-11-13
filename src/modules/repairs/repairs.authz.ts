@@ -1,6 +1,12 @@
 /**
  * Who may hand a triage to whom.
  *
+ * SINCE 2026-11-14 BOTH SIDES ARE RIGHTS, set per person in IAM:
+ * `repair:assign` to hand one out, `repair:take_jobs` to be handed one. They
+ * start on the roles named below. The rest of this note is why the rule
+ * exists; read "admin" as "holder of repair:assign" and "technician" as
+ * "holder of repair:take_jobs".
+ *
  * ## The rule, as the operator stated it
  *
  * A triage under Maintenance is handed out by an ADMINISTRATOR and worked by a
@@ -64,23 +70,19 @@
 import type { RequestHandler } from 'express'
 import { prisma } from '../../lib/prisma.js'
 import { holdsPermission } from '../../middleware/authorize.js'
+import { can, resolveSubject } from '../../lib/authz/subject.js'
+import { userHolds } from '../../lib/authz/holders.js'
 import { ForbiddenError, NotFoundError } from '../../core/errors/errors.js'
 
-/** Roles whose holders may hand a triage out. */
-export const TRIAGE_ASSIGNER_ROLE_SLUGS = ['admin', 'super_admin'] as const
-
-/** Roles whose holders may be handed one. Deliberately disjoint from the
- *  assigner list above: only a technician works a triage. */
-export const TRIAGE_ASSIGNEE_ROLE_SLUGS = ['technician'] as const
-
 /**
- * Platform roles reach every tenant without a membership — that is what makes
- * them platform roles, and the operator said so explicitly of this one: the
- * platform administrator may assign a triage in any organisation. Held apart
- * from the org-scoped slugs because the membership test below must not run
- * against it.
+ * The rights that decide a triage (2026-11-14). Until then both sides were role
+ * NAMES typed here (admin and super_admin assign, technician is assigned); the
+ * user asked for every hidden rule to be a right in IAM. They start where the
+ * roles were: `repair:assign` on the admin role (and the System Administrator,
+ * through the wildcard), `repair:take_jobs` on the technician role.
  */
-const PLATFORM_ROLE_SLUGS = new Set<string>(['super_admin'])
+export const TRIAGE_ASSIGN_RIGHT = 'repair:assign'
+export const TRIAGE_TAKE_RIGHT   = 'repair:take_jobs'
 
 export type TriageRoleCheck =
   | { ok: true }
@@ -107,36 +109,17 @@ async function isMemberOf(userId: string, orgId: string): Promise<boolean> {
   return row !== null
 }
 
-/** The live role slugs this person holds, either in `orgId` or platform-wide. */
-async function roleSlugsFor(userId: string, orgId: string): Promise<Set<string>> {
-  const grants = await prisma.userRole.findMany({
-    where: {
-      userId,
-      revokedAt: null,
-      // A platform role (organisation_id IS NULL) applies everywhere; an
-      // org-scoped one only where it was granted. A role named `admin` in
-      // ANOTHER tenant must not answer for this one, which is the whole
-      // reason this is not a bare slug lookup.
-      role: { OR: [{ organisationId: orgId }, { organisationId: null }] },
-    },
-    select: { role: { select: { slug: true } } },
-  })
-  return new Set(grants.map((g) => g.role.slug))
-}
-
 /**
  * May `userId` hand out a triage in `orgId`?
  *
- * The platform administrator passes on the role alone. Everybody else must
- * also be a member here — an `admin` of Menengai is not an administrator of
- * Kabras, and the role row being org-scoped already says so, but the
- * membership test is what makes that legible in the refusal.
+ * They must hold `repair:assign` there. A platform role (the System
+ * Administrator) reaches every organisation and needs no membership; anybody
+ * else must also be a member here.
  */
 export async function canAssignTriage(userId: string, orgId: string): Promise<TriageRoleCheck> {
-  const slugs = await roleSlugsFor(userId, orgId)
-  const held = TRIAGE_ASSIGNER_ROLE_SLUGS.filter((s) => slugs.has(s))
-  if (held.length === 0) return { ok: false, reason: 'wrong_role' }
-  if (held.some((s) => PLATFORM_ROLE_SLUGS.has(s))) return { ok: true }
+  const subject = await resolveSubject(userId)
+  if (!can(subject, orgId, TRIAGE_ASSIGN_RIGHT)) return { ok: false, reason: 'wrong_role' }
+  if (subject.isPlatform) return { ok: true }
   return (await isMemberOf(userId, orgId)) ? { ok: true } : { ok: false, reason: 'not_a_member' }
 }
 
@@ -144,62 +127,38 @@ export async function canAssignTriage(userId: string, orgId: string): Promise<Tr
  * `canAssignTriage` for many organisations at once: the ones among `orgIds`
  * where this person passes it. For the Alerts page, which lists alerts from
  * every organisation a person holds and draws Escalate / De-escalate only
- * where they may decide; two queries however many organisations there are.
+ * where they may decide.
  */
 export async function triageAssignerOrgs(userId: string, orgIds: string[]): Promise<Set<string>> {
   if (orgIds.length === 0) return new Set()
-  const [grants, me] = await Promise.all([
-    prisma.userRole.findMany({
-      where: {
-        userId,
-        revokedAt: null,
-        role: {
-          slug: { in: [...TRIAGE_ASSIGNER_ROLE_SLUGS] },
-          OR: [{ organisationId: { in: orgIds } }, { organisationId: null }],
-        },
-      },
-      select: { role: { select: { slug: true, organisationId: true } } },
-    }),
-    prisma.user.findFirst({
-      where: { id: userId, deletedAt: null },
-      select: {
-        organisationId: true,
-        memberships: { where: { organisationId: { in: orgIds }, revokedAt: null }, select: { organisationId: true } },
-      },
-    }),
-  ])
-  // The same two arms as canAssignTriage: a platform slug passes on the role
-  // alone; any other needs a membership in the organisation. A role row with
-  // no organisation applies in every one of them.
+  const subject = await resolveSubject(userId)
+  const allowed = orgIds.filter((org) => can(subject, org, TRIAGE_ASSIGN_RIGHT))
+  if (subject.isPlatform || allowed.length === 0) return new Set(allowed)
+  const me = await prisma.user.findFirst({
+    where: { id: userId, deletedAt: null },
+    select: {
+      organisationId: true,
+      memberships: { where: { organisationId: { in: allowed }, revokedAt: null }, select: { organisationId: true } },
+    },
+  })
   const member = new Set(me ? [me.organisationId, ...me.memberships.map((m) => m.organisationId)] : [])
-  const out = new Set<string>()
-  for (const g of grants) {
-    const where = g.role.organisationId === null ? orgIds : [g.role.organisationId]
-    for (const org of where) {
-      if (PLATFORM_ROLE_SLUGS.has(g.role.slug) || member.has(org)) out.add(org)
-    }
-  }
-  return out
+  return new Set(allowed.filter((org) => member.has(org)))
 }
 
 /**
  * May `userId` be handed one in `orgId`?
  *
- * Only a technician, and only one who is a member HERE. Membership is required
- * of everybody, and that is not an inconsistency with the rule above: assigning
- * is an act performed upon an organisation, which a platform remit covers.
- * Being assigned is being made responsible for a job inside one, and the
- * operator bounded it in the same breath every time: "in the same
- * organization". (A platform administrator now fails the role test first, so
- * the membership arm is reached only by a technician from another tenant.)
+ * Only somebody who holds `repair:take_jobs` HERE (the right itself: the
+ * System Administrator's wildcard does not put them in the picker), and who is
+ * a member here: being assigned is being made responsible for a job inside
+ * one organisation (operator: "in the same organization").
  *
  * A suspended or terminated account is refused. The job would be mailed to
  * somebody who cannot sign in to work it, and it would sit open under their
  * name until a human noticed.
  */
 export async function canReceiveTriage(userId: string, orgId: string): Promise<TriageRoleCheck> {
-  const slugs = await roleSlugsFor(userId, orgId)
-  if (!TRIAGE_ASSIGNEE_ROLE_SLUGS.some((s) => slugs.has(s))) return { ok: false, reason: 'wrong_role' }
+  if (!(await userHolds(userId, orgId, TRIAGE_TAKE_RIGHT))) return { ok: false, reason: 'wrong_role' }
   if (!(await isMemberOf(userId, orgId))) return { ok: false, reason: 'not_a_member' }
 
   const active = await prisma.user.findFirst({

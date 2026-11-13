@@ -14,27 +14,38 @@
  * comment: naming a DRIVER — a row synced from the registry, holding no role
  * and unable to sign in — as the owner of a repair job, and mailing them about
  * it. The repository asked only whether the id existed in the tenant.
+ *
+ * Since 2026-11-14 the two sides are rights (repair:assign, repair:take_jobs)
+ * that START on these roles; "holding('admin')" below means "holds what the
+ * admin role gives".
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const prismaMock = vi.hoisted(() => ({
   user:     { findFirst: vi.fn() },
-  userRole: { findMany: vi.fn() },
 }))
 vi.mock('../../src/lib/prisma.js', () => ({ prisma: prismaMock }))
+const subjectMock = vi.hoisted(() => vi.fn())
+vi.mock('../../src/lib/authz/subject.js', async (orig) => ({
+  ...(await orig<typeof import('../../src/lib/authz/subject.js')>()),
+  resolveSubject: subjectMock,
+}))
 
-import {
-  canAssignTriage, canReceiveTriage,
-  TRIAGE_ASSIGNER_ROLE_SLUGS, TRIAGE_ASSIGNEE_ROLE_SLUGS,
-} from '../../src/modules/repairs/repairs.authz.js'
+import { canAssignTriage, canReceiveTriage } from '../../src/modules/repairs/repairs.authz.js'
+import { ROLE_DEFINITIONS } from '../../src/lib/permissions.js'
+import { subjectFromRoles } from '../helpers/subject-from-roles.js'
 
 const ORG = 'org-menengai'
 
-/** Roles the next lookup should report, as the query's shape returns them. */
+/** The rights these roles give, as the person's resolved access. */
 function holding(...slugs: string[]) {
-  prismaMock.userRole.findMany.mockResolvedValue(slugs.map((slug) => ({ role: { slug } })))
+  subjectMock.mockResolvedValue(subjectFromRoles(ORG, slugs))
 }
+
+const rolesHolding = (right: string) => ROLE_DEFINITIONS.filter((r) => r.permissions.includes(right as never)).map((r) => r.slug)
+const ASSIGNERS = rolesHolding('repair:assign')
+const ASSIGNEES = rolesHolding('repair:take_jobs')
 
 /** Membership and account status, in the order the module asks for them. */
 function member(is: boolean, active = true) {
@@ -45,7 +56,7 @@ function member(is: boolean, active = true) {
 }
 
 beforeEach(() => {
-  prismaMock.userRole.findMany.mockReset()
+  subjectMock.mockReset()
   prismaMock.user.findFirst.mockReset()
 })
 
@@ -95,14 +106,17 @@ describe('handing a triage out', () => {
     await expect(canAssignTriage('u1', ORG)).resolves.toEqual({ ok: false, reason: 'wrong_role' })
   })
 
-  it('asks only for roles granted HERE or platform-wide', async () => {
-    // An `admin` of Kabras must not answer for Menengai. The filter is in the
-    // query rather than in a post-filter, so this asserts the query.
-    holding('admin'); member(true)
-    await canAssignTriage('u1', ORG)
-    const where = prismaMock.userRole.findMany.mock.calls[0][0].where
-    expect(where.revokedAt).toBeNull()
-    expect(where.role.OR).toEqual([{ organisationId: ORG }, { organisationId: null }])
+  it('reads the right in THIS organisation only', async () => {
+    // An `admin` of Kabras must not answer for Menengai.
+    subjectMock.mockResolvedValue(subjectFromRoles('org-kabras', ['admin'])); member(true)
+    await expect(canAssignTriage('u1', ORG)).resolves.toEqual({ ok: false, reason: 'wrong_role' })
+  })
+
+  it('follows IAM: a person given repair:assign may assign, one denied it may not', async () => {
+    subjectMock.mockResolvedValue(subjectFromRoles(ORG, ['operator'], { allow: ['repair:assign'] })); member(true)
+    await expect(canAssignTriage('u1', ORG)).resolves.toEqual({ ok: true })
+    subjectMock.mockResolvedValue(subjectFromRoles(ORG, ['admin'], { deny: ['repair:assign'] })); member(true)
+    await expect(canAssignTriage('u1', ORG)).resolves.toEqual({ ok: false, reason: 'wrong_role' })
   })
 })
 
@@ -166,8 +180,8 @@ describe('the two lists', () => {
     // The rule in one assertion: nobody who may hand a triage out may also be
     // given one. This is what "a system administrator can only assign a triage
     // to only a technician" means once it is written down.
-    for (const slug of TRIAGE_ASSIGNER_ROLE_SLUGS) {
-      expect(TRIAGE_ASSIGNEE_ROLE_SLUGS as readonly string[]).not.toContain(slug)
+    for (const slug of ASSIGNERS) {
+      expect(ASSIGNEES).not.toContain(slug)
     }
   })
 
@@ -182,8 +196,8 @@ describe('the two lists', () => {
   })
 
   it('does not let a technician assign, and lets nobody else receive', async () => {
-    expect(TRIAGE_ASSIGNER_ROLE_SLUGS as readonly string[]).not.toContain('technician')
-    expect(TRIAGE_ASSIGNEE_ROLE_SLUGS as readonly string[]).toEqual(['technician'])
+    expect(ASSIGNERS).not.toContain('technician')
+    expect(ASSIGNEES).toEqual(['technician'])
   })
 })
 
@@ -215,8 +229,8 @@ describe('signing a job off', () => {
   it('lets the person it was assigned to sign it off', async () => {
     const { canSignOffTriage } = await import('../../src/modules/repairs/repairs.authz.js')
     await expect(canSignOffTriage('tech-1', ORG, JOB)).resolves.toEqual({ ok: true, as: 'assignee' })
-    // Decided without touching the database: the two ids are already in hand.
-    expect(prismaMock.userRole.findMany).not.toHaveBeenCalled()
+    // Decided without reading anybody's access: the two ids are already in hand.
+    expect(subjectMock).not.toHaveBeenCalled()
   })
 
   it('lets whoever filed the report close their own ticket', async () => {

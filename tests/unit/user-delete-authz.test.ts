@@ -17,6 +17,9 @@
  * system administrator, the platform administrator or a director.
  * That last line is not a ladder of rank — it stops an administrator removing
  * the people whose accounts exist to hold them to account.
+ *
+ * Since 2026-11-14 both lines are rights (user:delete, user:manage_protected)
+ * that START on these roles; roles(['admin']) means "holds what admin gives".
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -26,21 +29,27 @@ const prismaMock = vi.hoisted(() => ({
   userRole: { findMany: vi.fn() },
 }))
 vi.mock('../../src/lib/prisma.js', () => ({ prisma: prismaMock }))
+const subjectMock = vi.hoisted(() => vi.fn())
+vi.mock('../../src/lib/authz/subject.js', async (orig) => ({
+  ...(await orig<typeof import('../../src/lib/authz/subject.js')>()),
+  resolveSubject: subjectMock,
+}))
 const groupScope = vi.hoisted(() => ({ value: { unscoped: true } as { unscoped: boolean; groupIds?: string[] } }))
 vi.mock('../../src/modules/users/user-group.scope.js', () => ({
   groupScopeFor: vi.fn(async () => groupScope.value),
 }))
 
-import { canDeleteUser, DELETER_ROLE_SLUGS } from '../../src/modules/users/user.authz.js'
+import { canDeleteUser } from '../../src/modules/users/user.authz.js'
+import { ROLE_DEFINITIONS } from '../../src/lib/permissions.js'
+import { subjectFromRoles, type SubjectExtras } from '../helpers/subject-from-roles.js'
 
 const ORG = 'org-mufindi'
 
-/** Role slugs for the actor, then for the target, in the order they're asked. */
-function roles(actor: string[], target: string[] = []) {
+/** The actor's access (from their roles), then the target's role slugs. */
+function roles(actor: string[], target: string[] = [], extras: SubjectExtras = {}) {
+  subjectMock.mockResolvedValue(subjectFromRoles(ORG, actor, extras))
   prismaMock.userRole.findMany.mockReset()
-  prismaMock.userRole.findMany
-    .mockResolvedValueOnce(actor.map((slug) => ({ role: { slug } })))
-    .mockResolvedValueOnce(target.map((slug) => ({ role: { slug } })))
+  prismaMock.userRole.findMany.mockResolvedValue(target.map((slug) => ({ role: { slug } })))
 }
 
 /** Membership answers, in the order they're asked (actor, then target). */
@@ -155,8 +164,20 @@ describe('the role lookup', () => {
     expect(where.role.OR).toEqual([{ organisationId: ORG }, { organisationId: null }])
   })
 
-  it('names the two roles that may delete, and no others', () => {
-    expect([...DELETER_ROLE_SLUGS].sort()).toEqual(['admin', 'super_admin'])
+  it('starts user:delete on the admin role only (the System Administrator has it by the wildcard)', () => {
+    expect(ROLE_DEFINITIONS.filter((r) => r.permissions.includes('user:delete')).map((r) => r.slug)).toEqual(['admin'])
+  })
+
+  it('follows IAM: an admin given user:manage_protected may delete a director', async () => {
+    roles(['admin'], ['director'], { allow: ['user:manage_protected'] })
+    members(true, true)
+    await expect(canDeleteUser('boss', 'dir', ORG)).resolves.toEqual({ ok: true, platformAdmin: false })
+  })
+
+  it('follows IAM: a manager given user:delete may delete an operator', async () => {
+    roles(['manager'], ['operator'], { allow: ['user:delete'] })
+    members(true, true)
+    await expect(canDeleteUser('m', 'op', ORG)).resolves.toEqual({ ok: true, platformAdmin: false })
   })
 
   it('requires a shared group for an organisation admin, but not for super admin', async () => {

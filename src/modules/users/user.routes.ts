@@ -2,7 +2,6 @@ import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission, requirePermissionStrict } from '../../middleware/authorize.js'
 import { requireRealAuth } from '../../middleware/requireRealAuth.js'
-import { requireUserAdministrator, requireUserReader } from './user.authz.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
 import { createUserSchema, updateUserSchema, listUserQuerySchema, userLoginReportQuerySchema, assignRoleSchema, orgProvisionUserSchema, setMembershipSchema, setUserStatusSchema, setUserRoleSchema } from './user.schema.js'
 import * as ctrl from './user.controller.js'
@@ -31,9 +30,9 @@ router.use(authenticate, requireOrgAccess)
 // (the User Accounts panel via api/users.js), so no screen that works today
 // starts failing. What stops working is the thing that should never have
 // worked.
-router.get('/', requirePermissionStrict('user:read'), requireUserReader, validateQuery(listUserQuerySchema), ctrl.list)
-router.get('/login-report', requirePermissionStrict('user:read'), requireUserReader, validateQuery(userLoginReportQuerySchema), ctrl.loginReport)
-router.post('/', requireRealAuth, requirePermissionStrict('user:create'), requireUserAdministrator, validateBody(createUserSchema), ctrl.create)
+router.get('/', requirePermissionStrict('user:read'), validateQuery(listUserQuerySchema), ctrl.list)
+router.get('/login-report', requirePermissionStrict('user:read'), validateQuery(userLoginReportQuerySchema), ctrl.loginReport)
+router.post('/', requireRealAuth, requirePermissionStrict('user:create'), validateBody(createUserSchema), ctrl.create)
 // BEFORE the /:userId routes — a literal path must be declared ahead of the
 // parameter that would otherwise swallow it, the same ordering constraint
 // app.ts documents for telemetry vs vehicles.
@@ -46,12 +45,12 @@ router.post('/', requireRealAuth, requirePermissionStrict('user:create'), requir
 // mapping to discover. Shipping account creation in a mode that logs
 // "WOULD DENY" and then creates the user anyway would be shipping an open door
 // with a diary attached.
-router.post('/provision', requireRealAuth, requirePermissionStrict('user:create'), requireUserAdministrator, validateBody(orgProvisionUserSchema), ctrl.provisionInOrg)
+router.post('/provision', requireRealAuth, requirePermissionStrict('user:create'), validateBody(orgProvisionUserSchema), ctrl.provisionInOrg)
 
 // Also before /:userId — a literal must beat the parameter that would swallow it.
-router.get('/assignable-roles', requirePermissionStrict('user:assign_role'), requireUserAdministrator, ctrl.listAssignableRoles)
+router.get('/assignable-roles', requirePermissionStrict('user:assign_role'), ctrl.listAssignableRoles)
 
-router.get('/:userId', requirePermissionStrict('user:read'), requireUserReader, ctrl.getOne)
+router.get('/:userId', requirePermissionStrict('user:read'), ctrl.getOne)
 
 // Which organisations this person may reach, and how much of each fleet.
 // Scoped to the path organisation: an admin here cannot read or alter what the
@@ -65,11 +64,11 @@ router.get('/:userId', requirePermissionStrict('user:read'), requireUserReader, 
 // AUTH_BYPASS deployment must not hand out memberships to an unauthenticated
 // caller. The GET stays as it was; reading who has access is already gated by
 // user:read and org reach.
-router.get('/:userId/memberships', requirePermissionStrict('user:read'), requireUserReader, ctrl.listUserMemberships)
-router.put('/:userId/memberships', requireRealAuth, requirePermissionStrict('user:assign_role'), requireUserAdministrator, validateBody(setMembershipSchema), ctrl.putMembership)
-router.delete('/:userId/memberships', requireRealAuth, requirePermissionStrict('user:assign_role'), requireUserAdministrator, ctrl.deleteMembership)
-router.patch('/:userId', requireRealAuth, requirePermissionStrict('user:update'), requireUserAdministrator, validateBody(updateUserSchema), ctrl.update)
-router.delete('/:userId', requireRealAuth, requirePermissionStrict('user:delete'), requireUserAdministrator, ctrl.remove)
+router.get('/:userId/memberships', requirePermissionStrict('user:read'), ctrl.listUserMemberships)
+router.put('/:userId/memberships', requireRealAuth, requirePermissionStrict('user:assign_role'), validateBody(setMembershipSchema), ctrl.putMembership)
+router.delete('/:userId/memberships', requireRealAuth, requirePermissionStrict('user:assign_role'), ctrl.deleteMembership)
+router.patch('/:userId', requireRealAuth, requirePermissionStrict('user:update'), validateBody(updateUserSchema), ctrl.update)
+router.delete('/:userId', requireRealAuth, requirePermissionStrict('user:delete'), ctrl.remove)
 // Permanent, and therefore its own path rather than a flag on the one above.
 //
 // A query parameter that turns a reversible delete into an irreversible one is
@@ -84,16 +83,16 @@ router.delete('/:userId', requireRealAuth, requirePermissionStrict('user:delete'
 // roles, which is exactly the audience. The protection that matters is in the
 // service — self, guests, and anybody with operations history are refused —
 // and in the client, which asks for the address to be typed out.
-router.delete('/:userId/permanent', requireRealAuth, requirePermissionStrict('user:delete'), requireUserAdministrator, ctrl.purge)
+router.delete('/:userId/permanent', requireRealAuth, requirePermissionStrict('user:delete'), ctrl.purge)
 
 // ── Administration of an existing person, all strictly gated ────────────────
-router.post('/:userId/resend-invite', requireRealAuth, requirePermissionStrict('user:create'), requireUserAdministrator, ctrl.resendInvite)
-router.post('/:userId/send-reset', requireRealAuth, requirePermissionStrict('user:update'), requireUserAdministrator, ctrl.sendPasswordReset)
-router.patch('/:userId/status', requireRealAuth, requirePermissionStrict('user:update'), requireUserAdministrator, validateBody(setUserStatusSchema), ctrl.setUserStatus)
-router.patch('/:userId/role', requireRealAuth, requirePermissionStrict('user:assign_role'), requireUserAdministrator, validateBody(setUserRoleSchema), ctrl.setUserRole)
+router.post('/:userId/resend-invite', requireRealAuth, requirePermissionStrict('user:create'), ctrl.resendInvite)
+router.post('/:userId/send-reset', requireRealAuth, requirePermissionStrict('user:update'), ctrl.sendPasswordReset)
+router.patch('/:userId/status', requireRealAuth, requirePermissionStrict('user:update'), validateBody(setUserStatusSchema), ctrl.setUserStatus)
+router.patch('/:userId/role', requireRealAuth, requirePermissionStrict('user:assign_role'), validateBody(setUserRoleSchema), ctrl.setUserRole)
 
-router.post('/:userId/roles', requireRealAuth, requirePermissionStrict('user:assign_role'), requireUserAdministrator, validateBody(assignRoleSchema), ctrl.assignRole)
-router.delete('/:userId/roles/:roleId', requireRealAuth, requirePermissionStrict('user:assign_role'), requireUserAdministrator, ctrl.revokeRole)
+router.post('/:userId/roles', requireRealAuth, requirePermissionStrict('user:assign_role'), validateBody(assignRoleSchema), ctrl.assignRole)
+router.delete('/:userId/roles/:roleId', requireRealAuth, requirePermissionStrict('user:assign_role'), ctrl.revokeRole)
 
 
 export default router
