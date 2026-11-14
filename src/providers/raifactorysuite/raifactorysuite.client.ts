@@ -189,6 +189,77 @@ export interface RaiFactorySuiteMachineRow {
   active?:             boolean | null
 }
 
+/**
+ * One machine-shift on a work plan — a line of `GET /fuel/plans`. Read off the
+ * live endpoint 2026-11-14 (225 lines). `machine` is the register's
+ * `reference` ("EX-01", or a hired truck's plate "T895DSZ") — all 70 distinct
+ * machines on the first week of plans matched `/machines` by reference, 63 of
+ * them with a `gpsUnitId`. A machine working day and night has a line per
+ * shift. `plannedKm` is set only for units rated by distance; `litresRequested`
+ * only when `fullTank` is false.
+ */
+export interface RaiFactorySuiteWorkPlanLine {
+  id:               string
+  taskId:           string                // "T-261114-ROA-8-01"
+  machine:          string                // register reference
+  machineName?:     string | null         // "Excavator", "Hired Truck"
+  activity:         string
+  unit?:            string | null         // unit of the activity ("m", "CUBIC M")
+  workLocation?:    string | null         // "Zone 4", "Nursery A", "Intake 3"
+  fuelingLocation?: string | null
+  operator?:        string | null
+  secondOperator?:  string | null
+  thirdOperator?:   string | null
+  supervisor?:      string | null
+  shiftNo?:         number | null         // 1, 2 or 3
+  crews?:           number | null
+  shiftStart?:      string | null         // "06:00:00", local wall clock
+  plannedHours?:    number | null
+  litresRequested?: number | null
+  fullTank?:        boolean | null
+  plannedKm?:       number | null
+  expectedOutput?:  number | null
+  outputUnit?:      string | null         // "Trips", "Mtrs", "Pcs"
+  decision?:        string | null         // reviewer's per-line decision
+  decisionNote?:    string | null
+  active?:          boolean | null
+  notes?:           string | null
+}
+
+/**
+ * A department's work plan for a day — `GET /fuel/plans?from&to`. FactorySuite's
+ * "Work Plans" screen: a department head plans the day's machines, an admin (or
+ * the control room) approves it, and at 17:00 the evening before each line is
+ * released as that machine's fuel request. Only machines on an approved plan
+ * can be fuelled.
+ *
+ * Measured 2026-11-14 — unlike the weighment feeds, this window is real:
+ *   • `from`/`to` (YYYY-MM-DD) are both required, `to` is INCLUSIVE, and they
+ *     filter on the plan's own date; over 31 days is refused.
+ *   • `factoryCode` and `limit` are honoured (limit 500 by default, max 1000).
+ *   • Only MUFINDI PAPER MILLS (our KASULU) and SANDBOX have plans. FactorySuite
+ *     wiped its test plans on 2026-11-09, so real ones start 2026-11-11.
+ *   • No webhook announces a plan; `fuel.request.decided` fires per released
+ *     line. Poll to keep up.
+ * Status seen: DRAFT, SUBMITTED, APPROVED.
+ */
+export interface RaiFactorySuiteWorkPlanRow {
+  id:            string
+  factoryCode:   string
+  planCode:      string                   // "WP-261114-ROA-8"
+  department:    string                   // ROADS, IRRIGATION, AGRICULTURE, FACTORY
+  title?:        string | null
+  startDate:     string                   // YYYY-MM-DD
+  endDate:       string
+  status:        string
+  submittedBy?:  string | null
+  submittedAt?:  string | null            // offsetless local wall clock
+  reviewedBy?:   string | null
+  reviewedAt?:   string | null
+  decisionNote?: string | null
+  lines?:        RaiFactorySuiteWorkPlanLine[] | null
+}
+
 export class RaiFactorySuiteClient {
   constructor(
     private readonly baseUrl: string = raiFactorySuiteApi.url,
@@ -284,6 +355,14 @@ export class RaiFactorySuiteClient {
   /** The machine register — see RaiFactorySuiteMachineRow. Whole set always. */
   async listMachines(): Promise<RaiFactorySuiteMachineRow[]> {
     return this.get<RaiFactorySuiteMachineRow>('/machines?limit=5000')
+  }
+
+  /** Work plans whose day falls in `from`..`to` (both inclusive, ≤ 31 days) —
+   *  see RaiFactorySuiteWorkPlanRow. */
+  async listWorkPlans(from: string, to: string, factoryCode?: string): Promise<RaiFactorySuiteWorkPlanRow[]> {
+    const q = new URLSearchParams({ from, to, limit: '1000' })
+    if (factoryCode) q.set('factoryCode', factoryCode)
+    return this.get<RaiFactorySuiteWorkPlanRow>(`/fuel/plans?${q}`)
   }
 
   /** Cheap liveness probe used when a reconcile run fails, to tell apart

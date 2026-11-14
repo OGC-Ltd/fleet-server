@@ -41,10 +41,19 @@ function visibleTo(client: SseClient, event: string, vehicleId: string | null, s
   if (event === 'feed' && !client.feedSources && source && RESTRICTED_SOURCES.has(source) && !client.feedGrants?.has(source)) return false
   if (client.vehicleIds === null) return true
   if (event === 'heartbeat' || event === 'connected') return true
+  if (ORG_WIDE_EVENTS.has(event)) return true
   // Allowed by source above, and not tied to the unit still being in scope.
   if (event === 'feed' && source && SCOPE_EXEMPT_SOURCES.has(source)) return true
   return vehicleId !== null && client.vehicleIds.has(vehicleId)
 }
+
+/**
+ * Events about the organisation, not any unit, that a scoped client is told
+ * anyway. Each only says "re-read X", and X's endpoint already serves that
+ * client the same thing: work_plans_changed → planner/work-plans, which hands
+ * every map:read user the whole day's plans.
+ */
+const ORG_WIDE_EVENTS = new Set(['work_plans_changed'])
 
 function vehicleIdOf(data: unknown): string | null {
   const v = (data as { vehicleId?: unknown } | null)?.vehicleId
@@ -484,6 +493,16 @@ export function emitDashboardFuelFollowUp(orgId: string, data: { vehicleId: stri
  */
 export function emitDashboardRepairChanged(orgId: string) {
   broadcastDashboard(orgId, 'repair_changed', { at: new Date().toISOString() })
+}
+
+/**
+ * A FactorySuite work plan changed (approved, sent back, a change asked for
+ * or decided, released as fuel requests). Clients with the map's Work plans
+ * switch on re-read the day's plans. It is the only thing that updates them,
+ * so it reaches scoped clients too (ORG_WIDE_EVENTS).
+ */
+export function emitDashboardWorkPlansChanged(orgId: string, data: { event: string; planCode: string | null; status: string | null }) {
+  broadcastDashboard(orgId, 'work_plans_changed', { ...data, at: new Date().toISOString() })
 }
 
 /**

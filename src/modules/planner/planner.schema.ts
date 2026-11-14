@@ -31,6 +31,11 @@ export const planListQuerySchema = z.object({
   to:   day,
 })
 
+/** The Live Map's Work plans switch: one day, today (EAT) by default. */
+export const workPlansQuerySchema = z.object({
+  day: day.optional(),
+})
+
 export const stopUpdateSchema = z.object({
   outcome: z.enum(['FULL', 'PARTLY', 'REJECTED']).nullable().optional(),
   remarks: z.string().max(500).optional(),
@@ -57,3 +62,4 @@ export type CustomerFence = z.infer<typeof customerFenceSchema>
 export type SaveSheet    = z.infer<typeof saveSheetSchema>
 export type PlanListQuery = z.infer<typeof planListQuerySchema>
 export type StopUpdate   = z.infer<typeof stopUpdateSchema>
+export type WorkPlansQuery = z.infer<typeof workPlansQuerySchema>

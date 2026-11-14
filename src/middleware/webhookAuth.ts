@@ -74,11 +74,19 @@ function normaliseSignature(sig: string): string {
   return (eq > 0 && eq < 16 ? s.slice(eq + 1) : s).trim()
 }
 
+/**
+ * Every secret a FactorySuite webhook may be signed with. Each webhook
+ * registered there has its own: FACTORY_SUITE_HOOK (alerts, dispatches,
+ * movements, weighments; CONTROLTECH_WEBHOOK_SECRET is its older name) and
+ * WORK_PLANNER_HOOK (the work plan events). Both post to the same URL.
+ */
+export function webhookSecrets(): string[] {
+  return [env.FACTORY_SUITE_HOOK || env.CONTROLTECH_WEBHOOK_SECRET, env.WORK_PLANNER_HOOK].filter(Boolean)
+}
+
 export const webhookAuth: RequestHandler = (req, _res, next) => {
-  // FACTORY_SUITE_HOOK is the provider's name for it; the older variable is
-  // still honoured so an un-migrated deployment keeps working.
-  const secret = env.FACTORY_SUITE_HOOK || env.CONTROLTECH_WEBHOOK_SECRET
-  if (!secret) {
+  const secrets = webhookSecrets()
+  if (secrets.length === 0) {
     // Fail closed: an unset secret must never mean "allow anyone to inject
     // alerts into the operations feed".
     logger.error('FACTORY_SUITE_HOOK is not set — rejecting webhook delivery')
@@ -87,16 +95,22 @@ export const webhookAuth: RequestHandler = (req, _res, next) => {
 
   // 1. HMAC over the raw body, in hex or base64, under any known header.
   const raw = (req as { rawBody?: Buffer }).rawBody ?? Buffer.alloc(0)
-  const expectedHex    = createHmac('sha256', secret).update(raw).digest('hex')
-  const expectedBase64 = createHmac('sha256', secret).update(raw).digest('base64')
+  const expected = secrets.map(s => ({
+    hex:    createHmac('sha256', s).update(raw).digest('hex'),
+    base64: createHmac('sha256', s).update(raw).digest('base64'),
+  }))
 
   for (const name of SIGNATURE_HEADERS) {
     const sig = header(req, name)
     if (!sig) continue
     const received = normaliseSignature(sig)
-    if (safeEqual(expectedHex, received.toLowerCase()) || safeEqual(expectedBase64, received)) {
-      return next()
+    // Every secret is compared, not just until one matches, so the time
+    // taken does not say which webhook a signature was checked against.
+    let ok = false
+    for (const e of expected) {
+      if (safeEqual(e.hex, received.toLowerCase()) || safeEqual(e.base64, received)) ok = true
     }
+    if (ok) return next()
     // A present-but-wrong signature is a hard failure: don't fall through to
     // the weaker shared-secret path, or a bad signature could be bypassed by
     // also sending the secret in the clear.
@@ -105,16 +119,21 @@ export const webhookAuth: RequestHandler = (req, _res, next) => {
   }
 
   // 2. The shared secret sent verbatim, under any known header.
+  const anySecret = (provided: string) => {
+    let ok = false
+    for (const s of secrets) if (safeEqual(s, provided)) ok = true
+    return ok
+  }
   for (const name of SECRET_HEADERS) {
     const provided = header(req, name)
-    if (provided && safeEqual(secret, provided.trim())) return next()
+    if (provided && anySecret(provided.trim())) return next()
   }
 
   // 3. Authorization: Bearer <secret> (or the bare secret).
   const auth = header(req, 'authorization')
   if (auth) {
     const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : auth.trim()
-    if (safeEqual(secret, token)) return next()
+    if (anySecret(token)) return next()
   }
 
   logRejection(req)

@@ -40,6 +40,7 @@
     "repair:home-orgs": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/repair-home-orgs.ts",
     "sync:vehicles": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/sync-vehicles.ts",
     "sync:machines": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/sync-factorysuite-machines.ts",
+    "preview:work-plans": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/preview-factorysuite-work-plans.ts",
     "sync:drivers": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/sync-drivers.ts",
     "seed:org": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/seed-org.ts",
     "sync:wialon": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/sync-wialon.ts --org=KASULU",

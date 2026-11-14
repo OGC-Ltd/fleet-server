@@ -285,7 +285,8 @@ export function createApp() {
   // Deliberately mounted at the ROOT, not under /api/v1: the URL registered
   // with RaiFactorySuite is http://<host>/webhook/rai (nginx proxies /webhook/ to
   // this process). Authenticated by HMAC signature or shared secret; see
-  // middleware/webhookAuth.
+  // middleware/webhookAuth. Both FactorySuite webhooks (alerts and the work
+  // plan one, WORK_PLANNER_HOOK) post here.
   app.use('/webhook', webhookRoutes)
 
   app.use(`${orgBase}/users`, userRoutes)

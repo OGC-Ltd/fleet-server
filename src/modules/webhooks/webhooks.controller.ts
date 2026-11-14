@@ -5,6 +5,7 @@ import { ingestAlerts, type RaiFactorySuiteAlert } from './raifactorysuite-alert
 import { handleDispatch, handleMovement, handleSale } from './raifactorysuite-events.service.js'
 import { handleWeighment } from '../weighments/weighment.ingest.js'
 import { ingestWialonNotifications } from './wialon-notifications.service.js'
+import { workPlansChanged } from '../planner/work-plans.service.js'
 import {
   raiFactorySuiteAlertSchema,
   raiFactorySuiteDispatchSchema,
@@ -28,6 +29,8 @@ import {
  *   movement.created   → gate crossing (Live Feed only; carries no coordinates)
  *   weighment.created  → weighbridge ticket (persisted; NOT narrated — see below)
  *   weighment.updated  → the same ticket, re-weighed or corrected
+ *   fuelplan.*         → a work plan changed (WORK_PLANNER_HOOK): the map's
+ *                        Work plans layer re-reads; nothing is stored
  *
  * A 4xx makes their sender retry a few times and then DROP the event, so an
  * unrecognised shape must never fail the request: acknowledge it, log the
@@ -45,6 +48,8 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
     let movements  = 0
     let sales      = 0
     let weighments = 0
+    let workPlans  = 0
+    let workPlanOrgs = 0
 
     const wialonNotifications: Parameters<typeof ingestWialonNotifications>[0] = []
 
@@ -54,6 +59,18 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
       const wn = wialonNotificationSchema.safeParse(item)
       if (wn.success && (kind.startsWith('wialon') || !kind)) {
         wialonNotifications.push(wn.data)
+        continue
+      }
+
+      // Work plan events, from the WORK_PLANNER_HOOK webhook. Nothing is
+      // stored: the map reads plans through from FactorySuite, so all this
+      // does is clear that read's cache and tell the org's open maps. By
+      // NAME, first, so no plan payload is ever tried against a dispatch or
+      // alert shape. The field events on the same hook (sighting.recorded,
+      // meter.readings.flagged) are not wired up yet and land in `unmapped`.
+      if (kind.startsWith('fuelplan.')) {
+        workPlanOrgs += await workPlansChanged(kind, item)
+        workPlans++
         continue
       }
 
@@ -149,9 +166,9 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
         'Webhook event received that we do not map yet',
       )
     }
-    if (result || dispatches || movements || sales || weighments || wialon) {
+    if (result || dispatches || movements || sales || weighments || workPlans || wialon) {
       logger.info(
-        { event, dispatches, movements, sales, weighments, wialon, ...(result ?? {}) },
+        { event, dispatches, movements, sales, weighments, workPlans, workPlanOrgs, wialon, ...(result ?? {}) },
         'Provider webhook processed',
       )
     }
@@ -164,6 +181,7 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
       movements,
       sales,
       weighments,
+      workPlans,
       wialonNotifications: wialon?.created ?? 0,
       ignored:  unmapped.length,
       ...(result ?? {}),

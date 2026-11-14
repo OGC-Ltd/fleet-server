@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission } from '../../middleware/authorize.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
-import { previewSheetSchema, saveSheetSchema, planListQuerySchema, stopUpdateSchema, customerListQuerySchema, customerFenceSchema } from './planner.schema.js'
+import { previewSheetSchema, saveSheetSchema, planListQuerySchema, stopUpdateSchema, customerListQuerySchema, customerFenceSchema, workPlansQuerySchema } from './planner.schema.js'
 import * as ctrl from './planner.controller.js'
 
 // Planner: delivery sheets per truck and day, their customers' geofences, and
@@ -19,5 +19,9 @@ router.patch('/plans/:planId/stops/:stopId', requirePermission('planner:write'),
 router.delete('/plans/:planId', requirePermission('planner:write'), ctrl.remove)
 router.get('/customers',       requirePermission('planner:read'),  validateQuery(customerListQuerySchema), ctrl.customers)
 router.post('/customers/:customerId/fence', requirePermission('planner:write'), requirePermission('geofence:create'), validateBody(customerFenceSchema), ctrl.fenceCustomer)
+
+// FactorySuite work plans on the Live Map: a map layer, so the map's right
+// rather than the Planner's (the switch sits beside Geofences on the rail).
+router.get('/work-plans',      requirePermission('map:read'),      validateQuery(workPlansQuerySchema), ctrl.workPlans)
 
 export default router

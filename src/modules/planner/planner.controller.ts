@@ -1,7 +1,8 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as svc from './planner.service.js'
-import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, CustomerFence } from './planner.schema.js'
+import { workPlansForMap } from './work-plans.service.js'
+import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, CustomerFence, WorkPlansQuery } from './planner.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -53,5 +54,13 @@ export const customers: RequestHandler = async (req, res, next) => {
 export const fenceCustomer: RequestHandler = async (req, res, next) => {
   try {
     sendSuccess(res, await svc.fenceCustomer(p(req, 'orgId'), p(req, 'customerId'), req.body as CustomerFence), 201)
+  } catch (err) { next(err) }
+}
+
+/** FactorySuite work plans for the Live Map (KASULU); `{ factory: null }` elsewhere. */
+export const workPlans: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as WorkPlansQuery
+    sendSuccess(res, await workPlansForMap(p(req, 'orgId'), q.day))
   } catch (err) { next(err) }
 }
