@@ -260,6 +260,66 @@ export interface RaiFactorySuiteWorkPlanRow {
   lines?:        RaiFactorySuiteWorkPlanLine[] | null
 }
 
+/**
+ * A machine-shift's fuel request — `GET /fuel/requests?from&to` (≤ 31 days,
+ * `factoryCode` honoured). Each released work plan line becomes one, keyed by
+ * machine, day and shift (it carries no line id). Read off the live endpoint
+ * 2026-11-14: only SANDBOX had rows; MUFINDI PAPER MILLS had none from
+ * 15 Sep to 15 Nov, so the shape is SANDBOX's. Status seen: APPROVED.
+ */
+export interface RaiFactorySuiteFuelRequestRow {
+  id:               string
+  factoryCode?:     string | null
+  machine:          string                // register reference
+  department?:      string | null
+  planDate:         string                // YYYY-MM-DD
+  shift?:           number | null
+  plannedHours?:    number | null
+  litresRequested?: number | null
+  fullTank?:        boolean | null
+  status?:          string | null
+  offPlan?:         boolean | null
+  serviceOverdue?:  boolean | null
+  decisionNote?:    string | null
+  slotStart?:       string | null
+  slotEnd?:         string | null
+  reviewedAt?:      string | null         // offsetless local wall clock
+}
+
+/**
+ * One fuelling at the pump — `GET /fuel/issues?from&to` (`factoryCode`
+ * honoured), its own feed, tied to the request it filled by `requestId`.
+ * Read off the live endpoint 2026-11-14 (SANDBOX only, as the requests). The
+ * readings are the machine's meter (km or hours) before, as estimated, and as
+ * read at the pump; the three mismatch flags and `flagNotes` are the pump's
+ * own checks.
+ */
+export interface RaiFactorySuiteFuelIssueRow {
+  id:                 string
+  factoryCode?:       string | null
+  machine:            string
+  machineName?:       string | null
+  issueDate:          string              // YYYY-MM-DD
+  department?:        string | null
+  location?:          string | null       // the pump
+  tank?:              string | null
+  operator?:          string | null       // the machine's operator
+  activity?:          string | null
+  fuelingStart?:      string | null       // offsetless local wall clock
+  fuelingEnd?:        string | null
+  fuelingMinutes?:    number | null
+  previousReading?:   number | null
+  estimatedReading?:  number | null
+  physicalReading?:   number | null
+  quantityIssued?:    number | null
+  operatorMismatch?:  boolean | null
+  deviationFromPlan?: boolean | null
+  jobMismatch?:       boolean | null
+  flagNotes?:         string | null
+  completed?:         boolean | null
+  requestId?:         string | null
+}
+
 export class RaiFactorySuiteClient {
   constructor(
     private readonly baseUrl: string = raiFactorySuiteApi.url,
@@ -363,6 +423,22 @@ export class RaiFactorySuiteClient {
     const q = new URLSearchParams({ from, to, limit: '1000' })
     if (factoryCode) q.set('factoryCode', factoryCode)
     return this.get<RaiFactorySuiteWorkPlanRow>(`/fuel/plans?${q}`)
+  }
+
+  /** Fuel requests whose day falls in `from`..`to` (≤ 31 days) — see
+   *  RaiFactorySuiteFuelRequestRow. */
+  async listFuelRequests(from: string, to: string, factoryCode?: string): Promise<RaiFactorySuiteFuelRequestRow[]> {
+    const q = new URLSearchParams({ from, to, limit: '1000' })
+    if (factoryCode) q.set('factoryCode', factoryCode)
+    return this.get<RaiFactorySuiteFuelRequestRow>(`/fuel/requests?${q}`)
+  }
+
+  /** Fuel issued at the pump whose day falls in `from`..`to` — see
+   *  RaiFactorySuiteFuelIssueRow. */
+  async listFuelIssues(from: string, to: string, factoryCode?: string): Promise<RaiFactorySuiteFuelIssueRow[]> {
+    const q = new URLSearchParams({ from, to, limit: '1000' })
+    if (factoryCode) q.set('factoryCode', factoryCode)
+    return this.get<RaiFactorySuiteFuelIssueRow>(`/fuel/issues?${q}`)
   }
 
   /** Cheap liveness probe used when a reconcile run fails, to tell apart

@@ -1,8 +1,8 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as svc from './planner.service.js'
-import { workPlansForMap } from './work-plans.service.js'
-import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, CustomerFence, WorkPlansQuery } from './planner.schema.js'
+import { workPlansForMap, factoryFuelFor } from './work-plans.service.js'
+import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, CustomerFence, WorkPlansQuery, FactoryFuelQuery } from './planner.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -62,5 +62,12 @@ export const workPlans: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as WorkPlansQuery
     sendSuccess(res, await workPlansForMap(p(req, 'orgId'), q.day))
+  } catch (err) { next(err) }
+}
+
+export const factoryFuel: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as FactoryFuelQuery
+    sendSuccess(res, await factoryFuelFor(p(req, 'orgId'), q.from, q.to))
   } catch (err) { next(err) }
 }

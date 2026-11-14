@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { fenceForLocation, buildMapWorkPlans, foldName, type FenceRef } from '../../src/modules/planner/work-plan-match.js'
+import { fenceForLocation, buildMapWorkPlans, foldName, needLitres, type FenceRef } from '../../src/modules/planner/work-plan-match.js'
 import type { RaiFactorySuiteWorkPlanRow } from '../../src/providers/raifactorysuite/raifactorysuite.client.js'
 
 const fence = (id: string, name: string, isActive = true, type = 'POLYGON'): FenceRef => ({ id, name, isActive, type })
@@ -87,5 +87,65 @@ describe('buildMapWorkPlans', () => {
   it('keeps only the plans that cover the day asked for', () => {
     const out = buildMapWorkPlans('2026-11-14', 'M', [plan(), plan({ id: 'p2', startDate: '2026-11-13', endDate: '2026-11-13' })], vehicles, FENCES)
     expect(out.plans.map(p => p.id)).toEqual(['p1'])
+  })
+})
+
+describe('buildMapWorkPlans: the plan card', () => {
+  const line = { id: 'l1', taskId: 'T-261114-AGR-02', machine: 'FT-06', machineName: 'Truck', activity: 'Agriculture - Haulage (Tons)',
+    workLocation: 'Nursery A', fuelingLocation: 'Logistics Centre 1', operator: 'Zuberi Justine Onesmo', supervisor: 'Joseph Amri',
+    shiftNo: 1, shiftStart: '06:00:00', plannedHours: 8, plannedKm: 150, fullTank: true, expectedOutput: 30, outputUnit: 'Tons', active: true }
+  const row: RaiFactorySuiteWorkPlanRow = {
+    id: 'p', factoryCode: 'MUFINDI PAPER MILLS', planCode: 'WP-261114-AGR', department: 'AGRICULTURE',
+    startDate: '2026-11-14', endDate: '2026-11-14', status: 'APPROVED',
+    submittedBy: 'Hashim', submittedAt: '2026-11-13T13:35:12.1', reviewedBy: 'Test', reviewedAt: '2026-11-14T06:44:42.6',
+    lines: [line],
+  }
+  const vehicles = [{ id: 'v', registrationPlate: 'T968DZY', name: 'FT-06', equipmentReference: 'FT-06', tankCapacityLitres: 380 }]
+  const machines = [{ id: 'm', factoryCode: 'MUFINDI PAPER MILLS', reference: 'FT-06', consumptionBasis: 'KM_PER_LITRE', expectedConsumption: 3,
+    status: 'BROKEN_DOWN', downReason: 'ELECTRICAL FAULT' }]
+
+  it('carries what FactorySuite\'s own row shows: fuel, tank, need, flags and the plan\'s people', () => {
+    const out = buildMapWorkPlans('2026-11-14', 'M', [row], vehicles, FENCES, { machines })
+    expect(out.plans[0]).toMatchObject({ submittedBy: 'Hashim', submittedAt: '2026-11-13T13:35:12.1', reviewedBy: 'Test', reviewedAt: '2026-11-14T06:44:42.6' })
+    expect(out.plans[0]!.lines[0]).toMatchObject({
+      fuelingLocation: 'Logistics Centre 1', fullTank: true, tankLitres: 380, needLitres: 50,
+      flags: ['Broken down'], downReason: 'ELECTRICAL FAULT', pump: null,
+    })
+  })
+
+  it('works the need out by the hour for an hour-rated machine, and says nothing without a rate', () => {
+    expect(needLitres({ plannedHours: 12, plannedKm: null }, { consumptionBasis: 'HOUR', expectedConsumption: 6.5 })).toBe(78)
+    expect(needLitres({ plannedHours: 12, plannedKm: null }, { consumptionBasis: 'HOUR', expectedConsumption: null })).toBeNull()
+    expect(needLitres({ plannedHours: 12, plannedKm: null }, null)).toBeNull()
+  })
+
+  it('finds the line\'s fuel request by machine, day and shift, and the pump\'s issues by request', () => {
+    const requests = [
+      { id: 'r1', machine: 'ft-06', planDate: '2026-11-14', shift: 1, status: 'APPROVED' },
+      { id: 'r2', machine: 'FT-06', planDate: '2026-11-14', shift: 2, status: 'APPROVED' },
+    ]
+    const issues = [
+      { id: 'i1', machine: 'FT-06', issueDate: '2026-11-14', requestId: 'r1', completed: true, quantityIssued: 120,
+        fuelingStart: '2026-11-14T05:02:00', fuelingEnd: '2026-11-14T05:10:00', tank: 'Tank 1', location: 'Logistics Centre 1',
+        jobMismatch: true, flagNotes: 'no GPS position was recorded' },
+      { id: 'i2', machine: 'FT-06', issueDate: '2026-11-14', requestId: 'r1', completed: false, fuelingStart: '2026-11-14T05:20:00' },
+      { id: 'i3', machine: 'FT-06', issueDate: '2026-11-14', requestId: 'r2', completed: true, quantityIssued: 9 },
+    ]
+    const out = buildMapWorkPlans('2026-11-14', 'M', [row], vehicles, FENCES, { requests, issues })
+    expect(out.plans[0]!.lines[0]!.pump).toEqual({ status: 'APPROVED', issues: [
+      { litres: 120, done: true, at: '2026-11-14T05:10:00', tank: 'Tank 1', pump: 'Logistics Centre 1', flags: ['Job mismatch'], note: 'no GPS position was recorded' },
+      { litres: null, done: false, at: '2026-11-14T05:20:00', tank: null, pump: null, flags: [], note: null },
+    ] })
+  })
+
+  it('has no pump without a request for that shift', () => {
+    const requests = [{ id: 'r9', machine: 'FT-06', planDate: '2026-11-14', shift: 2, status: 'APPROVED' }]
+    const out = buildMapWorkPlans('2026-11-14', 'M', [row], vehicles, FENCES, { requests })
+    expect(out.plans[0]!.lines[0]!.pump).toBeNull()
+  })
+
+  it('flags nothing for an available machine', () => {
+    const out = buildMapWorkPlans('2026-11-14', 'M', [row], vehicles, FENCES, { machines: [{ ...machines[0]!, status: 'AVAILABLE' }] })
+    expect(out.plans[0]!.lines[0]).toMatchObject({ flags: [], downReason: null })
   })
 })

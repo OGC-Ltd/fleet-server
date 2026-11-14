@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission } from '../../middleware/authorize.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
-import { previewSheetSchema, saveSheetSchema, planListQuerySchema, stopUpdateSchema, customerListQuerySchema, customerFenceSchema, workPlansQuerySchema } from './planner.schema.js'
+import { previewSheetSchema, saveSheetSchema, planListQuerySchema, stopUpdateSchema, customerListQuerySchema, customerFenceSchema, workPlansQuerySchema, factoryFuelQuerySchema } from './planner.schema.js'
 import * as ctrl from './planner.controller.js'
 
 // Planner: delivery sheets per truck and day, their customers' geofences, and
@@ -23,5 +23,9 @@ router.post('/customers/:customerId/fence', requirePermission('planner:write'), 
 // FactorySuite work plans on the Live Map: a map layer, so the map's right
 // rather than the Planner's (the switch sits beside Geofences on the rail).
 router.get('/work-plans',      requirePermission('map:read'),      validateQuery(workPlansQuerySchema), ctrl.workPlans)
+
+// The Fuel page: FactorySuite's plans, fuel requests and pump issues. A fuel
+// screen, so the fuel fillings' right.
+router.get('/factory-fuel',    requirePermission('fuel_filling:read'), validateQuery(factoryFuelQuerySchema), ctrl.factoryFuel)
 
 export default router
