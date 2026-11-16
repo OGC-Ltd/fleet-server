@@ -40,15 +40,17 @@ interface State {
 let state: State = { orgId: null, status: 'loading', alerts: [], notReporting: [], notOnPlatform: [], checkedAt: null, message: null }
 let zones: { at: number; places: Place[] } = { at: 0, places: [] }
 const fromFile = placesOf(AUTHORISED)
-/** The yard and depots: standing there is where a unit belongs. */
-const excluded = storePlaces()
+/** The yard and depots: no longer left out of the watch, but still named as where a unit stands. */
+const yards = storePlaces()
 
 /** The rule, as the page explains it. */
 const RULE = {
   idleMs: IDLE_MS,
   criticalMs: CRITICAL_MS,
   hours: `${String(Math.floor(WORK_HOURS.start)).padStart(2, '0')}:${String((WORK_HOURS.start % 1) * 60).padStart(2, '0')}–${String(Math.floor(WORK_HOURS.end)).padStart(2, '0')}:${String((WORK_HOURS.end % 1) * 60).padStart(2, '0')}`,
-  excluded: excluded.map((p) => p.name),
+  // Nowhere is left out any more (operator, 16 Nov 2026). Kept, empty, because
+  // dashboards built before this read `excluded.join(...)` into their wording.
+  excluded: [] as string[],
 }
 
 async function menengaiId(): Promise<string | null> {
@@ -86,8 +88,8 @@ export async function checkIdle(now = Date.now()): Promise<void> {
     if (fc) zones = { at: now, places: placesOf(fc.features.filter((f) => f.properties.isActive !== false) as never) }
   }
   const snap = await getFleetSnapshotCached(orgId)
-  const watch = idleUnits(withRuns(snap as unknown as Record<string, unknown>[]), { excluded, now })
-  const near = [...excluded, ...fromFile, ...zones.places]
+  const watch = idleUnits(withRuns(snap as unknown as Record<string, unknown>[]), { now })
+  const near = [...yards, ...fromFile, ...zones.places]
   const alerts: IdleWatchAlert[] = watch.alerts.map((a) => ({
     ...a,
     nearest: nearestPlace(a.lat, a.lng, near),
