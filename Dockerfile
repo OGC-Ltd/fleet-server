@@ -15,9 +15,13 @@
 # nothing in them installs packages at run time, so those are only attack
 # surface (and the image scan flags the copies of tar/undici that npm bundles).
 #
-# Pin the base by digest in CI (NODE_IMAGE build arg); the tag here matches the
-# node the box and CI run today.
-ARG NODE_IMAGE=node:24.20.0-bookworm-slim
+# The base is pinned by digest (the multi-arch index of the tag, read from
+# Docker Hub 2026-11-16), so every build starts from the same bytes; the tag
+# matches the node the box and CI run today. Debian's fixes still arrive each
+# CI run through `apt-get upgrade` (APT_REFRESH below). Node itself changes
+# only when tag and digest are bumped together:
+#   docker buildx imagetools inspect node:<tag> --format '{{json .Manifest.Digest}}'
+ARG NODE_IMAGE=node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
 
 FROM ${NODE_IMAGE} AS deps
 WORKDIR /app
@@ -46,8 +50,15 @@ RUN npm pkg delete devDependencies.prisma devDependencies.typescript \
  && ! npm ls --omit=dev --omit=peer --all 2>&1 | grep -iE "extraneous|missing|invalid"
 
 FROM ${NODE_IMAGE} AS base
+# APT_REFRESH changes every CI run (images.yml passes run id + attempt), so
+# this layer is never reused from the build cache: each image gets the Debian
+# fixes published by the time it is built. Without it the cached layer kept
+# the packages of the first build, and once Trivy found a fixable HIGH every
+# build failed until someone cleared the cache by hand.
+ARG APT_REFRESH=manual
 # Avoid the redirect/retry path in CVE-2026-109518 while updating vulnerable APT.
-RUN apt-get -o Acquire::Retries=0 update \
+RUN echo "apt refresh: ${APT_REFRESH}" \
+ && apt-get -o Acquire::Retries=0 update \
  && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=0 -y upgrade --no-install-recommends \
  && APT_VERSION="$(dpkg-query -W -f='${Version}' apt)" \
  && { dpkg --compare-versions "$APT_VERSION" ge 2.6.2 \

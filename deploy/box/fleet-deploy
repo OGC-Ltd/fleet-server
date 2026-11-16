@@ -11,7 +11,10 @@
 #   sudo fleet-deploy cutover <sha>         pm2 -> containers, once (rolls back itself)
 #   sudo fleet-deploy up <sha>              deploy an image (containers mode only)
 #   sudo fleet-deploy rollback              back to the previous image
-#   sudo fleet-deploy back-to-pm2           containers -> pm2 (reports made since come along)
+#   sudo fleet-deploy back-to-pm2 [--accept-stale]
+#                                           containers -> pm2 (reports made since come along);
+#                                           refuses while the edge container serves, or when the
+#                                           pm2 build is not the commit the containers run
 #   sudo fleet-deploy status
 #
 # Install (root-owned, so nobody else can change what it runs):
@@ -149,17 +152,53 @@ record() {   # new current, previous
 
 volume_dir() { docker volume inspect -f '{{.Mountpoint}}' "${PROJECT}_fleet-cache"; }
 
+# .cache moves between pm2 and the containers as a MIRROR of the side that is
+# authoritative at that moment (--delete). Without --delete, a saved report a
+# user deleted came back after a switch, and a report rebuilt in place (its
+# folder is swapped, usage-review.saved.ts) kept stray day files of the old
+# build. The final copy of each switch runs with the source side stopped.
+#   - An empty or missing source is refused: mirroring it would wipe the copy.
+#   - Every file the mirror deletes or overwrites is kept under
+#     $CACHE_BACKUPS/<time>-<direction>; the newest 10 such folders are kept.
+#   - vss-session.json is excluded both ways (so --delete leaves it alone) and
+#     moved explicitly: pm2 keeps it in /tmp, the containers in the volume.
+# Returns non-zero instead of dying, so cutover's ERR trap brings pm2 back.
+CACHE_BACKUPS=/var/backups/fleet-cache
+mirror_cache() {   # src/ dst/ owner direction
+  local src=$1 dst=$2 owner=$3 dir=$4 bk
+  if [ -z "$(ls -A "$src" 2>/dev/null)" ]; then echo "fleet-deploy: $src is empty or missing: refusing to mirror it over $dst" >&2; return 1; fi
+  install -d -m 700 "$CACHE_BACKUPS"
+  bk="$CACHE_BACKUPS/$(date -u +%Y%m%dT%H%M%SZ)-$dir"
+  rsync -a --delete --exclude vss-session.json --backup --backup-dir="$bk" --chown="$owner" "$src" "$dst" || return 1
+  [ -d "$bk" ] && echo "replaced or deleted files kept in $bk"
+  # `|| true`: with pipefail an empty folder (ls finds nothing) would fail the
+  # pipeline and, inside cutover, fire its ERR trap.
+  { ls -1d "$CACHE_BACKUPS"/*/ 2>/dev/null | sort | head -n -10 | xargs -r rm -rf; } || true
+  return 0
+}
+
 copy_cache_in() {
-  local vol; vol=$(volume_dir)
-  rsync -a --chown=10001:10001 "$LIVE_DIR/.cache/" "$vol/"
+  local vol; vol=$(volume_dir) || return 1
+  mirror_cache "$LIVE_DIR/.cache/" "$vol/" 10001:10001 into-volume || return 1
   if [ -f "$VSS_TMP" ]; then install -o 10001 -g 10001 -m 600 "$VSS_TMP" "$vol/vss-session.json"; fi
 }
 
 copy_cache_out() {
-  local vol; vol=$(volume_dir)
-  rsync -a --chown=ubuntu:ubuntu --exclude vss-session.json "$vol/" "$LIVE_DIR/.cache/"
+  local vol; vol=$(volume_dir) || return 1
+  mirror_cache "$vol/" "$LIVE_DIR/.cache/" ubuntu:ubuntu out-of-volume || return 1
   if [ -f "$vol/vss-session.json" ]; then install -o ubuntu -g ubuntu -m 600 "$vol/vss-session.json" "$VSS_TMP"; fi
 }
+
+# The edge container (phase 4) reaches the API as `server:3000` on the Docker
+# network; pm2 listens on the host, where the edge cannot reach it. So the
+# server may only go back to pm2 once host nginx serves again.
+edge_serving() {
+  [ -f /etc/fleet/edge.on ] || [ -n "$(docker ps -q --filter label=com.docker.compose.project=fleet --filter label=com.docker.compose.service=edge)" ]
+}
+
+# The commit the pm2 checkout was last BUILT at (deploy.yml writes it after
+# `npm run build`, also in container mode, where pm2 is not started).
+fallback_commit() { cat "$LIVE_DIR/dist/.built-commit" 2>/dev/null || echo unknown; }
 
 pm2_back() {
   # After a reboot the pm2 daemon is gone (its boot unit is disabled at
@@ -263,7 +302,7 @@ case "${1:-}" in
   mode) mode ;;
 
   status)
-    say "mode: $(mode)   current: $(current)   previous: $(previous)"
+    say "mode: $(mode)   current: $(current)   previous: $(previous)   pm2 fallback built at: $(fallback_commit)"
     compose ps
     docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' \
       $(docker ps -q --filter "label=com.docker.compose.project=${PROJECT}") 2>/dev/null || true
@@ -301,6 +340,9 @@ case "${1:-}" in
   cutover)
     sha="${2:-}"; valid_sha "$sha"; [ "$PROJECT" = fleet ] || die "cutover is for the real project only"
     m=$(mode); [ "$m" = pm2 ] || die "mode is '$m', expected pm2"
+    # The parallel run's container is API-only and nginx still splits /api to
+    # it: end it first, so the cutover is the only change in the gap.
+    [ ! -f /etc/fleet/parallel.deployed ] || die "the parallel container still runs: sudo fleet-parallel down first"
     check "$sha"
     img="${REPO}:fleet-server-${sha}"
     # Containers and the volume exist before anything stops, so the copy
@@ -330,10 +372,21 @@ case "${1:-}" in
   back-to-pm2)
     [ "$PROJECT" = fleet ] || die "real project only"
     m=$(mode); [ "$m" = containers ] || die "mode is '$m', expected containers"
+    # Everything that can refuse runs BEFORE the containers stop.
+    edge_serving && die "the edge container serves 80/443 and reaches the API by container name, not pm2. Go back in order: sudo fleet-edge back, then this (or: sudo fleet-fallback all)"
+    cur=$(current); fb=$(fallback_commit)
+    say "containers run ${cur:-unknown}; the pm2 fallback is built at ${fb}"
+    if [ "$fb" != "$cur" ]; then
+      [ "${2:-}" = --accept-stale ] || die "the pm2 fallback is not built at the commit the containers run. Rebuild it (re-run the deploy workflow), or pass --accept-stale knowing it may not match the database schema"
+      echo "WARNING: going back to a pm2 build of ${fb}, not ${cur} (--accept-stale)"
+    fi
+    say "pm2 .env <- the values the containers run with"
+    /usr/local/sbin/fleet-secrets pm2-env || die "could not bring pm2's .env up to date: containers left running"
     compose stop -t 30 server report-worker
-    copy_cache_out
+    say "copying .cache out of the volume"
+    copy_cache_out || { echo "fleet-deploy: .cache copy failed; starting pm2 anyway (the volume still holds everything)" >&2; }
     pm2_back
     echo "pm2 is serving. Containers stopped (volume kept). Forward again: sudo fleet-deploy cutover <sha>" ;;
 
-  *) die "usage: fleet-deploy mode | status | check <sha> | cutover <sha> | up <sha> | rollback | back-to-pm2" ;;
+  *) die "usage: fleet-deploy mode | status | check <sha> | cutover <sha> | up <sha> | rollback | back-to-pm2 [--accept-stale]" ;;
 esac

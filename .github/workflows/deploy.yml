@@ -32,22 +32,25 @@ name: build and deploy
 on:
   push:
     branches: [main]
-    # Files the pm2 deploy never reads: changing only these must not restart
-    # the live server. The next real deploy still pushes them to the box.
-    # This file is listed too, so editing the workflow alone does not
-    # redeploy; use "Run workflow" when a deploy is wanted.
+    # Files no deploy ships: changing only these must not restart the live
+    # server. The next real deploy still pushes them to the box. This file is
+    # listed too, so editing the workflow alone does not redeploy; use "Run
+    # workflow" when a deploy is wanted. The compose, edge and box-script files
+    # are installed on the box by hand; the drift step below warns when the
+    # installed copies no longer match.
+    #
+    # NOT listed: Dockerfile, .dockerignore, .trivyignore*, deploy/certs/**.
+    # In container mode they are what ships (a base-image security fix, a new
+    # RDS CA bundle), so they must deploy. In pm2 mode the scope step skips
+    # the restart when a push changes nothing else.
     paths-ignore:
       - '.github/workflows/deploy.yml'
       - 'docs/**'
       - '**/*.md'
       - '.github/workflows/images.yml'
-      - 'Dockerfile'
-      - '.dockerignore'
-      - '.trivyignore*'
       - 'docker-compose*.yml'
       - 'deploy/edge/**'
       - 'deploy/box/**'
-      - 'deploy/certs/**'
   workflow_dispatch:
 
 # One deploy at a time, and never cancel one half-way: a cancelled run can leave
@@ -211,6 +214,63 @@ jobs:
             *) echo "::error::box mode is '${mode}': not deploying. See docs/containerization-plan.md"; exit 1 ;;
           esac
 
+      # The compose files, edge config and box scripts reach the box only when
+      # someone installs them (see each file's "Install" note), so a change
+      # merged here does nothing there until then. Warns, never blocks.
+      - name: do the box's installed copies match the repo
+        continue-on-error: true
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          want=$(mktemp)
+          {
+            for f in docker-compose.prod.yml docker-compose.phase3.yml docker-compose.edgecheck.yml docker-compose.preview.yml docker-compose.parallel.yml; do
+              echo "$(sha256sum < "$f" | cut -c1-64) /etc/fleet/compose/$f $f"
+            done
+            for f in $(git ls-files deploy/edge); do
+              echo "$(sha256sum < "$f" | cut -c1-64) /etc/fleet/compose/$f $f"
+            done
+            for f in $(git ls-files deploy/box); do
+              case "$f" in
+                *.service) box=/etc/systemd/system/$(basename "$f") ;;
+                *)         box=/usr/local/sbin/$(basename "$f") ;;
+              esac
+              echo "$(sha256sum < "$f" | cut -c1-64) $box $f"
+            done
+          } > "$want"
+          out=$(ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" 'while read -r h box repo; do
+              if ! sudo -n test -e "$box"; then echo "absent $repo -> $box"
+              elif [ "$(sudo -n sha256sum "$box" | cut -c1-64)" != "$h" ]; then echo "differs $repo -> $box"; fi
+            done' < "$want")
+          printf '%s\n' "$out" | grep '^differs' | while read -r _ line; do
+            echo "::warning::installed copy differs from this commit: $line"
+          done || true
+          printf '%s\n' "$out" | grep '^absent' | sed 's/^absent/not installed:/' || true
+          [ -n "$out" ] || echo "every installed copy matches this commit"
+
+      - name: does this push change anything pm2 runs
+        id: scope
+        if: steps.mode.outputs.mode == 'pm2'
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          # The image files now trigger this workflow (they ship in container
+          # mode), but pm2 never reads them: a push that changes only those
+          # must not restart the live server. Manual runs, and a range git
+          # cannot resolve, always deploy. The box's checkout catches up with
+          # the next real deploy, which pushes everything up to its commit.
+          run=true
+          if [ "${GITHUB_EVENT_NAME}" = push ] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            other=$(git diff --name-only "${BEFORE}" "${GITHUB_SHA}" \
+              | grep -vE '^(Dockerfile|\.dockerignore|\.trivyignore[^/]*|deploy/(certs|box|edge)/.*|docker-compose[^/]*\.yml|docs/.*|.*\.md|\.github/workflows/(deploy|images)\.yml)$' || true)
+            [ -n "${other}" ] || run=false
+          fi
+          echo "pm2=${run}" >> "$GITHUB_OUTPUT"
+          if [ "${run}" = true ]; then echo "pm2 deploy: yes"
+          else echo "::notice::only image/container files changed: the pm2 server is not restarted"; fi
+
       - name: deploy the image (containers)
         if: steps.mode.outputs.mode == 'containers'
         env:
@@ -220,8 +280,17 @@ jobs:
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o ServerAliveInterval=30 "ubuntu@${HOST}" \
             "sudo -n PULL_WAIT_S=1200 /usr/local/sbin/fleet-deploy up ${GITHUB_SHA}"
 
+      # In container mode these two steps keep the pm2 FALLBACK at the commit
+      # the containers run: the checkout is pushed and built, but pm2 is not
+      # started. Without them the fallback stayed at the cutover commit while
+      # later releases (and their hand-run migrations) moved on, so
+      # `fleet-deploy back-to-pm2` would have started old code against a newer
+      # schema. A failure here does not fail the deploy (the containers are
+      # already up); it warns, and back-to-pm2 refuses a stale fallback.
       - name: push this commit into the box's working tree
-        if: steps.mode.outputs.mode == 'pm2'
+        id: fallback_push
+        if: (steps.mode.outputs.mode == 'pm2' && steps.scope.outputs.pm2 == 'true') || steps.mode.outputs.mode == 'containers'
+        continue-on-error: ${{ steps.mode.outputs.mode == 'containers' }}
         env:
           HOST: ${{ secrets.EC2_HOST }}
         run: |
@@ -232,14 +301,18 @@ jobs:
           # conditions to force past.
           git push "ssh://ubuntu@${HOST}/home/ubuntu/prod/fleet-server" HEAD:main
 
-      - name: install, build and restart
-        if: steps.mode.outputs.mode == 'pm2'
+      - name: install, build and restart (pm2) / build the fallback (containers)
+        id: fallback_build
+        if: (steps.mode.outputs.mode == 'pm2' && steps.scope.outputs.pm2 == 'true') || (steps.mode.outputs.mode == 'containers' && steps.fallback_push.outcome == 'success')
+        continue-on-error: ${{ steps.mode.outputs.mode == 'containers' }}
         env:
           HOST: ${{ secrets.EC2_HOST }}
+          MODE: ${{ steps.mode.outputs.mode }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" bash -s <<'REMOTE'
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" bash -s -- "${MODE}" <<'REMOTE'
           set -euo pipefail
+          mode=$1
           # `bash -lc` over ssh does not load nvm — node, npm and pm2 are all
           # "command not found" without this.
           export PATH="$HOME/.nvm/versions/node/v24.20.0/bin:$PATH"
@@ -250,6 +323,13 @@ jobs:
           npx prisma generate --config prisma.config.ts
           # pm2 runs dist/, not src/ — skipping this restarts the OLD code.
           npm run build
+          # What the pm2 fallback would run: fleet-deploy back-to-pm2 compares
+          # this with the containers' commit and refuses a stale fallback.
+          git rev-parse HEAD > dist/.built-commit
+          if [ "$mode" != pm2 ]; then
+            echo "--- container mode: pm2 fallback built at $(cat dist/.built-commit), NOT started"
+            exit 0
+          fi
 
           # The pm2 app is `server`, NOT `fleet-server`.
           #
@@ -279,6 +359,11 @@ jobs:
           pm2 save
           REMOTE
 
+      - name: warn when the pm2 fallback is stale
+        if: steps.mode.outputs.mode == 'containers' && (steps.fallback_push.outcome == 'failure' || steps.fallback_build.outcome == 'failure')
+        run: |
+          echo "::warning::the containers run ${GITHUB_SHA} but the pm2 fallback was not updated (push: ${{ steps.fallback_push.outcome }}, build: ${{ steps.fallback_build.outcome }}). fleet-deploy back-to-pm2 will refuse until it is rebuilt: re-run this workflow, or see docs/containerization-plan.md"
+
       - name: confirm the service answers
         env:
           HOST: ${{ secrets.EC2_HOST }}
@@ -298,3 +383,19 @@ jobs:
             'if [ "$(sudo -n /usr/local/sbin/fleet-deploy mode)" = containers ]; then sudo -n docker logs --tail 60 fleet-server-1 2>&1;
              else export PATH=$HOME/.nvm/versions/node/v24.20.0/bin:$PATH; pm2 logs server --lines 60 --nostream; fi'
           exit 1
+
+      # The parallel run (docs/parallel-run.md): while it is on, its container
+      # follows pm2 to this commit, so both servers answer with the same code.
+      # Never fails the deploy. A container that does not come up healthy is
+      # sent nothing (fleet-parallel sets the weight to 0 itself).
+      - name: keep the parallel container on this commit
+        if: steps.mode.outputs.mode == 'pm2'
+        continue-on-error: true
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          if ! ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}"                "if sudo -n test -f /etc/fleet/parallel.deployed; then sudo -n PULL_WAIT_S=1200 /usr/local/sbin/fleet-parallel up ${GITHUB_SHA}; else echo 'no parallel run on the box'; fi"; then
+            echo "::warning::the parallel container did not move to ${GITHUB_SHA}; check: sudo fleet-parallel status"
+            exit 1
+          fi
