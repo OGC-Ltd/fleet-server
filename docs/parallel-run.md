@@ -22,7 +22,7 @@ The AI brief: without the sweep, the container writes a brief only when one of i
 
 - **Alerts raised by pm2's poller** reach the container's users through the database follower. They arrive a few seconds later, and readings the follower does not carry are missing: engine temperature and oil level show empty.
 - **Toasts** for unauthorised stops go out from whichever server announces the stop first, to that server's users only.
-- **In-memory caches** (permissions, incident reviews) are per server. One client stays on one server (nginx hashes the client's address, using the forwarded address first because the LiteSpeed proxy sends many clients from one address). A change made by someone on the other server can take up to that cache's expiry to show. A user whose address changes, such as a phone moving between networks, can move between servers.
+- **In-memory caches** (permissions, incident reviews) are per server. One browser stays on one server. nginx hashes the `fleet_did` cookie that the API sets on every token refresh, so the split is per browser, not per office. On 2026-11-16, one office behind one address sent 97% of `/api`; an address hash would have moved that whole office at once. A browser that has not refreshed a token since 16 Sep has no cookie and is placed by its address until its next refresh. A change made by someone on the other server can take up to that cache's expiry to show.
 - **Memory**: about 1–1.5 GB more on a 3.8 GB box. `up` refuses below 1.2 GB available. Watch `status`.
 - **Database connections**: the container's pool is 8, on top of pm2's.
 
