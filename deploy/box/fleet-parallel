@@ -17,9 +17,13 @@
 # The split, in host nginx:
 #   /etc/nginx/conf.d/fleet-api-split.conf   upstream fleet_api_split: pm2 :3000 and this :3002, by weight
 #   /etc/nginx/fleet/locations.conf          its /api/ proxy_pass names that upstream instead of :3000
-# One client stays on one server (hash of its address): permissions and some
-# caches live in each process's memory, so a change made through one server
-# shows on the other only when its cache expires. When the container fails
+# One BROWSER stays on one server: nginx hashes the fleet_did cookie the API
+# sets on every token refresh (middleware/device-id), and the address only for
+# a browser that has none yet. Not the address alone: one office behind one NAT
+# sent 97% of /api on 2026-11-16, so an address hash would have moved that
+# whole office at once. Permissions and some caches live in each process's
+# memory, so a change made through one server shows on the other only when its
+# cache expires. When the container fails
 # (3 errors), nginx sends its clients to pm2 for 30 s, then tries again; a
 # request nginx never managed to send is retried on pm2 at once.
 #
@@ -185,10 +189,14 @@ set_weight() {
 # Written by fleet-parallel (deploy/box/fleet-parallel). Do not edit: it is
 # rewritten by every 'fleet-parallel weight', and removed by 'down'.
 # weight ${w}
+# One browser, one server: its fleet_did cookie, or for a browser without one
+# its address (the forwarded one first: the LiteSpeed proxy sends many from one).
+map \$cookie_fleet_did \$fleet_split_key {
+    ""      \$http_x_forwarded_for\$remote_addr;
+    default \$cookie_fleet_did;
+}
 upstream fleet_api_split {
-    # One client, one server: hashed on the client's address (the forwarded
-    # one first, since the LiteSpeed proxy sends many clients from one).
-    hash \$http_x_forwarded_for\$remote_addr consistent;
+    hash \$fleet_split_key consistent;
     server 127.0.0.1:3000 weight=$((100 - w));
     server 127.0.0.1:${PORT} weight=${w} max_fails=3 fail_timeout=30s;
 }
