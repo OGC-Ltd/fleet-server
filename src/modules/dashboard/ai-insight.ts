@@ -68,6 +68,9 @@ const REFRESH_MS = 10 * 60_000
  */
 const ASKED_WINDOW_MS = 15 * 60_000
 const lastAsked = new Map<string, number>()
+/** Whether this process runs the sweep (SCHEDULED_JOBS_ENABLED). Without it a
+ *  stored brief is refreshed when it is asked for and is older than REFRESH_MS. */
+let sweeping = false
 const recentlyAsked = (orgId: string) => (lastAsked.get(orgId) ?? 0) > Date.now() - ASKED_WINDOW_MS
 
 /**
@@ -1934,7 +1937,13 @@ export async function getAiInsight(orgId: string): Promise<AiInsightResponse> {
   if (!env.OPENAI_API_KEY) return { configured: false, insight: null }
   lastAsked.set(orgId, Date.now())
   const hit = insights.get(orgId)
-  if (hit) return hit
+  if (hit) {
+    // A server without the sweep (fleet-parallel) would otherwise serve its
+    // first brief for ever. It still writes one only for what is asked of it.
+    const at = hit.insight ? Date.parse(hit.insight.generatedAt) : 0
+    if (!sweeping && Date.now() - at > REFRESH_MS) void generateFor(orgId)
+    return hit
+  }
   void generateFor(orgId)
   return { configured: true, insight: null }
 }
@@ -1965,6 +1974,7 @@ export async function getAiInsight(orgId: string): Promise<AiInsightResponse> {
  */
 export function startAiInsightWarmer(): () => void {
   if (!env.OPENAI_API_KEY) return () => {}
+  sweeping = true
   let stopped = false
   let primed = false
   const sweep = async () => {
@@ -1984,5 +1994,5 @@ export function startAiInsightWarmer(): () => void {
   }
   void sweep().then(() => { primed = true })
   const timer = setInterval(() => void sweep(), REFRESH_MS)
-  return () => { stopped = true; clearInterval(timer) }
+  return () => { stopped = true; sweeping = false; clearInterval(timer) }
 }

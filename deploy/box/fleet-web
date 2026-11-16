@@ -206,6 +206,11 @@ case "${1:-}" in
 
   back)
     [ "$(mode)" = container ] || die "already static"
+    # Phase 4: host nginx is stopped and the edge container serves `/` from
+    # `web` itself, so editing host nginx here changes nothing that serves.
+    if [ -f /etc/fleet/edge.on ] || [ -n "$(docker ps -q --filter label=com.docker.compose.project=fleet --filter label=com.docker.compose.service=edge)" ]; then
+      die "the edge container serves 80/443; go back in order: sudo fleet-edge back, then this (or: sudo fleet-fallback all)"
+    fi
     [ -f "$STATIC_COPY" ] || die "missing $STATIC_COPY"
     install -m 644 "$STATIC_COPY" "$LOCATIONS"; nginx_reload
     echo "BACK: / is served from ${STATIC_DIR} ($(served_commit http://127.0.0.1)); the container still runs" ;;

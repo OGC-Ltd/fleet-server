@@ -194,6 +194,7 @@ case "${1:-}" in
 
   switch)
     m=$(mode); [ "$m" = host ] || die "mode is '$m', expected host"
+    [ ! -f /etc/fleet/parallel.deployed ] || die "the parallel container still runs: sudo fleet-parallel down first"
     [ "$(fleet-deploy mode)" = containers ] || die "phase 2 first: the server is not in containers"
     [ "$(fleet-web mode)" = container ] || die "phase 3 first: / is not served by the web container"
     SERVER_IMAGE="${REPO}:fleet-server-$(sed -n 1p /etc/fleet/deployed)"

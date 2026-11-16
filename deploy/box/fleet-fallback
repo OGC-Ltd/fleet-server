@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# fleet-fallback: back from containers to the traditional setup, layer by
+# layer, in the only order that keeps the site answering. See
+# docs/containerization-plan.md.
+#
+#   sudo fleet-fallback status                  what serves each layer now
+#   sudo fleet-fallback all [--accept-stale]    edge -> host nginx, then
+#                                               site -> static files, then
+#                                               server -> pm2
+#
+# Why the order matters: the edge container reaches the site and the API by
+# their CONTAINER names. Taking the server back to pm2 while the edge serves
+# leaves the API unreachable; taking the site back while the edge serves edits
+# a host nginx that is not running. fleet-deploy back-to-pm2 and fleet-web back
+# now refuse while the edge serves; this runs the three in order and stops at
+# the first that fails, saying what is left.
+#
+# Each layer that already runs the traditional way is skipped, so running this
+# again after a failure carries on where it stopped. --accept-stale goes to
+# fleet-deploy back-to-pm2 (see there).
+#
+# Install (root-owned):
+#   sudo install -o root -g root -m 755 deploy/box/fleet-fallback /usr/local/sbin/fleet-fallback
+set -Eeuo pipefail
+
+die() { echo "fleet-fallback: $*" >&2; exit 1; }
+say() { echo "=== $*"; }
+[ "$(id -u)" = 0 ] || die "run as root (sudo)"
+for t in fleet-edge fleet-web fleet-deploy; do
+  [ -x "/usr/local/sbin/$t" ] || die "missing /usr/local/sbin/$t"
+done
+
+edge_mode()   { /usr/local/sbin/fleet-edge mode; }
+web_mode()    { /usr/local/sbin/fleet-web mode; }
+server_mode() { /usr/local/sbin/fleet-deploy mode; }
+
+status() {
+  echo "80/443  (fleet-edge):   $(edge_mode)      host = host nginx, edge = container"
+  echo "site /  (fleet-web):    $(web_mode)    static = files, container = web container"
+  echo "API     (fleet-deploy): $(server_mode)     pm2, or containers"
+  if [ -f /etc/fleet/parallel.deployed ] && [ -x /usr/local/sbin/fleet-parallel ]; then
+    echo "/api split (fleet-parallel): $(/usr/local/sbin/fleet-parallel status | sed -n 's/.*weight: //p')   of clients on the parallel container"
+  fi
+}
+
+case "${1:-}" in
+  status) status ;;
+
+  all)
+    stale=""; [ "${2:-}" = --accept-stale ] && stale=--accept-stale
+    status
+    # The parallel run (pm2 mode only): host nginx back to pm2 for all of /api.
+    if [ -f /etc/fleet/parallel.deployed ] && [ -x /usr/local/sbin/fleet-parallel ]; then
+      say "0/3 /api split -> pm2 only"; /usr/local/sbin/fleet-parallel weight 0 || die "could not take the /api split off: sudo fleet-parallel status"
+    fi
+    e=$(edge_mode)
+    case "$e" in
+      edge) say "1/3 edge container -> host nginx"; /usr/local/sbin/fleet-edge back || die "edge step failed: 80/443 state unknown, look now (sudo fleet-edge mode)" ;;
+      host) say "1/3 host nginx already serves 80/443" ;;
+      *)    die "80/443 mode is '$e': sort that out by hand first (sudo fleet-edge mode)" ;;
+    esac
+    case "$(web_mode)" in
+      container) say "2/3 site: web container -> static files"; /usr/local/sbin/fleet-web back || die "site step failed; host nginx serves, the API is untouched. Then: sudo fleet-fallback all" ;;
+      *)         say "2/3 site already from static files" ;;
+    esac
+    s=$(server_mode)
+    case "$s" in
+      containers) say "3/3 API: containers -> pm2"; /usr/local/sbin/fleet-deploy back-to-pm2 $stale || die "API step failed; site and 80/443 are back on the host. Fix it, then: sudo fleet-fallback all" ;;
+      pm2)        say "3/3 API already on pm2" ;;
+      *)          die "API mode is '$s': sort that out by hand (sudo fleet-deploy mode)" ;;
+    esac
+    say "done: everything runs the traditional way"
+    status ;;
+
+  *) die "usage: fleet-fallback status | all [--accept-stale]" ;;
+esac

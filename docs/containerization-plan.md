@@ -1,6 +1,6 @@
 # Containerizing the production box: plan
 
-Status: **phase 0 written and tested on the box, not committed** (2026-11-03).
+Status (2026-11-16): **phases 0–4 and SSM are wired and rehearsed on the box; nothing is switched.** pm2 and host nginx still serve live. The cutover waits for the operator's go.
 See section 8 for what was tested and what was found. Docker and the firewall are
 already set up on the box. See [server-hardening.md](server-hardening.md).
 
@@ -184,7 +184,25 @@ That leaves about 7 GiB free during the rollout, with the old pm2 setup still in
   - It re-checks all of the above, plus 3 GiB free, before every start.
   - It pulls from ECR with the instance role (a login that lasts minutes, then logout), and runs compose project `fleet-shadow` on `127.0.0.1:3001`.
   - Commands: `sudo fleet-shadow up <sha>` / `status` / `down`.
-- **`deploy.yml` ignores** pushes that change only Docker, CI, docs or `deploy/box` files, so container work no longer restarts the live server.
+- **`deploy.yml` ignores** pushes that change only CI, docs, compose, `deploy/edge` or `deploy/box` files, so container work no longer restarts the live server.
+- **Pre-cutover fixes (2026-11-16):**
+  - **Image files deploy.** `Dockerfile`, `.dockerignore`, `.trivyignore*` and `deploy/certs/**` trigger `deploy.yml` again, because in container mode they are what ships. In pm2 mode a scope step skips the git push and the restart when a push changes nothing else.
+  - **Drift warning.** Each deploy compares the box's installed compose files, edge config and box scripts with the commit, and warns on any difference. They are still installed by hand.
+  - **One image build per commit, never cancelled** (`images.yml` concurrency is keyed by sha). Before, a quick second push cancelled the first commit's build, and that commit's container deploy failed after its 20-minute wait.
+  - **Server heap ceiling set** with `--max-old-space-size=1024` in compose. Without it, node sizes the heap from the 1536m container limit (~384 MB), not from the host's 3.8 GB (~950 MB under pm2).
+  - **Base image pinned by digest, and Debian refreshed each run.** The `APT_REFRESH` build-arg changes every CI run, as raitrack's `APK_REFRESH` does, so the cached `apt-get upgrade` layer can no longer freeze security fixes.
+- **The pm2 fallback, made dependable (2026-11-16).** Until the phase 4 cleanup, pm2 is the way back from containers. These keep it working:
+  - **One writer, enforced by the database.** A server with `POLL_ENABLED` takes a Postgres advisory lock at boot (`src/lib/leader-lock.ts`, `LEADER_LOCK_ENABLED` / `LEADER_LOCK_WAIT_S`). A second server, such as pm2 started beside the containers, waits 90 s for the lock and then exits before starting anything. It logs who holds the lock. If the lock's connection drops, the holder shuts down and its restart takes the lock again. CI's boot test checks the lock on a real Postgres.
+  - **The fallback is built at the live commit.** In container mode, `deploy.yml` also pushes and builds the pm2 checkout, without starting pm2, and writes `dist/.built-commit`.
+    - If that fails, the deploy warns but does not fail.
+    - `fleet-deploy back-to-pm2` refuses when the fallback's commit is not the containers' commit, unless given `--accept-stale`.
+    - **Schema rule while pm2 is the fallback:** migrations only add (new tables, nullable or defaulted columns). No renames and no drops until after the phase 4 cleanup, so even a stale fallback still matches the database.
+  - **The fallback gets the containers' secrets.** `back-to-pm2` first runs `fleet-secrets pm2-env`. It brings the `.env` up to `/etc/fleet/server.env`, keeping the `.env`'s own TLS query string on the database URLs (`/app/certs` exists only in the image), rewriting only the changed lines, and keeping `.env.bak-<time>`.
+  - **Rollback order is enforced.** While the edge container serves, `back-to-pm2` and `fleet-web back` refuse. **`sudo fleet-fallback all`** goes back edge → host nginx, then site → static files, then API → pm2. It skips layers that are already back, and it can be run again after a failure.
+  - **`.cache` moves as a mirror.** Each copy is `rsync --delete` from the side that is authoritative at that moment. An empty source is refused. Every file the mirror deletes or overwrites is kept under `/var/backups/fleet-cache/<time>-<direction>`, newest 10. Before this, deleted reports came back after a switch, and reports rebuilt in place kept stray files.
+  - **Rehearsed before the live cutover:** [cutover-rehearsal.md](cutover-rehearsal.md) runs the cutover, its own undo, the double-writer guard, the stale and drift gates, a reboot, phases 3 and 4, and `fleet-fallback all` on a clone of the box against a copy of the database.
+  - **Box install:** the changed `fleet-deploy`, `fleet-secrets` and `fleet-web`, and the new `fleet-fallback`, go to `/usr/local/sbin` (root, 755). The deploy's drift step warns until they are installed.
+- **Parallel run before the cutover (2026-11-16):** the container server beside pm2 on the same box, with the poller and every scheduled job off, serving a share of `/api` clients through a host nginx upstream. `/webhook` stays on pm2. Run with `fleet-parallel up | weight <0-90> | status | down`. The cutover stays the step that moves the poller, and it refuses while the parallel container runs. Plan, limits and getting out: [parallel-run.md](parallel-run.md).
 
 **Phase 1: shadow container on the box.**
 - Run `server` from the image on `127.0.0.1:3001` with **all fourteen background switches off**:
