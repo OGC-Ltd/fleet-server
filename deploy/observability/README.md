@@ -34,11 +34,18 @@ sudo install -o root -g root -m 755 deploy/box/fleet-observability /usr/local/sb
 sudo fleet-observability install deploy/observability   # files, data dirs, Grafana password, .env
 sudo fleet-observability up                             # pull, validate every config, start
 sudo fleet-observability nginx                          # JSON access log + /grafana/ (nginx -t, reload)
-sudo fleet-observability app-on                         # server.env: OTEL_EXPORTER_OTLP_ENDPOINT
+# fleet's compose file, so the server reads the optional /etc/fleet/observability.env:
+sudo install -o root -g root -m 644 docker-compose.prod.yml /etc/fleet/compose/docker-compose.prod.yml
+sudo fleet-observability app-on                         # writes /etc/fleet/observability.env
 # The server sends from its next container start: the next deploy, or now:
-sudo fleet-observability app-restart                    # ~20 s API gap
+sudo fleet-observability app-restart                    # same image, ~20 s API gap
 sudo fleet-observability status
 ```
+
+The setting lives in `/etc/fleet/observability.env`, not `server.env`:
+fleet-deploy re-renders `server.env` from SSM on every deploy, which would drop
+it. `docker-compose.prod.yml` loads the file when it exists (`required: false`);
+absent, telemetry is off.
 
 The image must be one with `src/telemetry/register.ts` (NODE_OPTIONS loads it);
 on an older image `app-on` changes nothing.

@@ -23,7 +23,7 @@
 import type { NextFunction, Request, Response } from 'express'
 import { trace, type Span } from '@opentelemetry/api'
 import { logger } from '../lib/logger.js'
-import { scrubQuery } from '../lib/scrub-query.js'
+import { scrubPath, scrubQuery } from '../lib/scrub-query.js'
 
 const ORG_IN_PATH = /^\/api\/v1\/organisations\/([^/?]+)/
 
@@ -50,7 +50,7 @@ export function requestLog(req: Request, res: Response, next: NextFunction): voi
   const ip = req.ip ?? req.socket.remoteAddress ?? null
   const url = req.originalUrl
   const q = url.indexOf('?')
-  const path = q === -1 ? url : url.slice(0, q)
+  const path = scrubPath(q === -1 ? url : url.slice(0, q))
   const query = q === -1 ? undefined : scrubQuery(url.slice(q + 1))
 
   const span = trace.getActiveSpan()

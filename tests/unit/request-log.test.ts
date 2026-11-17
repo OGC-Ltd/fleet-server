@@ -6,7 +6,8 @@ const info = vi.fn()
 vi.mock('../../src/lib/logger.js', () => ({ logger: { info: (...a: unknown[]) => info(...a), warn: vi.fn(), error: vi.fn() } }))
 
 const { requestLog } = await import('../../src/middleware/request-log.js')
-const { scrubQuery } = await import('../../src/lib/scrub-query.js')
+const { scrubQuery, scrubPath, scrubUrl } = await import('../../src/lib/scrub-query.js')
+const { scrubAttributes } = await import('../../src/telemetry/sdk.js')
 
 function app() {
   const a = express()
@@ -17,6 +18,7 @@ function app() {
     q.user = { id: 'user-1', organisationId: 'o', email: null, fullName: 'x', status: 'ACTIVE' as never }
     r.json({ ok: true })
   })
+  a.get('/api/v1/account/setup/:token', (_q, r) => { r.json({ ok: true }) })
   a.get('/api/v1/organisations/:orgId/live', (_q, r) => {
     r.setHeader('Content-Type', 'text/event-stream')
     r.flushHeaders()
@@ -81,5 +83,43 @@ describe('scrubQuery', () => {
     ['/p?keyword=fuel', '/p?keyword=fuel'],
   ])('%s', (input, out) => {
     expect(scrubQuery(input)).toBe(out)
+  })
+})
+
+describe('secrets in the path', () => {
+  it('the request log blanks the account-setup token', async () => {
+    info.mockReset()
+    await request(app()).get('/api/v1/account/setup/RAWTOKEN123').expect(200)
+    const [l] = lines()
+    expect(l.path).toBe('/api/v1/account/setup/[redacted]')
+    expect(JSON.stringify(l)).not.toContain('RAWTOKEN123')
+  })
+
+  it.each([
+    ['/api/v1/account/setup/abc', '/api/v1/account/setup/[redacted]'],
+    ['https://x.example/api/v1/account/setup/abc?y=1', 'https://x.example/api/v1/account/setup/[redacted]?y=1'],
+    ['/api/v1/account/setup', '/api/v1/account/setup'],
+    ['/api/v1/organisations/o/vehicles', '/api/v1/organisations/o/vehicles'],
+  ])('scrubPath %s', (input, out) => {
+    expect(scrubPath(input)).toBe(out)
+  })
+
+  it('span attributes lose the setup token and credential query values', () => {
+    const attrs: Record<string, string> = {
+      'url.full': 'http://127.0.0.1:3000/api/v1/account/setup/RAW1?sid=S',
+      'url.path': '/api/v1/account/setup/RAW1',
+      'http.target': '/api/v1/account/setup/RAW1',
+      'url.query': 'token=T&page=2',
+      'http.route': '/api/v1/account/setup/:token',
+    }
+    scrubAttributes(attrs)
+    expect(attrs).toEqual({
+      'url.full': 'http://127.0.0.1:3000/api/v1/account/setup/[redacted]?sid=[redacted]',
+      'url.path': '/api/v1/account/setup/[redacted]',
+      'http.target': '/api/v1/account/setup/[redacted]',
+      'url.query': 'token=[redacted]&page=2',
+      'http.route': '/api/v1/account/setup/:token',
+    })
+    expect(scrubUrl('/a?code=1')).toBe('/a?code=[redacted]')
   })
 })

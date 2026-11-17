@@ -37,7 +37,14 @@ x-hardening: &hardening
 x-app: &app
   <<: *hardening
   image: ${FLEET_SERVER_IMAGE:?set FLEET_SERVER_IMAGE to <account>.dkr.ecr.af-south-1.amazonaws.com/ghala:fleet-server-<sha>}
-  env_file: [ "${FLEET_ENV_FILE:-/etc/fleet/server.env}" ]
+  env_file:
+    - "${FLEET_ENV_FILE:-/etc/fleet/server.env}"
+    # Settings that are not secrets and must survive fleet-secrets rendering
+    # server.env from SSM on every deploy: today only OpenTelemetry's
+    # OTEL_EXPORTER_OTLP_ENDPOINT, written by `fleet-observability app-on`.
+    # Absent = telemetry off.
+    - path: /etc/fleet/observability.env
+      required: false
   environment:
     NODE_ENV: production
     # Survives restarts in the volume, so a deploy does not log in to VSS again

@@ -10,10 +10,15 @@
 #                                            (backs up, tests with nginx -t, restores on failure, reloads)
 #   sudo fleet-observability nginx-undo      the host nginx as it was before `nginx`
 #   sudo fleet-observability app-on          the server and report worker send OTLP to the collector
-#                                            (one line in /etc/fleet/server.env; takes effect when their
+#                                            (/etc/fleet/observability.env; takes effect when their
 #                                            containers are next created: the next deploy, or `app-restart`)
-#   sudo fleet-observability app-off         remove that line again
-#   sudo fleet-observability app-restart     recreate server + report-worker now (API gap of ~20 s)
+#   sudo fleet-observability app-off         remove that file again
+#   sudo fleet-observability app-restart     recreate server + report-worker now, same image (API gap of ~20 s)
+#
+# Not in /etc/fleet/server.env: fleet-deploy re-renders that file from SSM on
+# every deploy (/etc/fleet/secrets-from-ssm), which would drop the setting.
+# docker-compose.prod.yml loads observability.env as an optional second env
+# file; the installed copy in /etc/fleet/compose must be the one that does.
 #   sudo fleet-observability status          containers, memory, disk, what is flowing
 #   sudo fleet-observability down            stop the stack (data volumes kept)
 #
@@ -26,8 +31,11 @@ set -Eeuo pipefail
 
 DIR=/opt/fleet-observability
 DATA=/var/lib/fleet-observability
-ENV_FILE=/etc/fleet/server.env
+OBS_ENV=/etc/fleet/observability.env
 OTEL_LINE='OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318'
+FLEET_COMPOSE=/etc/fleet/compose/docker-compose.prod.yml
+FLEET_STATE=/etc/fleet/deployed
+REGION=af-south-1
 SITE_DOMAIN_DEFAULT=logistics.raioperations.com
 NGINX_LOG_CONF=/etc/nginx/conf.d/05-observability-log.conf
 NGINX_LOCATIONS=/etc/nginx/fleet/observability.conf
@@ -171,29 +179,44 @@ nginx_off() {
 }
 
 app_on() {
-  [ -f "$ENV_FILE" ] || die "missing $ENV_FILE"
-  if grep -q '^OTEL_EXPORTER_OTLP_ENDPOINT=' "$ENV_FILE"; then
-    say "already set in $ENV_FILE"
-  else
-    cp -p "$ENV_FILE" "$ENV_FILE.bak-observability-$(date -u +%Y%m%dT%H%M%SZ)"
-    echo "$OTEL_LINE" >> "$ENV_FILE"
-    say "added to $ENV_FILE (backup beside it); applies when the containers are next created"
-  fi
+  grep -q '/etc/fleet/observability.env' "$FLEET_COMPOSE" \
+    || die "$FLEET_COMPOSE does not load /etc/fleet/observability.env yet: install docker-compose.prod.yml from this repo first
+  (sudo install -o root -g root -m 644 docker-compose.prod.yml $FLEET_COMPOSE)"
+  docker network inspect fleet_backend --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | grep -q 'otel-collector' \
+    || say "note: the collector is not on fleet_backend yet (fleet-observability up); the app will drop what it cannot send"
+  printf '%s\n' "$OTEL_LINE" > "$OBS_ENV.tmp"
+  chown root:root "$OBS_ENV.tmp"; chmod 600 "$OBS_ENV.tmp"; mv "$OBS_ENV.tmp" "$OBS_ENV"
+  say "wrote $OBS_ENV; applies when the containers are next created (the next deploy, or app-restart)"
 }
 
 app_off() {
-  grep -q '^OTEL_EXPORTER_OTLP_ENDPOINT=' "$ENV_FILE" || { say "not set"; return 0; }
-  cp -p "$ENV_FILE" "$ENV_FILE.bak-observability-$(date -u +%Y%m%dT%H%M%SZ)"
-  sed -i '/^OTEL_EXPORTER_OTLP_ENDPOINT=/d' "$ENV_FILE"
-  say "removed from $ENV_FILE; applies when the containers are next created (app-restart)"
+  [ -f "$OBS_ENV" ] || { say "already off"; return 0; }
+  rm -f "$OBS_ENV"
+  say "removed $OBS_ENV; applies when the containers are next created (app-restart)"
 }
 
+# Recreates server + report-worker on the image already deployed, so they read
+# their env files again. Not `fleet-deploy up <same sha>`: that answers
+# "already running" and recreates nothing.
 app_restart() {
-  local sha
-  sha=$(sed -n 1p /etc/fleet/deployed 2>/dev/null || true)
-  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "cannot read the deployed sha from /etc/fleet/deployed"
-  say "recreating server + report-worker on $sha (fleet-deploy up)"
-  /usr/local/sbin/fleet-deploy up "$sha"
+  local sha acct img i
+  sha=$(sed -n 1p "$FLEET_STATE" 2>/dev/null || true)
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "cannot read the deployed sha from $FLEET_STATE"
+  acct=$(aws sts get-caller-identity --query Account --output text)
+  img="${acct}.dkr.ecr.${REGION}.amazonaws.com/ghala:fleet-server-${sha}"
+  docker image inspect "$img" >/dev/null 2>&1 || die "image $img is not on the box"
+  say "recreating server + report-worker on ${sha:0:7}"
+  FLEET_SERVER_IMAGE="$img" FLEET_ENV_FILE=/etc/fleet/server.env SERVER_HOST_PORT=3000 \
+    docker compose -f "$FLEET_COMPOSE" -p fleet up -d --no-deps --force-recreate server report-worker
+  for i in $(seq 1 60); do
+    if curl -fsS -o /dev/null http://127.0.0.1:3000/health; then
+      say "server healthy after ~$((i * 2)) s"
+      docker exec fleet-server-1 printenv OTEL_EXPORTER_OTLP_ENDPOINT 2>/dev/null | sed 's/^/OTLP endpoint in the container: /' || echo "OTLP: off"
+      return 0
+    fi
+    sleep 2
+  done
+  die "server not healthy after 120 s: sudo docker logs --tail 50 fleet-server-1 (app-off + app-restart goes back)"
 }
 
 status() {
@@ -206,7 +229,7 @@ status() {
   du -sh "$DATA"/* 2>/dev/null || true
   docker system df -v 2>/dev/null | grep -E '^observability-' || true
   say "app"
-  grep -q '^OTEL_EXPORTER_OTLP_ENDPOINT=' "$ENV_FILE" && echo "server.env: OTLP on" || echo "server.env: OTLP off"
+  [ -f "$OBS_ENV" ] && echo "$OBS_ENV: OTLP on" || echo "$OBS_ENV: absent (OTLP off)"
   docker exec fleet-server-1 printenv OTEL_EXPORTER_OTLP_ENDPOINT >/dev/null 2>&1 \
     && echo "fleet-server-1: sending" || echo "fleet-server-1: not sending (container predates app-on)"
   say "flowing (last 5 min, from Prometheus)"
@@ -234,5 +257,5 @@ case "${1:-}" in
   app-restart) app_restart ;;
   status) status ;;
   down) compose down; say "stopped (volumes and $DATA kept)" ;;
-  *) sed -n '2,25p' "$0"; exit 1 ;;
+  *) sed -n '2,/^set -E/p' "$0" | sed '$d'; exit 1 ;;
 esac

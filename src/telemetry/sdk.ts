@@ -20,7 +20,8 @@
  * ones are always kept).
  *
  * Secrets: query values that look like credentials (Wialon's token/sid, signed
- * S3 URLs) are blanked in span attributes before export; SQL is sent without
+ * S3 URLs) and the account-setup token in its path are blanked in span
+ * attributes before export (lib/scrub-query); SQL is sent without
  * parameter values; Redis spans carry the command name only. Log lines already
  * pass pino's redaction (lib/log-redact) before the instrumentation sees them.
  */
@@ -42,15 +43,15 @@ import { IORedisInstrumentation } from '@opentelemetry/instrumentation-ioredis'
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici'
 import { PinoInstrumentation } from '@opentelemetry/instrumentation-pino'
 import { RuntimeNodeInstrumentation } from '@opentelemetry/instrumentation-runtime-node'
-import { scrubQuery } from '../lib/scrub-query.js'
+import { scrubUrl } from '../lib/scrub-query.js'
 
 /** Span attributes that can hold a URL or a query string. */
-const URL_ATTRS = ['url.full', 'http.url', 'url.query', 'http.target', 'url.original']
+const URL_ATTRS = ['url.full', 'url.path', 'url.query', 'url.original', 'http.url', 'http.target']
 
 export function scrubAttributes(attrs: Attributes): void {
   for (const k of URL_ATTRS) {
     const v: AttributeValue | undefined = attrs[k]
-    if (typeof v === 'string') attrs[k] = scrubQuery(v)
+    if (typeof v === 'string') attrs[k] = scrubUrl(v)
   }
 }
 

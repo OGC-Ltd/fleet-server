@@ -142,6 +142,7 @@ connectors:
       - name: http.route
       - name: http.request.method
       - name: http.response.status_code
+      - name: server.address
     exclude_dimensions: [status.code]
     metrics_flush_interval: 30s
     metrics_expiration: 10m
