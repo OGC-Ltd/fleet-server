@@ -3,6 +3,7 @@ import { createApp } from './app.js'
 import { connectDB, disconnectDB } from './lib/prisma.js'
 import { acquireLeaderLock, type LeaderLock } from './lib/leader-lock.js'
 import { logger } from './lib/logger.js'
+import { flushTelemetry } from './lib/tracing.js'
 import { startPoller } from './lib/poller.js'
 import { startDbFollower } from './lib/db-follower.js'
 import { startTelemetryWorker }     from './lib/workers/telemetry.worker.js'
@@ -216,6 +217,8 @@ async function main() {
       // process's death releases it just the same.)
       await leader?.release()
       logger.info('Graceful shutdown complete')
+      // Last of all, so the shutdown's own log lines and spans go out too.
+      await flushTelemetry()
       process.exit(0)
     })
 

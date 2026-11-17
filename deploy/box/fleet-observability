@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# fleet-observability: the OpenTelemetry / Jaeger / Prometheus / Loki / Grafana
+# stack in deploy/observability, run as its own compose project beside fleet.
+#
+#   sudo fleet-observability install <dir>   copy <dir> (a checkout's deploy/observability) to /opt/fleet-observability;
+#                                            first time: data dirs, Grafana password, .env
+#   sudo fleet-observability check           validate every config with its own image (up runs it first)
+#   sudo fleet-observability up              pull (with a disk guard), check, and start the stack
+#   sudo fleet-observability nginx           JSON access log + https://<site>/grafana/ on the host nginx
+#                                            (backs up, tests with nginx -t, restores on failure, reloads)
+#   sudo fleet-observability nginx-undo      the host nginx as it was before `nginx`
+#   sudo fleet-observability app-on          the server and report worker send OTLP to the collector
+#                                            (one line in /etc/fleet/server.env; takes effect when their
+#                                            containers are next created: the next deploy, or `app-restart`)
+#   sudo fleet-observability app-off         remove that line again
+#   sudo fleet-observability app-restart     recreate server + report-worker now (API gap of ~20 s)
+#   sudo fleet-observability status          containers, memory, disk, what is flowing
+#   sudo fleet-observability down            stop the stack (data volumes kept)
+#
+# Install (root-owned):
+#   sudo install -o root -g root -m 755 deploy/box/fleet-observability /usr/local/sbin/fleet-observability
+#
+# The app runs the same with this stack down or absent: its OpenTelemetry SDK
+# is off until app-on, and drops what it cannot send.
+set -Eeuo pipefail
+
+DIR=/opt/fleet-observability
+DATA=/var/lib/fleet-observability
+ENV_FILE=/etc/fleet/server.env
+OTEL_LINE='OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318'
+SITE_DOMAIN_DEFAULT=logistics.raioperations.com
+NGINX_LOG_CONF=/etc/nginx/conf.d/05-observability-log.conf
+NGINX_LOCATIONS=/etc/nginx/fleet/observability.conf
+NGINX_SITE=/etc/nginx/conf.d/fleet.conf
+NGINX_BACKUP=/etc/fleet/observability-nginx-backup
+# Images are about 1.6 GB together, Jaeger keeps up to ~2-3 GB of traces, and
+# fleet's own deploys refuse to pull below 3 GiB. The volume went from 20 to 30
+# GiB for this on 2026-11-17 (6.4 GB free before, 17 GB after).
+MIN_FREE_GIB_TO_PULL=10
+
+die() { echo "fleet-observability: $*" >&2; exit 1; }
+say() { echo "--- $*"; }
+[ "$(id -u)" = 0 ] || die "run as root (sudo)"
+
+compose() { docker compose --project-directory "$DIR" -f "$DIR/docker-compose.yml" -p observability "$@"; }
+
+free_gib() { df --output=avail -BG / | tail -1 | tr -dc 0-9; }
+
+install_files() {
+  local src=${1:-}
+  [ -n "$src" ] && [ -f "$src/docker-compose.yml" ] && [ -f "$src/otel-collector/config.yaml" ] \
+    || die "usage: install <dir>, where <dir> is deploy/observability from a checkout"
+  say "copying $src to $DIR (secrets and .env are kept)"
+  mkdir -p "$DIR"
+  # Everything but the secrets folder and .env, which live only on the box.
+  (cd "$src" && tar --exclude=./secrets --exclude=./.env -cf - .) | (cd "$DIR" && tar -xf -)
+  chown -R root:root "$DIR"
+  find "$DIR" -type d -exec chmod 755 {} +
+  find "$DIR" -type f -exec chmod 644 {} +
+
+  say "data directories (owned by the collector's and Jaeger's user, 10001)"
+  install -d -o 10001 -g 10001 -m 750 "$DATA/otelcol" "$DATA/jaeger"
+
+  install -d -o root -g root -m 755 "$DIR/secrets"
+  if [ ! -s "$DIR/secrets/grafana-admin-password" ]; then
+    say "Grafana admin password (sudo cat $DIR/secrets/grafana-admin-password)"
+    openssl rand -base64 24 | tr -d '\n' > "$DIR/secrets/grafana-admin-password"
+  fi
+  # Readable by Grafana (uid 472) only.
+  chown 472 "$DIR/secrets/grafana-admin-password"; chmod 400 "$DIR/secrets/grafana-admin-password"
+
+  if [ ! -f "$DIR/.env" ]; then
+    say "writing $DIR/.env"
+    {
+      echo "SITE_DOMAIN=$SITE_DOMAIN_DEFAULT"
+      echo "ADM_GID=$(getent group adm | cut -d: -f3)"
+      echo "DOCKER_GID=$(getent group docker | cut -d: -f3)"
+    } > "$DIR/.env"
+    chmod 644 "$DIR/.env"
+  fi
+  compose config -q && say "compose file valid"
+}
+
+up() {
+  [ -f "$DIR/docker-compose.yml" ] || die "not installed: run install <dir> first"
+  docker network inspect fleet_backend >/dev/null 2>&1 || die "network fleet_backend missing: is fleet running in containers?"
+  local need missing=0 img
+  for img in $(compose config --images); do docker image inspect "$img" >/dev/null 2>&1 || missing=1; done
+  if [ "$missing" = 1 ]; then
+    need=$MIN_FREE_GIB_TO_PULL
+    [ "$(free_gib)" -ge "$need" ] || die "only $(free_gib) GiB free on /, need ${need} GiB to pull the images (grow the volume first)"
+    say "pulling images"
+    compose pull -q
+  fi
+  check
+  say "starting"
+  compose up -d --remove-orphans
+  say "waiting for the stores"
+  local i
+  for i in $(seq 1 30); do
+    if curl -fsS -o /dev/null http://127.0.0.1:9090/-/ready \
+       && curl -fsS -o /dev/null http://127.0.0.1:3300/api/health \
+       && curl -fsS -o /dev/null http://127.0.0.1:16686/; then
+      say "Prometheus, Grafana and Jaeger answer"; status; return 0
+    fi
+    sleep 2
+  done
+  compose ps; die "the stack did not come up in 60 s (sudo docker compose -p observability logs)"
+}
+
+# Each store checks its own config with its own image, before anything starts.
+check() {
+  img() { compose config --images | grep -m1 "$1"; }
+  say "checking configs"
+  docker run --rm --network none -e AWS_REGION=af-south-1 -e S3_BUCKET=check -e S3_BASE_PREFIX=check -e BACKGROUND_SAMPLE_PERCENT=20 \
+    -v "$DIR/otel-collector/config.yaml:/c.yaml:ro" "$(img opentelemetry-collector)" validate --config=/c.yaml \
+    || die "otel-collector config invalid"
+  docker run --rm --network none -e JAEGER_TTL=48h -v "$DIR/jaeger/config.yaml:/c.yaml:ro" "$(img jaeger)" validate --config=/c.yaml \
+    || die "jaeger config invalid"
+  docker run --rm --network none --entrypoint promtool -v "$DIR/prometheus:/etc/prometheus:ro" "$(img prometheus)" \
+    check config /etc/prometheus/prometheus.yml || die "prometheus config invalid"
+  docker run --rm --network none -v "$DIR/loki/loki.yml:/c.yml:ro" "$(img loki)" -config.file=/c.yml -verify-config \
+    || die "loki config invalid"
+  say "all configs valid"
+}
+
+backup_nginx() {
+  install -d -m 700 "$NGINX_BACKUP"
+  [ -f "$NGINX_BACKUP/fleet.conf" ] || cp -p "$NGINX_SITE" "$NGINX_BACKUP/fleet.conf"
+}
+
+restore_nginx() {
+  [ -f "$NGINX_BACKUP/fleet.conf" ] || die "no backup in $NGINX_BACKUP"
+  cp -p "$NGINX_BACKUP/fleet.conf" "$NGINX_SITE"
+  rm -f "$NGINX_LOG_CONF" "$NGINX_LOCATIONS"
+}
+
+nginx_on() {
+  [ -f "$DIR/nginx/05-observability-log.conf" ] || die "not installed: run install <dir> first"
+  backup_nginx
+  install -o root -g root -m 644 "$DIR/nginx/05-observability-log.conf" "$NGINX_LOG_CONF"
+  install -o root -g root -m 644 "$DIR/nginx/observability.conf" "$NGINX_LOCATIONS"
+  local tmp; tmp=$(mktemp)
+  # 1. The plain-http /webhook/ location names its own access logs, so it does
+  #    not inherit the JSON one from the http block: add it there.
+  # 2. Grafana: in the HTTPS server only, after its locations include.
+  awk -v loc="$NGINX_LOCATIONS" '
+    /access_log \/var\/log\/nginx\/webhook-http\.log;/ && !seen_wh {
+      print; match($0, /^[ \t]*/); print substr($0, 1, RLENGTH) "access_log /var/log/nginx/access.json.log fleet_json;"; seen_wh=1; next }
+    /listen 443/ { in443=1 }
+    in443 && /include \/etc\/nginx\/fleet\/locations\.conf;/ && !seen_inc {
+      print; match($0, /^[ \t]*/); print substr($0, 1, RLENGTH) "include " loc ";"; seen_inc=1; next }
+    { print }
+  ' "$NGINX_BACKUP/fleet.conf" > "$tmp"
+  grep -q "include $NGINX_LOCATIONS;" "$tmp" || { rm -f "$tmp"; restore_nginx; die "could not find the HTTPS server's locations include in $NGINX_SITE"; }
+  install -o root -g root -m 644 "$tmp" "$NGINX_SITE"; rm -f "$tmp"
+  if ! nginx -t 2>&1; then
+    restore_nginx; nginx -t >/dev/null 2>&1 || true
+    die "nginx -t failed; restored the previous config, nothing reloaded"
+  fi
+  systemctl reload nginx
+  say "nginx reloaded: /var/log/nginx/access.json.log, https://$(sed -n 's/^SITE_DOMAIN=//p' "$DIR/.env")/grafana/"
+}
+
+nginx_off() {
+  restore_nginx
+  nginx -t || die "nginx -t failed after restoring $NGINX_BACKUP/fleet.conf: look before reloading"
+  systemctl reload nginx
+  rm -f "$NGINX_BACKUP/fleet.conf"
+  say "nginx back to its previous config"
+}
+
+app_on() {
+  [ -f "$ENV_FILE" ] || die "missing $ENV_FILE"
+  if grep -q '^OTEL_EXPORTER_OTLP_ENDPOINT=' "$ENV_FILE"; then
+    say "already set in $ENV_FILE"
+  else
+    cp -p "$ENV_FILE" "$ENV_FILE.bak-observability-$(date -u +%Y%m%dT%H%M%SZ)"
+    echo "$OTEL_LINE" >> "$ENV_FILE"
+    say "added to $ENV_FILE (backup beside it); applies when the containers are next created"
+  fi
+}
+
+app_off() {
+  grep -q '^OTEL_EXPORTER_OTLP_ENDPOINT=' "$ENV_FILE" || { say "not set"; return 0; }
+  cp -p "$ENV_FILE" "$ENV_FILE.bak-observability-$(date -u +%Y%m%dT%H%M%SZ)"
+  sed -i '/^OTEL_EXPORTER_OTLP_ENDPOINT=/d' "$ENV_FILE"
+  say "removed from $ENV_FILE; applies when the containers are next created (app-restart)"
+}
+
+app_restart() {
+  local sha
+  sha=$(sed -n 1p /etc/fleet/deployed 2>/dev/null || true)
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "cannot read the deployed sha from /etc/fleet/deployed"
+  say "recreating server + report-worker on $sha (fleet-deploy up)"
+  /usr/local/sbin/fleet-deploy up "$sha"
+}
+
+status() {
+  say "containers"
+  compose ps --format 'table {{.Service}}\t{{.Status}}' || true
+  docker stats --no-stream --format '{{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}' \
+    $(compose ps -q 2>/dev/null) 2>/dev/null || true
+  say "disk"
+  df -h / | tail -1
+  du -sh "$DATA"/* 2>/dev/null || true
+  docker system df -v 2>/dev/null | grep -E '^observability-' || true
+  say "app"
+  grep -q '^OTEL_EXPORTER_OTLP_ENDPOINT=' "$ENV_FILE" && echo "server.env: OTLP on" || echo "server.env: OTLP off"
+  docker exec fleet-server-1 printenv OTEL_EXPORTER_OTLP_ENDPOINT >/dev/null 2>&1 \
+    && echo "fleet-server-1: sending" || echo "fleet-server-1: not sending (container predates app-on)"
+  say "flowing (last 5 min, from Prometheus)"
+  local q
+  for q in \
+    'sum(rate(otelcol_receiver_accepted_spans_total[5m]))' \
+    'sum(rate(otelcol_receiver_accepted_log_records_total[5m]))' \
+    'sum(rate(otelcol_receiver_accepted_metric_points_total[5m]))' \
+    'sum by (exporter) (rate(otelcol_exporter_send_failed_log_records_total[5m]) + rate(otelcol_exporter_send_failed_spans_total[5m]))'; do
+    printf '%s\n  ' "$q"
+    curl -fsS --get http://127.0.0.1:9090/api/v1/query --data-urlencode "query=$q" 2>/dev/null \
+      | grep -o '"value":\[[^]]*\]\|"exporter":"[^"]*"' | tr '\n' ' ' || printf 'no answer'
+    echo
+  done
+}
+
+case "${1:-}" in
+  install) install_files "${2:-}" ;;
+  up) up ;;
+  check) check ;;
+  nginx) nginx_on ;;
+  nginx-undo) nginx_off ;;
+  app-on) app_on ;;
+  app-off) app_off ;;
+  app-restart) app_restart ;;
+  status) status ;;
+  down) compose down; say "stopped (volumes and $DATA kept)" ;;
+  *) sed -n '2,25p' "$0"; exit 1 ;;
+esac

@@ -1,0 +1,36 @@
+# Metrics arrive over OTLP from the collector (--web.enable-otlp-receiver):
+# the app's own, span metrics, the box and the containers. Prometheus scrapes
+# only the stores below, for their own health.
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+# OTLP resource attributes worth a label on every series. service.name and
+# service.instance.id become job and instance on their own.
+otlp:
+  promote_resource_attributes:
+    - service.name
+    - container.name
+    - host.name
+    - deployment.environment.name
+  keep_identifying_resource_attributes: true
+
+storage:
+  tsdb:
+    # The collector batches; samples can arrive a little late.
+    out_of_order_time_window: 5m
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+  - job_name: jaeger
+    static_configs:
+      - targets: ["jaeger:8888"]
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]

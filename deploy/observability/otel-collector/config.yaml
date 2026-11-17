@@ -1,0 +1,296 @@
+# The OpenTelemetry collector: the one place everything enters.
+#
+#   in                                        out
+#   fleet-server / report worker (OTLP) ─┐    ┌─ Jaeger      traces, tail-sampled, 48 h
+#   nginx access log (every client IP)  ─┤    ├─ Prometheus  metrics, 15 d
+#   nginx error log, box auth log       ─┼────┼─ Loki        logs, 14 d
+#   box CPU/memory/disk/network         ─┤    └─ S3          every log line and every span,
+#   container CPU/memory (Docker API)   ─┘                   unsampled, kept
+#
+# Pipelines share their receivers, so each signal fans out to each store with
+# its own processors: S3 gets everything in large gzipped batches, Jaeger gets
+# the tail-sampled traces, span metrics are counted from every span before any
+# sampling (so request rates and latencies are exact).
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  # Read offsets for the log files and the S3 send queues: a restart neither
+  # re-reads the logs nor loses what was waiting for S3.
+  file_storage:
+    directory: /var/lib/otelcol
+    create_directory: true
+    compaction:
+      on_start: true
+      directory: /var/lib/otelcol
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # nginx's JSON access log (deploy/observability/nginx/observability-log.conf):
+  # one line per request that reached the box, with the connecting address,
+  # X-Forwarded-For, timings and status. The app's own request log covers what
+  # the app saw; this covers everything, scanners and refused requests included.
+  filelog/nginx_access:
+    include: [/hostfs/var/log/nginx/access.json.log]
+    start_at: end
+    storage: file_storage
+    resource:
+      service.name: nginx
+      log.source: access
+    operators:
+      - type: json_parser
+        parse_to: attributes
+        timestamp:
+          parse_from: attributes.time
+          layout_type: gotime
+          layout: "2006-01-02T15:04:05-07:00"
+        severity:
+          parse_from: attributes.status
+          mapping:
+            error: 5xx
+            warn: 4xx
+            info: [2xx, 3xx, 1xx]
+
+  filelog/nginx_error:
+    include: [/hostfs/var/log/nginx/error.log]
+    start_at: end
+    storage: file_storage
+    resource:
+      service.name: nginx
+      log.source: error
+    operators:
+      - type: regex_parser
+        regex: '^(?P<time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) \[(?P<level>\w+)\] (?P<message>.*?)(?:, client: (?P<client>[^,]+))?(?:, server: (?P<server>[^,]+))?(?:, request: "(?P<request>[^"]*)")?.*$'
+        timestamp:
+          parse_from: attributes.time
+          layout: "%Y/%m/%d %H:%M:%S"
+        severity:
+          parse_from: attributes.level
+
+  # SSH sign-ins (accepted and refused, with the address), sudo, and the rest
+  # of the box's auth log.
+  filelog/auth:
+    include: [/hostfs/var/log/auth.log]
+    start_at: end
+    storage: file_storage
+    resource:
+      service.name: host-auth
+    operators:
+      - type: regex_parser
+        regex: '^(?P<time>\S+) (?P<host>\S+) (?P<program>[^\[:]+)(?:\[(?P<pid>\d+)\])?: (?P<message>.*)$'
+        timestamp:
+          parse_from: attributes.time
+          layout_type: gotime
+          layout: "2006-01-02T15:04:05.999999-07:00"
+      - type: regex_parser
+        parse_from: attributes.message
+        if: 'attributes.message matches " from \\d+\\.\\d+\\.\\d+\\.\\d+"'
+        regex: ' from (?P<client_ip>\d+\.\d+\.\d+\.\d+)'
+
+  hostmetrics:
+    root_path: /hostfs
+    collection_interval: 30s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.utilization: { enabled: true }
+      load: {}
+      memory:
+        metrics:
+          system.memory.utilization: { enabled: true }
+      paging: {}
+      disk: {}
+      filesystem:
+        exclude_fs_types:
+          fs_types: [autofs, binfmt_misc, bpf, cgroup2, configfs, debugfs, devpts, devtmpfs, fusectl, hugetlbfs, mqueue, nsfs, overlay, proc, procfs, pstore, rpc_pipefs, securityfs, selinuxfs, squashfs, sysfs, tracefs, tmpfs]
+          match_type: strict
+        metrics:
+          system.filesystem.utilization: { enabled: true }
+      network: {}
+      processes: {}
+
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+    collection_interval: 30s
+    metrics:
+      container.memory.percent: { enabled: true }
+      container.restarts: { enabled: true }
+      container.uptime: { enabled: true }
+
+  # The collector's own health: how much it took in, sent, dropped.
+  prometheus/self:
+    config:
+      scrape_configs:
+        - job_name: otel-collector
+          scrape_interval: 30s
+          static_configs:
+            - targets: ["127.0.0.1:8888"]
+
+connectors:
+  # Request/job/query rates and latencies from EVERY span, before sampling.
+  spanmetrics:
+    histogram:
+      explicit:
+        buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2500ms, 5s, 10s, 30s, 60s]
+    dimensions:
+      - name: http.route
+      - name: http.request.method
+      - name: http.response.status_code
+    exclude_dimensions: [status.code]
+    metrics_flush_interval: 30s
+    metrics_expiration: 10m
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+
+  batch:
+    send_batch_size: 2048
+    send_batch_max_size: 4096
+    timeout: 5s
+
+  # Fewer, larger S3 objects: about one per signal per minute.
+  batch/s3:
+    send_batch_size: 20000
+    send_batch_max_size: 40000
+    timeout: 60s
+
+
+  resource/box:
+    attributes:
+      - key: deployment.environment.name
+        value: production
+        action: insert
+      - key: host.name
+        value: fleet-box
+        action: upsert
+
+  # What Jaeger keeps for searching. S3 keeps every span regardless.
+  # A trace is kept when ANY policy says so.
+  tail_sampling:
+    decision_wait: 15s
+    num_traces: 40000
+    expected_new_traces_per_sec: 200
+    policies:
+      - name: errors
+        type: status_code
+        status_code: { status_codes: [ERROR] }
+      - name: slow
+        type: latency
+        latency: { threshold_ms: 2000 }
+      # Every request a person or a client made (the server span carries
+      # http.route; background work has none).
+      - name: requests
+        type: ottl_condition
+        ottl_condition:
+          error_mode: ignore
+          span:
+            - 'span.kind == SPAN_KIND_SERVER'
+      # Poll cycles, jobs, timers: a share is plenty to see their shape.
+      - name: background
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: ${env:BACKGROUND_SAMPLE_PERCENT}
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls: { insecure: true }
+    sending_queue: { enabled: true, queue_size: 2000 }
+    retry_on_failure: { enabled: true, max_elapsed_time: 5m }
+
+  otlphttp/prometheus:
+    metrics_endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
+    tls: { insecure: true }
+    sending_queue: { enabled: true, queue_size: 2000 }
+
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls: { insecure: true }
+    sending_queue: { enabled: true, queue_size: 5000 }
+    retry_on_failure: { enabled: true, max_elapsed_time: 10m }
+
+  awss3/logs:
+    s3uploader:
+      region: ${env:AWS_REGION}
+      s3_bucket: ${env:S3_BUCKET}
+      s3_base_prefix: ${env:S3_BASE_PREFIX}
+      s3_prefix: logs
+      s3_partition_format: "year=%Y/month=%m/day=%d/hour=%H"
+      s3_partition_timezone: UTC
+      file_prefix: fleet-logs_
+      compression: gzip
+      unique_key_func_name: uuidv7
+    marshaler: otlp_json
+    timeout: 60s
+    sending_queue: { enabled: true, queue_size: 500, storage: file_storage }
+    retry_on_failure: { enabled: true, max_elapsed_time: 1h }
+
+  awss3/traces:
+    s3uploader:
+      region: ${env:AWS_REGION}
+      s3_bucket: ${env:S3_BUCKET}
+      s3_base_prefix: ${env:S3_BASE_PREFIX}
+      s3_prefix: traces
+      s3_partition_format: "year=%Y/month=%m/day=%d/hour=%H"
+      s3_partition_timezone: UTC
+      file_prefix: fleet-traces_
+      compression: gzip
+      unique_key_func_name: uuidv7
+    marshaler: otlp_json
+    timeout: 60s
+    sending_queue: { enabled: true, queue_size: 500, storage: file_storage }
+    retry_on_failure: { enabled: true, max_elapsed_time: 1h }
+
+service:
+  extensions: [health_check, file_storage]
+  telemetry:
+    logs:
+      level: warn
+    metrics:
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: 8888
+  pipelines:
+    traces/jaeger:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/box, tail_sampling, batch]
+      exporters: [otlp/jaeger]
+    traces/archive:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/box, batch/s3]
+      exporters: [awss3/traces]
+    traces/metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/box]
+      exporters: [spanmetrics]
+
+    metrics:
+      receivers: [otlp, spanmetrics, prometheus/self]
+      processors: [memory_limiter, resource/box, batch]
+      exporters: [otlphttp/prometheus]
+    metrics/host:
+      receivers: [hostmetrics, docker_stats]
+      processors: [memory_limiter, resource/box, batch]
+      exporters: [otlphttp/prometheus]
+
+    logs:
+      receivers: [otlp, filelog/nginx_access, filelog/nginx_error, filelog/auth]
+      processors: [memory_limiter, resource/box, batch]
+      exporters: [otlphttp/loki]
+    logs/archive:
+      receivers: [otlp, filelog/nginx_access, filelog/nginx_error, filelog/auth]
+      processors: [memory_limiter, resource/box, batch/s3]
+      exporters: [awss3/logs]

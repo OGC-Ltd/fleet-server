@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: fleet
+    folder: Fleet
+    type: file
+    # Edits made in Grafana are not saved back here: change the JSON instead.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

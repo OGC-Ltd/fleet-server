@@ -28,6 +28,7 @@
  */
 
 import { logger } from './logger.js'
+import { inSpan, loopRunDuration, loopTicksSkipped } from './tracing.js'
 
 export interface PollLoopOptions {
   /** Identifies this loop in logs. Must be unique per loop. */
@@ -71,14 +72,21 @@ export function startPollLoop(opts: PollLoopOptions): PollLoopHandle {
     if (stopped) return
     if (inFlight) {
       logger.warn({ loop: name }, 'Previous run still in flight — skipping this tick')
+      loopTicksSkipped.add(1, { loop: name })
       return
     }
     inFlight = true
     const t0 = Date.now()
 
-    const attempt = run().then(
-      () => 'settled' as const,
+    // Each run is a trace of its own (lib/tracing): every query and outside
+    // call it makes hangs under it in Jaeger.
+    const attempt = inSpan(`loop ${name}`, { 'fleet.loop': name }, run, { root: true }).then(
+      () => {
+        loopRunDuration.record(Date.now() - t0, { loop: name, outcome: 'ok' })
+        return 'settled' as const
+      },
       (err) => {
+        loopRunDuration.record(Date.now() - t0, { loop: name, outcome: 'error' })
         logger.error({ err, loop: name }, 'Poll run failed')
         return 'settled' as const
       },
