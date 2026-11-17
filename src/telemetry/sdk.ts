@@ -5,8 +5,8 @@
  * Started by telemetry/register.ts, before the app loads.
  *
  * What is captured:
- *   traces   every HTTP request (express handlers, not each middleware or
- *            router), and inside a trace every SQL statement (pg, under
+ *   traces   every HTTP request (express routers and handlers, not each
+ *            middleware), and inside a trace every SQL statement (pg, under
  *            Prisma's adapter), Redis command, outgoing fetch (Wialon, OpenAI,
  *            FactorySuite, Google) and https call (S3, mail); a trace per
  *            poll-loop run and BullMQ job (lib/tracing), a share of them kept.
@@ -111,11 +111,16 @@ export function startTelemetry(): NodeSDK {
           server: { requestHeaders: ['user-agent', 'x-forwarded-for', 'x-real-ip', 'referer', 'origin'] },
         },
       }),
-      // Handlers only, not the ~12 middlewares and the nested routers every
-      // request passes (helmet, cors, json, /api/v1/organisations/:orgId...):
-      // those multiply the spans per request and say nothing the request's
-      // own duration does not.
-      new ExpressInstrumentation({ ignoreLayersType: [ExpressLayerType.MIDDLEWARE, ExpressLayerType.ROUTER] }),
+      // Routers and handlers, not each of the ~12 middlewares every request
+      // passes (helmet, cors, json...): those would triple the spans per
+      // request and say nothing the request's own duration does not.
+      // Routers must NOT be ignored: http.route is built from the path each
+      // router pushes, and only a traced router pops its path when it passes
+      // the request on. Ignored, every router mounted at
+      // /api/v1/organisations/:orgId that a request passes through left its
+      // path behind, and routes came out with that prefix up to 7 times
+      // (2026-11-17, instrumentation-express 0.7x).
+      new ExpressInstrumentation({ ignoreLayersType: [ExpressLayerType.MIDDLEWARE] }),
       // Only inside a trace (a request, a loop run, a job): a statement with no
       // parent would be a one-span trace saying nothing about why it ran.
       // Under a trace that is not kept it costs almost nothing.
