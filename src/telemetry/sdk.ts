@@ -33,7 +33,7 @@ import { NodeSDK } from '@opentelemetry/sdk-node'
 import type { Attributes, AttributeValue } from '@opentelemetry/api'
 import type { ExportResult } from '@opentelemetry/core'
 import { resourceFromAttributes } from '@opentelemetry/resources'
-import { BatchSpanProcessor, ParentBasedSampler, type ReadableSpan, type SpanExporter } from '@opentelemetry/sdk-trace'
+import { BatchSpanProcessor, type ReadableSpan, type SpanExporter } from '@opentelemetry/sdk-trace'
 import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics'
 import { BatchLogRecordProcessor } from '@opentelemetry/sdk-logs'
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto'
@@ -47,7 +47,7 @@ import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici'
 import { PinoInstrumentation } from '@opentelemetry/instrumentation-pino'
 import { RuntimeNodeInstrumentation } from '@opentelemetry/instrumentation-runtime-node'
 import { scrubUrl } from '../lib/scrub-query.js'
-import { FleetRootSampler, backgroundRatio } from './sampler.js'
+import { fleetSampler, backgroundRatio } from './sampler.js'
 
 /** Span attributes that can hold a URL or a query string. */
 const URL_ATTRS = ['url.full', 'url.path', 'url.query', 'url.original', 'http.url', 'http.target']
@@ -87,7 +87,7 @@ export function startTelemetry(): NodeSDK {
       'deployment.environment.name': process.env.OTEL_DEPLOYMENT_ENVIRONMENT ?? process.env.NODE_ENV ?? 'development',
       'host.name': os.hostname(),
     }),
-    sampler: new ParentBasedSampler({ root: new FleetRootSampler(backgroundRatio(process.env.FLEET_TRACE_BACKGROUND_RATIO)) }),
+    sampler: fleetSampler(backgroundRatio(process.env.FLEET_TRACE_BACKGROUND_RATIO)),
     spanLimits: { attributeValueLengthLimit: 2048 },
     spanProcessors: [
       new BatchSpanProcessor({
@@ -116,9 +116,9 @@ export function startTelemetry(): NodeSDK {
       // those multiply the spans per request and say nothing the request's
       // own duration does not.
       new ExpressInstrumentation({ ignoreLayersType: [ExpressLayerType.MIDDLEWARE, ExpressLayerType.ROUTER] }),
-      // Only inside a trace (a request, a loop run, a job). A statement with no
-      // parent would start a trace of its own that skips the root sampler's
-      // share; under a trace that is not kept it costs almost nothing.
+      // Only inside a trace (a request, a loop run, a job): a statement with no
+      // parent would be a one-span trace saying nothing about why it ran.
+      // Under a trace that is not kept it costs almost nothing.
       new PgInstrumentation({ requireParentSpan: true, ignoreConnectSpans: true, enhancedDatabaseReporting: false }),
       // Only inside a trace: BullMQ's own blocking reads would otherwise be a
       // root span every second. Command name only; keys and values stay out.

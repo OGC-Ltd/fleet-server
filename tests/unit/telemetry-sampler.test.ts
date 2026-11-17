@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { ROOT_CONTEXT, SpanKind } from '@opentelemetry/api'
+import { ROOT_CONTEXT, SpanKind, TraceFlags, trace } from '@opentelemetry/api'
 import { SamplingDecision } from '@opentelemetry/sdk-trace'
-import { FleetRootSampler, backgroundRatio, DEFAULT_BACKGROUND_RATIO } from '../../src/telemetry/sampler.js'
+import { FleetRootSampler, backgroundRatio, fleetSampler, DEFAULT_BACKGROUND_RATIO } from '../../src/telemetry/sampler.js'
 
 // Trace ids spread evenly over the id space (never all zeros, which is not a
 // valid id), so a ratio sampler keeps about its share.
@@ -26,6 +26,32 @@ describe('FleetRootSampler', () => {
   it('drops all background at 0 and keeps all at 1', () => {
     expect(kept(new FleetRootSampler(0), SpanKind.INTERNAL)).toBe(0)
     expect(kept(new FleetRootSampler(1), SpanKind.INTERNAL)).toBe(ids.length)
+  })
+})
+
+describe('fleetSampler', () => {
+  const parent = (isRemote: boolean, sampled: boolean) =>
+    trace.setSpanContext(ROOT_CONTEXT, {
+      traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+      spanId: '00f067aa0ba902b7',
+      traceFlags: sampled ? TraceFlags.SAMPLED : TraceFlags.NONE,
+      isRemote,
+    })
+  const decide = (ctx: ReturnType<typeof parent>, kind: SpanKind) =>
+    fleetSampler(0).shouldSample(ctx, '4bf92f3577b34da6a3ce929d0e0e4736', 'x', kind, {}, []).decision
+
+  it('keeps a request whose client sent traceparent with the not-sampled flag', () => {
+    expect(decide(parent(true, false), SpanKind.SERVER)).toBe(SamplingDecision.RECORD_AND_SAMPLED)
+    expect(decide(parent(true, true), SpanKind.SERVER)).toBe(SamplingDecision.RECORD_AND_SAMPLED)
+  })
+
+  it('lets a client-sent sampled flag keep nothing but requests', () => {
+    expect(decide(parent(true, true), SpanKind.INTERNAL)).toBe(SamplingDecision.NOT_RECORD)
+  })
+
+  it('children follow their in-process parent', () => {
+    expect(decide(parent(false, true), SpanKind.CLIENT)).toBe(SamplingDecision.RECORD_AND_SAMPLED)
+    expect(decide(parent(false, false), SpanKind.CLIENT)).toBe(SamplingDecision.NOT_RECORD)
   })
 })
 

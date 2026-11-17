@@ -184,16 +184,32 @@ app_on() {
   (sudo install -o root -g root -m 644 docker-compose.prod.yml $FLEET_COMPOSE)"
   docker network inspect fleet_backend --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | grep -q 'otel-collector' \
     || say "note: the collector is not on fleet_backend yet (fleet-observability up); the app will drop what it cannot send"
-  printf '%s\n' "$OTEL_LINE" > "$OBS_ENV.tmp"
+  # Replaces only the endpoint line: other settings kept in the file (e.g.
+  # FLEET_TRACE_BACKGROUND_RATIO) stay.
+  { other_obs_lines; printf '%s\n' "$OTEL_LINE"; } > "$OBS_ENV.tmp"
   chown root:root "$OBS_ENV.tmp"; chmod 600 "$OBS_ENV.tmp"; mv "$OBS_ENV.tmp" "$OBS_ENV"
   say "wrote $OBS_ENV; applies when the containers are next created (the next deploy, or app-restart)"
 }
 
-app_off() {
-  [ -f "$OBS_ENV" ] || { say "already off"; return 0; }
-  rm -f "$OBS_ENV"
-  say "removed $OBS_ENV; applies when the containers are next created (app-restart)"
+# The file's lines other than the endpoint (nothing when there is no file).
+other_obs_lines() {
+  [ -f "$OBS_ENV" ] || return 0
+  grep -v '^OTEL_EXPORTER_OTLP_ENDPOINT=' "$OBS_ENV" || true
 }
+
+app_off() {
+  obs_on || { say "already off"; return 0; }
+  other_obs_lines > "$OBS_ENV.tmp"
+  if [ -s "$OBS_ENV.tmp" ]; then
+    chown root:root "$OBS_ENV.tmp"; chmod 600 "$OBS_ENV.tmp"; mv "$OBS_ENV.tmp" "$OBS_ENV"
+    say "removed the endpoint from $OBS_ENV (other settings kept); applies when the containers are next created (app-restart)"
+  else
+    rm -f "$OBS_ENV.tmp" "$OBS_ENV"
+    say "removed $OBS_ENV; applies when the containers are next created (app-restart)"
+  fi
+}
+
+obs_on() { [ -f "$OBS_ENV" ] && grep -q '^OTEL_EXPORTER_OTLP_ENDPOINT=' "$OBS_ENV"; }
 
 # Recreates server + report-worker on the image already deployed, so they read
 # their env files again. Not `fleet-deploy up <same sha>`: that answers
@@ -229,7 +245,7 @@ status() {
   du -sh "$DATA"/* 2>/dev/null || true
   docker system df -v 2>/dev/null | grep -E '^observability-' || true
   say "app"
-  [ -f "$OBS_ENV" ] && echo "$OBS_ENV: OTLP on" || echo "$OBS_ENV: absent (OTLP off)"
+  obs_on && echo "$OBS_ENV: OTLP on" || echo "$OBS_ENV: no endpoint (OTLP off)"
   docker exec fleet-server-1 printenv OTEL_EXPORTER_OTLP_ENDPOINT >/dev/null 2>&1 \
     && echo "fleet-server-1: sending" || echo "fleet-server-1: not sending (container predates app-on)"
   say "flowing (last 5 min, from Prometheus)"

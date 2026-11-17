@@ -88,7 +88,10 @@ without a parser:
 - `{service_name="fleet-server"} |= "Poll cycle complete"`: the Wialon poll
 
 A line written inside a trace has a `trace_id`: Grafana links it to Jaeger,
-and a span in Jaeger links back to its lines.
+and a span in Jaeger links back to its lines. Every request's trace is there;
+a line from background work (a poll run, a job) also carries a `trace_id`,
+but its trace exists only for the share of runs the app keeps (5 %): for the
+rest Jaeger says the trace is not found.
 
 Two addresses per request at the edge: `remote_addr` is what connected (for
 the ogc-monitoring domain, that is the LiteSpeed proxy), `xff` is what the
