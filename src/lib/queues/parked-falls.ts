@@ -21,7 +21,8 @@
  * passes can never announce the same fall twice.
  */
 
-import { Queue, Worker, type Job } from 'bullmq'
+import { Queue, type Job } from 'bullmq'
+import { TracedWorker as Worker } from '../tracing.js'
 import { getQueueRedis } from '../redis.js'
 import { env } from '../../config/env.js'
 import { logger } from '../logger.js'

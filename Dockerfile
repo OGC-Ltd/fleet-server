@@ -98,4 +98,13 @@ EXPOSE 3000
 # slim has no wget/curl; node's own fetch does the check.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+# OpenTelemetry loads before the app (src/telemetry/register.ts). In NODE_OPTIONS
+# rather than CMD so compose's `command:` overrides keep it. It starts nothing
+# until OTEL_EXPORTER_OTLP_ENDPOINT is set in the env file, and only in the two
+# app entry points (not the health check above).
+ENV NODE_OPTIONS="--import=/app/dist/src/telemetry/register.js"
+# Last, so a new commit does not invalidate any layer above. service.version on
+# every span and log line.
+ARG APP_COMMIT=unknown
+ENV APP_COMMIT=${APP_COMMIT}
 CMD ["node", "dist/src/index.js"]

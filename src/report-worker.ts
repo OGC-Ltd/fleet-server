@@ -15,6 +15,7 @@ const { connectDB, disconnectDB } = await import('./lib/prisma.js')
 const { disconnectRedis } = await import('./lib/redis.js')
 const { closeReportQueues } = await import('./lib/queues/usage-review.js')
 const { startReportWorker } = await import('./modules/usage-review/usage-review.worker.js')
+const { flushTelemetry } = await import('./lib/tracing.js')
 
 await connectDB()
 const worker = await startReportWorker()
@@ -28,6 +29,7 @@ async function shutdown(signal: string) {
   await closeReportQueues().catch(() => {})
   await disconnectRedis().catch(() => {})
   await disconnectDB().catch(() => {})
+  await flushTelemetry()
   process.exit(0)
 }
 process.on('SIGTERM', () => void shutdown('SIGTERM'))

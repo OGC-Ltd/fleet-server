@@ -58,6 +58,7 @@ import { validateQuery, validateBody } from './middleware/validate.js'
 import * as userCtrl from './modules/users/user.controller.js'
 import { provisionUserSchema } from './modules/users/user.schema.js'
 import { trustProxy, parseProxyList } from './lib/trust-proxy.js'
+import { requestLog } from './middleware/request-log.js'
 import * as alertsCtrl from './modules/alerts/alerts.controller.js'
 import * as stopWatchCtrl from './modules/stop-watch/stop-watch.service.js'
 import * as idleWatchCtrl from './modules/idle-watch/idle-watch.service.js'
@@ -89,6 +90,8 @@ export function createApp() {
   // nginx, plus the LiteSpeed proxy in front of it on one of the two domains —
   // see lib/trust-proxy for why one hop was not enough.
   app.set("trust proxy", trustProxy(parseProxyList(env.TRUSTED_PROXY_IPS)));
+  // First, so every request is logged with its client address, refused ones too.
+  app.use(requestLog)
   app.set('json replacer', (_key: string, value: unknown) =>
     typeof value === 'bigint' ? value.toString() : value,
   )

@@ -57,7 +57,8 @@
  * enumerates the places where a person is told something about their mail.
  */
 
-import { DelayedError, Queue, UnrecoverableError, Worker, type Job } from 'bullmq'
+import { DelayedError, Queue, UnrecoverableError, type Job } from 'bullmq'
+import { TracedWorker as Worker } from '../tracing.js'
 import { getQueueRedis } from '../redis.js'
 import { logger } from '../logger.js'
 import { isMailAllowed, sendMail, type MailResult } from '../mailer/mailer.js'

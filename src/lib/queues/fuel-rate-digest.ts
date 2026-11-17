@@ -22,7 +22,8 @@
  * same day updates its summary rather than posting a second.
  */
 
-import { Queue, Worker, type Job } from 'bullmq'
+import { Queue, type Job } from 'bullmq'
+import { TracedWorker as Worker } from '../tracing.js'
 import { getQueueRedis } from '../redis.js'
 import { env } from '../../config/env.js'
 import { logger } from '../logger.js'

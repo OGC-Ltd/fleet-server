@@ -64,7 +64,9 @@ jobs:
         with:
           context: .
           target: runtime
-          build-args: APT_REFRESH=${{ env.APT_REFRESH }}
+          build-args: |
+            APT_REFRESH=${{ env.APT_REFRESH }}
+            APP_COMMIT=${{ github.sha }}
           load: true
           tags: ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha,scope=runtime
@@ -183,7 +185,9 @@ jobs:
         with:
           context: .
           target: runtime
-          build-args: APT_REFRESH=${{ env.APT_REFRESH }}
+          build-args: |
+            APT_REFRESH=${{ env.APT_REFRESH }}
+            APP_COMMIT=${{ github.sha }}
           push: true
           sbom: true
           provenance: mode=max

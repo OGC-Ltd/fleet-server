@@ -1,0 +1,175 @@
+# fleet's observability stack: everything the server and the box do, captured
+# with OpenTelemetry and kept where it can be searched and where it is kept.
+#
+#   otel-collector  the one entry point. Takes OTLP from fleet-server and the
+#                   report worker (traces, metrics, logs), and reads on its own:
+#                   nginx's access log (every client address, every request,
+#                   including the ones the app never sees), nginx's error log,
+#                   the box's auth log (SSH sign-ins and sudo), the box's CPU /
+#                   memory / disk / network, and every container's CPU / memory.
+#                   Sends them on to:
+#   jaeger          traces, searchable for JAEGER_TTL (48 h): every request, every
+#                   error, every slow trace, and a share of background work
+#                   (tail sampling in otel-collector/config.yaml)
+#   prometheus      metrics, 15 days
+#   loki            logs, searchable for 14 days
+#   grafana         the dashboards, and Explore over all three
+#   S3              EVERYTHING, kept: every log line and every span, unsampled,
+#                   gzipped OTLP JSON under
+#                   s3://ndoo-522505217087-af-south-1-an/ndoo/kumbukumbu/{logs,traces}/
+#                   (written by the collector with the box's own role, fleet-app)
+#
+# Its own compose project, outside fleet's release: CI never deploys it, and
+# fleet runs the same with it down (the SDK drops what it cannot send). The
+# collector joins fleet's `backend` network, which is how the server reaches
+# otel-collector:4318; nothing else here is reachable from fleet.
+#
+# Nothing is published beyond the box's loopback (daemon.json binds there too):
+#   127.0.0.1:3300   Grafana; the host nginx serves it at https://<site>/grafana/
+#   127.0.0.1:16686  Jaeger UI      (ssh -L 16686:127.0.0.1:16686, or Grafana › Explore › Jaeger)
+#   127.0.0.1:9090   Prometheus     (ssh -L 9090:127.0.0.1:9090)
+#
+# Set up, start and stop with deploy/box/fleet-observability; see README.md.
+
+name: observability
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  logging:
+    driver: local
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  otel-collector:
+    <<: *hardening
+    image: otel/opentelemetry-collector-contrib:0.164.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    # Its image user (10001), plus the groups that own what it reads:
+    #   adm    (4)   /var/log/nginx/*.log and /var/log/auth.log, mode 640
+    #   docker (982) /var/run/docker.sock, for the container metrics; the
+    #                receiver only lists containers and reads their stats
+    group_add: ["${ADM_GID:-4}", "${DOCKER_GID:-982}"]
+    environment:
+      AWS_REGION: af-south-1
+      S3_BUCKET: ${S3_BUCKET:-ndoo-522505217087-af-south-1-an}
+      S3_BASE_PREFIX: ${S3_BASE_PREFIX:-ndoo/kumbukumbu}
+      BACKGROUND_SAMPLE_PERCENT: ${BACKGROUND_SAMPLE_PERCENT:-20}
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+      # The host, read-only: /proc and /sys for the host metrics, mounts for
+      # disk usage, /var/log for nginx and auth. Root-only files (the env
+      # files, keys) stay unreadable: the collector is not root.
+      - /:/hostfs:ro,rslave
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Read positions in the log files and the S3 send queue, so a restart
+      # neither re-reads nor loses lines. Owned by 10001 (fleet-observability setup).
+      - /var/lib/fleet-observability/otelcol:/var/lib/otelcol
+    networks: [obs, fleet]
+    expose: ["4317", "4318"]
+    mem_limit: ${OTELCOL_MEM_LIMIT:-384m}
+    cpus: 0.5
+    pids_limit: 256
+    healthcheck: { disable: true }   # distroless image, nothing to run a check with
+    depends_on: [jaeger, prometheus, loki]
+
+  jaeger:
+    <<: *hardening
+    image: jaegertracing/jaeger:2.22.0
+    command: ["--config=/etc/jaeger/config.yaml"]
+    environment:
+      JAEGER_TTL: ${JAEGER_TTL:-48h}
+    volumes:
+      - ./jaeger/config.yaml:/etc/jaeger/config.yaml:ro
+      # Badger, on disk. Owned by 10001 (fleet-observability setup).
+      - /var/lib/fleet-observability/jaeger:/badger
+    networks: [obs]
+    expose: ["4317", "4318", "8888", "16686"]
+    ports:
+      - "127.0.0.1:16686:16686"
+    mem_limit: ${JAEGER_MEM_LIMIT:-384m}
+    cpus: 0.5
+    pids_limit: 256
+
+  prometheus:
+    <<: *hardening
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=1GB
+      # The collector writes here over OTLP (/api/v1/otlp/v1/metrics).
+      - --web.enable-otlp-receiver
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - prometheus:/prometheus
+    networks: [obs]
+    ports:
+      - "127.0.0.1:9090:9090"
+    mem_limit: ${PROMETHEUS_MEM_LIMIT:-320m}
+    cpus: 0.5
+    pids_limit: 256
+
+  loki:
+    <<: *hardening
+    image: grafana/loki:3.5.5
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki:/loki
+    networks: [obs]
+    expose: ["3100"]
+    mem_limit: ${LOKI_MEM_LIMIT:-320m}
+    cpus: 0.5
+    pids_limit: 256
+
+  grafana:
+    <<: *hardening
+    image: grafana/grafana:12.1.0
+    environment:
+      GF_SERVER_ROOT_URL: https://${SITE_DOMAIN:?set SITE_DOMAIN in .env}/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana-admin-password
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/fleet-overview.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./secrets/grafana-admin-password:/run/secrets/grafana-admin-password:ro
+      - grafana:/var/lib/grafana
+    networks: [obs]
+    ports:
+      - "127.0.0.1:3300:3000"
+    depends_on: [prometheus, loki, jaeger]
+    mem_limit: ${GRAFANA_MEM_LIMIT:-256m}
+    cpus: 0.5
+    pids_limit: 256
+
+volumes:
+  prometheus:
+    name: observability-prometheus
+  loki:
+    name: observability-loki
+  grafana:
+    name: observability-grafana
+
+networks:
+  obs:
+    name: observability
+  # fleet's own network (docker-compose.prod.yml, project `fleet`): only the
+  # collector joins it, so the server can send to otel-collector:4318.
+  fleet:
+    name: fleet_backend
+    external: true

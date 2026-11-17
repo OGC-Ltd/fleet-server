@@ -9,7 +9,8 @@
  * (usage-review.saved), where the API process reads it.
  */
 
-import { Worker, type Job } from 'bullmq'
+import { type Job } from 'bullmq'
+import { TracedWorker as Worker } from '../../lib/tracing.js'
 import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
 import { getQueueRedis } from '../../lib/redis.js'
