@@ -121,7 +121,7 @@ check() {
   img() { compose config --images | grep -m1 "$1"; }
   say "checking configs"
   docker run --rm --network none -e AWS_REGION=af-south-1 -e S3_BUCKET=check -e S3_BASE_PREFIX=check -e BACKGROUND_SAMPLE_PERCENT=20 \
-    -v "$DIR/otel-collector/config.yaml:/c.yaml:ro" "$(img opentelemetry-collector)" validate --config=/c.yaml \
+    -v /:/hostfs:ro -v "$DIR/otel-collector/config.yaml:/c.yaml:ro" "$(img opentelemetry-collector)" validate --config=/c.yaml \
     || die "otel-collector config invalid"
   docker run --rm --network none -e JAEGER_TTL=48h -v "$DIR/jaeger/config.yaml:/c.yaml:ro" "$(img jaeger)" validate --config=/c.yaml \
     || die "jaeger config invalid"

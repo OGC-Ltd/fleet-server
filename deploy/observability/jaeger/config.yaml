@@ -1,5 +1,5 @@
 # Jaeger v2: stores the traces the collector's tail sampling keeps, on disk
-# (Badger), for JAEGER_TTL (default 48 h). S3 keeps every span for good; this is
+# (Badger), for JAEGER_TTL (default 48 h). S3 keeps every span it receives; this is
 # the searchable recent window. Grafana › Explore › Jaeger reads it, and the UI
 # is on the box's loopback (ssh -L 16686:127.0.0.1:16686).
 service:
