@@ -79,6 +79,14 @@ export interface VehicleTelemetryFrame {
   extVoltageV?:      number | null
   intVoltageV?:      number | null
 
+  /**
+   * The tracker's own running odometer at this fix, in metres (Teltonika
+   * io_16), from the same message as the position. Absent where the unit sends
+   * none. Never carried forward: a day's distance is the span between the
+   * day's own readings.
+   */
+  odometerM?:        number | null
+
   // ── Fuel / FLS sensor ─────────────────────────────────────────────────────
   fuelLevelMl:       number | null
   fuelUsedMl:        number | null     // delta since last ping; negative = suspect theft

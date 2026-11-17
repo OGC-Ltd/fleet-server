@@ -636,6 +636,26 @@ export function readVoltages(params: Record<string, unknown> | null | undefined)
   return ext == null && int == null ? null : { ext, int }
 }
 
+/** The tracker's total odometer, metres: Teltonika io_16, or `odometer` on other firmwares. */
+const ODOMETER_PARAMS = ['io_16', 'odometer']
+/** Past this a reading is not an odometer: 10 million km. */
+const ODOMETER_LIMIT_M = 1e10
+
+/**
+ * The tracker's own running odometer in metres, from one message's params; null
+ * where the unit sends none (or 0, which Teltonika sends when the counter is off).
+ * Stored per fix so a day's distance is the counter's own count, not a GPS sum
+ * (operator, 18 Nov 2026: Weighbridges › Metrics, "store it, then use it").
+ */
+export function readOdometerM(params: Record<string, unknown> | null | undefined): number | null {
+  if (!params) return null
+  for (const k of ODOMETER_PARAMS) {
+    const v = asNumber(params[k])
+    if (v != null && v > 0 && v < ODOMETER_LIMIT_M) return Math.round(v)
+  }
+  return null
+}
+
 /**
  * The most a tracker accelerometer can report, in g. Teltonika's range tops out
  * at ±16 g; a value past it is not a reading.

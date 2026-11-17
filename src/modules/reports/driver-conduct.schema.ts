@@ -75,4 +75,7 @@ export const incidentSharedSchema = z.object({ shared: z.boolean() })
 export const dayRangeQuerySchema = z.object({ from: day, to: day })
   .refine((q) => q.from <= q.to, { message: 'From must not be after to', path: ['from'] })
 
+/** One fleet day's distance for the units named (Weighbridges › Metrics): the odometer, pulled from Wialon where not stored. */
+export const unitDistanceBodySchema = z.object({ day, vehicleIds: z.array(z.string().min(1).max(64)).min(1).max(500) })
+
 export const importIncidentsSchema = z.object({ entries: z.array(incidentSchema).max(20_000) })

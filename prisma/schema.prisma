@@ -2855,6 +2855,15 @@ model VehicleTelemetry {
   extVoltageV Float? @map("ext_voltage_v") @db.Real
   intVoltageV Float? @map("int_voltage_v") @db.Real
 
+  /// ── Odometer ─────────────────────────────────────────────────────────────
+  /// The tracker's own running odometer at this fix, in metres — Teltonika
+  /// io_16 (or `odometer`), from the same message as the position, never
+  /// carried forward. A day's distance is the span of the day's readings
+  /// (reports/range-reports dayKm), where a unit sends one; the GPS sum where
+  /// it does not (operator, 18 Nov 2026). Stored from the deploy on. DOUBLE,
+  /// not REAL: a REAL holding 10⁹ m resolves to about 64 m.
+  odometerM Float? @map("odometer_m")
+
   // Fuel (FLS sensor reading)
   fuelLevelMl Int? @map("fuel_level_ml") // calibrated tank level in millilitres
   fuelUsedMl  Int? @map("fuel_used_ml") // delta vs. previous ping (negative = impossible → flag)

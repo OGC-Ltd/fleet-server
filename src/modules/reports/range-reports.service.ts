@@ -41,18 +41,54 @@ export function rangeBounds(fromDay: string, toDay: string, maxDays: number): { 
 
 export const FUEL_RATE_MAX_DAYS = 31
 
+export type DistanceSource = 'odometer' | 'gps'
+export interface DayDistance { km: number; source: DistanceSource }
+
+/** The day's evidence for one unit, as dayKm's query returns it. */
+export interface DayKmEvidence {
+  gpsKm: number
+  /** The odometer's own count: the plausible steps between the day's readings, km. */
+  odoKm: number
+  odoReadings: number
+  fixes: number
+}
+
 /**
- * Kilometres per unit over one fleet day, "mileage in trips" as
- * fuel-balance.tripDistanceKm counts it, in SQL so a month of a large fleet is
- * not carried over the wire: consecutive fixes while moving (3 km/h and over),
- * no more than 20 minutes apart, steps under 20 m left out as jitter. It does
- * not drop the short blips that function does, so it can read a little higher.
+ * Which figure a unit's day is (operator, 18 Nov 2026: "store it, then use it").
+ * The tracker's odometer (io_16) where the unit sends one on at least half its
+ * fixes, as usage-review.compute judges it; the GPS sum otherwise, and on days
+ * before the odometer was stored. A counter that stood still while the GPS
+ * covered real ground is stuck, not parked: under half the GPS figure on a day
+ * of more than 5 km, the GPS figure stands.
  */
-async function dayKm(vehicleIds: string[], from: Date, to: Date): Promise<Map<string, number>> {
+export function pickDayKm(e: DayKmEvidence): DayDistance {
+  const usable = e.odoReadings >= 2 && e.fixes > 0 && e.odoReadings / e.fixes >= 0.5
+  const stuck = e.gpsKm > 5 && e.odoKm < e.gpsKm * 0.5
+  return usable && !stuck ? { km: e.odoKm, source: 'odometer' } : { km: e.gpsKm, source: 'gps' }
+}
+
+/** Over a range: the one source every day used, or "mixed". */
+export const rangeSource = (sources: Set<DistanceSource>): DistanceSource | 'mixed' | null =>
+  sources.size === 0 ? null : sources.size === 1 ? [...sources][0]! : 'mixed'
+
+/** The fastest a step between two odometer readings may imply; past it the step is a glitch. */
+export const ODO_MAX_KMH = 200
+
+/**
+ * Kilometres per unit over one fleet day: the tracker's odometer where it sends
+ * one (pickDayKm), else "mileage in trips" as fuel-balance.tripDistanceKm counts
+ * it, in SQL so a month of a large fleet is not carried over the wire:
+ * consecutive fixes while moving (3 km/h and over), no more than 20 minutes
+ * apart, steps under 20 m left out as jitter. It does not drop the short blips
+ * that function does, so it can read a little higher. The odometer counts each
+ * rise between consecutive readings, never a fall (a reset) nor a rise faster
+ * than ODO_MAX_KMH (a glitch).
+ */
+export async function dayKmEvidence(vehicleIds: string[], from: Date, to: Date): Promise<Map<string, DayKmEvidence>> {
   if (!vehicleIds.length) return new Map()
-  const rows = await reportDb().$queryRaw<Array<{ vehicle_id: string; km: number | null }>>`
+  const rows = await reportDb().$queryRaw<Array<{ vehicle_id: string; gps_km: number | null; odo_km: number | null; odo_n: number | bigint | null; fixes: number | bigint | null }>>`
     WITH p AS (
-      SELECT t.vehicle_id, t.captured_at, t.lat, t.lng, t.speed_kmh,
+      SELECT t.vehicle_id, t.captured_at, t.lat, t.lng, t.speed_kmh, t.odometer_m,
              LAG(t.lat) OVER w AS plat, LAG(t.lng) OVER w AS plng, LAG(t.captured_at) OVER w AS pt
         FROM vehicle_telemetries t
        WHERE t.vehicle_id = ANY(${vehicleIds}) AND t.captured_at >= ${from} AND t.captured_at < ${to}
@@ -63,19 +99,47 @@ async function dayKm(vehicleIds: string[], from: Date, to: Date): Promise<Map<st
              2 * 6371008.8 * asin(sqrt(power(sin(radians(lat - plat) / 2), 2)
                + cos(radians(plat)) * cos(radians(lat)) * power(sin(radians(lng - plng) / 2), 2))) AS m
         FROM p WHERE pt IS NOT NULL
+    ), g AS (
+      SELECT vehicle_id, SUM(m) / 1000 AS km
+        FROM s WHERE speed_kmh >= 3 AND gap <= interval '20 minutes' AND m >= 20
+       GROUP BY vehicle_id
+    ), o AS (
+      SELECT vehicle_id, odometer_m - LAG(odometer_m) OVER wo AS dm,
+             EXTRACT(EPOCH FROM captured_at - LAG(captured_at) OVER wo) AS ds
+        FROM p WHERE odometer_m IS NOT NULL
+      WINDOW wo AS (PARTITION BY vehicle_id ORDER BY captured_at)
+    ), ok AS (
+      SELECT vehicle_id,
+             SUM(CASE WHEN dm > 0 AND ds > 0 AND dm / ds * 3.6 <= ${ODO_MAX_KMH} THEN dm ELSE 0 END) / 1000 AS km
+        FROM o GROUP BY vehicle_id
+    ), n AS (
+      SELECT vehicle_id, COUNT(*) AS fixes, COUNT(odometer_m) AS odo_n FROM p GROUP BY vehicle_id
     )
-    SELECT vehicle_id, SUM(m) / 1000 AS km
-      FROM s WHERE speed_kmh >= 3 AND gap <= interval '20 minutes' AND m >= 20
-     GROUP BY vehicle_id`
-  return new Map(rows.map((r) => [r.vehicle_id, Number(r.km ?? 0)]))
+    SELECT n.vehicle_id, g.km AS gps_km, ok.km AS odo_km, n.odo_n, n.fixes
+      FROM n LEFT JOIN g USING (vehicle_id) LEFT JOIN ok USING (vehicle_id)`
+  return new Map(rows.map((r) => [r.vehicle_id, {
+    gpsKm: Number(r.gps_km ?? 0), odoKm: Number(r.odo_km ?? 0),
+    odoReadings: Number(r.odo_n ?? 0), fixes: Number(r.fixes ?? 0),
+  }]))
+}
+
+async function dayKm(vehicleIds: string[], from: Date, to: Date): Promise<Map<string, DayDistance>> {
+  const ev = await dayKmEvidence(vehicleIds, from, to)
+  return new Map([...ev].map(([id, e]) => [id, pickDayKm(e)]))
 }
 
 /** A finished day does not change: kept, per organisation and day, for the next run. */
-const kmCache = new Map<string, Map<string, number>>()
+const kmCache = new Map<string, Map<string, DayDistance>>()
 const KM_CACHE_MAX = 2_000
 
-async function rangeKm(orgId: string, vehicleIds: string[], days: string[], now: number): Promise<Map<string, number>> {
+/** A day's odometer readings were filled from Wialon (unit-distance): its cached distances are stale. */
+export function forgetDayKm(orgId: string, day: string) {
+  for (const k of [...kmCache.keys()]) if (k.startsWith(`${orgId}|${day}|`)) kmCache.delete(k)
+}
+
+async function rangeKm(orgId: string, vehicleIds: string[], days: string[], now: number) {
   const total = new Map<string, number>()
+  const sources = new Map<string, Set<DistanceSource>>()
   for (const day of days) {
     const { from, to: end } = fleetDayBounds(day)!
     const key = `${orgId}|${day}|${vehicleIds.length}`
@@ -88,9 +152,12 @@ async function rangeKm(orgId: string, vehicleIds: string[], days: string[], now:
         kmCache.set(key, km)
       }
     }
-    for (const [id, k] of km) total.set(id, (total.get(id) ?? 0) + k)
+    for (const [id, d] of km) {
+      total.set(id, (total.get(id) ?? 0) + d.km)
+      sources.set(id, (sources.get(id) ?? new Set()).add(d.source))
+    }
   }
-  return total
+  return { total, sources }
 }
 
 /** The tank at the start and end of the range: the middle of the first and last 7 readings. */
@@ -111,6 +178,8 @@ async function edgeLevels(vehicleIds: string[], from: Date, to: Date) {
 export interface FuelRateRow {
   vehicleId: string; plate: string; model: string | null
   distanceKm: number
+  /** Where the distance came from: the tracker's odometer, the GPS sum, or both over a range. Null with no fixes. */
+  distanceSource: DistanceSource | 'mixed' | null
   startL: number | null; filledL: number; theftL: number; endL: number | null
   /** Null where it cannot be worked out, or cannot be believed (reportableConsumptionL). */
   consumedL: number | null
@@ -130,7 +199,7 @@ export async function fuelConsumptionRate(orgId: string, scope: Set<string> | nu
     orderBy: { registrationPlate: 'asc' },
   })
   const ids = vehicles.map((v) => v.id)
-  const [km, edges, fillings, drains] = await Promise.all([
+  const [{ total: km, sources }, edges, fillings, drains] = await Promise.all([
     rangeKm(orgId, ids, days, now),
     edgeLevels(ids, from, to),
     reportDb().fuelFilling.findMany({
@@ -167,7 +236,7 @@ export async function fuelConsumptionRate(orgId: string, scope: Set<string> | nu
       : distanceKm < 1 ? 'Did not move' : ''
     return {
       vehicleId: v.id, plate: v.registrationPlate, model: v.model,
-      distanceKm, startL: bal.startL, filledL: bal.filledL, theftL: bal.theftL, endL: bal.endL,
+      distanceKm, distanceSource: rangeSource(sources.get(v.id) ?? new Set()), startL: bal.startL, filledL: bal.filledL, theftL: bal.theftL, endL: bal.endL,
       consumedL, kmPerL, target,
       belowTarget: kmPerL != null && target ? kmPerL < target.kmPerL : null,
       note,

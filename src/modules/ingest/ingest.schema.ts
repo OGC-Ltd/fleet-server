@@ -26,6 +26,8 @@ export const telemetryPayloadSchema = z.object({
   /** Supply voltages at this fix, volts: the vehicle's electrics and the tracker's own battery. */
   extVoltageV:    z.number().min(0).max(60).optional(),
   intVoltageV:    z.number().min(0).max(60).optional(),
+  /** The tracker's own running odometer at this fix, metres (Teltonika io_16). */
+  odometerM:      z.number().positive().max(1e10).optional(),
   fuelLevelMl:    z.number().int().nonnegative().optional(),
   fuelUsedMl:     z.number().int().optional(),
   cargoWeightKg:  z.number().nonnegative().optional(),

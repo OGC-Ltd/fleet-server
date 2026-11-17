@@ -12,7 +12,7 @@ const pool = {
     const sql = strings.join('?')
     queries.push(sql)
     if (sql.includes('array_agg')) return [{ id: 'v1', first: [128_000, 128_100, 127_900], last: [129_100, 129_000] }, { id: 'v2', first: null, last: null }]
-    return [{ vehicle_id: 'v1', km: 32.1 }]
+    return [{ vehicle_id: 'v1', gps_km: 32.1, odo_km: null, odo_n: 0, fixes: 400 }]
   }),
   fuelFilling: { findMany: vi.fn(async () => [{ vehicleId: 'v1', filledAt: new Date(T0 + 11 * 3_600_000), verdict: 'REFILL', observedRiseMl: 10_500, filledMl: 13_800, initialFuelLevelMl: null, finalFuelLevelMl: null }]) },
   fuelTheft: { findMany: vi.fn(async () => []) },
@@ -65,11 +65,11 @@ describe('fuel consumption rate', () => {
     const out = await fuelConsumptionRate('o', null, '2026-11-06', '2026-11-07', T0 + 30 * 86_400_000)
     const [kda, kcx] = [out.rows.find((r) => r.plate === 'KDA 258J')!, out.rows.find((r) => r.plate === 'KCX 001A')!]
     // km summed over both days; tank 128.0 -> 129.1 with a 10.5 L refill
-    expect(kda).toMatchObject({ distanceKm: 64.2, startL: 128, filledL: 10.5, endL: 129.1, consumedL: 9.4, target: { kmPerL: 4.7 } })
+    expect(kda).toMatchObject({ distanceKm: 64.2, distanceSource: 'gps', startL: 128, filledL: 10.5, endL: 129.1, consumedL: 9.4, target: { kmPerL: 4.7 } })
     expect(kda.kmPerL).toBeCloseTo(6.83, 2)
     expect(kda.belowTarget).toBe(false)
     // no probe: no figures, and says why, rather than 0 L
-    expect(kcx).toMatchObject({ startL: null, consumedL: null, kmPerL: null, note: 'No fuel probe', target: { kmPerL: 5.8 } })
+    expect(kcx).toMatchObject({ distanceSource: null, startL: null, consumedL: null, kmPerL: null, note: 'No fuel probe', target: { kmPerL: 5.8 } })
     expect(out.totals).toMatchObject({ units: 2, measured: 1, consumedL: 9.4 })
     expect(queries.filter((q) => q.includes('LAG(')).length).toBe(2)
   })

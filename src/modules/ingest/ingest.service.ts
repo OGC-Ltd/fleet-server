@@ -69,6 +69,15 @@ export function voltColumns(dto: TelemetryPayload): { extVoltageV: number | null
   return { extVoltageV: v(dto.extVoltageV), intVoltageV: v(dto.intVoltageV) }
 }
 
+/**
+ * The odometer column for one frame, whole metres. Re-checked as the voltages
+ * are, since the poller skips the HTTP schema. `null` when absent.
+ */
+export function odometerColumns(dto: TelemetryPayload): { odometerM: number | null } {
+  const v = dto.odometerM
+  return { odometerM: typeof v === 'number' && Number.isFinite(v) && v > 0 && v < 1e10 ? Math.round(v) : null }
+}
+
 export async function processTelemetry(
   orgId: string,
   dto: TelemetryPayload,
@@ -135,6 +144,8 @@ export async function processTelemetry(
       ...accelColumns(dto),
       // Supply voltages, written in the same change that adds the columns.
       ...voltColumns(dto),
+      // The tracker's odometer, written in the same change that adds the column.
+      ...odometerColumns(dto),
       fuelLevelMl:   dto.fuelLevelMl,
       fuelUsedMl:    dto.fuelUsedMl,
       cargoWeightKg: dto.cargoWeightKg,
