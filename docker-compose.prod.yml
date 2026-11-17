@@ -53,8 +53,16 @@ x-app: &app
 services:
   server:
     <<: *app
+    # The heap ceiling is set, not left to node. Without the flag node sizes
+    # it from the CONTAINER's limit (about a quarter of it: ~384 MB under
+    # 1536m), where under pm2 it sized it from the box's 3.8 GB (~950 MB).
+    # The same app would hit "JavaScript heap out of memory" under real load
+    # in the container. 1024 keeps today's ceiling and leaves ~500 MB of the
+    # limit for buffers and native memory. Change both numbers together.
+    command: ["node", "--max-old-space-size=1024", "dist/src/index.js"]
     ports:
-      # Loopback only. Phase 4 removes this: the edge reaches server:3000 itself.
+      # Loopback only. Keep it through phase 4 as well: deploy.yml's health
+      # check and fleet-deploy's wait_healthy both curl 127.0.0.1:3000/health.
       - "127.0.0.1:${SERVER_HOST_PORT:-3001}:3000"
     # Uses about 1 GB today under pm2. Swap stays allowed (Docker's default,
     # 2x the limit): under pm2 it can swap, and a hard cut would OOM-kill it.

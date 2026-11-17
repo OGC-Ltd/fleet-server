@@ -53,6 +53,7 @@ import { reverseGeocode } from './lib/geocode.js'
 import { prisma } from './lib/prisma.js'
 import * as roleCtrl from './modules/roles/role.controller.js'
 import { listQuerySchema } from './modules/roles/role.schema.js'
+import { cspReportHandler, CSP_REPORT_TYPES } from './modules/csp/csp-report.js'
 import { validateQuery, validateBody } from './middleware/validate.js'
 import * as userCtrl from './modules/users/user.controller.js'
 import { provisionUserSchema } from './modules/users/user.schema.js'
@@ -121,6 +122,10 @@ export function createApp() {
 
 
   const v1 = '/api/v1'
+
+  // The site's Content-Security-Policy reports (report-only for now; see
+  // modules/csp/csp-report). No auth: browsers send these on their own.
+  app.post(`${v1}/csp-report`, express.json({ type: CSP_REPORT_TYPES, limit: '16kb' }), cspReportHandler)
 
   // Simulation clock — lets the dashboard extrapolate sim time client-side
   // without polling on every tick. Returns the current sim timestamp and the

@@ -19,9 +19,16 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# One run per COMMIT, never cancelled. In container mode every commit's deploy
+# (deploy.yml -> fleet-deploy up <sha>) waits for that commit's own image. A
+# per-branch group with cancel-in-progress let a later push (even docs only)
+# cancel the earlier build: that commit's deploy then waited 20 min for an
+# image that never came and failed, and a docs-only follow-up deploys nothing,
+# so production stayed on the old code. A per-branch group WITHOUT cancelling
+# is no better: GitHub keeps one pending run per group and drops the older one.
 concurrency:
-  group: fleet-server-images-${{ github.ref }}
-  cancel-in-progress: true
+  group: fleet-server-images-${{ github.sha }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -30,6 +37,10 @@ env:
   IMAGE: fleet-server          # local name for build, test and scan
   AWS_REGION: af-south-1
   TRIVY_IMAGE: aquasec/trivy:0.58.1
+  # New per run, the SAME for every build below: each run takes Debian's
+  # latest fixes (see the Dockerfile's base stage), and the push steps reuse
+  # the base layer this run built, scanned and booted.
+  APT_REFRESH: ${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   image:
@@ -44,25 +55,27 @@ jobs:
       contents: read
       id-token: write          # GitHub OIDC token, exchanged for the ECR push role
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: build the runtime image (local, not pushed yet)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           target: runtime
+          build-args: APT_REFRESH=${{ env.APT_REFRESH }}
           load: true
           tags: ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha,scope=runtime
           cache-to: type=gha,mode=max,scope=runtime
 
       - name: build the migrate image (local, not pushed yet)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           target: migrate
+          build-args: APT_REFRESH=${{ env.APT_REFRESH }}
           load: true
           tags: ${{ env.IMAGE }}:${{ github.sha }}-migrate
           cache-from: type=gha,scope=runtime
@@ -114,6 +127,19 @@ jobs:
           docker logs app 2>&1 | tail -40
           [ "$s" = healthy ] || { echo "::error::the server image did not become healthy ($s)"; exit 1; }
           docker exec app node -e "fetch('http://127.0.0.1:3000/api/v1/sim-clock').then(r=>{console.log('sim-clock',r.status);process.exit(r.ok?0:1)})"
+          # The leader lock (src/lib/leader-lock.ts) on a real Postgres: a second
+          # holder is refused, and the lock is free again once released. The
+          # boot above runs with the poller off, so it never takes the lock itself.
+          docker exec app node -e "
+            import('/app/dist/src/lib/leader-lock.js').then(async m => {
+              const o = { connectionString: process.env.DATABASE_URL, waitMs: 0, onLost() {}, log: { info() {}, warn() {}, error() {} } }
+              const first = await m.acquireLeaderLock(o)
+              const second = await m.acquireLeaderLock(o).then(l => (l.release(), 'TAKEN TWICE'), e => e.name)
+              await first.release()
+              const again = await m.acquireLeaderLock(o).then(async l => (await l.release(), 'taken'), e => e.name)
+              console.log('leader lock: second holder', second, '/ after release', again)
+              process.exit(second === 'LeaderLockTimeout' && again === 'taken' ? 0 : 1)
+            }).catch(e => { console.error(e); process.exit(1) })"
           docker rm -f app pg >/dev/null; docker network rm boot >/dev/null; rm -f boot.env
 
       - name: scan both images (fail on fixable HIGH/CRITICAL)
@@ -140,7 +166,7 @@ jobs:
 
       - name: sign in to AWS (OIDC, this run only)
         if: steps.gate.outputs.push == 'true'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE_ARN }}
           role-session-name: fleet-server-images-${{ github.run_id }}
@@ -149,14 +175,15 @@ jobs:
       - name: log in to ECR
         if: steps.gate.outputs.push == 'true'
         id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
 
       - name: push with SBOM and provenance
         if: steps.gate.outputs.push == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           target: runtime
+          build-args: APT_REFRESH=${{ env.APT_REFRESH }}
           push: true
           sbom: true
           provenance: mode=max
@@ -165,10 +192,11 @@ jobs:
 
       - name: push the migrate image
         if: steps.gate.outputs.push == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           target: migrate
+          build-args: APT_REFRESH=${{ env.APT_REFRESH }}
           push: true
           sbom: true
           provenance: mode=max

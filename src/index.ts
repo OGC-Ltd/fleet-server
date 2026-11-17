@@ -1,6 +1,7 @@
 import { env } from './config/env.js'
 import { createApp } from './app.js'
 import { connectDB, disconnectDB } from './lib/prisma.js'
+import { acquireLeaderLock, type LeaderLock } from './lib/leader-lock.js'
 import { logger } from './lib/logger.js'
 import { startPoller } from './lib/poller.js'
 import { startDbFollower } from './lib/db-follower.js'
@@ -36,10 +37,40 @@ import { ensureAllOrganisationsHaveCatalogueRoles } from './modules/roles/role.c
 async function main() {
   await connectDB()
 
+  // Before ANYTHING starts: only one server may poll and run the background
+  // jobs, whether pm2 or a container started it (lib/leader-lock.ts). A second
+  // one exits here, having started nothing. Instances with the poller off (the
+  // read-only shadow, the preview, CI's boot test) skip the lock.
+  let leader: LeaderLock | null = null
+  if (env.POLL_ENABLED && env.LEADER_LOCK_ENABLED) {
+    try {
+      leader = await acquireLeaderLock({
+        connectionString: env.DATABASE_URL,
+        waitMs: env.LEADER_LOCK_WAIT_S * 1000,
+        log: logger,
+        // SIGTERM runs the normal shutdown below; pm2 or Docker restarts the
+        // process, and the restart takes the lock again.
+        onLost: () => { process.kill(process.pid, 'SIGTERM') },
+      })
+    } catch (err) {
+      logger.fatal({ err }, 'Not starting: another fleet-server is already running the poller (pm2 and containers at once?)')
+      await disconnectDB().catch(() => {})
+      process.exit(1)
+    }
+  } else if (env.POLL_ENABLED) {
+    logger.warn('LEADER_LOCK_ENABLED=false: nothing stops a second server polling beside this one')
+  }
+
   // Every organisation holds the standard roles; ones created since the last
   // seed run had none (modules/roles/role.catalogue). Additive, off the
   // critical path, and it never fails the boot.
   void ensureAllOrganisationsHaveCatalogueRoles()
+
+  // A second server beside the one that runs the jobs (fleet-parallel) starts
+  // none of them, and leaves their schedules in Redis alone — see config/env.
+  const jobs = env.SCHEDULED_JOBS_ENABLED
+  const notStarted = { stop: async () => {} }
+  if (!jobs) logger.warn('SCHEDULED_JOBS_ENABLED=false — no scheduled job started here; their schedules in Redis are left to the server that runs them')
 
   const app = createApp()
 
@@ -70,10 +101,10 @@ async function main() {
   void warmRoadRoutes(staticRoutePairs())
   // Hourly AI operations brief per org (dashboard/ai-insight.ts) — generated
   // in the background so the endpoint always answers from memory.
-  const stopAiInsightWarmer = startAiInsightWarmer()
+  const stopAiInsightWarmer = jobs ? startAiInsightWarmer() : () => {}
   // Each unit's insight, rewritten in the background when its signals change,
   // so a click on the map reads it instantly (vehicles/vehicle-insight.ts).
-  const stopVehicleInsightSweep = startVehicleInsightSweep()
+  const stopVehicleInsightSweep = jobs ? startVehicleInsightSweep() : () => {}
   // Menengai's unauthorised stops, checked here once a minute and toasted to
   // whoever may see the unit (modules/stop-watch).
   const stopStopWatch = startStopWatch()
@@ -103,39 +134,39 @@ async function main() {
   // reconcile safety net for the deliveries their sender retries a few times
   // and then drops. Independent of POLL_ENABLED: an API-only instance still
   // wants its operations feed to be complete, and the writes are idempotent.
-  const raiFactorySuite = startRaiFactorySuiteReconciler()
+  const raiFactorySuite = jobs ? startRaiFactorySuiteReconciler() : { stop: () => {} }
 
   // Notification retention — a BullMQ repeatable job that deletes items past
   // NOTIFICATION_RETENTION_DAYS. No-op without REDIS_URL, which is the current
   // production state: the t3.micro is already swapping, so Redis only arrives
   // after the instance is resized. Until then notifications persist to
   // Postgres and accumulate — see lib/queues/retention.ts.
-  const retention = await startRetentionSweep()
+  const retention = jobs ? await startRetentionSweep() : notStarted
 
   // Fuel fillings and drains from Wialon's reports onto the Live Feed. This
   // one has to run IN-PROCESS: the notification read path serves its first
   // page from the Redis cache, and the equivalent CLI (`npm run sync:fuel`)
   // cannot write that cache, so its items were durable but invisible.
   // Also no-op without REDIS_URL — see lib/queues/fuel-events.ts.
-  const fuelSync = await startFuelSync()
+  const fuelSync = jobs ? await startFuelSync() : notStarted
   // Verdicts on their OWN clock, every minute. This used to ride on the fuel
   // sync's quarter-hourly cadence, which is set by what Wialon costs to ask —
   // a cost this pass does not incur, since it reads rows we already hold. That
   // put up to fifteen minutes of dead wait between a drain ripening and
   // anything looking at it. See lib/queues/fuel-events.ts.
-  const fuelAdjudication = await startFuelAdjudication()
+  const fuelAdjudication = jobs ? await startFuelAdjudication() : notStarted
   // Stage two of the parked-fall rule: what each fall the live watch raised
   // turned out to be, once the machine next started — see lib/queues/parked-falls.
-  const parkedFalls = await startParkedFallVerdicts()
+  const parkedFalls = jobs ? await startParkedFallVerdicts() : notStarted
   // FUEL RATE and FUEL DOWN as one summary a day instead of one alert per
   // drop (FUEL_RATE_ALERTS) — see lib/queues/fuel-rate-digest.
-  const fuelRateDigest = await startFuelRateDigest()
+  const fuelRateDigest = jobs ? await startFuelRateDigest() : notStarted
   // Completed dispatches → measured trips. Nothing else writes that table
   // since the simulator was retired — see lib/queues/trips.
-  const tripBuild = await startTripBuild()
+  const tripBuild = jobs ? await startTripBuild() : notStarted
   // Units added, renamed or deleted in Wialon → vehicles rows, every 30 minutes.
   // Replaces running `npm run sync:<fleet> -- --apply` by hand — see lib/queues/wialon-registry.
-  const wialonRegistry = await startWialonRegistrySync()
+  const wialonRegistry = jobs ? await startWialonRegistrySync() : notStarted
   // Mail and durable notifications, off the request thread. Unlike the three
   // above this one is NOT conditional on Redis in its effect: with no
   // REDIS_URL the publishers send inline exactly as they did before, so a
@@ -181,6 +212,9 @@ async function main() {
     await disconnectRedis().catch((err) => logger.warn({ err }, 'Redis disconnect failed'))
     server.close(async () => {
       await disconnectDB()
+      // Last, once every writer above has stopped. (On the 10 s exit below the
+      // process's death releases it just the same.)
+      await leader?.release()
       logger.info('Graceful shutdown complete')
       process.exit(0)
     })

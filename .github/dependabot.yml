@@ -1,0 +1,36 @@
+# Update PRs for npm and GitHub Actions. Merging one to main DEPLOYS (deploy.yml),
+# so they are grouped to keep the count down, and each is reviewed like any PR.
+#
+# Not covered: the Docker base images. The Dockerfile takes them from an ARG
+# (NODE_IMAGE, pinned by digest), which Dependabot does not read; bump that by
+# hand. Security updates (Dependabot alerts -> PR) are switched on in the repo
+# settings, not here.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Africa/Nairobi
+    open-pull-requests-limit: 5
+    groups:
+      # patch and minor releases of everything, as one PR a week
+      npm-minor:
+        update-types: [minor, patch]
+    ignore:
+      # majors are their own planned change, never a weekly PR
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Africa/Nairobi
+    groups:
+      actions:
+        patterns: ["*"]

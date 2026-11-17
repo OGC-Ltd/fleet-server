@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# fleet-parallel: the container server serving a share of live traffic BESIDE
+# pm2, with the poller and the scheduled jobs off. docs/parallel-run.md.
+#
+#   sudo fleet-parallel up <sha>          start (or replace) the container on 127.0.0.1:3002; sends it nothing by itself
+#   sudo fleet-parallel weight <0-90>     the percentage of clients host nginx sends to it (0 = pm2 only)
+#   sudo fleet-parallel status
+#   sudo fleet-parallel down              weight 0, then stop and remove the container
+#
+# What stays with pm2 whatever the weight: the poller, the leader lock, every
+# scheduled job, the report-worker and /webhook (the webhook raises alerts on
+# pm2's in-process bus, which only pm2's own map streams carry). 100% is not
+# offered: sending everything to the container is the cutover
+# (fleet-deploy cutover), which stops pm2 and starts the container WITH the
+# poller. Run `down` before it; cutover refuses while this runs.
+#
+# The split, in host nginx:
+#   /etc/nginx/conf.d/fleet-api-split.conf   upstream fleet_api_split: pm2 :3000 and this :3002, by weight
+#   /etc/nginx/fleet/locations.conf          its /api/ proxy_pass names that upstream instead of :3000
+# One BROWSER stays on one server: nginx hashes the fleet_did cookie the API
+# sets on every token refresh (middleware/device-id), and the address only for
+# a browser that has none yet. Not the address alone: one office behind one NAT
+# sent 97% of /api on 2026-11-16, so an address hash would have moved that
+# whole office at once. Permissions and some caches live in each process's
+# memory, so a change made through one server shows on the other only when its
+# cache expires. When the container fails
+# (3 errors), nginx sends its clients to pm2 for 30 s, then tries again; a
+# request nginx never managed to send is retried on pm2 at once.
+#
+# Install (root-owned):
+#   sudo install -o root -g root -m 755 deploy/box/fleet-parallel /usr/local/sbin/fleet-parallel
+#   sudo install -o root -g root -m 644 docker-compose.parallel.yml /etc/fleet/compose/
+set -Eeuo pipefail
+
+REGION=af-south-1
+COMPOSE_DIR=/etc/fleet/compose
+PROJECT=fleet-parallel
+PORT=3002
+LIVE_DIR=/home/ubuntu/prod/fleet-server
+SOURCE_ENV=/etc/fleet/server.env
+ENV_FILE=/etc/fleet/parallel.env
+STATE=/etc/fleet/parallel.deployed
+CACHE_DIR=/var/lib/fleet-parallel/cache
+VSS_TMP=/tmp/fleet-server-vss-session.json
+LOCATIONS=/etc/nginx/fleet/locations.conf
+UPSTREAM=/etc/nginx/conf.d/fleet-api-split.conf
+DIRECT='proxy_pass http://127.0.0.1:3000/api/;'
+SPLIT='proxy_pass http://fleet_api_split/api/;'
+MAX_WEIGHT=90
+MIN_FREE_GIB=3
+MIN_MEM_MB=1200            # MemAvailable needed to start it beside pm2
+PULL_WAIT_S=${PULL_WAIT_S:-0}   # CI passes 1200: its image may still be on the way
+
+die() { echo "fleet-parallel: $*" >&2; exit 1; }
+say() { echo "--- $*"; }
+[ "$(id -u)" = 0 ] || die "run as root (sudo)"
+for f in docker-compose.prod.yml docker-compose.parallel.yml; do
+  [ -f "$COMPOSE_DIR/$f" ] || die "missing $COMPOSE_DIR/$f"
+done
+
+valid_sha() { [[ "${1:-}" =~ ^[0-9a-f]{40}$ ]] || die "expected a 40-character commit sha, got '${1:-}'"; }
+current() { [ -f "$STATE" ] && sed -n 1p "$STATE" || true; }
+answers() { curl -fsS -m 5 -o /dev/null "$1"; }
+
+# pm2's own paths for what the two servers share.
+pm2_env() { grep -E "^$1=" "$LIVE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | sed -E "s/^['\"](.*)['\"]$/\1/" || true; }
+reports_dir() { local d; d=$(pm2_env REPORT_STORE_DIR); echo "${d:-$LIVE_DIR/.cache/reports}"; }
+investigations_dir() { local d; d=$(pm2_env REPORT_STORE_DIR); if [ -n "$d" ]; then echo "$(dirname "$d")/investigations"; else echo "$LIVE_DIR/.cache/investigations"; fi; }
+
+compose() {
+  FLEET_SERVER_IMAGE="${IMAGE:-unused}" FLEET_ENV_FILE="$ENV_FILE" \
+  PARALLEL_UID="$(id -u ubuntu)" PARALLEL_GID="$(id -g ubuntu)" PARALLEL_CACHE_DIR="$CACHE_DIR" \
+  PM2_REPORTS_DIR="$(reports_dir)" PM2_INVESTIGATIONS_DIR="$(investigations_dir)" \
+    docker compose -f "$COMPOSE_DIR/docker-compose.prod.yml" -f "$COMPOSE_DIR/docker-compose.parallel.yml" -p "$PROJECT" "$@"
+}
+quiet() { local out; out=$("$@" 2>&1) || { printf '%s\n' "$out" | tail -15 >&2; return 1; }; }
+
+registry() {
+  local account; account=$(aws sts get-caller-identity --query Account --output text)
+  echo "${account}.dkr.ecr.${REGION}.amazonaws.com"
+}
+
+pull() {
+  local img=$1 reg=$2 free waited=0
+  free=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+  [ "$free" -ge "$MIN_FREE_GIB" ] || die "only ${free} GiB free on /, need ${MIN_FREE_GIB}"
+  docker image inspect "$img" >/dev/null 2>&1 && return 0
+  trap 'docker logout "$reg" >/dev/null 2>&1 || true' EXIT
+  aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$reg" >/dev/null
+  until docker pull -q "$img" >/dev/null 2>&1; do
+    [ "$waited" -lt "$PULL_WAIT_S" ] || { docker logout "$reg" >/dev/null; trap - EXIT; die "cannot pull ${img##*/}"; }
+    [ "$waited" = 0 ] && echo "waiting for CI to push ${img##*/} ..."
+    sleep 20; waited=$((waited + 20))
+  done
+  docker logout "$reg" >/dev/null; trap - EXIT
+}
+
+# The live env with the four settings that make a second server harmless. Each
+# is checked in the written file, not assumed.
+write_env() {
+  [ -f "$SOURCE_ENV" ] || die "missing $SOURCE_ENV (fleet-secrets render)"
+  [ "$(stat -c '%U %a' "$SOURCE_ENV")" = "root 600" ] || die "$SOURCE_ENV must be owned by root, mode 600"
+  # Settings added to pm2's .env since server.env was written would be missing
+  # in the container (on 2026-11-17: UPLOADS_S3_BUCKET/PREFIX, WORK_PLANNER_HOOK,
+  # WIALON_REGISTRY_SYNC), so its users would get different behaviour.
+  local missing
+  missing=$(comm -23 <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$LIVE_DIR/.env" | tr -d = | sort -u) \
+                     <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$SOURCE_ENV" | tr -d = | sort -u) \
+              | grep -vxE 'NODE_ENV|VSS_SESSION_FILE' | paste -sd' ' || true)
+  [ -z "$missing" ] || die "$SOURCE_ENV lacks settings pm2's .env has: ${missing}. Add them first"
+  local tmp k
+  tmp=$(mktemp /etc/fleet/.parallel.env.XXXXXX); chmod 600 "$tmp"
+  {
+    grep -vE '^(POLL_ENABLED|FOLLOW_DB|SCHEDULED_JOBS_ENABLED|LEADER_LOCK_ENABLED|DB_POOL_MAX)=' "$SOURCE_ENV" || true
+    echo "# fleet-parallel: written $(date -u +%FT%TZ) from $SOURCE_ENV; rewritten by every 'up'"
+    echo "POLL_ENABLED=false"
+    echo "FOLLOW_DB=true"
+    echo "SCHEDULED_JOBS_ENABLED=false"
+    echo "LEADER_LOCK_ENABLED=true"
+    # A smaller pool: pm2's server (14), its report-worker and this all share RDS's connection limit.
+    echo "DB_POOL_MAX=8"
+  } > "$tmp"
+  for k in POLL_ENABLED=false FOLLOW_DB=true SCHEDULED_JOBS_ENABLED=false; do
+    [ "$(grep -cE "^${k%%=*}=" "$tmp")" = 1 ] && grep -qx "$k" "$tmp" || { rm -f "$tmp"; die "could not set $k in the env"; }
+  done
+  mv -f "$tmp" "$ENV_FILE"
+}
+
+# An image older than SCHEDULED_JOBS_ENABLED would ignore it and run every job
+# beside pm2's. Read from the image itself, with no network.
+supports_switch() {
+  docker run --rm --network none --entrypoint /bin/grep "$1" -q SCHEDULED_JOBS_ENABLED /app/dist/src/index.js
+}
+
+wait_healthy() {
+  local st=missing
+  for _ in $(seq 1 40); do
+    st=$(docker inspect -f '{{.State.Health.Status}}' "${PROJECT}-server-1" 2>/dev/null || echo missing)
+    [ "$st" = healthy ] && answers "http://127.0.0.1:${PORT}/health" && return 0
+    sleep 3
+  done
+  echo "container is $st"; return 1
+}
+
+# --- the split in host nginx -------------------------------------------------
+weight() {
+  if grep -qF "$SPLIT" "$LOCATIONS" 2>/dev/null; then
+    sed -n 's/^# weight \([0-9]*\)$/\1/p' "$UPSTREAM" 2>/dev/null | head -1
+  else echo 0; fi
+}
+
+nginx_apply() {   # restores both files and dies when nginx rejects them or /api stops answering
+  local loc_bak=$1 up_bak=$2
+  if nginx -t >/dev/null 2>&1 && systemctl reload nginx && sleep 1 && answers http://127.0.0.1/api/v1/sim-clock; then
+    return 0
+  fi
+  install -m 644 "$loc_bak" "$LOCATIONS"
+  if [ -s "$up_bak" ]; then install -m 644 "$up_bak" "$UPSTREAM"; else rm -f "$UPSTREAM"; fi
+  nginx -t >/dev/null 2>&1 && systemctl reload nginx
+  die "nginx rejected the change, or /api stopped answering through it; both files restored (weight $(weight))"
+}
+
+set_weight() {
+  local w=$1 tmp loc_bak up_bak
+  [[ "$w" =~ ^[0-9]+$ ]] && [ "$w" -le "$MAX_WEIGHT" ] || die "weight is a whole percentage, 0 to ${MAX_WEIGHT} (100% is the cutover)"
+  [ -f "$LOCATIONS" ] || die "missing $LOCATIONS"
+  local n_direct n_split
+  n_direct=$(grep -cF "$DIRECT" "$LOCATIONS" || true); n_split=$(grep -cF "$SPLIT" "$LOCATIONS" || true)
+  [ $((n_direct + n_split)) = 1 ] || die "$LOCATIONS has ${n_direct} direct and ${n_split} split /api proxy_pass lines, expected one: look by hand"
+  # Kept in /etc/fleet, not removed on purpose: the last copy before a change.
+  loc_bak=/etc/fleet/parallel.locations.bak; up_bak=/etc/fleet/parallel.upstream.bak
+  : > "$up_bak"
+  cp "$LOCATIONS" "$loc_bak"; [ -f "$UPSTREAM" ] && cp "$UPSTREAM" "$up_bak"
+
+  if [ "$w" = 0 ]; then
+    [ "$n_split" = 1 ] || { echo "weight already 0: pm2 serves all of /api"; return 0; }
+    sed "s#${SPLIT}#${DIRECT}#" "$loc_bak" > "$LOCATIONS.new" && install -m 644 "$LOCATIONS.new" "$LOCATIONS"; rm -f "$LOCATIONS.new"
+    nginx_apply "$loc_bak" "$up_bak"
+    echo "WEIGHT 0: pm2 serves all of /api (the container still runs; down removes it)"
+    return 0
+  fi
+
+  [ -n "$(current)" ] || die "no parallel container: fleet-parallel up <sha> first"
+  answers "http://127.0.0.1:${PORT}/health" || die "the container on :${PORT} does not answer /health"
+  answers "http://127.0.0.1:3000/health" || die "pm2 on :3000 does not answer /health"
+  systemctl is-active -q nginx || die "host nginx is not running (phase 4?): the split lives in host nginx"
+  tmp=$(mktemp)
+  cat > "$tmp" <<EOF
+# Written by fleet-parallel (deploy/box/fleet-parallel). Do not edit: it is
+# rewritten by every 'fleet-parallel weight', and removed by 'down'.
+# weight ${w}
+# One browser, one server: its fleet_did cookie, or for a browser without one
+# its address (the forwarded one first: the LiteSpeed proxy sends many from one).
+map \$cookie_fleet_did \$fleet_split_key {
+    ""      \$http_x_forwarded_for\$remote_addr;
+    default \$cookie_fleet_did;
+}
+upstream fleet_api_split {
+    hash \$fleet_split_key consistent;
+    server 127.0.0.1:3000 weight=$((100 - w));
+    server 127.0.0.1:${PORT} weight=${w} max_fails=3 fail_timeout=30s;
+}
+EOF
+  install -m 644 "$tmp" "$UPSTREAM"; rm -f "$tmp"
+  if [ "$n_direct" = 1 ]; then
+    sed "s#${DIRECT}#${SPLIT}#" "$loc_bak" > "$LOCATIONS.new" && install -m 644 "$LOCATIONS.new" "$LOCATIONS"; rm -f "$LOCATIONS.new"
+  fi
+  nginx_apply "$loc_bak" "$up_bak"
+  echo "WEIGHT ${w}: about ${w}% of clients' /api goes to the container ($(current | cut -c1-7)), the rest to pm2; /webhook stays on pm2"
+}
+
+status() {
+  local mem
+  echo "container: $(current | cut -c1-12)  health: $(docker inspect -f '{{.State.Health.Status}}' "${PROJECT}-server-1" 2>/dev/null || echo none)  weight: $(weight)%"
+  echo "answers:   pm2 :3000 $(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:3000/health)   container :${PORT} $(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:${PORT}/health")"
+  echo "open connections from nginx: pm2 $(ss -Htn state established '( dport = :3000 )' | wc -l)   container $(ss -Htn state established "( dport = :${PORT} )" | wc -l)"
+  docker stats --no-stream --format 'container memory: {{.MemUsage}}  cpu: {{.CPUPerc}}' "${PROJECT}-server-1" 2>/dev/null || true
+  mem=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+  echo "box: ${mem} MB available, swap used $(free -m | awk '/Swap/ {print $3}') MB"
+  echo "errors in the container's last hour: $(docker logs --since 1h "${PROJECT}-server-1" 2>&1 | grep -c '"level":50' || true)"
+}
+
+case "${1:-}" in
+  up)
+    sha="${2:-}"; valid_sha "$sha"
+    m=$(/usr/local/sbin/fleet-deploy mode); [ "$m" = pm2 ] || die "fleet-deploy mode is '$m': this runs beside pm2 only"
+    answers http://127.0.0.1:3000/health || die "pm2 on :3000 does not answer /health"
+    if [ -z "$(docker ps -q --filter "label=com.docker.compose.project=${PROJECT}")" ]; then
+      mem=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+      [ "$mem" -ge "$MIN_MEM_MB" ] || die "only ${mem} MB available, need ${MIN_MEM_MB} to run it beside pm2"
+    fi
+    reg=$(registry); IMAGE="${reg}/ghala:fleet-server-${sha}"
+    pull "$IMAGE" "$reg"
+    supports_switch "$IMAGE" || die "image ${sha:0:7} predates SCHEDULED_JOBS_ENABLED: it would run every scheduled job beside pm2's"
+    write_env
+    install -d -o ubuntu -g ubuntu -m 700 "$CACHE_DIR"
+    install -d -o ubuntu -g ubuntu -m 755 "$(reports_dir)" "$(investigations_dir)"
+    # pm2's VSS login, so the container does not log in again (VSS rate-limits logins).
+    if [ -f "$VSS_TMP" ]; then install -o ubuntu -g ubuntu -m 600 "$VSS_TMP" "$CACHE_DIR/vss-session.json"; fi
+    prev=$(current)
+    IMAGE="$IMAGE" quiet compose up -d --no-deps server
+    if ! wait_healthy; then
+      docker logs --tail 40 "${PROJECT}-server-1" 2>&1 | sed 's/^/  /' >&2 || true
+      if [ "$(weight)" != 0 ]; then set_weight 0 || true; fi
+      die "container ${sha:0:7} is not healthy; nginx sends it nothing now (weight 0). Fix, then up again${prev:+ (was ${prev:0:7})}"
+    fi
+    printf '%s\n' "$sha" > "$STATE"; chmod 644 "$STATE"
+    answers "http://127.0.0.1:${PORT}/api/v1/sim-clock" || die "the container answers /health but not /api/v1/sim-clock"
+    docker logs "${PROJECT}-server-1" 2>&1 | grep -q 'SCHEDULED_JOBS_ENABLED=false' \
+      || die "the container did not log SCHEDULED_JOBS_ENABLED=false: stop it now (fleet-parallel down) and look"
+    echo "PARALLEL UP ${sha:0:7} on 127.0.0.1:${PORT}, weight $(weight)% (fleet-parallel weight <percent> to send it clients)" ;;
+
+  weight) set_weight "${2:-}" ;;
+
+  status) status ;;
+
+  down)
+    set_weight 0
+    quiet compose down --remove-orphans
+    rm -f "$UPSTREAM" "$STATE" "$ENV_FILE"
+    nginx -t >/dev/null 2>&1 && systemctl reload nginx
+    echo "PARALLEL DOWN: pm2 serves everything ($(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1/api/v1/sim-clock) through nginx). Kept: $CACHE_DIR" ;;
+
+  *) die "usage: fleet-parallel up <sha> | weight <0-${MAX_WEIGHT}> | status | down" ;;
+esac

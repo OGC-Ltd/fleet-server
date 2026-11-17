@@ -55,6 +55,24 @@ const schema = z.object({
   // an empty feed. Set 'false' for a truly passive API instance.
   FOLLOW_DB: z.string().optional().default('true').transform(v => v === 'true'),
 
+  // POLL_ENABLED instances take a Postgres advisory lock at boot, so only ONE
+  // server runs the poller and background jobs, whether pm2 or a container
+  // started it (lib/leader-lock.ts). A second one waits LEADER_LOCK_WAIT_S for
+  // it, then exits. 'false' only when something else guarantees one writer.
+  LEADER_LOCK_ENABLED: z.string().optional().default('true').transform(v => v === 'true'),
+  LEADER_LOCK_WAIT_S: z.coerce.number().int().min(0).optional().default(90),
+
+  // 'false' starts none of the scheduled jobs: the RaiFactorySuite reconciler,
+  // retention and nightly rollups, fuel sync, adjudication, parked-fall
+  // verdicts, the FUEL RATE digest, trip build, the Wialon registry sync, the
+  // unit insight sweep and the AI brief sweep. For a second server sharing the
+  // database and Redis with the one that runs them (fleet-parallel). Unlike
+  // turning each one off by its own setting, this never TOUCHES their schedules
+  // in Redis: several of those, switched off, remove the shared schedule at
+  // boot (FUEL_RATE_ALERTS other than 'digest' removes the live digest's), and
+  // would silently stop it for the server that does run them.
+  SCHEDULED_JOBS_ENABLED: z.enum(['true', 'false']).default('true').transform(v => v === 'true'),
+
   // Comma-separated org codes this instance simulates (e.g.
   // "MENENGAI,TIMSALES,KABRAS"). Unset = all orgs in SIM_FLEET_COMPOSITION.
   // Lets two deployments split the sim fleet org-wise over one shared DB.

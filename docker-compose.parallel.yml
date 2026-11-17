@@ -1,0 +1,34 @@
+# `fleet-parallel` only (deploy/box/fleet-parallel), with docker-compose.prod.yml:
+# the container server running BESIDE the live pm2 server on the live database
+# and Redis, with the poller and every scheduled job off. Host nginx sends it a
+# share of /api (fleet-parallel weight <percent>); /webhook stays on pm2.
+# docs/parallel-run.md has the whole plan.
+#
+# Its env (/etc/fleet/parallel.env) is the live one with POLL_ENABLED=false,
+# FOLLOW_DB=true and SCHEDULED_JOBS_ENABLED=false, written by fleet-parallel.
+# So it serves requests, and its map follows the database pm2 writes into; it
+# does not poll Wialon, take the leader lock, or run a scheduled job. Mail and
+# push jobs on the shared queue are taken by whichever server is free, once.
+#
+# It runs as the box's `ubuntu` user (not the image's 10001) because it shares
+# pm2's saved reports and fuel investigations, which are ubuntu's files: the
+# pm2 report-worker builds the reports both servers serve. Its other caches
+# are its own, in /var/lib/fleet-parallel/cache.
+#
+# Install (root-owned):
+#   sudo install -o root -g root -m 644 docker-compose.parallel.yml /etc/fleet/compose/
+services:
+  server:
+    user: "${PARALLEL_UID:?}:${PARALLEL_GID:?}"
+    ports: !override
+      - "127.0.0.1:3002:3000"
+    volumes: !override
+      - ${PARALLEL_CACHE_DIR:?}:/app/.cache
+      - ${PM2_REPORTS_DIR:?}:/app/.cache/reports
+      - ${PM2_INVESTIGATIONS_DIR:?}:/app/.cache/investigations
+    environment:
+      # The defaults under /app/.cache, i.e. the shared folders above. The
+      # live env may name pm2's host paths, which do not exist in here.
+      REPORT_STORE_DIR: ""
+      FUEL_DAY_CACHE_DIR: ""
+      USAGE_REVIEW_CACHE_DIR: ""
