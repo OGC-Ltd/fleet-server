@@ -121,6 +121,9 @@ jobs:
     environment: production
     # Long enough for fleet-deploy to wait for the image CI is still pushing.
     timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write          # GitHub OIDC token, exchanged for the github-deploy role
     steps:
       # Full history: the box's main must be a fast-forward of what we push, and
       # a shallow clone cannot prove that.
@@ -200,6 +203,59 @@ jobs:
           fi
           echo "pinned $(grep -c . ~/.ssh/known_hosts) host key(s):"
           sed 's/^/  /' /tmp/host-fingerprints
+
+      # Port 22 on the box is being limited to the operators' own address, and
+      # GitHub's runners arrive from a new address every run. So ssh travels
+      # inside an AWS Session Manager session instead. The OIDC role
+      # github-deploy may open an SSH tunnel (AWS-StartSSHSession) to this one
+      # box and nothing else, and ssh inside the tunnel still checks the pinned
+      # host key and the deploy key. Every ssh and git push below picks the
+      # tunnel up from ~/.ssh/config, unchanged.
+      #
+      # While port 22 still admits the runners, a tunnel that cannot be opened
+      # falls back to plain ssh with a warning, so a missing role never stops a
+      # deploy. Once 22 is limited, that fallback fails at the next ssh.
+      - name: AWS credentials for the Session Manager tunnel
+        id: deploy_aws
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: arn:aws:iam::522505217087:role/github-deploy
+          role-session-name: fleet-server-deploy-${{ github.run_id }}
+          aws-region: af-south-1
+
+      - name: route ssh through Session Manager
+        env:
+          HOST:     ${{ secrets.EC2_HOST }}
+          INSTANCE: i-0a4d8f7f5a97d8098
+          AWS_OK:   ${{ steps.deploy_aws.outcome }}
+        run: |
+          set -euo pipefail
+          fallback() {
+            rm -f ~/.ssh/config
+            echo "::warning::$1. This run uses plain ssh on port 22, which stops working once port 22 is limited to the operators' address."
+            exit 0
+          }
+          [ "$AWS_OK" = success ] || fallback "could not assume the github-deploy role"
+          if ! command -v session-manager-plugin >/dev/null; then
+            curl -fsSL --retry 3 -o /tmp/session-manager-plugin.deb \
+              https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb
+            sudo dpkg -i /tmp/session-manager-plugin.deb >/dev/null
+          fi
+          echo "session-manager-plugin $(session-manager-plugin --version)"
+          # ServerAliveInterval keeps data moving through the tunnel, so a long
+          # `fleet-deploy up` is not cut by Session Manager's idle timeout.
+          {
+            echo "Host ${HOST}"
+            echo "  ProxyCommand aws ssm start-session --region af-south-1 --target ${INSTANCE} --document-name AWS-StartSSHSession --parameters portNumber=%p"
+            echo "  ServerAliveInterval 30"
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          if ! timeout 90 ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes "ubuntu@${HOST}" true 2>/tmp/ssm-err; then
+            sed 's/^/  /' /tmp/ssm-err
+            fallback "ssh through Session Manager failed"
+          fi
+          echo "ssh reaches the box through Session Manager"
 
       - name: which mode is the box in
         id: mode
