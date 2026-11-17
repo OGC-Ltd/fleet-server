@@ -333,7 +333,7 @@ export function createApp() {
   app.use(`${orgBase}/notifications`, notificationsOrgRouter)
   // Menengai's units flagged now by the server's stop watch (Alerts page)
   app.get(`${orgBase}/stop-watch`, authenticate, requireOrgAccess, requirePermission('notification:read'), stopWatchCtrl.current)
-  // Menengai's listed units idle 3 h of working time (Alerts page, corner badge)
+  // Menengai's listed units idle 1 h 30 min of working time, yard and depots included (Alerts page, corner badge)
   app.get(`${orgBase}/idle-watch`, authenticate, requireOrgAccess, requirePermission('notification:read'), idleWatchCtrl.current)
   // The idle alerts kept, for the Alerts page's history (operator, 2026-11-13).
   app.get(`${orgBase}/idle-watch/history`, authenticate, requireOrgAccess, requirePermission('notification:read'), idleWatchCtrl.history)

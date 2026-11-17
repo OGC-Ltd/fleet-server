@@ -48,8 +48,8 @@ const RULE = {
   idleMs: IDLE_MS,
   criticalMs: CRITICAL_MS,
   hours: `${String(Math.floor(WORK_HOURS.start)).padStart(2, '0')}:${String((WORK_HOURS.start % 1) * 60).padStart(2, '0')}–${String(Math.floor(WORK_HOURS.end)).padStart(2, '0')}:${String((WORK_HOURS.end % 1) * 60).padStart(2, '0')}`,
-  // Nowhere is left out any more (operator, 16 Nov 2026). Kept, empty, because
-  // dashboards built before this read `excluded.join(...)` into their wording.
+  // Nowhere is left out any more (operator, 16 Nov 2026). Kept, empty, for
+  // clients that read it: new-ui from v2.2.3 drops "away from …" when it is empty.
   excluded: [] as string[],
 }
 
