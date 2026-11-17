@@ -8,10 +8,10 @@ in Grafana, and kept in S3.
 | fleet-server + report worker | OpenTelemetry SDK (`src/telemetry/`): a trace per request (route, client address, user, organisation), every SQL statement, every outside call (Wialon, OpenAI, FactorySuite, Google, S3, mail), a trace per poll-loop run and BullMQ job; request rates and latencies, event loop, heap, GC; every log line with its trace id, including one `request` line per request with the client address (`src/middleware/request-log.ts`) | — | sends OTLP to `otel-collector:4318` |
 | nginx (host) | A JSON access log beside the usual one (`nginx/05-observability-log.conf`): every request that reached the box, the connecting address, X-Forwarded-For, status, timings, rate-limit verdict. Credential-looking query strings are blanked | — | `/var/log/nginx/access.json.log` |
 | otel-collector | The one entry point (`otel-collector/config.yaml`): takes the app's OTLP; reads the nginx access and error logs and the box's auth log (SSH sign-ins, sudo); box CPU, memory, disk, network; each container's CPU and memory. Fans out to the stores below | — | — |
-| Jaeger | Traces kept for searching: every request, every error, every trace over 2 s, and 20 % of background work (`BACKGROUND_SAMPLE_PERCENT`) | 48 h (`JAEGER_TTL`) | Grafana › Explore › Jaeger, or `ssh -L 16686:127.0.0.1:16686` |
+| Jaeger | Traces kept for searching: every request, and the share of background work the app records (poll runs, jobs, timers: 5 %, `FLEET_TRACE_BACKGROUND_RATIO`) | 48 h (`JAEGER_TTL`) | Grafana › Explore › Jaeger, or `ssh -L 16686:127.0.0.1:16686` |
 | Prometheus | Metrics; the system checks in `prometheus/rules.yml` | 15 days, 1 GB cap | Grafana, or `ssh -L 9090:127.0.0.1:9090` |
 | Loki | Logs: app lines, nginx requests, nginx errors, auth log | 14 days | Grafana › Explore › Loki, and the dashboards |
-| S3 | **Every log line and every span, unsampled**, gzipped OTLP JSON | until a lifecycle rule says otherwise | `s3://ndoo-522505217087-af-south-1-an/ndoo/kumbukumbu/{logs,traces}/year=…/month=…/day=…/hour=…/` |
+| S3 | **Every log line**, and every span the app records (every request; 5 % of background work), gzipped OTLP JSON | until a lifecycle rule says otherwise | `s3://ndoo-522505217087-af-south-1-an/ndoo/kumbukumbu/{logs,traces}/year=…/month=…/day=…/hour=…/` |
 | Grafana | Dashboards **Fleet · Overview** and **Fleet · Visitors**, and Explore over all three stores | — | **https://logistics.raioperations.com/grafana/** (sign in as `admin`) |
 
 Its own compose project (`observability`), outside fleet's release: CI never
@@ -88,7 +88,10 @@ without a parser:
 - `{service_name="fleet-server"} |= "Poll cycle complete"`: the Wialon poll
 
 A line written inside a trace has a `trace_id`: Grafana links it to Jaeger,
-and a span in Jaeger links back to its lines.
+and a span in Jaeger links back to its lines. Every request's trace is there;
+a line from background work (a poll run, a job) also carries a `trace_id`,
+but its trace exists only for the share of runs the app keeps (5 %): for the
+rest Jaeger says the trace is not found.
 
 Two addresses per request at the edge: `remote_addr` is what connected (for
 the ogc-monitoring domain, that is the LiteSpeed proxy), `xff` is what the
@@ -99,9 +102,9 @@ trusts (`TRUSTED_PROXY_IPS`, `src/lib/trust-proxy.ts`).
 
 `/opt/fleet-observability/.env`, then `sudo fleet-observability up`:
 
-- `BACKGROUND_SAMPLE_PERCENT` (20): the share of poll/job/timer traces Jaeger keeps (S3 keeps all)
+- `BACKGROUND_SAMPLE_PERCENT` (100): of the background traces the app sends, the share Jaeger keeps (S3 keeps all it receives). The app records 5 % of them in the first place: `FLEET_TRACE_BACKGROUND_RATIO=0.05` in `/etc/fleet/observability.env`, applied by `app-restart`. Recording all of them cost about a core on this box (2026-11-17)
 - `JAEGER_TTL` (48h): how long Jaeger keeps traces
-- `*_MEM_LIMIT`: each container's memory ceiling (collector 384m, Jaeger 384m, Prometheus 320m, Loki 320m, Grafana 256m)
+- `*_MEM_LIMIT`: each container's memory ceiling (collector 384m, Jaeger 384m, Prometheus 320m, Loki 320m, Grafana 384m)
 
 Nothing pages anyone yet: rules show on the dashboard. Add a Grafana contact
 point (Alerting › Contact points) to be told.

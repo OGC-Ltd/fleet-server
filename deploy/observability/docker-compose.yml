@@ -14,7 +14,7 @@
 #   prometheus      metrics, 15 days
 #   loki            logs, searchable for 14 days
 #   grafana         the dashboards, and Explore over all three
-#   S3              EVERYTHING, kept: every log line and every span, unsampled,
+#   S3              kept: every log line, and every span the app records,
 #                   gzipped OTLP JSON under
 #                   s3://ndoo-522505217087-af-south-1-an/ndoo/kumbukumbu/{logs,traces}/
 #                   (written by the collector with the box's own role, fleet-app)
@@ -55,7 +55,7 @@ services:
       AWS_REGION: af-south-1
       S3_BUCKET: ${S3_BUCKET:-ndoo-522505217087-af-south-1-an}
       S3_BASE_PREFIX: ${S3_BASE_PREFIX:-ndoo/kumbukumbu}
-      BACKGROUND_SAMPLE_PERCENT: ${BACKGROUND_SAMPLE_PERCENT:-20}
+      BACKGROUND_SAMPLE_PERCENT: ${BACKGROUND_SAMPLE_PERCENT:-100}
     volumes:
       - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
       # The host, read-only: /proc and /sys for the host metrics, mounts for
@@ -153,7 +153,7 @@ services:
     ports:
       - "127.0.0.1:3300:3000"
     depends_on: [prometheus, loki, jaeger]
-    mem_limit: ${GRAFANA_MEM_LIMIT:-256m}
+    mem_limit: ${GRAFANA_MEM_LIMIT:-384m}
     cpus: 0.5
     pids_limit: 256
 

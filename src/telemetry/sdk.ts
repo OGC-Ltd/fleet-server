@@ -5,19 +5,22 @@
  * Started by telemetry/register.ts, before the app loads.
  *
  * What is captured:
- *   traces   every HTTP request (express routes, not each middleware), every
- *            SQL statement (pg, under Prisma's adapter), Redis commands made
- *            inside a trace, every outgoing fetch (Wialon, OpenAI,
- *            FactorySuite, Google) and https call (S3, mail), plus a trace per
- *            poll-loop run and BullMQ job (lib/tracing).
+ *   traces   every HTTP request (express handlers, not each middleware or
+ *            router), and inside a trace every SQL statement (pg, under
+ *            Prisma's adapter), Redis command, outgoing fetch (Wialon, OpenAI,
+ *            FactorySuite, Google) and https call (S3, mail); a trace per
+ *            poll-loop run and BullMQ job (lib/tracing), a share of them kept.
  *   metrics  request rate/latency by route, runtime (event loop delay, heap,
  *            GC), loop and job durations.
  *   logs     every pino line, with trace_id/span_id, including the one-line
  *            request log (middleware/request-log) that carries the client IP.
  *
- * Sampling happens in the collector (tail sampling), not here: the app sends
- * every span, so the decision can look at the whole trace (errors and slow
- * ones are always kept).
+ * Sampling: every request trace is recorded; background work (poll loops,
+ * jobs, timers) at FLEET_TRACE_BACKGROUND_RATIO (default 5 %), decided when
+ * its trace starts (telemetry/sampler). Recording every poll query cost about
+ * a core and filled Jaeger in minutes. The collector then tail-samples what
+ * reaches Jaeger. Attribute values are cut at 2 KB: the live poll's multi-row
+ * INSERTs run to hundreds of placeholders, and Jaeger refused those batches.
  *
  * Secrets: query values that look like credentials (Wialon's token/sid, signed
  * S3 URLs) and the account-setup token in its path are blanked in span
@@ -30,7 +33,7 @@ import { NodeSDK } from '@opentelemetry/sdk-node'
 import type { Attributes, AttributeValue } from '@opentelemetry/api'
 import type { ExportResult } from '@opentelemetry/core'
 import { resourceFromAttributes } from '@opentelemetry/resources'
-import { BatchSpanProcessor, ParentBasedSampler, AlwaysOnSampler, type ReadableSpan, type SpanExporter } from '@opentelemetry/sdk-trace'
+import { BatchSpanProcessor, type ReadableSpan, type SpanExporter } from '@opentelemetry/sdk-trace'
 import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics'
 import { BatchLogRecordProcessor } from '@opentelemetry/sdk-logs'
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto'
@@ -44,6 +47,7 @@ import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici'
 import { PinoInstrumentation } from '@opentelemetry/instrumentation-pino'
 import { RuntimeNodeInstrumentation } from '@opentelemetry/instrumentation-runtime-node'
 import { scrubUrl } from '../lib/scrub-query.js'
+import { fleetSampler, backgroundRatio } from './sampler.js'
 
 /** Span attributes that can hold a URL or a query string. */
 const URL_ATTRS = ['url.full', 'url.path', 'url.query', 'url.original', 'http.url', 'http.target']
@@ -83,7 +87,8 @@ export function startTelemetry(): NodeSDK {
       'deployment.environment.name': process.env.OTEL_DEPLOYMENT_ENVIRONMENT ?? process.env.NODE_ENV ?? 'development',
       'host.name': os.hostname(),
     }),
-    sampler: new ParentBasedSampler({ root: new AlwaysOnSampler() }),
+    sampler: fleetSampler(backgroundRatio(process.env.FLEET_TRACE_BACKGROUND_RATIO)),
+    spanLimits: { attributeValueLengthLimit: 2048 },
     spanProcessors: [
       new BatchSpanProcessor({
         exporter: new ScrubbingSpanExporter(new OTLPTraceExporter()),
@@ -106,12 +111,15 @@ export function startTelemetry(): NodeSDK {
           server: { requestHeaders: ['user-agent', 'x-forwarded-for', 'x-real-ip', 'referer', 'origin'] },
         },
       }),
-      // Routers and handlers, not each of the ~12 middlewares every request
-      // passes (helmet, cors, json...): those would triple the spans per
-      // request and say nothing the request's own duration does not.
-      new ExpressInstrumentation({ ignoreLayersType: [ExpressLayerType.MIDDLEWARE] }),
-      // Every statement, inside a trace or not (setInterval jobs have none).
-      new PgInstrumentation({ requireParentSpan: false, ignoreConnectSpans: true, enhancedDatabaseReporting: false }),
+      // Handlers only, not the ~12 middlewares and the nested routers every
+      // request passes (helmet, cors, json, /api/v1/organisations/:orgId...):
+      // those multiply the spans per request and say nothing the request's
+      // own duration does not.
+      new ExpressInstrumentation({ ignoreLayersType: [ExpressLayerType.MIDDLEWARE, ExpressLayerType.ROUTER] }),
+      // Only inside a trace (a request, a loop run, a job): a statement with no
+      // parent would be a one-span trace saying nothing about why it ran.
+      // Under a trace that is not kept it costs almost nothing.
+      new PgInstrumentation({ requireParentSpan: true, ignoreConnectSpans: true, enhancedDatabaseReporting: false }),
       // Only inside a trace: BullMQ's own blocking reads would otherwise be a
       // root span every second. Command name only; keys and values stay out.
       new IORedisInstrumentation({ requireParentSpan: true, dbStatementSerializer: (cmd) => cmd }),

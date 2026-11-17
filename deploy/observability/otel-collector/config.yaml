@@ -4,8 +4,8 @@
 #   fleet-server / report worker (OTLP) ─┐    ┌─ Jaeger      traces, tail-sampled, 48 h
 #   nginx access log (every client IP)  ─┤    ├─ Prometheus  metrics, 15 d
 #   nginx error log, box auth log       ─┼────┼─ Loki        logs, 14 d
-#   box CPU/memory/disk/network         ─┤    └─ S3          every log line and every span,
-#   container CPU/memory (Docker API)   ─┘                   unsampled, kept
+#   box CPU/memory/disk/network         ─┤    └─ S3          every log line, every span the
+#   container CPU/memory (Docker API)   ─┘                   app records (it samples background), kept
 #
 # Pipelines share their receivers, so each signal fans out to each store with
 # its own processors: S3 gets everything in large gzipped batches, Jaeger gets
@@ -133,7 +133,8 @@ receivers:
             - targets: ["127.0.0.1:8888"]
 
 connectors:
-  # Request/job/query rates and latencies from EVERY span, before sampling.
+  # Rates and latencies from every span that arrives, before tail sampling
+  # (every request; background work is sampled in the app).
   spanmetrics:
     histogram:
       explicit:
@@ -174,7 +175,7 @@ processors:
         value: fleet-box
         action: upsert
 
-  # What Jaeger keeps for searching. S3 keeps every span regardless.
+  # What Jaeger keeps for searching. S3 keeps every span that arrives.
   # A trace is kept when ANY policy says so.
   tail_sampling:
     decision_wait: 15s
