@@ -2,12 +2,16 @@
  * The idle watch's rules: Menengai's listed units standing still too long
  * (fleet list of 10 Nov 2026; first built in the browser, new-ui PR #56).
  *
- * A unit is idle when it has not moved for 2 hours of WORKING time (3 until
- * 2026-11-13, when the operator lowered it):
+ * A unit is idle when it has not moved for 1 h 30 min of WORKING time (3 h
+ * until 2026-11-13, then 2 h until 2026-11-16, when the operator lowered it
+ * again):
  *   - working time is the day shift, 07:30 to 19:30 Nairobi time, so a truck
- *     parked at 18:00 and away at 08:00 has stood 1 h, and is never flagged;
- *   - a unit in the yard or a depot (MORL or the Nairobi depot, 1 km round
- *     each, as the stop watch has them) is where it belongs, and is not idle;
+ *     parked at 18:30 and away at 07:45 has stood 1 h 15 min, and is never
+ *     flagged; one parked at 18:00 has stood 1 h 30 min by 19:30, and is;
+ *   - wherever it stands: the yard and the depots (MORL and the Nairobi depot)
+ *     count too (operator, 16 Nov 2026: "it should be flagged even when it's
+ *     inside MORL or Nairobi depot"). They used to be left out as where a unit
+ *     belongs;
  *   - the stop time is the server's own (lib/movement-state), not when some
  *     browser first saw the unit stopped;
  *   - a tracker silent for a day is "not reporting", not idle: its position
@@ -17,10 +21,10 @@
  * Pure: no database, no network.
  */
 
-import { placeAt, plateIn, type Place } from '../stop-watch/stop-watch.rules.js'
+import { plateIn } from '../stop-watch/stop-watch.rules.js'
 
 export const ORG_CODE = 'MENENGAI'
-export const IDLE_MS = 2 * 3_600_000
+export const IDLE_MS = 1.5 * 3_600_000
 export const CRITICAL_MS = 6 * 3_600_000
 /** Silent longer than this: not reporting, not judged (new-ui lib/vehicleMap DARK_AFTER_MS). */
 export const DARK_MS = 24 * 3_600_000
@@ -137,11 +141,11 @@ export function idleWords(ms: number): string {
 
 /**
  * The listed units idle now, longest first, with the listed units the rule
- * cannot judge. `excluded`: where standing is not idle (the yard and depots).
+ * cannot judge. Wherever they stand, the yard and depots included.
  */
 export function idleUnits(
   units: readonly IdleUnit[],
-  { excluded = [], now = Date.now(), list = IDLE_UNITS }: { excluded?: readonly Place[]; now?: number; list?: typeof IDLE_UNITS } = {},
+  { now = Date.now(), list = IDLE_UNITS }: { now?: number; list?: typeof IDLE_UNITS } = {},
 ): IdleWatch {
   const byPlate = new Map<string, IdleUnit>()
   for (const u of units) {
@@ -166,7 +170,6 @@ export function idleUnits(
     if (!Number.isFinite(since)) continue
     const lat = u.lat as number
     const lng = u.lng as number
-    if (placeAt(lat, lng, excluded)) continue
     const idleMs = workingMs(since, now)
     if (idleMs < IDLE_MS) continue
     alerts.push({
