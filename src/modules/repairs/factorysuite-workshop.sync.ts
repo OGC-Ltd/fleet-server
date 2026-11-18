@@ -33,7 +33,7 @@ import type {
 } from '../../providers/raifactorysuite/raifactorysuite.client.js'
 import {
   AWAITING_ARRIVAL, boardDays, breakdownColumns, cardStage, cardUnchanged, eatDayStart, categoryFor, jobCardColumns, partColumns,
-  partUnchanged, stageRank, suspectedFaultOf, type CardStage,
+  partUnchanged, stageRank, suspectedFaultOf, type CardStage, type StoredCard,
 } from '../../providers/raifactorysuite/raifactorysuite.workshop.js'
 import { appendStage, type StageEvent } from './repairs.repository.js'
 import { jobSelect, nextTicketNo, refOf, tell, type Job } from './repairs.workflow.js'
@@ -262,8 +262,6 @@ async function advance(tx: Tx, job: Job, card: Card, to: CardStage, adopting: bo
 
 interface Outcome { orgId: string; job: Job; event: 'created' | 'adopted' | 'moved' | 'history' | 'void'; to: string }
 
-type StoredCard = { raw: unknown; vehicleId: string | null; repairItemId: string | null; appliedStage: string | null }
-
 async function syncCard(
   row: RaiFactorySuiteJobCardRow, ctx: Context, now: Date, report: WorkshopSyncReport, backlog: boolean,
   stored: StoredCard | undefined,
@@ -274,8 +272,8 @@ async function syncCard(
   const stage = cardStage(row)
   report.cards++
   if (!vehicleId) report.noVehicle.push(row.machine)
-  if (cardUnchanged(stored, row, vehicleId, stage)) return 'unchanged'
   const cols = jobCardColumns(row, orgId, vehicleId)
+  if (cardUnchanged(stored, row, cols, stage)) return 'unchanged'
   const card: Card = { id: row.id, ...cols }
 
   return prisma.$transaction(async (tx) => {
@@ -353,9 +351,9 @@ export async function syncJobCards(rows: RaiFactorySuiteJobCardRow[], opts: { si
   const ids = rows.map((r) => r.id).filter(Boolean)
   const stored = new Map(
     (await prisma.factorySuiteJobCard.findMany({
+      // Every column, not just raw: the mapping is compared too (cardUnchanged).
       where: { id: { in: ids } },
-      select: { id: true, raw: true, vehicleId: true, repairItemId: true, appliedStage: true },
-    })).map(({ id, ...s }) => [id, s] as const),
+    })).map(({ id, ...s }) => [id, s as StoredCard] as const),
   )
   const unchanged: string[] = []
   for (const row of rows) {

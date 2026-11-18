@@ -181,25 +181,45 @@ export function stableJson(v: unknown): string {
   return JSON.stringify(v ?? null)
 }
 
+/** One stored column against the value we would write now. Dates by instant. */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a instanceof Date || b instanceof Date) {
+    return a instanceof Date && b instanceof Date && a.getTime() === b.getTime()
+  }
+  return (a ?? null) === (b ?? null)
+}
+
+/**
+ * Every column we would write, already stored as we would write it. Compared
+ * as well as the raw row so a change to the MAPPING (how times are read, the
+ * factory's organisation, how priority is worded) reaches a card FactorySuite
+ * has not touched: the raw row alone would say nothing changed.
+ */
+export function columnsUnchanged(prev: Record<string, unknown>, cols: Record<string, unknown>): boolean {
+  return Object.keys(cols).every((k) => sameValue(prev[k], cols[k]))
+}
+
+export type StoredCard = Record<string, unknown> & {
+  raw: unknown; vehicleId: string | null; repairItemId: string | null; appliedStage: string | null
+}
+
 /**
  * A card that needs nothing this pass: stored before with the same feed row
- * and the same unit, and its job already at the card's stage (or no job is due:
- * no tracked unit, or a card cancelled before we saw it). Anything else goes
- * through the full sync, as before.
+ * and the same columns, and its job already at the card's stage (or no job is
+ * due: no tracked unit, or a card cancelled before we saw it). Anything else
+ * goes through the full sync, as before.
  */
 export function cardUnchanged(
-  prev: { raw: unknown; vehicleId: string | null; repairItemId: string | null; appliedStage: string | null } | undefined,
-  row: unknown, vehicleId: string | null, stage: string,
+  prev: StoredCard | undefined, row: unknown, cols: ReturnType<typeof jobCardColumns>, stage: string,
 ): boolean {
-  if (!prev || prev.vehicleId !== vehicleId || stableJson(prev.raw) !== stableJson(row)) return false
+  if (!prev || stableJson(prev.raw) !== stableJson(row) || !columnsUnchanged(prev, cols)) return false
   if (prev.repairItemId) return prev.appliedStage === stage
-  return !vehicleId || stage === 'void'
+  return !cols.vehicleId || stage === 'void'
 }
 
 /** Every column the feed sets, stored as given. */
 export function partUnchanged(prev: Record<string, unknown> | undefined, cols: ReturnType<typeof partColumns>): boolean {
-  if (!prev) return false
-  return (Object.keys(cols) as (keyof typeof cols)[]).every((k) => (prev[k] ?? null) === (cols[k] ?? null))
+  return !!prev && columnsUnchanged(prev, cols)
 }
 
 /** The machine's name on a card's job: what the workshop wrote, then the card. */
