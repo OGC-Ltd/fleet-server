@@ -320,6 +320,83 @@ export interface RaiFactorySuiteFuelIssueRow {
   requestId?:         string | null
 }
 
+/**
+ * Auto Workshop feeds (`/workshop/*`), read off the live endpoints on
+ * 2026-11-18. Only MUFINDI PAPER MILLS (our KASULU) uses the module. Every
+ * time is an OFFSETLESS East Africa wall clock (07:00 is the busiest hour).
+ *
+ * `/workshop/job-cards` ignores from/to, limit and factoryCode and returns
+ * the whole set. `/workshop/parts` returns 500 rows by default and at most
+ * 1000 with `limit`, with no offset or page, so the catalogue can be cut short.
+ * The UI's other workshop routes (stores, stock movements, services due,
+ * technicians) 404 for an API key.
+ */
+export interface RaiFactorySuiteJobCardRow {
+  id:                string
+  factoryCode:       string
+  cardNumber:        string              // "MUFINDI PAPER MILLS-JC-2026-0247"
+  machine:           string              // the /machines reference
+  status:            string              // IN_PROGRESS | AWAITING_PARTS | RELEASED | ...
+  source?:           string | null
+  priority?:         string | null       // "Urgent", "NORMAL", "NOEMAL"... (free text)
+  checkedInAt?:      string | null
+  meterReadingIn?:   number | null
+  fuelLevelIn?:      number | null
+  fuelSourceIn?:     string | null
+  reportedFault?:    string | null
+  category?:         string | null       // MINOR | MAJOR | OTHER
+  diagnosis?:        string | null
+  confirmedDownAt?:  string | null
+  repairStartedAt?:  string | null
+  partsRequestedAt?: string | null
+  partsReceivedAt?:  string | null
+  workCompletedAt?:  string | null
+  releasedAt?:       string | null
+  service?:          boolean | null
+  serviceType?:      string | null
+  meterReadingOut?:  number | null
+  fuelLevelOut?:     number | null
+  fuelSourceOut?:    string | null
+  fuelDiscrepancy?:  boolean | null
+  labourCost?:       number | null
+  partsCost?:        number | null
+}
+
+export interface RaiFactorySuiteBreakdownRow {
+  id:              string
+  factoryCode:     string
+  machine:         string
+  reportedFault?:  string | null
+  location?:       string | null
+  status:          string              // CONFIRMED, ...
+  reportedAt?:     string | null
+  decidedAt?:      string | null
+  decisionNote?:   string | null
+  jobCardNumber?:  string | null
+}
+
+/** No requisition had been raised on 2026-11-18: only id and factoryCode are assumed. */
+export interface RaiFactorySuiteRequisitionRow {
+  id:              string
+  factoryCode:     string
+  status?:         string | null
+  jobCardNumber?:  string | null
+  [field: string]: unknown
+}
+
+export interface RaiFactorySuitePartRow {
+  id:              string
+  factoryCode:     string
+  partNumber:      string
+  description?:    string | null
+  unit?:           string | null
+  quantityOnHand?: number | null
+  minimumLevel?:   number | null
+  unitCost?:       number | null
+  supplier?:       string | null
+  active?:         boolean | null
+}
+
 export class RaiFactorySuiteClient {
   constructor(
     private readonly baseUrl: string = raiFactorySuiteApi.url,
@@ -439,6 +516,26 @@ export class RaiFactorySuiteClient {
     const q = new URLSearchParams({ from, to, limit: '1000' })
     if (factoryCode) q.set('factoryCode', factoryCode)
     return this.get<RaiFactorySuiteFuelIssueRow>(`/fuel/issues?${q}`)
+  }
+
+  /** Every workshop job card (the feed ignores any window). */
+  async listJobCards(): Promise<RaiFactorySuiteJobCardRow[]> {
+    return this.get<RaiFactorySuiteJobCardRow>('/workshop/job-cards?limit=5000')
+  }
+
+  /** Breakdowns reported in `from`..`to` (needs both, ≤ 31 days). */
+  async listBreakdowns(from: string, to: string): Promise<RaiFactorySuiteBreakdownRow[]> {
+    const q = new URLSearchParams({ from, to, limit: '1000' })
+    return this.get<RaiFactorySuiteBreakdownRow>(`/workshop/breakdowns?${q}`)
+  }
+
+  async listWorkshopRequisitions(): Promise<RaiFactorySuiteRequisitionRow[]> {
+    return this.get<RaiFactorySuiteRequisitionRow>('/workshop/requisitions?limit=1000')
+  }
+
+  /** The parts catalogue with stock, cut at 1000 rows by the provider. */
+  async listParts(): Promise<RaiFactorySuitePartRow[]> {
+    return this.get<RaiFactorySuitePartRow>('/workshop/parts?limit=1000')
   }
 
   /** Cheap liveness probe used when a reconcile run fails, to tell apart

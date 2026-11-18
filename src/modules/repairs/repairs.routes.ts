@@ -30,6 +30,7 @@ import {
 } from './repairs.schema.js'
 import * as ctrl from './repairs.controller.js'
 import * as wf from './repairs.workflow.controller.js'
+import * as fsw from './factorysuite-workshop.controller.js'
 import {
   flagUnitsSchema, spotFixSchema, pathSchema, assessmentSchema, bookingSchema, cancelBookingSchema,
   workshopAssignSchema, damageSchema, warrantyVoidSchema, warrantyClearSchema, workEntrySchema, workEditSchema,
@@ -104,6 +105,11 @@ router.get('/queue', requirePermissionStrict('repair:claim'), wf.queue)
 router.get('/mine', requirePermissionStrict('repair:read'), wf.mine)
 router.get('/service-states', requirePermission('repair:read'), wf.serviceStates)
 router.get('/workshops', requirePermission('repair:read'), wf.workshops)
+// FactorySuite Auto Workshop (KASULU): the card board, a unit's card history
+// and the stores part picker with stock. Read-only; the sync writes the jobs.
+router.get('/factorysuite/board', requirePermission('repair:read'), fsw.board)
+router.get('/factorysuite/parts', requirePermission('repair:read'), fsw.parts)
+router.get('/factorysuite/vehicles/:vehicleId/job-cards', requirePermission('repair:read'), fsw.vehicleJobCards)
 router.get('/workshops/:workshopId/availability', requirePermission('repair:read'), validateQuery(availabilityQuerySchema), wf.availability)
 router.get('/workshops/:workshopId/day', requirePermission('repair:read'), validateQuery(dayQuerySchema), wf.workshopDay)
 router.post('/workshops/:workshopId', requirePermissionStrict('repair:assign'), validateBody(workshopUpdateSchema), wf.updateWorkshop)

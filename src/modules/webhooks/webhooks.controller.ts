@@ -6,6 +6,7 @@ import { handleDispatch, handleMovement, handleSale } from './raifactorysuite-ev
 import { handleWeighment } from '../weighments/weighment.ingest.js'
 import { ingestWialonNotifications } from './wialon-notifications.service.js'
 import { workPlansChanged } from '../planner/work-plans.service.js'
+import { isWorkshopEvent, requestWorkshopSync } from '../repairs/factorysuite-workshop.runner.js'
 import {
   raiFactorySuiteAlertSchema,
   raiFactorySuiteDispatchSchema,
@@ -31,6 +32,10 @@ import {
  *   weighment.updated  → the same ticket, re-weighed or corrected
  *   fuelplan.*         → a work plan changed (WORK_PLANNER_HOOK): the map's
  *                        Work plans layer re-reads; nothing is stored
+ *   jobcard.* / breakdown.* / requisition.* / part.*
+ *                      → the Auto Workshop changed: the workshop feeds are
+ *                        re-read and fed into the repair workflow at once
+ *                        (repairs/factorysuite-workshop.runner)
  *
  * A 4xx makes their sender retry a few times and then DROP the event, so an
  * unrecognised shape must never fail the request: acknowledge it, log the
@@ -50,6 +55,7 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
     let weighments = 0
     let workPlans  = 0
     let workPlanOrgs = 0
+    let workshop   = 0
 
     const wialonNotifications: Parameters<typeof ingestWialonNotifications>[0] = []
 
@@ -71,6 +77,15 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
       if (kind.startsWith('fuelplan.')) {
         workPlanOrgs += await workPlansChanged(kind, item)
         workPlans++
+        continue
+      }
+
+      // Workshop events: the payload is not trusted for state. It only says
+      // that something changed, and the feeds are re-read in a moment; the
+      // same pass the reconcile loop runs every cycle.
+      if (isWorkshopEvent(kind)) {
+        requestWorkshopSync(kind)
+        workshop++
         continue
       }
 
@@ -166,9 +181,9 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
         'Webhook event received that we do not map yet',
       )
     }
-    if (result || dispatches || movements || sales || weighments || workPlans || wialon) {
+    if (result || dispatches || movements || sales || weighments || workPlans || workshop || wialon) {
       logger.info(
-        { event, dispatches, movements, sales, weighments, workPlans, workPlanOrgs, wialon, ...(result ?? {}) },
+        { event, dispatches, movements, sales, weighments, workPlans, workPlanOrgs, workshop, wialon, ...(result ?? {}) },
         'Provider webhook processed',
       )
     }
@@ -182,6 +197,7 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
       sales,
       weighments,
       workPlans,
+      workshop,
       wialonNotifications: wialon?.created ?? 0,
       ignored:  unmapped.length,
       ...(result ?? {}),

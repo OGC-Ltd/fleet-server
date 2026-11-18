@@ -86,6 +86,15 @@ const itemInclude = {
   vehicle: { select: { id: true, registrationPlate: true, name: true } },
   assignedTo: { select: { id: true, fullName: true } },
   assignedBy: { select: { id: true, fullName: true } },
+  /** The FactorySuite workshop card(s) this job is worked under: a badge on
+   *  the row and the card's own times on the ticket. */
+  fsJobCards: {
+    select: {
+      id: true, cardNumber: true, status: true, source: true, priority: true, category: true,
+      checkedInAt: true, repairStartedAt: true, partsRequestedAt: true, releasedAt: true,
+    },
+    orderBy: { checkedInAt: 'asc' as const },
+  },
 } as const
 
 const reportInclude = {

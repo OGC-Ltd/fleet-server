@@ -55,20 +55,20 @@ const WORKING: Stage[] = ['in_workshop', 'field_inspection', 'fixing', 'spare_ou
 /** Stages a technician may complete from. */
 const COMPLETABLE: Stage[] = ['remote_fix', 'in_workshop', 'field_inspection', 'fixing']
 
-const jobSelect = {
+export const jobSelect = {
   id: true, organisationId: true, vehicleId: true, stage: true, stageHistory: true, resolvedAt: true,
   outcome: true, targetKind: true, faultKind: true, faultCategory: true, queue: true, path: true,
   ticketNo: true, assignedToId: true, assignmentStatus: true, workshopTechnicianId: true,
   damageClass: true, completedById: true, stageChangedAt: true, diagnosis: true, fixNote: true,
   vehicle: { select: { registrationPlate: true } },
 } as const
-type Job = Prisma.RepairReportItemGetPayload<{ select: typeof jobSelect }>
+export type Job = Prisma.RepairReportItemGetPayload<{ select: typeof jobSelect }>
 
-function labelOf(job: Pick<Job, 'faultCategory' | 'faultKind'>): string {
+export function labelOf(job: Pick<Job, 'faultCategory' | 'faultKind'>): string {
   return job.faultCategory ? CATEGORY_LABEL[job.faultCategory as FaultCategory] ?? job.faultCategory : humanKind(job.faultKind)
 }
 
-function refOf(job: Job, stage: string = job.stage, ticketNo: string | null = job.ticketNo): JobRef {
+export function refOf(job: Job, stage: string = job.stage, ticketNo: string | null = job.ticketNo): JobRef {
   return {
     itemId: job.id, orgId: job.organisationId, vehicleId: job.vehicleId,
     plate: job.vehicle.registrationPlate, ticketNo, label: labelOf(job),
@@ -134,12 +134,12 @@ async function workEntry(tx: Tx, job: Job, userId: string, kind: WorkEntry['kind
 
 /** Notify, never throwing. `by` is whoever took the action: everyone else
  *  hears about it, they do not (operator, 2026-10-27). */
-async function tell(ref: JobRef, ev: WorkflowEvent, by?: string) {
+export async function tell(ref: JobRef, ev: WorkflowEvent, by?: string) {
   try { await notifyWorkflow(ref, by ? { ...ev, actorId: by } : ev) } catch { /* see repairs.workflow.notify */ }
 }
 
 /** RT-YYYY-NNNNN from the sequence. Never reused, never edited. */
-async function nextTicketNo(tx: Tx): Promise<string> {
+export async function nextTicketNo(tx: Tx): Promise<string> {
   const [row] = await tx.$queryRaw<{ n: bigint }[]>`SELECT nextval('repair_ticket_seq') AS n`
   return `RT-${new Date().getUTCFullYear()}-${String(row!.n).padStart(5, '0')}`
 }
@@ -1198,13 +1198,16 @@ export async function ticket(orgId: string, itemId: string) {
       assignedTo: { select: { id: true, fullName: true } },
       workshopTechnician: { select: { id: true, fullName: true } },
       resolvedBy: { select: { id: true, fullName: true } },
-      report: { select: { id: true, reportedAt: true, reportedBy: { select: { fullName: true } } } },
       assessments: { orderBy: { assessedAt: 'asc' } },
       bookings: { include: { workshop: { select: { id: true, name: true } } }, orderBy: { bookedAt: 'asc' } },
       spareParts: { orderBy: { orderedAt: 'asc' } },
       inspections: { orderBy: { inspectedAt: 'asc' } },
       workEntries: { orderBy: { at: 'asc' } },
       securityInvestigation: { select: { id: true, status: true, openedAt: true, closedAt: true } },
+      // The FactorySuite card(s) behind the job: meter and fuel in/out, the
+      // workshop's own times and diagnosis (docs/factorysuite-workshop-integration.md).
+      fsJobCards: { omit: { raw: true }, orderBy: { checkedInAt: 'asc' } },
+      report: { select: { id: true, reportedAt: true, source: true, reportedBy: { select: { fullName: true } } } },
     },
   })
   if (!item) throw new NotFoundError('Repair job not found')
