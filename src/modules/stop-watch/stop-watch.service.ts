@@ -80,7 +80,7 @@ export async function checkStops(now = Date.now()): Promise<void> {
   const near = [...storePlaces(), ...authorised]
   const flags: StopWatchFlag[] = flaggedUnits(units, { authorised, noGo, now }).map((f) => ({
     ...f,
-    nearest: f.kind === 'nogo' ? null : nearestPlace(f.lat, f.lng, near),
+    nearest: f.kind === 'unauthorised' ? nearestPlace(f.lat, f.lng, near) : null,
     text: flagWords(f, now),
   }))
   state = { orgId, status: 'done', flags, checkedAt: now, message: null }
@@ -96,7 +96,7 @@ export async function checkStops(now = Date.now()): Promise<void> {
     toastUsers(people, makeToast({
       kind: 'stop',
       level: f.kind === 'nogo' ? 'critical' : 'warning',
-      title: f.kind === 'nogo' ? 'No-go zone' : 'Unauthorised stop',
+      title: f.kind === 'nogo' ? 'No-go zone' : f.kind === 'customer' ? 'Customer stop' : 'Unauthorised stop',
       body: f.text,
       orgId,
       vehicleId: f.vehicleId,
