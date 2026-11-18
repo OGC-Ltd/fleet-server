@@ -27,5 +27,7 @@ router.get('/work-plans',      requirePermission('map:read'),      validateQuery
 // The Fuel page: FactorySuite's plans, fuel requests and pump issues. A fuel
 // screen, so the fuel fillings' right.
 router.get('/factory-fuel',    requirePermission('fuel_filling:read'), validateQuery(factoryFuelQuerySchema), ctrl.factoryFuel)
+// Its Consumed column: each probed machine's tank day by day (tank-days.ts)
+router.get('/factory-fuel/tank-days', requirePermission('fuel_filling:read'), validateQuery(factoryFuelQuerySchema), ctrl.tankDays)
 
 export default router

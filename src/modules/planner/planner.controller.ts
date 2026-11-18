@@ -2,6 +2,7 @@ import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as svc from './planner.service.js'
 import { workPlansForMap, factoryFuelFor } from './work-plans.service.js'
+import { tankDays as tankDaysFor } from './tank-days.js'
 import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, CustomerFence, WorkPlansQuery, FactoryFuelQuery } from './planner.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -62,6 +63,14 @@ export const workPlans: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as WorkPlansQuery
     sendSuccess(res, await workPlansForMap(p(req, 'orgId'), q.day))
+  } catch (err) { next(err) }
+}
+
+/** The Fuel page's tank days: probed machines' levels, fills and drains, from..to. */
+export const tankDays: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as FactoryFuelQuery
+    sendSuccess(res, await tankDaysFor(p(req, 'orgId'), q.from, q.to, req.authz?.vehicleIds ?? null))
   } catch (err) { next(err) }
 }
 
