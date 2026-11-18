@@ -1038,6 +1038,12 @@ model Geofence {
   /// Evaluated on live frames by lib/fence-rule-watch.
   rule           Json?
   isActive       Boolean                                   @default(true) @map("is_active")
+  /// Archived = out of use everywhere (containment, map, Planner, reports) but
+  /// kept so history that names it by id still resolves. NULL = in use. Not the
+  /// same as isActive=false, which only switches enforcement off. Set by
+  /// prisma/archive-geofences.ts; archivedNote holds the batch tag for undo.
+  archivedAt     DateTime?                                 @map("archived_at")
+  archivedNote   String?                                   @map("archived_note")
   createdAt      DateTime                                  @default(now()) @map("created_at")
   updatedAt      DateTime                                  @updatedAt @map("updated_at")
 
@@ -1047,6 +1053,7 @@ model Geofence {
 
   @@index([organisationId])
   @@index([organisationId, isActive])
+  @@index([organisationId, archivedAt])
   @@map("geofences")
 }
 

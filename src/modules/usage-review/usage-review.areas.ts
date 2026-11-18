@@ -19,6 +19,7 @@
  */
 
 import { prisma } from '../../lib/prisma.js'
+import { LIVE_FENCE } from '../../lib/fence-archive.js'
 import { haversineM, isInsideFence, type FenceGeometry } from '../../lib/geofence.js'
 import { ringAreaHa } from '../../lib/zone-taxonomy.js'
 import { WEIGHBRIDGES } from '../weighments/weighbridge.geography.js'
@@ -168,7 +169,7 @@ export async function loadSites(orgId: string): Promise<Site[]> {
  *  (usage-review.siteplans); a factory matched within 1.5 km cannot. */
 export async function loadFences(orgId: string): Promise<Site[]> {
   const rows = await prisma.geofence.findMany({
-    where: { organisationId: orgId, type: { in: ['CIRCLE', 'POLYGON'] } },
+    where: { organisationId: orgId, type: { in: ['CIRCLE', 'POLYGON'] }, ...LIVE_FENCE },
     select: { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true },
   })
   const fences: Site[] = []

@@ -21,6 +21,7 @@
  */
 import type { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
+import { LIVE_FENCE } from '../../lib/fence-archive.js'
 import { plateKey } from './planner.service.js'
 
 export const KEYED_SOURCE = 'manual'
@@ -103,7 +104,7 @@ export async function syncKeyedPlans(orgId: string, day: string, vehicles: Keyed
   const names = [...new Set(vehicles.flatMap((v) => v.customers ?? []))]
   const fences: FenceRow[] = names.length
     ? await prisma.geofence.findMany({
-      where: { organisationId: orgId, name: { in: names } },
+      where: { organisationId: orgId, name: { in: names }, ...LIVE_FENCE },
       select: { id: true, name: true, isActive: true, centerLat: true, centerLng: true, polygonCoords: true },
     })
     : []

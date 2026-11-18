@@ -31,6 +31,7 @@ import { isInsideFence, haversineM, fenceBox, inBox, type FenceBox, type FenceGe
 import { categoryOf, isEstateFeature, ringAreaHa, type ZoneCategory } from './zone-taxonomy.js'
 import { compileRule, readRule, type CompiledRule } from './fence-rules.js'
 import { checkFenceRules, type RuleZone } from './fence-rule-watch.js'
+import { LIVE_FENCE } from './fence-archive.js'
 
 interface CachedZone {
   id:   string
@@ -404,7 +405,7 @@ async function getZones(orgId: string): Promise<CachedZone[]> {
   if (hit && Date.now() - hit.loadedAt < ZONE_TTL_MS) return hit.zones
 
   const rows = await prisma.geofence.findMany({
-    where:  { organisationId: orgId },
+    where:  { organisationId: orgId, ...LIVE_FENCE },
     select: {
       id: true, name: true, type: true, mode: true, isActive: true,
       centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true,

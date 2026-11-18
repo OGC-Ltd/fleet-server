@@ -41,6 +41,7 @@ import { NotFoundError } from '../../core/errors/errors.js'
 import { findPlaybackFixes, type PlaybackPoint } from '../telemetry/telemetry.repository.js'
 import { findTheftById } from './fuel.repository.js'
 import { prisma } from '../../lib/prisma.js'
+import { ORG_CODE as STOP_WATCH_ORG, storePlaces } from '../stop-watch/stop-watch.rules.js'
 import {
   googleRoutingAvailable, snapToRoads, computeRoute, GoogleRoutingError, type LatLng,
 } from '../../providers/google-routing/index.js'
@@ -448,7 +449,9 @@ export async function homeSites(orgId: string, now: number): Promise<TripPlace[]
   if (hit && now - hit.at < SITES_TTL_MS) return hit.sites
   const rows = await prisma.$queryRawUnsafe<{ name: string; lat: number; lng: number }[]>(
     `SELECT name, ST_Y(ST_Centroid(geom::geometry)) AS lat, ST_X(ST_Centroid(geom::geometry)) AS lng
-       FROM geofences WHERE organisation_id = $1 AND geom IS NOT NULL AND name ~* '${HOME_FENCE}'`,
+       FROM geofences
+      WHERE organisation_id = $1 AND geom IS NOT NULL AND archived_at IS NULL
+        AND coalesce(purpose, '') NOT IN ('shop', 'customer') AND name ~* '${HOME_FENCE}'`,
     orgId,
   ).catch((err) => { logger.warn({ err, orgId }, 'Trip investigation: home sites'); return [] })
   const shout = (n: string) => n === n.toUpperCase()
@@ -460,6 +463,14 @@ export async function homeSites(orgId: string, now: number): Promise<TripPlace[]
     const title = (n: string) => n.toLowerCase().replace(/(^|[^a-z])([a-z])/g, (_m, pre: string, c: string) => pre + c.toUpperCase())
     for (const w of WEIGHBRIDGES) {
       if (org?.code && w.orgCode === org.code) ranked.push({ name: `${title(w.centerName)} Factory Yard`, lat: w.lat, lng: w.lng })
+    }
+    // Menengai's Wialon yards were archived (2026-11-18): MORL and STO as the
+    // stop watch has them, until its own yard fences are drawn.
+    if (org?.code === STOP_WATCH_ORG) {
+      for (const p of storePlaces()) {
+        const [lng, lat] = (p.feature.geometry?.coordinates ?? []) as number[]
+        if (Number.isFinite(lat) && Number.isFinite(lng)) ranked.push({ name: p.name, lat: lat!, lng: lng! })
+      }
     }
   }
   const sites: TripPlace[] = []

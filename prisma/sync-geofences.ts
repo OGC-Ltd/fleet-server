@@ -87,6 +87,7 @@ import pg from 'pg'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { PrismaClient } from '../generated/prisma/client.js'
 import { WialonClient } from '../src/providers/wialon/wialon.client.js'
+import { NO_WIALON_ZONE_IMPORT_ORGS } from '../src/lib/fence-archive.js'
 import {
   KASULU_WIALON_ACCOUNT_ID,
   MENENGAI_WIALON_ACCOUNT_ID,
@@ -260,6 +261,12 @@ async function main() {
     return
   }
 
+  // Menengai draws its own fences now; its Wialon zones were archived on
+  // 2026-11-18 and must not come back (user: "we will be building our own").
+  if (NO_WIALON_ZONE_IMPORT_ORGS.includes(ORG_CODE)) {
+    throw new Error(`${ORG_CODE} no longer imports Wialon zones: its own fences replace them. See src/lib/fence-archive.ts.`)
+  }
+
   const source = RESOURCE_OVERRIDE != null
     ? { accountId: RESOURCE_OVERRIDE, label: `--resource override` }
     : ZONE_SOURCE[ORG_CODE]
@@ -378,7 +385,7 @@ async function main() {
   const byType: Record<string, number> = {}
   const seen: string[] = []
 
-  let filteredOut = 0, corridorsSkipped = 0
+  let filteredOut = 0, corridorsSkipped = 0, archivedLeft = 0
   const wouldImport: string[] = []
 
   for (const z of zones) {
@@ -471,7 +478,7 @@ async function main() {
 
     // Without a database there is nothing to compare against, so everything
     // reads as new — which is the honest answer for a preview.
-    const select = { id: true, name: true, isActive: true, mode: true, organisationId: true } as const
+    const select = { id: true, name: true, isActive: true, mode: true, organisationId: true, archivedAt: true } as const
     const byKey  = org ? await prisma.geofence.findUnique({ where: { externalId }, select }) : null
     const legacy = org && !byKey ? await prisma.geofence.findUnique({ where: { externalId: legacyId }, select }) : null
     // The same org isn't enough: Mufindi's new DG 02 is zone 12 on its new
@@ -481,6 +488,11 @@ async function main() {
     const existing = byKey ?? (sameLegacy ? legacy : null)
     if (byKey && byKey.organisationId !== org?.id) {
       throw new Error(`${externalId} belongs to another organisation — refusing to move it into ${ORG_CODE}`)
+    }
+    if (existing?.archivedAt) {
+      // Archived on purpose: left exactly as it is, geometry included.
+      archivedLeft++
+      continue
     }
     if (existing) {
       // Never clobber an enforcement decision already made in our system —
@@ -511,6 +523,7 @@ async function main() {
   console.log(`  ${APPLY ? '✓' : '·'} by type: ${Object.entries(byType).map(([k, n]) => `${k} ${n}`).join(', ') || 'none'}`)
   if (retyped) console.log(`  · ${retyped} closed ring(s) reclassified LINE → POLYGON`)
   if (filteredOut) console.log(`  · ${filteredOut} zone(s) did not match the name mask`)
+  if (archivedLeft) console.log(`  · ${archivedLeft} archived fence(s) left alone`)
   if (corridorsSkipped) console.log(`  · ${corridorsSkipped} corridor(s) skipped — roads are not containment`)
 
   if (org) {

@@ -215,7 +215,7 @@ async function evaluateGeofences(
     // Only ENFORCED fences are evaluated. Definitions imported from the
     // provider land inactive, so syncing zones can never silently start
     // raising violations across the fleet.
-    where: { vehicleId, geofence: { isActive: true } },
+    where: { vehicleId, geofence: { isActive: true, archivedAt: null } },
     include: {
       geofence: {
         select: {
