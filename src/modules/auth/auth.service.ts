@@ -155,13 +155,25 @@ async function revokeFamilyForReuse(
   throw new UnauthorizedError('Invalid refresh token')
 }
 
+/**
+ * How long a device must have gone without refreshing before coming back counts
+ * as a login.
+ *
+ * Refresh tokens last 30 days, so most people never see the login form: they
+ * open the site and their cookie quietly signs them in. Only recording the
+ * password form left the Login Activity report showing nobody but those who had
+ * been signed out. An open tab refreshes every access-token lifetime (15 min),
+ * so a gap of an hour means the app was closed and the person returned.
+ */
+export const RETURN_AFTER_MS = 60 * 60 * 1000
+
 export async function refresh(rawToken: string, ctx: SessionContext = {}) {
   if (!rawToken) throw new UnauthorizedError('Invalid refresh token')
 
   const session = await prisma.authSession.findUnique({
     where:  { tokenHash: sha256(rawToken) },
     select: {
-      id: true, userId: true, familyId: true,
+      id: true, userId: true, familyId: true, issuedAt: true,
       expiresAt: true, rotatedAt: true, revokedAt: true,
     },
   })
@@ -200,7 +212,8 @@ export async function refresh(rawToken: string, ctx: SessionContext = {}) {
   })
   if (count === 0) await revokeFamilyForReuse(session, ctx)
 
-  return { ...(await issueSession(user, ctx, session.familyId)), user: user as SafeUser }
+  const returning = Date.now() - session.issuedAt.getTime() >= RETURN_AFTER_MS
+  return { ...(await issueSession(user, ctx, session.familyId, returning)), user: user as SafeUser }
 }
 
 /**

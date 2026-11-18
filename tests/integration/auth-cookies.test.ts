@@ -140,6 +140,8 @@ describe('POST /auth/refresh', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(prismaMock.authSession.findUnique as any).mockResolvedValue({
       id: 'ses_1', userId: USER.id, familyId: 'fam_1',
+      // Issued minutes ago: an open tab refreshing on schedule, not a return.
+      issuedAt: new Date(Date.now() - 10 * 60_000),
       expiresAt: new Date(Date.now() + 86_400_000), rotatedAt: null, revokedAt: null,
     })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

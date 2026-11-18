@@ -200,9 +200,13 @@ export async function completeSetup(raw: string, password: string, ctx: SessionC
   await authService.revokeAllSessions(token.userId, 'password set')
   forgetUser(token.user.email)
 
+  // Setting the password signs the person straight in, so this IS their login —
+  // for an invited user, their first one.
   const session = await authService.issueSession(
     { id: token.user.id, email: token.user.email },
     ctx,
+    undefined,
+    true,
   )
   const user = await prisma.user.findUnique({ where: { id: token.userId }, select: SAFE_USER })
   return { ...session, user }
