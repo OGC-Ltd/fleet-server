@@ -19,6 +19,8 @@ describe('flaggedUnits', () => {
     const [f] = flaggedUnits([unit({})], { authorised, noGo, now: NOW })
     expect(f).toMatchObject({ kind: 'unauthorised', plate: 'KDA 101A', zone: null })
     expect(flagWords(f!, NOW)).toBe('KDA 101A has stood 30 min outside any authorised place.')
+    expect(flagWords(f!, NOW, 'Southern Bypass, Dam 2, Nairobi'))
+      .toBe('KDA 101A has stopped 30 min at Southern Bypass, Dam 2, Nairobi (Unauthorised stop).')
   })
 
   it('says a stop at a customer is at that customer, by its name without the Wialon prefix', () => {
