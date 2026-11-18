@@ -165,6 +165,43 @@ export function partColumns(row: RaiFactorySuitePartRow, orgId: string) {
   }
 }
 
+// ── Unchanged rows (2026-11-18) ─────────────────────────────────────────────
+// Every pass re-reads the whole feed: ~250 cards every 5 minutes, 1,000 parts
+// an hour. Writing each one back, a transaction per card, kept the reconcile
+// past its 5-minute watchdog on the first live day. A row is written only when
+// it differs from what is stored; the rest only get their synced_at touched.
+
+/** JSON with object keys sorted: jsonb hands keys back in its own order. */
+export function stableJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>
+    return `{${Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${stableJson(o[k])}`).join(',')}}`
+  }
+  return JSON.stringify(v ?? null)
+}
+
+/**
+ * A card that needs nothing this pass: stored before with the same feed row
+ * and the same unit, and its job already at the card's stage (or no job is due:
+ * no tracked unit, or a card cancelled before we saw it). Anything else goes
+ * through the full sync, as before.
+ */
+export function cardUnchanged(
+  prev: { raw: unknown; vehicleId: string | null; repairItemId: string | null; appliedStage: string | null } | undefined,
+  row: unknown, vehicleId: string | null, stage: string,
+): boolean {
+  if (!prev || prev.vehicleId !== vehicleId || stableJson(prev.raw) !== stableJson(row)) return false
+  if (prev.repairItemId) return prev.appliedStage === stage
+  return !vehicleId || stage === 'void'
+}
+
+/** Every column the feed sets, stored as given. */
+export function partUnchanged(prev: Record<string, unknown> | undefined, cols: ReturnType<typeof partColumns>): boolean {
+  if (!prev) return false
+  return (Object.keys(cols) as (keyof typeof cols)[]).every((k) => (prev[k] ?? null) === (cols[k] ?? null))
+}
+
 /** The machine's name on a card's job: what the workshop wrote, then the card. */
 export function suspectedFaultOf(card: { reportedFault: string | null; isService: boolean; serviceType: string | null; cardNumber: string }) {
   if (card.reportedFault) return card.reportedFault

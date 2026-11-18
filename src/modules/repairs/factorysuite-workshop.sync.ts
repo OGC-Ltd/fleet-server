@@ -32,8 +32,8 @@ import type {
   RaiFactorySuiteBreakdownRow, RaiFactorySuiteJobCardRow, RaiFactorySuitePartRow, RaiFactorySuiteRequisitionRow,
 } from '../../providers/raifactorysuite/raifactorysuite.client.js'
 import {
-  AWAITING_ARRIVAL, boardDays, breakdownColumns, cardStage, eatDayStart, categoryFor, jobCardColumns, partColumns, stageRank,
-  suspectedFaultOf, type CardStage,
+  AWAITING_ARRIVAL, boardDays, breakdownColumns, cardStage, cardUnchanged, eatDayStart, categoryFor, jobCardColumns, partColumns,
+  partUnchanged, stageRank, suspectedFaultOf, type CardStage,
 } from '../../providers/raifactorysuite/raifactorysuite.workshop.js'
 import { appendStage, type StageEvent } from './repairs.repository.js'
 import { jobSelect, nextTicketNo, refOf, tell, type Job } from './repairs.workflow.js'
@@ -124,11 +124,13 @@ export interface WorkshopSyncReport {
   flagged: number
   requisitions: number
   parts: number
+  /** Cards and parts read but identical to what is stored, so not rewritten. */
+  unchanged: number
 }
 
 const empty = (): WorkshopSyncReport => ({
   cards: 0, created: 0, adopted: 0, history: 0, moved: 0, voided: 0, noVehicle: [],
-  breakdowns: 0, flagged: 0, requisitions: 0, parts: 0,
+  breakdowns: 0, flagged: 0, requisitions: 0, parts: 0, unchanged: 0,
 })
 
 // ── Job cards ───────────────────────────────────────────────────────────────
@@ -260,15 +262,21 @@ async function advance(tx: Tx, job: Job, card: Card, to: CardStage, adopting: bo
 
 interface Outcome { orgId: string; job: Job; event: 'created' | 'adopted' | 'moved' | 'history' | 'void'; to: string }
 
-async function syncCard(row: RaiFactorySuiteJobCardRow, ctx: Context, now: Date, report: WorkshopSyncReport, backlog: boolean): Promise<Outcome | null> {
+type StoredCard = { raw: unknown; vehicleId: string | null; repairItemId: string | null; appliedStage: string | null }
+
+async function syncCard(
+  row: RaiFactorySuiteJobCardRow, ctx: Context, now: Date, report: WorkshopSyncReport, backlog: boolean,
+  stored: StoredCard | undefined,
+): Promise<Outcome | 'unchanged' | null> {
   const orgId = ctx.orgs.get(row.factoryCode)
   if (!orgId || !row.id || !row.cardNumber || !row.machine) return null
   const vehicleId = vehicleFor(ctx, orgId, row.machine)
-  const cols = jobCardColumns(row, orgId, vehicleId)
-  const card: Card = { id: row.id, ...cols }
   const stage = cardStage(row)
   report.cards++
   if (!vehicleId) report.noVehicle.push(row.machine)
+  if (cardUnchanged(stored, row, vehicleId, stage)) return 'unchanged'
+  const cols = jobCardColumns(row, orgId, vehicleId)
+  const card: Card = { id: row.id, ...cols }
 
   return prisma.$transaction(async (tx) => {
     const prev = await tx.factorySuiteJobCard.findUnique({ where: { id: row.id }, select: { repairItemId: true, appliedStage: true } })
@@ -341,9 +349,19 @@ export async function syncJobCards(rows: RaiFactorySuiteJobCardRow[], opts: { si
   const now = opts.now ?? new Date()
   const ctx = await context()
   const touched = new Set<string>()
+  // What is stored, read once, so an unchanged card costs no transaction.
+  const ids = rows.map((r) => r.id).filter(Boolean)
+  const stored = new Map(
+    (await prisma.factorySuiteJobCard.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, raw: true, vehicleId: true, repairItemId: true, appliedStage: true },
+    })).map(({ id, ...s }) => [id, s] as const),
+  )
+  const unchanged: string[] = []
   for (const row of rows) {
     try {
-      const o = await syncCard(row, ctx, now, report, opts.silent)
+      const o = await syncCard(row, ctx, now, report, opts.silent, stored.get(row.id))
+      if (o === 'unchanged') { unchanged.push(row.id); continue }
       if (!o) continue
       touched.add(o.orgId)
       if (o.event === 'created') report.created++
@@ -356,6 +374,9 @@ export async function syncJobCards(rows: RaiFactorySuiteJobCardRow[], opts: { si
       logger.warn({ err, card: row.cardNumber }, 'FactorySuite workshop: could not sync a job card')
     }
   }
+  // Read this pass, as the changed ones are: one statement for all of them.
+  if (unchanged.length) await prisma.factorySuiteJobCard.updateMany({ where: { id: { in: unchanged } }, data: { syncedAt: now } })
+  report.unchanged += unchanged.length
   for (const orgId of touched) emitDashboardRepairChanged(orgId)
   return report
 }
@@ -484,14 +505,28 @@ export async function syncParts(rows: RaiFactorySuitePartRow[], report = empty()
   }
   for (const [orgId, parts] of byOrg) {
     const now = new Date()
+    // Only parts whose stock, cost or wording moved are written; the stores
+    // count rarely changes, so most hours this is a handful, not 1,000.
+    const stored = new Map(
+      (await prisma.factorySuitePart.findMany({
+        where: { organisationId: orgId },
+        select: {
+          id: true, organisationId: true, factoryCode: true, partNumber: true, description: true, unit: true,
+          quantityOnHand: true, minimumLevel: true, unitCost: true, supplier: true, active: true,
+        },
+      })).map(({ id, ...p }) => [id, p as Record<string, unknown>] as const),
+    )
+    const changed = parts.filter((row) => !partUnchanged(stored.get(row.id), partColumns(row, orgId)))
     await prisma.$transaction(async (tx) => {
-      for (const row of parts) {
+      for (const row of changed) {
         const cols = partColumns(row, orgId)
         await tx.factorySuitePart.upsert({ where: { id: row.id }, create: { id: row.id, ...cols }, update: { ...cols, syncedAt: now } })
       }
+      await tx.factorySuitePart.updateMany({ where: { id: { in: parts.map((r) => r.id) } }, data: { syncedAt: now } })
       await tx.factorySuitePart.deleteMany({ where: { organisationId: orgId, syncedAt: { lt: now } } })
     }, { timeout: 60_000 })
     report.parts += parts.length
+    report.unchanged += parts.length - changed.length
   }
   return report
 }
