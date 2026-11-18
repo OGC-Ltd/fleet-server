@@ -24,14 +24,25 @@ let partsWanted = false
 
 const ymd = (d: Date) => d.toISOString().slice(0, 10)
 
+/**
+ * The breakdowns window, both ends inclusive days: tomorrow (UTC; EAT is ahead)
+ * back to BREAKDOWN_DAYS days before it. FactorySuite refuses more than 31
+ * days with a 400 ("Date range too wide"); now-30 d to now+1 d was 32 (live,
+ * 2026-11-18), so no breakdown was ever read.
+ */
+export function breakdownWindow(now = Date.now()): { from: string; to: string } {
+  const to = new Date(now + 86_400_000)
+  const from = new Date(to.getTime() - BREAKDOWN_DAYS * 86_400_000)
+  return { from: ymd(from), to: ymd(to) }
+}
+
 async function pass(opts: { silent: boolean; parts?: boolean }): Promise<WorkshopSyncReport> {
   const cards = await client().listJobCards()
   const report = await syncJobCards(cards, { silent: opts.silent })
   // A failure past the cards costs only that feed.
   try {
-    const to = new Date(Date.now() + 86_400_000)
-    const from = new Date(Date.now() - BREAKDOWN_DAYS * 86_400_000)
-    await syncBreakdowns(await client().listBreakdowns(ymd(from), ymd(to)), { silent: opts.silent }, report)
+    const { from, to } = breakdownWindow()
+    await syncBreakdowns(await client().listBreakdowns(from, to), { silent: opts.silent }, report)
   } catch (err) { logger.warn({ err }, 'FactorySuite workshop: breakdowns not read') }
   try {
     await syncRequisitions(await client().listWorkshopRequisitions(), report)
