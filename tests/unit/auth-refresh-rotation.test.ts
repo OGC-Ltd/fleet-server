@@ -37,6 +37,7 @@ const session = (over: Record<string, unknown> = {}) => ({
   id:        'ses_1',
   userId:    USER.id,
   familyId:  'fam_1',
+  issuedAt:  new Date(Date.now() - 10 * 60_000),
   expiresAt: future(),
   rotatedAt: null,
   revokedAt: null,
@@ -143,6 +144,35 @@ describe('rotation', () => {
     expect(claims.sub).toBe(USER.id)
     expect(claims.sid).toBe('ses_2')
     expect(claims.typ).toBe('access')
+  })
+})
+
+describe('a returning device counts as a login', () => {
+  it('records nothing while the tab is open and refreshing on schedule', async () => {
+    arrange(session())
+    await authService.refresh('abc123')
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.userLoginEvent.create).not.toHaveBeenCalled()
+  })
+
+  it('records a login when the device comes back after the app was closed', async () => {
+    arrange(session({ issuedAt: new Date(Date.now() - authService.RETURN_AFTER_MS - 1_000) }))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.$transaction as any).mockResolvedValue([{ id: 'ses_2' }, { id: USER.id }, { id: 'evt_1' }])
+
+    const out = await authService.refresh('abc123')
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const event = (prismaMock.userLoginEvent.create as any).mock.calls[0][0].data
+    expect(event.userId).toBe(USER.id)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const user = (prismaMock.user.update as any).mock.calls[0][0]
+    expect(user.data.lastLoginAt).toBeInstanceOf(Date)
+    const claims = JSON.parse(
+      Buffer.from(out.accessToken.split('.')[1] as string, 'base64url').toString(),
+    ) as { sid: string }
+    expect(claims.sid).toBe('ses_2')
   })
 })
 

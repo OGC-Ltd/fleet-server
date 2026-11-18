@@ -278,6 +278,25 @@ describe('completeSetup', () => {
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     expect(revokeAllSessions).toHaveBeenCalledWith('u1', 'password set')
     expect(out.accessToken).toBe('new-access')
+    // Signed straight in, so it shows on Login Activity like any other login.
+    expect(issueSession).toHaveBeenCalledWith(
+      { id: 'u1', email: USER.email }, CTX, undefined, true,
+    )
+  })
+
+  it('records a successful password RESET as a login too', async () => {
+    prismaMock.passwordToken.findFirst.mockResolvedValue({
+      id: 't2', userId: 'u1', purpose: 'RESET', expiresAt: new Date(Date.now() + 1000),
+      user: { ...USER, status: 'ACTIVE' },
+    } as never)
+    prismaMock.$transaction.mockResolvedValue([] as never)
+    prismaMock.user.findUnique.mockResolvedValue({ id: 'u1', fullName: 'Maya Okonkwo' } as never)
+
+    await account.completeSetup('tok', 'a-brand-new-passphrase', CTX)
+
+    expect(issueSession).toHaveBeenCalledWith(
+      { id: 'u1', email: USER.email }, CTX, undefined, true,
+    )
   })
 })
 
