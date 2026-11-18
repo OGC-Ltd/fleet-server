@@ -20,6 +20,7 @@
  * person marks on each stop.
  */
 import { prisma } from '../../lib/prisma.js'
+import { LIVE_FENCE } from '../../lib/fence-archive.js'
 import { invalidateZoneCache } from '../../lib/zone-presence.js'
 import { BadRequestError, ConflictError, NotFoundError } from '../../core/errors/errors.js'
 import { readDeliverySheet, type DeliverySheet, type SheetStop } from './sheet.js'
@@ -162,7 +163,7 @@ async function knownCustomers(orgId: string, codes: string[]) {
   })
   const fenceIds = rows.map((r) => r.geofenceId).filter((x): x is string => Boolean(x))
   const fences = fenceIds.length
-    ? await prisma.geofence.findMany({ where: { id: { in: fenceIds }, organisationId: orgId }, select: { id: true, name: true } })
+    ? await prisma.geofence.findMany({ where: { id: { in: fenceIds }, organisationId: orgId, ...LIVE_FENCE }, select: { id: true, name: true } })
     : []
   return {
     byCode: new Map(rows.map((r) => [r.customerCode, r])),
@@ -271,7 +272,7 @@ export async function saveSheet(orgId: string, userId: string | null, body: Save
   // preview, else the existing fence the preview matched, else a new circle
   const chosen = Object.entries(body.fences ?? {}).filter(([, v]) => v !== 'new').map(([, v]) => v)
   const chosenOk = new Set(chosen.length
-    ? (await prisma.geofence.findMany({ where: { id: { in: chosen }, organisationId: orgId }, select: { id: true } })).map((f) => f.id)
+    ? (await prisma.geofence.findMany({ where: { id: { in: chosen }, organisationId: orgId, ...LIVE_FENCE }, select: { id: true } })).map((f) => f.id)
     : [])
   const undecided = stops.filter((s) => !body.fences?.[s.customerCode])
   const picks = await picksFor(orgId, undecided, known)
@@ -472,7 +473,8 @@ export async function fenceCustomer(orgId: string, customerId: string, body: Cus
     select: { id: true, customerCode: true, geofenceId: true },
   })
   if (!c) throw new NotFoundError('Customer not found')
-  if (c.geofenceId && await prisma.geofence.findFirst({ where: { id: c.geofenceId, organisationId: orgId }, select: { id: true } })) {
+  // An archived fence counts as gone: the customer is fenced again here.
+  if (c.geofenceId && await prisma.geofence.findFirst({ where: { id: c.geofenceId, organisationId: orgId, ...LIVE_FENCE }, select: { id: true } })) {
     throw new ConflictError('This customer already has a geofence; redraw it on the Live Map.')
   }
   const geofence = await prisma.$transaction(async (tx) => {

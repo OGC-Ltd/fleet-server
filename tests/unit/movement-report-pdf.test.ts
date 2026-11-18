@@ -320,7 +320,7 @@ describe('without a MORL fence', () => {
       geometry: { type: 'CIRCLE', radiusM: 800 },
     })
     expect(prismaMock.geofence.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { organisationId: 'org1', name: { equals: 'Menengai Yard', mode: 'insensitive' } },
+      where: { organisationId: 'org1', name: { equals: 'Menengai Yard', mode: 'insensitive' }, archivedAt: null },
     }))
   })
 

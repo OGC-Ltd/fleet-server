@@ -16,6 +16,7 @@
  */
 
 import { prisma } from '../../lib/prisma.js'
+import { LIVE_FENCE } from '../../lib/fence-archive.js'
 import { logger } from '../../lib/logger.js'
 import { emitDashboardWorkPlansChanged } from '../../lib/sse.js'
 import {
@@ -149,7 +150,7 @@ export async function workPlansForMap(orgId: string, day = eatToday()): Promise<
       select: { id: true, registrationPlate: true, name: true, equipmentReference: true, tankCapacityLitres: true },
     }),
     prisma.geofence.findMany({
-      where: { organisationId: orgId },
+      where: { organisationId: orgId, ...LIVE_FENCE },
       select: { id: true, name: true, isActive: true, type: true },
     }),
   ])

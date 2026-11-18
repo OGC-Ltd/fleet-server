@@ -84,6 +84,8 @@ export const geofenceListQuerySchema = z.object({
   cursor:   z.string().optional(),
   limit:    z.coerce.number().int().min(1).max(100).default(20),
   isActive: z.enum(['true', 'false']).transform(v => v === 'true').optional(),
+  /** true = only archived fences; default only the ones in use. */
+  archived: z.enum(['true', 'false']).transform(v => v === 'true').default(false),
 })
 
 export const assignVehicleSchema = z.object({ vehicleId: z.string().cuid() })

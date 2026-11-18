@@ -2,6 +2,7 @@
 import { Prisma } from '../../../generated/prisma/client.js'
 import { ConflictError } from '../../core/errors/errors.js'
 import type { CreateGeofence, UpdateGeofence, GeofenceListQuery } from './geofence.schema.js'
+import { LIVE_FENCE } from '../../lib/fence-archive.js'
 
 export async function create(orgId: string, createdById: string, dto: CreateGeofence) {
   return prisma.geofence.create({
@@ -44,6 +45,8 @@ export async function findAll(orgId: string, q: GeofenceListQuery) {
   const rows = await prisma.geofence.findMany({
     where: {
       organisationId: orgId,
+      // Archived fences are listed only when asked for (?archived=true).
+      archivedAt: q.archived ? { not: null } : null,
       ...(q.isActive !== undefined ? { isActive: q.isActive } : {}),
       ...(q.cursor ? { id: { gt: q.cursor } } : {}),
     },
@@ -79,7 +82,7 @@ import { categoryOf, ringAreaHa } from '../../lib/zone-taxonomy.js'
  */
 export async function findAllAsGeoJSON(orgId: string) {
   const rows = await prisma.geofence.findMany({
-    where:   { organisationId: orgId },
+    where:   { organisationId: orgId, ...LIVE_FENCE },
     orderBy: { name: 'asc' },
   })
 
@@ -125,8 +128,11 @@ export async function findAllAsGeoJSON(orgId: string) {
 }
 
 export async function update(id: string, orgId: string, dto: UpdateGeofence) {
-  const fence = await prisma.geofence.findFirst({ where: { id, organisationId: orgId }, select: { id: true, externalId: true } })
+  const fence = await prisma.geofence.findFirst({ where: { id, organisationId: orgId }, select: { id: true, externalId: true, archivedAt: true } })
   if (!fence) return null
+  // An archived fence is out of use; bringing it back is a batch undo
+  // (prisma/archive-geofences.ts --undo), not an edit.
+  if (fence.archivedAt) throw new ConflictError('This fence is archived. It has to be restored before it can be changed.')
   // A Wialon zone's name and shape are rewritten by the next import, so an
   // edit to either would quietly undo itself. Its purpose, colour and rule are
   // ours (no import writes them), and so is whether it is enforced.

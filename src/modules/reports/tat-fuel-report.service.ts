@@ -19,6 +19,7 @@
  *                  2026): type those times in there and the two read the same.
  */
 import { prisma } from '../../lib/prisma.js'
+import { LIVE_FENCE } from '../../lib/fence-archive.js'
 import { reportDb } from '../../lib/report-db.js'
 import { logger } from '../../lib/logger.js'
 import { fleetDayBounds } from '../../lib/provider-time.js'
@@ -380,7 +381,7 @@ async function fenceRows(unit: Unit, from: number, to: number, fences: Fences): 
 async function loadFences(orgCode: string, orgId: string): Promise<Fences> {
   const family = FENCE_FAMILIES.find(f => f.includes(orgCode))
   const rows = await prisma.geofence.findMany({
-    where: family ? { organisation: { code: { in: [...family] } } } : { organisationId: orgId },
+    where: { ...(family ? { organisation: { code: { in: [...family] } } } : { organisationId: orgId }), ...LIVE_FENCE },
     select: { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true },
     orderBy: { name: 'asc' },
   })

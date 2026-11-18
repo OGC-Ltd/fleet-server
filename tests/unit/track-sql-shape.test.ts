@@ -148,11 +148,26 @@ describe('zone-timeline SQL', () => {
     await findZoneTimeline('veh_01', 'org_01', FROM, TO)
     const sql = capturedSql()
 
-    // is_active is legitimate in exactly one place: deriving `enforced`. Any
-    // other appearance is a predicate, and a predicate here is defect (2).
+    // is_active is legitimate in two places: deriving `enforced`, and the
+    // Menengai switch below, which is OR'd with a parameter that is TRUE for
+    // every other organisation. Any other appearance is a predicate, and a
+    // predicate here is defect (2).
     const uses = sql.match(/is_active/g) ?? []
-    expect(uses).toHaveLength(1)
+    expect(uses).toHaveLength(2)
     expect(sql).toMatch(/\(f\."is_active" AND f\."mode" = 'BLOCKLIST'\)\s+AS enforced/)
+    const gate = /\(f\."is_active" OR \$(\d+)\s*\)/.exec(sql)
+    expect(gate).not.toBeNull()
+    expect(prismaMock.$queryRaw.mock.calls[0]![Number(gate![1])]).toBe(true)
+  })
+
+  it('leaves out archived fences, and inactive ones for Menengai (2026-11-18)', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(prismaMock.organisation.findUnique as any).mockResolvedValue({ code: 'MENENGAI' })
+    await findZoneTimeline('veh_01', 'org_01', FROM, TO)
+    const sql = capturedSql()
+    expect(sql).toMatch(/f\."archived_at" IS NULL/)
+    const gate = /\(f\."is_active" OR \$(\d+)\s*\)/.exec(sql)
+    expect(prismaMock.$queryRaw.mock.calls[0]![Number(gate![1])]).toBe(false)
   })
 
   it('still restricts fences to the caller\'s organisation', async () => {

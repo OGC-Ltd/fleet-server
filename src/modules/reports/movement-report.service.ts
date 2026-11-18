@@ -20,6 +20,7 @@
  * fix at or before its end from the stored telemetry.
  */
 import { prisma } from '../../lib/prisma.js'
+import { LIVE_FENCE } from '../../lib/fence-archive.js'
 import { logger } from '../../lib/logger.js'
 import { haversineM, isInsideFence, type FenceGeometry } from '../../lib/geofence.js'
 import { cachedPlace, reverseGeocode } from '../../lib/geocode.js'
@@ -165,7 +166,7 @@ const MORL_FALLBACK: MorlFence = {
  */
 export async function findMorlDestination(orgId: string): Promise<MorlFence | null> {
   const fences = await prisma.geofence.findMany({
-    where: { organisationId: orgId, name: { equals: 'Menengai Yard', mode: 'insensitive' } },
+    where: { organisationId: orgId, name: { equals: 'Menengai Yard', mode: 'insensitive' }, ...LIVE_FENCE },
     select: { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true },
     orderBy: { externalId: 'asc' },
   })
@@ -206,7 +207,7 @@ export function siteNameOf(orgName: string | null | undefined): string {
  */
 export async function findHomeFence(orgId: string, site: string): Promise<MorlFence | null> {
   const fences = await prisma.geofence.findMany({
-    where: { organisationId: orgId },
+    where: { organisationId: orgId, ...LIVE_FENCE },
     select: { name: true, type: true, centerLat: true, centerLng: true, radiusM: true, polygonCoords: true, widthM: true, isActive: true },
   })
   const word = site.split(' ')[0]!.toLowerCase()

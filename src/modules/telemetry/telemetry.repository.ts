@@ -3,6 +3,7 @@ import { probeHoldVehicleIds } from '../fuel/probe-hold.js'
 import { overspeedLimitFor } from '../../lib/derived-alerts.js'
 import { warmSpeedPolicy } from '../../lib/speed-policy.js'
 import { Prisma } from '../../../generated/prisma/client.js'
+import { hidesInactiveFences } from '../../lib/fence-archive.js'
 import { ALERT_SOURCE } from '../../lib/alerts.js'
 import { logger } from '../../lib/logger.js'
 import type { TelemetryListQuery, TrackQuery } from './telemetry.schema.js'
@@ -622,6 +623,10 @@ export async function findZoneTimeline(vehicleId: string, orgId: string, from: D
   if (!span) return { rows: [], bucketSec: 0 }
 
   const bucketSec = bucketSeconds(span.lo, span.hi, ZONE_PROBE_BUDGET)
+  // Archived fences never take part. For Menengai (user 2026-11-18) inactive
+  // ones do not either, so its timeline agrees with its live map.
+  const org = await prisma.organisation.findUnique({ where: { id: orgId }, select: { code: true } })
+  const inactiveToo = !hidesInactiveFences(org?.code)
 
   const rows = await withTimeout('zone-timeline', tx => tx.$queryRaw<ZoneVisitRow[]>`
     WITH fence_area AS MATERIALIZED (
@@ -646,6 +651,8 @@ export async function findZoneTimeline(vehicleId: string, orgId: string, from: D
              (f."is_active" AND f."mode" = 'BLOCKLIST')     AS enforced
       FROM "geofences" f
       WHERE f."organisation_id" = ${orgId} AND f."geom" IS NOT NULL
+        AND f."archived_at" IS NULL
+        AND (f."is_active" OR ${inactiveToo})
     ),
     buckets AS (
       SELECT b AS bucket_start
@@ -672,7 +679,9 @@ export async function findZoneTimeline(vehicleId: string, orgId: string, from: D
              z.enforced
       FROM samples s
       LEFT JOIN LATERAL (
-        -- NOT filtered by is_active, deliberately. 99 of the 107 fences here
+        -- NOT filtered by is_active, deliberately (except where fence_area
+        -- leaves them out: archived fences, and Menengai's inactive ones,
+        -- which its live map no longer draws). 99 of the 107 fences here
         -- were bulk-imported from Wialon and never switched on, and
         -- lib/zone-presence.ts still reports them — it uses is_active only to
         -- decide whether being inside one is ENFORCED, never whether the

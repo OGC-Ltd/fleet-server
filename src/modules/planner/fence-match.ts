@@ -14,6 +14,7 @@ export async function fencesNear(orgId: string, lat: number, lng: number): Promi
            ST_Area(geom) AS "areaM2"
       FROM geofences
      WHERE organisation_id = ${orgId}
+       AND archived_at IS NULL
        AND type <> 'LINE'
        AND geom IS NOT NULL
        AND ST_DWithin(geom, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, ${MATCH_NEAR_M})
