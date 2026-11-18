@@ -165,6 +165,63 @@ export function partColumns(row: RaiFactorySuitePartRow, orgId: string) {
   }
 }
 
+// ── Unchanged rows (2026-11-18) ─────────────────────────────────────────────
+// Every pass re-reads the whole feed: ~250 cards every 5 minutes, 1,000 parts
+// an hour. Writing each one back, a transaction per card, kept the reconcile
+// past its 5-minute watchdog on the first live day. A row is written only when
+// it differs from what is stored; the rest only get their synced_at touched.
+
+/** JSON with object keys sorted: jsonb hands keys back in its own order. */
+export function stableJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>
+    return `{${Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${stableJson(o[k])}`).join(',')}}`
+  }
+  return JSON.stringify(v ?? null)
+}
+
+/** One stored column against the value we would write now. Dates by instant. */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a instanceof Date || b instanceof Date) {
+    return a instanceof Date && b instanceof Date && a.getTime() === b.getTime()
+  }
+  return (a ?? null) === (b ?? null)
+}
+
+/**
+ * Every column we would write, already stored as we would write it. Compared
+ * as well as the raw row so a change to the MAPPING (how times are read, the
+ * factory's organisation, how priority is worded) reaches a card FactorySuite
+ * has not touched: the raw row alone would say nothing changed.
+ */
+export function columnsUnchanged(prev: Record<string, unknown>, cols: Record<string, unknown>): boolean {
+  return Object.keys(cols).every((k) => sameValue(prev[k], cols[k]))
+}
+
+export type StoredCard = Record<string, unknown> & {
+  raw: unknown; vehicleId: string | null; repairItemId: string | null; appliedStage: string | null
+}
+
+/**
+ * A card that needs nothing this pass: stored before with the same feed row
+ * and the same columns, and its job already at the card's stage (or no job is
+ * due: no tracked unit, or a card cancelled before we saw it). Anything else
+ * goes through the full sync, as before.
+ */
+export function cardUnchanged(
+  prev: StoredCard | undefined, row: unknown, cols: ReturnType<typeof jobCardColumns>, stage: string,
+): boolean {
+  if (!prev || stableJson(prev.raw) !== stableJson(row) || !columnsUnchanged(prev, cols)) return false
+  if (prev.repairItemId) return prev.appliedStage === stage
+  return !cols.vehicleId || stage === 'void'
+}
+
+/** Every column the feed sets, stored as given. */
+export function partUnchanged(prev: Record<string, unknown> | undefined, cols: ReturnType<typeof partColumns>): boolean {
+  return !!prev && columnsUnchanged(prev, cols)
+}
+
 /** The machine's name on a card's job: what the workshop wrote, then the card. */
 export function suspectedFaultOf(card: { reportedFault: string | null; isService: boolean; serviceType: string | null; cardNumber: string }) {
   if (card.reportedFault) return card.reportedFault
