@@ -267,8 +267,10 @@ export function standingWords(since: number, now = Date.now()): string {
 }
 
 /** What the toast says. */
-export function flagWords(f: StopFlag, now = Date.now()): string {
+export function flagWords(f: StopFlag, now = Date.now(), place: string | null = null): string {
   if (f.kind === 'nogo') return `${f.plate} has stood ${standingWords(f.since, now)} in the no-go zone ${f.zone}.`
   if (f.kind === 'customer') return `${f.plate} has stopped ${standingWords(f.since, now)} at customer ${f.zone}.`
+  // Named by where it stands (operator, 18 Nov 2026: "stop at X place (Non Authorized)")
+  if (place) return `${f.plate} has stopped ${standingWords(f.since, now)} at ${place} (Unauthorised stop).`
   return `${f.plate} has stood ${standingWords(f.since, now)} outside any authorised place.`
 }

@@ -18,6 +18,7 @@ import { getFleetSnapshotCached } from '../telemetry/fleet-snapshot.cache.js'
 import { findAllAsGeoJSON } from '../geofences/geofence.repository.js'
 import { AUTHORISED, NO_GO } from './stop-watch.places.js'
 import { movementState } from '../../lib/movement-state.js'
+import { cachedPlace, reverseGeocode } from '../../lib/geocode.js'
 import {
   ORG_CODE, flagWords, flaggedUnits, nearestPlace, placesOf, storePlaces, withMovement,
   type Nearest, type Place, type RawSnapshotRow, type StopFlag,
@@ -27,7 +28,21 @@ export const CHECK_MS = 60_000
 const ZONES_MS = 60 * 60_000
 const KEEP_S = 24 * 3600
 
-export interface StopWatchFlag extends StopFlag { nearest: Nearest | null; text: string }
+export interface StopWatchFlag extends StopFlag { place: string | null; nearest: Nearest | null; text: string }
+
+const PLACE_WAIT_MS = 5_000
+/** Where a stop stands, by name: cached at once, else the lookup for up to PLACE_WAIT_MS. */
+async function placeOf(lat: number, lng: number): Promise<string | null> {
+  const hit = cachedPlace(lat, lng)
+  if (hit) return hit
+  let timer: NodeJS.Timeout | undefined
+  const wait = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), PLACE_WAIT_MS); timer.unref?.() })
+  try {
+    return await Promise.race([reverseGeocode(lat, lng).catch(() => null), wait])
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 interface State {
   orgId: string | null
@@ -78,10 +93,15 @@ export async function checkStops(now = Date.now()): Promise<void> {
   const units = withMovement(snap as unknown as RawSnapshotRow[], movementState)
   const authorised = [...fromFile, ...zones.places]
   const near = [...storePlaces(), ...authorised]
-  const flags: StopWatchFlag[] = flaggedUnits(units, { authorised, noGo, now }).map((f) => ({
+  const found = flaggedUnits(units, { authorised, noGo, now })
+  // An unauthorised stop is named by where it stands. A name not cached yet
+  // waits PLACE_WAIT_MS at most; the lookup carries on and the next check has it.
+  const places = await Promise.all(found.map((f) => (f.kind === 'unauthorised' ? placeOf(f.lat, f.lng) : null)))
+  const flags: StopWatchFlag[] = found.map((f, i) => ({
     ...f,
+    place: places[i],
     nearest: f.kind === 'unauthorised' ? nearestPlace(f.lat, f.lng, near) : null,
-    text: flagWords(f, now),
+    text: flagWords(f, now, places[i]),
   }))
   state = { orgId, status: 'done', flags, checkedAt: now, message: null }
 
