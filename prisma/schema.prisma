@@ -327,6 +327,10 @@ model Organisation {
   repairReports        RepairReport[]
   repairReportItems    RepairReportItem[]
   workshops            Workshop[]
+  fsJobCards           FactorySuiteJobCard[]
+  fsBreakdowns         FactorySuiteBreakdown[]
+  fsRequisitions       FactorySuiteRequisition[]
+  fsParts              FactorySuitePart[]
   fuelTheftFollowUps   FuelTheftFollowUp[]
   driverConductCases   DriverConductCase[]
   operatorIncidents    OperatorIncident[]
@@ -883,6 +887,8 @@ model Vehicle {
   dispatches             Dispatch[]
   weighments             Weighment[]
   repairReportItems      RepairReportItem[]
+  fsJobCards             FactorySuiteJobCard[]
+  fsBreakdowns           FactorySuiteBreakdown[]
   securityInvestigations SecurityInvestigation[]
 
   @@index([organisationId])
@@ -1431,8 +1437,12 @@ model RepairReport {
   id             String @id @default(cuid())
   organisationId String @map("organisation_id")
 
-  /// Who filed it. Not nullable: a repair report with no author is a rumour.
-  reportedById String   @map("reported_by_id")
+  /// Who filed it. Required for a report filed in the app (CHECK): a repair
+  /// report with no author is a rumour. Null only when `source` names the
+  /// integration that raised it (a FactorySuite job card).
+  reportedById String?  @map("reported_by_id")
+  /// app | factorysuite (CHECK, migration 20261118120000_factorysuite_workshop).
+  source       String   @default("app")
   reportedAt   DateTime @default(now()) @map("reported_at")
 
   /// Free text about the visit as a whole — access, weather, why half the list
@@ -1453,7 +1463,7 @@ model RepairReport {
   createdAt DateTime @default(now()) @map("created_at")
 
   organisation Organisation       @relation(fields: [organisationId], references: [id])
-  reportedBy   User               @relation("RepairReportsFiled", fields: [reportedById], references: [id])
+  reportedBy   User?              @relation("RepairReportsFiled", fields: [reportedById], references: [id])
   items        RepairReportItem[]
 
   @@index([organisationId, reportedAt])
@@ -1644,6 +1654,9 @@ model RepairReportItem {
   /// ordered for the fix. See RepairInspection and RepairSparePart.
   inspections   RepairInspection[]
   spareParts    RepairSparePart[]
+  /// FactorySuite job cards worked under this job (normally one).
+  fsJobCards    FactorySuiteJobCard[]
+  fsBreakdowns  FactorySuiteBreakdown[]
 
   @@index([reportId])
   /// The open-jobs list, and the "Reported" badge on the probe table.
@@ -3763,4 +3776,136 @@ model FleetListVersion {
 
   @@index([organisationId, createdAt])
   @@map("fleet_list_versions")
+}
+
+// ── FactorySuite Auto Workshop (migration 20261118120000_factorysuite_workshop) ──
+// What FactorySuite last said, keyed on its own ids. The repair workflow is
+// fed from these (src/modules/repairs/factorysuite-workshop.sync.ts); see
+// docs/factorysuite-workshop-integration.md. FactorySuite's times carry no
+// zone and are East Africa time; they are stored as UTC like every other row.
+
+/// A FactorySuite workshop job card. Each one is worked as a repair job of
+/// ours (`repairItemId`), created for it or a flagged job it adopted.
+model FactorySuiteJobCard {
+  id               String    @id
+  organisationId   String    @map("organisation_id")
+  factoryCode      String    @map("factory_code")
+  cardNumber       String    @unique @map("card_number")
+  /// The /machines reference ("EX-22") = vehicles.equipment_reference.
+  machine          String
+  vehicleId        String?   @map("vehicle_id")
+  /// IN_PROGRESS | AWAITING_PARTS | RELEASED | CANCELLED (as FactorySuite says)
+  status           String
+  /// WORKSHOP_RAISED | DEPARTMENT_REPORT | SUPERVISOR_REPORT | SCHEDULED_SERVICE
+  source           String?
+  priority         String?
+  /// MINOR | MAJOR | OTHER
+  category         String?
+  reportedFault    String?   @map("reported_fault")
+  diagnosis        String?
+  checkedInAt      DateTime? @map("checked_in_at")
+  confirmedDownAt  DateTime? @map("confirmed_down_at")
+  repairStartedAt  DateTime? @map("repair_started_at")
+  partsRequestedAt DateTime? @map("parts_requested_at")
+  partsReceivedAt  DateTime? @map("parts_received_at")
+  workCompletedAt  DateTime? @map("work_completed_at")
+  releasedAt       DateTime? @map("released_at")
+  isService        Boolean   @default(false) @map("is_service")
+  serviceType      String?   @map("service_type")
+  meterIn          Float?    @map("meter_in")
+  meterOut         Float?    @map("meter_out")
+  fuelIn           Float?    @map("fuel_in")
+  fuelOut          Float?    @map("fuel_out")
+  fuelSourceIn     String?   @map("fuel_source_in")
+  fuelSourceOut    String?   @map("fuel_source_out")
+  fuelDiscrepancy  Boolean   @default(false) @map("fuel_discrepancy")
+  labourCost       Float?    @map("labour_cost")
+  partsCost        Float?    @map("parts_cost")
+  /// The row as received, so a field FactorySuite adds is not lost.
+  raw              Json
+  repairItemId     String?   @map("repair_item_id")
+  /// The workflow stage this card last moved its job to. The sync moves the
+  /// job again only when the card's own stage changes, so a Control Room
+  /// rejection is not undone by the next pass.
+  appliedStage     String?   @map("applied_stage")
+  firstSeenAt      DateTime  @default(now()) @map("first_seen_at")
+  syncedAt         DateTime  @default(now()) @map("synced_at")
+
+  organisation Organisation      @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  vehicle      Vehicle?          @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  repairItem   RepairReportItem? @relation(fields: [repairItemId], references: [id], onDelete: SetNull)
+
+  @@index([organisationId, status])
+  @@index([vehicleId, checkedInAt])
+  @@index([repairItemId])
+  @@map("factorysuite_job_cards")
+}
+
+/// A breakdown reported from the field in FactorySuite. A CONFIRMED one is a
+/// flag in our workflow until the workshop opens a card on the machine.
+model FactorySuiteBreakdown {
+  id             String    @id
+  organisationId String    @map("organisation_id")
+  factoryCode    String    @map("factory_code")
+  machine        String
+  vehicleId      String?   @map("vehicle_id")
+  reportedFault  String?   @map("reported_fault")
+  location       String?
+  status         String
+  reportedAt     DateTime? @map("reported_at")
+  decidedAt      DateTime? @map("decided_at")
+  decisionNote   String?   @map("decision_note")
+  jobCardNumber  String?   @map("job_card_number")
+  raw            Json
+  repairItemId   String?   @map("repair_item_id")
+  firstSeenAt    DateTime  @default(now()) @map("first_seen_at")
+  syncedAt       DateTime  @default(now()) @map("synced_at")
+
+  organisation Organisation      @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  vehicle      Vehicle?          @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  repairItem   RepairReportItem? @relation(fields: [repairItemId], references: [id], onDelete: SetNull)
+
+  @@index([organisationId, reportedAt])
+  @@map("factorysuite_breakdowns")
+}
+
+/// A FactorySuite parts requisition. None had been raised by 2026-11-18, so
+/// the row is kept raw until the first real one shows its shape.
+model FactorySuiteRequisition {
+  id             String   @id
+  organisationId String   @map("organisation_id")
+  factoryCode    String   @map("factory_code")
+  status         String?
+  jobCardNumber  String?  @map("job_card_number")
+  raw            Json
+  firstSeenAt    DateTime @default(now()) @map("first_seen_at")
+  syncedAt       DateTime @default(now()) @map("synced_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  @@index([organisationId])
+  @@index([jobCardNumber])
+  @@map("factorysuite_requisitions")
+}
+
+/// The stores' spare-parts catalogue with stock on hand. FactorySuite serves
+/// at most 1000 rows and no paging (2026-11-18), so this can be a part of it.
+model FactorySuitePart {
+  id             String   @id
+  organisationId String   @map("organisation_id")
+  factoryCode    String   @map("factory_code")
+  partNumber     String   @map("part_number")
+  description    String?
+  unit           String?
+  quantityOnHand Float?   @map("quantity_on_hand")
+  minimumLevel   Float?   @map("minimum_level")
+  unitCost       Float?   @map("unit_cost")
+  supplier       String?
+  active         Boolean  @default(true)
+  syncedAt       DateTime @default(now()) @map("synced_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  @@index([organisationId, partNumber])
+  @@map("factorysuite_parts")
 }

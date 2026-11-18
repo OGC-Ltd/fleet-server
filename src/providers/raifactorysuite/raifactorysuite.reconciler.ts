@@ -38,6 +38,7 @@ import { ingestAlerts } from '../../modules/webhooks/raifactorysuite-alerts.serv
 import { handleDispatch, handleSale } from '../../modules/webhooks/raifactorysuite-events.service.js'
 import { handleWeighment } from '../../modules/weighments/weighment.ingest.js'
 import { FACTORIES } from '../../modules/webhooks/factory-map.js'
+import { runWorkshopSync } from '../../modules/repairs/factorysuite-workshop.runner.js'
 import { fleetDayKey } from '../../lib/provider-time.js'
 import { prisma } from '../../lib/prisma.js'
 import { syncMachineRegister } from './raifactorysuite.machine-sync.js'
@@ -267,6 +268,17 @@ class RaiFactorySuiteReconciler {
       }
     }
 
+    // Auto Workshop job cards, breakdowns, requisitions and parts feed the
+    // repair workflow (modules/repairs/factorysuite-workshop.sync). Silent on
+    // the first pass for the same reason as alerts: a backlog is not news.
+    let workshop: Awaited<ReturnType<typeof runWorkshopSync>> = null
+    try {
+      workshop = await runWorkshopSync({ silent: !this.primed })
+    } catch (err) {
+      failed = true
+      this.logFailure('workshop', err)
+    }
+
     if (failed) {
       this.consecutiveFailures++
     } else {
@@ -278,7 +290,11 @@ class RaiFactorySuiteReconciler {
     }
 
     logger.info(
-      { durationMs: Date.now() - t0, alertsCreated, dispatchesSeen, salesSeen, weighmentsSeen, machinesWritten, primed: this.primed },
+      {
+        durationMs: Date.now() - t0, alertsCreated, dispatchesSeen, salesSeen, weighmentsSeen, machinesWritten,
+        jobCards: workshop?.cards, workshopMoves: workshop ? workshop.created + workshop.adopted + workshop.moved + workshop.voided : undefined,
+        primed: this.primed,
+      },
       'RaiFactorySuite reconcile complete',
     )
   }
