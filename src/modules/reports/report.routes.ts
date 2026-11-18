@@ -72,7 +72,9 @@ router.get('/reports/recovery.pdf', requirePermission('telemetry:read'), validat
 // The rows the page made, for one organisation or several together, drawn on the letterhead.
 // User-read users need this renderer for the group-scoped Login Activity report;
 // telemetry-read report users retain access to their existing editable reports.
-router.post('/reports/document.pdf', requireAnyPermission(['telemetry:read', 'user:read']), validateBody(reportDocSchema), ctrl.downloadReportDoc)
+// Weighbridge-read users draw the Weighbridges Tickets, Coverage and Analytics PDFs
+// (18 Nov 2026); Finance Manager holds that and neither of the other two.
+router.post('/reports/document.pdf', requireAnyPermission(['telemetry:read', 'user:read', 'weighbridge:read']), validateBody(reportDocSchema), ctrl.downloadReportDoc)
 router.post('/reports/dormant-assets.pdf', requirePermission('telemetry:read'), validateBody(dormantPdfBodySchema), ctrl.downloadDormantPdf)
 router.post('/reports/geofences.pdf', requirePermission('telemetry:read'), validateBody(geofencePdfBodySchema), ctrl.downloadGeofencePdf)
 router.post('/reports/tat-fuel.pdf', requirePermission('telemetry:read'), validateBody(tatFuelPdfBodySchema), ctrl.downloadTatFuelPdf)
