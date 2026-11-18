@@ -15,6 +15,14 @@ export const NOGO_MIN_MS = 2 * 60_000
 export const UNAUTHORISED_MIN_MS = 10 * 60_000
 /** A position older than this is not judged: the unit may have moved since. */
 export const STALE_MS = 6 * 3_600_000
+/**
+ * A customer's fence (operator, 18 Nov 2026: a unit stopped at a customer
+ * should say "stopped at X customer", not unauthorised, and still alert):
+ * Menengai's shop and customer zones, its 30 m customer circles, and the
+ * places file's Customers. Every other authorised place (rest stops, sites,
+ * weighbridges, yards, MORL and STO) stays silent.
+ */
+export const CUSTOMER_CATEGORIES: ReadonlySet<string> = new Set(['customer', 'shop'])
 /** Standing: slower than this (km/h), and not moving by the movement state. */
 const STAND_KMH = 3
 
@@ -186,7 +194,7 @@ export interface StopFlag {
   vehicleId: string
   plate: string
   name: string | null
-  kind: 'nogo' | 'unauthorised'
+  kind: 'nogo' | 'unauthorised' | 'customer'
   zone: string | null
   since: number
   lat: number
@@ -209,6 +217,8 @@ export function flaggedUnits(
   { authorised = [], noGo = [], now = Date.now() }: { authorised?: readonly Place[]; noGo?: readonly Place[]; now?: number } = {},
 ): StopFlag[] {
   const allowed = [...storePlaces(), ...authorised]
+  const silent = allowed.filter((p) => !CUSTOMER_CATEGORIES.has(p.category))
+  const customers = allowed.filter((p) => CUSTOMER_CATEGORIES.has(p.category))
   const out: StopFlag[] = []
   for (const v of units) {
     if (!Number.isFinite(v.lat) || !Number.isFinite(v.lng)) continue
@@ -226,11 +236,19 @@ export function flaggedUnits(
       if (standing >= NOGO_MIN_MS) out.push({ ...base, key: `${v.vehicleId}|nogo|${bad.name}|${since}`, kind: 'nogo', zone: bad.name })
       continue
     }
-    if (standing >= UNAUTHORISED_MIN_MS && !placeAt(lat, lng, allowed)) {
-      out.push({ ...base, key: `${v.vehicleId}|stop|${since}`, kind: 'unauthorised', zone: null })
-    }
+    // A rest stop, site, weighbridge or yard: nothing to say, even with a shop inside it
+    if (standing < UNAUTHORISED_MIN_MS || placeAt(lat, lng, silent)) continue
+    const shop = placeAt(lat, lng, customers)
+    if (shop) out.push({ ...base, key: `${v.vehicleId}|customer|${since}`, kind: 'customer', zone: customerName(shop.name) })
+    else out.push({ ...base, key: `${v.vehicleId}|stop|${since}`, kind: 'unauthorised', zone: null })
   }
   return out.sort((a, b) => b.since - a.since)
+}
+
+/** A customer fence's name as people say it: "MENENGAI_VS: NEEMA SHOP" is NEEMA SHOP. */
+export function customerName(name: string): string {
+  const shown = name.replace(/^me\w*\s*[_ :-]?\s*(vs|vansales|shop|fg)\s*:\s*/i, '').trim()
+  return shown || name
 }
 
 /** "2 h 05 min", "12 min". */
@@ -242,7 +260,7 @@ export function standingWords(since: number, now = Date.now()): string {
 
 /** What the toast says. */
 export function flagWords(f: StopFlag, now = Date.now()): string {
-  return f.kind === 'nogo'
-    ? `${f.plate} has stood ${standingWords(f.since, now)} in the no-go zone ${f.zone}.`
-    : `${f.plate} has stood ${standingWords(f.since, now)} outside any authorised place.`
+  if (f.kind === 'nogo') return `${f.plate} has stood ${standingWords(f.since, now)} in the no-go zone ${f.zone}.`
+  if (f.kind === 'customer') return `${f.plate} has stopped ${standingWords(f.since, now)} at customer ${f.zone}.`
+  return `${f.plate} has stood ${standingWords(f.since, now)} outside any authorised place.`
 }
