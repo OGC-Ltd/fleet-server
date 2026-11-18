@@ -2,6 +2,7 @@ import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as service from './range-reports.service.js'
 import { unitDistance as unitDistanceOf } from './unit-distance.service.js'
+import { odometerAt as odometerAtOf, type OdoPoint } from './odometer-at.service.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 const range = (req: Parameters<RequestHandler>[0]) => req.query as { from: string; to: string }
@@ -35,5 +36,13 @@ export const unitDistance: RequestHandler = async (req, res, next) => {
   try {
     const { day, vehicleIds } = req.body as { day: string; vehicleIds: string[] }
     sendSuccess(res, await unitDistanceOf(p(req, 'orgId'), req.authz?.vehicleIds ?? null, day, vehicleIds))
+  } catch (err) { next(err) }
+}
+
+/** POST …/reports/odometer-at { points: [{ vehicleId, at }] } — each unit's odometer at each moment, filled from Wialon where missing. */
+export const odometerAt: RequestHandler = async (req, res, next) => {
+  try {
+    const { points } = req.body as { points: OdoPoint[] }
+    sendSuccess(res, await odometerAtOf(p(req, 'orgId'), req.authz?.vehicleIds ?? null, points))
   } catch (err) { next(err) }
 }

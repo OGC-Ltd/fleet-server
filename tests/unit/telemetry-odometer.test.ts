@@ -75,3 +75,21 @@ describe('unit-distance', async () => {
     expect(needsFill(undefined, 1, now - MISS_TTL_MS, now)).toBe(true)
   })
 })
+
+describe('odometer-at', async () => {
+  const { readingAt, fleetDayOf, NEAR_MS } = await import('../../src/modules/reports/odometer-at.service.js')
+  it('interpolates between the readings either side of the moment', () => {
+    expect(readingAt(1_500, { t: 1_000, m: 10_000 }, { t: 2_000, m: 12_000 })).toBe(11_000)
+    expect(readingAt(1_000, { t: 1_000, m: 10_000 }, { t: 1_000, m: 10_000 })).toBe(10_000)
+  })
+  it('takes a one-sided reading only when it is near', () => {
+    expect(readingAt(NEAR_MS, { t: 0, m: 5_000 }, null)).toBe(5_000)
+    expect(readingAt(NEAR_MS + 1, { t: 0, m: 5_000 }, null)).toBeNull()
+    expect(readingAt(0, null, { t: NEAR_MS, m: 7_000 })).toBe(7_000)
+    expect(readingAt(0, null, null)).toBeNull()
+  })
+  it('files a moment under its Nairobi fleet day', () => {
+    expect(fleetDayOf(Date.parse('2026-11-14T23:47:00Z'))).toBe('2026-11-15')
+    expect(fleetDayOf(Date.parse('2026-11-15T20:59:00Z'))).toBe('2026-11-15')
+  })
+})

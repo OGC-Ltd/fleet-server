@@ -79,5 +79,62 @@ export async function keepDayKm(entries: [string, DayKmEvidence][], day: string,
   }
 }
 
+/**
+ * The odometer at a moment (odometer-at), kept for 7 days once the moment is settled. A
+ * reading of null (no stored reading near it) is kept too, so it is not looked for again.
+ */
+export const odoAtKey = (vehicleId: string, t: number) => `odo:at:v1:${vehicleId}:${t}`
+const localAt = new Map<string, { m: number | null; until: number }>()
+
+/** The kept readings for these (vehicle, unix ms) moments, keyed `vehicleId|t`; a miss is absent. */
+export async function readOdoAt(points: [string, number][], now = Date.now()): Promise<Map<string, number | null>> {
+  const out = new Map<string, number | null>()
+  if (!points.length) return out
+  const redis = getCacheRedis()
+  if (redis) {
+    try {
+      const raws = await redis.mget(...points.map(([id, t]) => odoAtKey(id, t)))
+      raws.forEach((raw, i) => {
+        if (raw == null) return
+        const v: unknown = JSON.parse(raw)
+        if (v && typeof v === 'object' && 'm' in v) {
+          const m = (v as { m: unknown }).m
+          out.set(`${points[i]![0]}|${points[i]![1]}`, typeof m === 'number' ? m : null)
+        }
+      })
+      return out
+    } catch (err) {
+      logger.warn({ err }, 'Odometer reading cache read failed, reading the database')
+    }
+  }
+  for (const [id, t] of points) {
+    const hit = localAt.get(odoAtKey(id, t))
+    if (hit && hit.until > now) out.set(`${id}|${t}`, hit.m)
+  }
+  return out
+}
+
+/** Keeps readings at moments for DAY_KM_TTL_S. */
+export async function keepOdoAt(entries: [string, number, number | null][], now = Date.now()): Promise<void> {
+  if (!entries.length) return
+  const redis = getCacheRedis()
+  if (redis) {
+    try {
+      const pipe = redis.pipeline()
+      for (const [id, t, m] of entries) pipe.set(odoAtKey(id, t), JSON.stringify({ m }), 'EX', DAY_KM_TTL_S)
+      await pipe.exec()
+      return
+    } catch (err) {
+      logger.warn({ err }, 'Odometer reading cache write failed')
+    }
+  }
+  for (const [id, t, m] of entries) {
+    const key = odoAtKey(id, t)
+    localAt.delete(key)
+    if (localAt.size >= LOCAL_MAX) localAt.delete(localAt.keys().next().value!)
+    localAt.set(key, { m, until: now + DAY_KM_TTL_S * 1000 })
+  }
+}
+
 /** Tests only. */
-export function _clearDayKmCache() { local.clear() }
+export function _clearDayKmCache() { local.clear(); localAt.clear() }

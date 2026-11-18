@@ -78,4 +78,9 @@ export const dayRangeQuerySchema = z.object({ from: day, to: day })
 /** One fleet day's distance for the units named (Weighbridges › Metrics): the odometer, pulled from Wialon where not stored. */
 export const unitDistanceBodySchema = z.object({ day, vehicleIds: z.array(z.string().min(1).max(64)).min(1).max(500) })
 
+/** The odometer at each trip end (Weighbridges › Coverage): a unit and a moment, up to 2,000 at once. */
+export const odometerAtBodySchema = z.object({
+  points: z.array(z.object({ vehicleId: z.string().min(1).max(64), at: z.string().datetime({ offset: true }) })).min(1).max(2_000),
+})
+
 export const importIncidentsSchema = z.object({ entries: z.array(incidentSchema).max(20_000) })

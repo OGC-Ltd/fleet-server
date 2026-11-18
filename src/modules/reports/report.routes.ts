@@ -29,7 +29,7 @@ import * as conduct from './driver-conduct.controller.js'
 import * as ranged from './range-reports.controller.js'
 import {
   foundCasesSchema, importCasesSchema, caseActionSchema, listCasesQuerySchema,
-  incidentSchema, importIncidentsSchema, incidentSharedSchema, dayRangeQuerySchema, unitDistanceBodySchema,
+  incidentSchema, importIncidentsSchema, incidentSharedSchema, dayRangeQuerySchema, unitDistanceBodySchema, odometerAtBodySchema,
 } from './driver-conduct.schema.js'
 
 const router = Router({ mergeParams: true })
@@ -64,6 +64,7 @@ router.get('/reports/probe-disconnections', requirePermission('telemetry:read'),
 // Worked out here, not in the page (v47): fleet days from and to, inclusive.
 router.get('/reports/fuel-consumption-rate', requirePermission('telemetry:read'), validateQuery(dayRangeQuerySchema), ranged.fuelConsumptionRate)
 router.post('/reports/unit-distance', requirePermission('telemetry:read'), validateBody(unitDistanceBodySchema), ranged.unitDistance)
+router.post('/reports/odometer-at', requirePermission('telemetry:read'), validateBody(odometerAtBodySchema), ranged.odometerAt)
 router.get('/reports/alarm-distribution', requirePermission('vehicle:read'), validateQuery(dayRangeQuerySchema), ranged.alarmDistribution)
 router.get('/reports/unauthorized-passengers', requirePermission('telemetry:read'), validateQuery(dayRangeQuerySchema), ranged.unauthorizedPassengers)
 router.get('/reports/recovery', requirePermission('telemetry:read'), validateQuery(recoveryReportQuerySchema), ctrl.getRecoveryReport)
