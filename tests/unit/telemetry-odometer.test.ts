@@ -64,7 +64,12 @@ describe('unit-distance', async () => {
     const now = 10 * MISS_TTL_MS
     expect(needsFill(undefined, 30170978, undefined, now)).toBe(true)
     expect(needsFill({ gpsKm: 60, odoKm: 0, odoReadings: 0, fixes: 1374 }, 30170978, undefined, now)).toBe(true)
-    expect(needsFill({ gpsKm: 60, odoKm: 70, odoReadings: 900, fixes: 1374 }, 30170978, undefined, now)).toBe(false)
+    expect(needsFill({ gpsKm: 60, odoKm: 70, odoReadings: 1371, fixes: 1374 }, 30170978, undefined, now)).toBe(false)
+    // Most rows without a reading though some carry one (the deploy day's early hours): pulled
+    expect(needsFill({ gpsKm: 60, odoKm: 70, odoReadings: 900, fixes: 1374 }, 30170978, undefined, now)).toBe(true)
+    expect(needsFill({ gpsKm: 0, odoKm: 0, odoReadings: 2, fixes: 14 }, 30171059, undefined, now)).toBe(true)
+    // ...but not again within the memo, answered or not
+    expect(needsFill({ gpsKm: 0, odoKm: 0, odoReadings: 2, fixes: 14 }, 30171059, now - 60_000, now)).toBe(false)
     expect(needsFill(undefined, null, undefined, now)).toBe(false)
     expect(needsFill(undefined, 1, now - 1000, now)).toBe(false)
     expect(needsFill(undefined, 1, now - MISS_TTL_MS, now)).toBe(true)

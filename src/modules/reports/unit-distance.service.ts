@@ -13,8 +13,13 @@
  * read of that day is answered from the database.
  *
  * A unit with no odometer, on Wialon or off it, keeps the GPS sum, as the Fuel
- * Consumption Rate report does (pickDayKm). Wialon is asked once per unit-day:
- * a day it had no odometer for is not asked again for MISS_TTL_MS. No more than
+ * Consumption Rate report does (pickDayKm). A unit-day is pulled when fewer
+ * than FILL_COVERAGE of its rows carry a reading, not only when none do: the
+ * deploy day (18 Nov 2026) has three hours of rows from before the column, and
+ * two live readings must not stop those being filled (KTCC 861B). Wialon is
+ * asked at most once per unit-day per MISS_TTL_MS, whether it answered or not;
+ * a pulled figure goes into the 7-day day-distance cache (day-km.cache), so a
+ * settled day reads the same the next time, from the cache. No more than
  * FILLS_AT_ONCE units are read at a time across the server, and one request
  * fills for at most BUDGET_MS; what is left is answered `pending`, for the page
  * to ask again, so a long fill never runs into the proxy's timeout.
@@ -27,12 +32,15 @@ import { BadRequestError } from '../../core/errors/errors.js'
 import { WialonClient } from '../../providers/wialon/wialon.client.js'
 import { readOdometerM } from '../../providers/wialon/wialon.sensors.js'
 import { wialonUnitId } from '../fuel/fuel-sync.service.js'
-import { dayKmEvidence, forgetDayKm, pickDayKm, ODO_MAX_KMH, type DayKmEvidence, type DistanceSource } from './range-reports.service.js'
+import { cachedDayKmEvidence, pickDayKm, ODO_MAX_KMH, type DayKmEvidence, type DistanceSource } from './range-reports.service.js'
+import { keepDayKm, SETTLE_MS } from './day-km.cache.js'
 
 const PAGE = 20_000
 /** A day at one message a second, with room to spare. */
 const MAX_MESSAGES = 100_000
 export const MISS_TTL_MS = 6 * 3_600_000
+/** Below this share of a day's rows carrying a reading, the day is pulled from Wialon. */
+export const FILL_COVERAGE = 0.9
 const FILLS_AT_ONCE = 3
 export const BUDGET_MS = 35_000
 export const MAX_UNITS = 500
@@ -96,10 +104,8 @@ async function storeReadings(vehicleId: string, readings: OdoReading[]): Promise
        AND t.odometer_m IS NULL`
 }
 
-const misses = new Map<string, number>()
-/** A finished day pulled for a unit we hold no rows to write it onto: kept, so Wialon is not asked again. */
-const pulled = new Map<string, DayKmEvidence>()
-const PULLED_MAX = 20_000
+/** When each unit-day was last asked of Wialon, answered or not. */
+const tried = new Map<string, number>()
 let running = 0
 const waiting: (() => void)[] = []
 
@@ -112,9 +118,13 @@ async function slot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Does this unit-day need Wialon: a unit on Wialon with no stored reading, not missed lately? */
-export const needsFill = (e: DayKmEvidence | undefined, wialonUnit: number | null, missedAt: number | undefined, now: number) =>
-  wialonUnit != null && (e?.odoReadings ?? 0) < 2 && (missedAt == null || now - missedAt >= MISS_TTL_MS)
+/** Does this unit-day need Wialon: a unit on Wialon whose rows mostly carry no reading, not asked lately? */
+export const needsFill = (e: DayKmEvidence | undefined, wialonUnit: number | null, triedAt: number | undefined, now: number) => {
+  const readings = e?.odoReadings ?? 0
+  return wialonUnit != null
+    && (readings < 2 || readings < FILL_COVERAGE * (e?.fixes ?? 0))
+    && (triedAt == null || now - triedAt >= MISS_TTL_MS)
+}
 
 export interface UnitDistanceRow {
   vehicleId: string
@@ -133,40 +143,37 @@ export async function unitDistance(orgId: string, scope: Set<string> | null, day
     where: { organisationId: orgId, id: { in: ids } },
     select: { id: true, deviceId: true },
   })
-  const evidence = await dayKmEvidence(vehicles.map((v) => v.id), bounds.from, bounds.to)
+  // From the 7-day cache where it holds the unit-day (day-km.cache), else the database
+  const evidence = await cachedDayKmEvidence(vehicles.map((v) => v.id), day, now)
+  const settled = bounds.to.getTime() <= now - SETTLE_MS
   const fromSec = Math.floor(bounds.from.getTime() / 1000)
   const toSec = Math.ceil(Math.min(bounds.to.getTime(), now) / 1000)
   const deadline = now + BUDGET_MS
 
   const filled = new Map<string, DayKmEvidence>()
   const pending = new Set<string>()
-  let stored = 0
   await Promise.all(vehicles.map(async (v) => {
     const unit = wialonUnitId(v.deviceId)
     const key = `${v.id}|${day}`
-    const kept = pulled.get(key)
-    if (kept) { filled.set(v.id, kept); return }
-    if (!needsFill(evidence.get(v.id), unit, misses.get(key), now)) return
+    if (!needsFill(evidence.get(v.id), unit, tried.get(key), now)) return
     if (Date.now() >= deadline) { pending.add(v.id); return }
     await slot(async () => {
       if (Date.now() >= deadline) { pending.add(v.id); return }
       try {
         const { readings, messages } = await loadDayOdometer(unit!, fromSec, toSec)
-        if (readings.length < 2) { misses.set(key, Date.now()); return }
-        const wrote = await storeReadings(v.id, readings)
-        stored += wrote
+        tried.set(key, Date.now())
+        if (readings.length < 2) return
+        await storeReadings(v.id, readings)
         const e = { gpsKm: evidence.get(v.id)?.gpsKm ?? 0, odoKm: odoKmOf(readings), odoReadings: readings.length, fixes: messages }
         filled.set(v.id, e)
-        if (wrote === 0 && bounds.to.getTime() <= now) {
-          if (pulled.size >= PULLED_MAX) pulled.delete(pulled.keys().next().value!)
-          pulled.set(key, e)
-        }
+        // The pulled figure replaces the cached one, so the next read has it without Wialon
+        // or the database, even where Wialon's times did not meet our rows
+        if (settled) await keepDayKm([[v.id, e]], day, now)
       } catch {
-        misses.set(key, Date.now())
+        tried.set(key, Date.now())
       }
     })
   }))
-  if (stored > 0) forgetDayKm(orgId, day)
 
   const rows: UnitDistanceRow[] = vehicles.map((v) => {
     const e = filled.get(v.id) ?? evidence.get(v.id)
@@ -177,4 +184,4 @@ export async function unitDistance(orgId: string, scope: Set<string> | null, day
 }
 
 /** Tests only. */
-export function _clearOdoMisses() { misses.clear(); pulled.clear() }
+export function _clearOdoMisses() { tried.clear() }

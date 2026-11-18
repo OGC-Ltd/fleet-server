@@ -15,6 +15,7 @@
  *   Unauthorized Passengers the incidents operators logged with that violation,
  *                           with when each was shared.
  */
+import { readDayKm, keepDayKm, SETTLE_MS } from './day-km.cache.js'
 import { prisma } from '../../lib/prisma.js'
 import { reportDb } from '../../lib/report-db.js'
 import { fleetDayBounds } from '../../lib/provider-time.js'
@@ -123,35 +124,34 @@ export async function dayKmEvidence(vehicleIds: string[], from: Date, to: Date):
   }]))
 }
 
-async function dayKm(vehicleIds: string[], from: Date, to: Date): Promise<Map<string, DayDistance>> {
-  const ev = await dayKmEvidence(vehicleIds, from, to)
-  return new Map([...ev].map(([id, e]) => [id, pickDayKm(e)]))
+/**
+ * The day's evidence for these units, from the 7-day cache (day-km.cache) where it has the
+ * unit-day and from the database for the rest, which are then kept. A day not yet settled
+ * is read from the database every time. Units with no fixes that day are left out, as
+ * dayKmEvidence leaves them out; they are cached as such, so they are not asked again.
+ */
+export async function cachedDayKmEvidence(vehicleIds: string[], day: string, now = Date.now()): Promise<Map<string, DayKmEvidence>> {
+  const { from, to } = fleetDayBounds(day)!
+  if (!vehicleIds.length) return new Map()
+  if (to.getTime() > now - SETTLE_MS) return dayKmEvidence(vehicleIds, from, to)
+  const out = await readDayKm(vehicleIds, day, now)
+  const miss = vehicleIds.filter((id) => !out.has(id))
+  if (miss.length) {
+    const got = await dayKmEvidence(miss, from, to)
+    const none: DayKmEvidence = { gpsKm: 0, odoKm: 0, odoReadings: 0, fixes: 0 }
+    await keepDayKm(miss.map((id) => [id, got.get(id) ?? none]), day, now)
+    for (const id of miss) out.set(id, got.get(id) ?? none)
+  }
+  for (const [id, e] of out) if (e.fixes === 0 && e.odoReadings === 0) out.delete(id)
+  return out
 }
 
-/** A finished day does not change: kept, per organisation and day, for the next run. */
-const kmCache = new Map<string, Map<string, DayDistance>>()
-const KM_CACHE_MAX = 2_000
-
-/** A day's odometer readings were filled from Wialon (unit-distance): its cached distances are stale. */
-export function forgetDayKm(orgId: string, day: string) {
-  for (const k of [...kmCache.keys()]) if (k.startsWith(`${orgId}|${day}|`)) kmCache.delete(k)
-}
-
-async function rangeKm(orgId: string, vehicleIds: string[], days: string[], now: number) {
+async function rangeKm(vehicleIds: string[], days: string[], now: number) {
   const total = new Map<string, number>()
   const sources = new Map<string, Set<DistanceSource>>()
   for (const day of days) {
-    const { from, to: end } = fleetDayBounds(day)!
-    const key = `${orgId}|${day}|${vehicleIds.length}`
-    let km = kmCache.get(key)
-    if (!km) {
-      km = await dayKm(vehicleIds, from, end)
-      // Only a day well over: the latest readings arrive late.
-      if (end.getTime() < now - 6 * 3_600_000) {
-        if (kmCache.size >= KM_CACHE_MAX) kmCache.delete(kmCache.keys().next().value!)
-        kmCache.set(key, km)
-      }
-    }
+    const ev = await cachedDayKmEvidence(vehicleIds, day, now)
+    const km = new Map([...ev].map(([id, e]) => [id, pickDayKm(e)]))
     for (const [id, d] of km) {
       total.set(id, (total.get(id) ?? 0) + d.km)
       sources.set(id, (sources.get(id) ?? new Set()).add(d.source))
@@ -200,7 +200,7 @@ export async function fuelConsumptionRate(orgId: string, scope: Set<string> | nu
   })
   const ids = vehicles.map((v) => v.id)
   const [{ total: km, sources }, edges, fillings, drains] = await Promise.all([
-    rangeKm(orgId, ids, days, now),
+    rangeKm(ids, days, now),
     edgeLevels(ids, from, to),
     reportDb().fuelFilling.findMany({
       where: { vehicleId: { in: ids }, filledAt: { gte: from, lt: to } },
