@@ -34,6 +34,17 @@ describe('flaggedUnits', () => {
     expect(g).toMatchObject({ kind: 'customer', zone: 'Kahawa Depot' })
   })
 
+  it('counts a stop within 50 m of a customer fence as at that customer; further out is unauthorised', () => {
+    // A 30 m circle at (-0.5, 36.5); 0.0007° of latitude is about 78 m from the centre, 48 m beyond the edge
+    const shops = placesOf([
+      { properties: { name: 'KWA MARY KANYI', category: 'shop', radiusM: 30 }, geometry: { type: 'Point', coordinates: [36.5, -0.5] } },
+    ])
+    const [near] = flaggedUnits([unit({ lat: -0.5007, lng: 36.5 })], { authorised: shops, noGo, now: NOW })
+    expect(near).toMatchObject({ kind: 'customer', zone: 'KWA MARY KANYI' })
+    const [far] = flaggedUnits([unit({ lat: -0.5012, lng: 36.5 })], { authorised: shops, noGo, now: NOW })
+    expect(far).toMatchObject({ kind: 'unauthorised', zone: null })
+  })
+
   it('keeps a customer stop under 10 minutes quiet, and one inside a rest stop or yard', () => {
     const places = placesOf([
       square('Kahawa Depot', -1.0, 37.0),

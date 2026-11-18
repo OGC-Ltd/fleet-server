@@ -62,6 +62,14 @@ export function categorise(name: string): ZoneCategory {
      "FG_P_Magunas Kahawa", "Menengai: Gilanis Kisumu". Ahead of the land uses,
      because the name after the prefix is the customer's own: "MENENGAI_FG:QUICKMART
      MOMBASA ROAD" is a shop on a road, not a road. */
+  /* Menengai's own places under the same "Menengai:" prefix are not customers
+     (operator, 18 Nov 2026: "Menengai: Maungu Rest Stop" and "Menengai:
+     naitiri factory" were flagged as customer stops). */
+  if (/^men\w*\s*:/.test(n)) {
+    if (/rest\s*stop|\bparking\b/.test(n)) return 'parking'
+    if (n.includes('factory'))             return 'factory'
+    if (n.includes('weigh'))               return 'weighing'
+  }
   if (/^me\w*\s*[_ :-]?\s*fg\b/.test(n) || /^me\w*_fg/.test(n)
     || /^fg[_ ]/.test(n) || /^men\w*\s*:/.test(n)) return 'customer'
   /* First, and before any land use: a keep-out is the one zone whose colour

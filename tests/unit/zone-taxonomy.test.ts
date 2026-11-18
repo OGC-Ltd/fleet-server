@@ -177,3 +177,12 @@ describe('categorise — Menengai van-sales shops', () => {
     expect(categorise('Menengai Yard - Nakuru HQ')).toBe('logistics')
   })
 })
+
+describe('Menengai places under the "Menengai:" prefix', () => {
+  it('reads a rest stop, a factory and a weighbridge as what they are, not customers', () => {
+    expect(categorise('Menengai: Maungu Rest Stop')).toBe('parking')
+    expect(categorise('Menengai:naitiri factory')).toBe('factory')
+    expect(categorise('Menengai: Mtito Weighbridge')).toBe('weighing')
+    expect(categorise('Menengai: mahadev bungoma')).toBe('customer')
+  })
+})

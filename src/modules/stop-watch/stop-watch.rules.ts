@@ -23,6 +23,12 @@ export const STALE_MS = 6 * 3_600_000
  * weighbridges, yards, MORL and STO) stays silent.
  */
 export const CUSTOMER_CATEGORIES: ReadonlySet<string> = new Set(['customer', 'shop'])
+/**
+ * A stop this close to a customer's fence is at that customer (operator,
+ * 18 Nov 2026): a truck parks on the road outside the shop, 10–40 m beyond a
+ * 30 m circle's edge, and GPS drifts a few metres more.
+ */
+export const CUSTOMER_NEAR_M = 50
 /** Standing: slower than this (km/h), and not moving by the movement state. */
 const STAND_KMH = 3
 
@@ -238,7 +244,9 @@ export function flaggedUnits(
     }
     // A rest stop, site, weighbridge or yard: nothing to say, even with a shop inside it
     if (standing < UNAUTHORISED_MIN_MS || placeAt(lat, lng, silent)) continue
-    const shop = placeAt(lat, lng, customers)
+    const inside = placeAt(lat, lng, customers)
+    const near = inside ? null : nearestPlace(lat, lng, customers)
+    const shop = inside ?? (near && near.metres <= CUSTOMER_NEAR_M ? near : null)
     if (shop) out.push({ ...base, key: `${v.vehicleId}|customer|${since}`, kind: 'customer', zone: customerName(shop.name) })
     else out.push({ ...base, key: `${v.vehicleId}|stop|${since}`, kind: 'unauthorised', zone: null })
   }
