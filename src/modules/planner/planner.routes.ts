@@ -30,4 +30,8 @@ router.get('/factory-fuel',    requirePermission('fuel_filling:read'), validateQ
 // Its Consumed column: each probed machine's tank day by day (tank-days.ts)
 router.get('/factory-fuel/tank-days', requirePermission('fuel_filling:read'), validateQuery(factoryFuelQuerySchema), ctrl.tankDays)
 
+// The Drivers page's Operators tab: who the work plans put on each machine. A
+// people screen, so the drivers' right.
+router.get('/factory-operators', requirePermission('driver:read'), validateQuery(factoryFuelQuerySchema), ctrl.factoryOperators)
+
 export default router

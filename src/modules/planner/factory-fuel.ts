@@ -40,6 +40,9 @@ export interface FuelPlanLine {
   workLocation: string | null
   fuelingLocation: string | null
   operator: string | null
+  /** Every operator on the line, first seat first (operator, second, third). */
+  operators: string[]
+  supervisor: string | null
   shiftNo: number | null
   shiftStart: string | null
   plannedHours: number | null
@@ -136,6 +139,9 @@ export function buildFactoryFuel(
           workLocation: l.workLocation ?? null,
           fuelingLocation: l.fuelingLocation ?? null,
           operator: l.operator ?? null,
+          operators: [l.operator, l.secondOperator, l.thirdOperator]
+            .map(o => String(o ?? '').trim()).filter(Boolean),
+          supervisor: l.supervisor?.trim() || null,
           shiftNo: l.shiftNo ?? null,
           shiftStart: l.shiftStart ?? null,
           plannedHours: l.plannedHours ?? null,

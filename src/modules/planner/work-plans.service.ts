@@ -29,6 +29,7 @@ import {
 import { MACHINE_FACTORY_TO_ORG } from '../../providers/raifactorysuite/raifactorysuite.machine-sync.js'
 import { buildMapWorkPlans, type MapWorkPlans } from './work-plan-match.js'
 import { buildFactoryFuel, type FactoryFuel } from './factory-fuel.js'
+import { buildFactoryOperators, type FactoryOperators } from './factory-operators.js'
 
 const FACTORY_OF_ORG: Record<string, string> = Object.fromEntries(
   Object.entries(MACHINE_FACTORY_TO_ORG).map(([factory, org]) => [org, factory]),
@@ -201,4 +202,17 @@ export async function factoryFuelFor(orgId: string, from: string, to: string): P
   }
   const out = await fuelCache.get(key)!.out
   return { ...out, fetchedAt: new Date().toISOString() }
+}
+
+/**
+ * The Drivers page's Operators tab: the operators the work plans and the pump
+ * name over `from`..`to` (factory-operators.ts). Built from the Fuel page's
+ * read, so it shares that cache and its hooks.
+ */
+export type FactoryOperatorsForPage = (FactoryOperators & { fetchedAt: string }) | { factory: null; from: string; to: string }
+
+export async function factoryOperatorsFor(orgId: string, from: string, to: string): Promise<FactoryOperatorsForPage> {
+  const fuel = await factoryFuelFor(orgId, from, to)
+  if (fuel.factory === null) return fuel
+  return { ...buildFactoryOperators(fuel), fetchedAt: fuel.fetchedAt }
 }
