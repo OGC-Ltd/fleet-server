@@ -28,6 +28,7 @@ import {
 } from '../../providers/raifactorysuite/raifactorysuite.client.js'
 import { MACHINE_FACTORY_TO_ORG } from '../../providers/raifactorysuite/raifactorysuite.machine-sync.js'
 import { buildMapWorkPlans, type MapWorkPlans } from './work-plan-match.js'
+import { collapsePlans } from './work-plan-items.js'
 import { buildFactorySupervisors, lineWindow, runKey, type FactorySupervisors, type LineRun } from './factory-supervisors.js'
 import { buildFactoryFuel, type FactoryFuel } from './factory-fuel.js'
 import { buildFactoryOperators, type FactoryOperators } from './factory-operators.js'
@@ -80,7 +81,8 @@ function plansFor(factory: string, day: string): Promise<RaiFactorySuiteWorkPlan
   const key = `${factory}|${day}`
   const hit = cache.get(key)
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.rows
-  const rows = client().listWorkPlans(day, day, factory)
+  // No duplicate plan line: one line per machine-shift (planner/work-plan-items).
+  const rows = client().listWorkPlans(day, day, factory).then(collapsePlans)
   cache.set(key, { at: Date.now(), rows })
   // A failed read is not kept: the map's retry asks again.
   rows.catch(() => cache.delete(key))
@@ -186,7 +188,9 @@ export async function factoryFuelFor(orgId: string, from: string, to: string): P
       return []
     })
     const out = Promise.all([
-      client().listWorkPlans(from, to, factory),
+      // No duplicate plan line (planner/work-plan-items): the Fuel page,
+      // Operators and Supervisors all read these lines.
+      client().listWorkPlans(from, to, factory).then(collapsePlans),
       soft(client().listFuelRequests(from, to, factory), 'fuel requests'),
       soft(client().listFuelIssues(from, to, factory), 'fuel issues'),
       client().listMachines(),

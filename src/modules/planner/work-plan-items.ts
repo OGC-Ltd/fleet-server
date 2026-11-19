@@ -14,6 +14,7 @@
  */
 
 import type { RaiFactorySuiteWorkPlanLine, RaiFactorySuiteWorkPlanRow } from '../../providers/raifactorysuite/raifactorysuite.client.js'
+import { requestKey } from './work-plan-match.js'
 
 /** A plan line as the watch keeps it, with the plan fields it needs. */
 export interface WorkPlanItem {
@@ -86,6 +87,77 @@ export function itemEdits(prev: Pick<WorkPlanItem, 'status' | 'day' | 'line'>, n
   for (const f of LINE_FIELDS) {
     const a = asText(prev.line?.[f]), b = asText(next.line?.[f])
     if (!same(a, b)) out.push({ field: f, from: a, to: b })
+  }
+  return out
+}
+
+/*
+ * Duplicate plan lines (operator 2026-11-19: "let it be dynamic but ensure
+ * that we don't get a duplicated on the plan line"). A machine can be on any
+ * number of plans and shifts, but two lines for the same machine, day and
+ * shift are one piece of work keyed twice: on 19 Nov WP-261119-CIV-2 (draft)
+ * repeated all 14 machine-shifts of the approved WP-261119-CIV, so every
+ * Civil machine read as two shifts and as "pending". The screens that read
+ * plans (map, Fuel, Operators, Supervisors) keep one line per machine-shift,
+ * keyed like FactorySuite keys a fuel request (requestKey), and the line that
+ * stands is decided by:
+ *   1. approved (or released) over pending (draft, submitted) over rejected
+ *      over cancelled;
+ *   2. between equals, the newer plan (reviewed, then submitted, then the
+ *      later plan code: CIV-2 after CIV).
+ * The watch's own table still keeps every FactorySuite line as it is.
+ */
+
+/** Higher stands. A status FactorySuite adds later counts as pending. */
+const STATUS_RANK: Record<string, number> = {
+  APPROVED: 4, RELEASED: 4,
+  SUBMITTED: 3, DRAFT: 3,
+  REJECTED: 2,
+  CANCELLED: 1,
+}
+export const statusRank = (status: string | null | undefined) => STATUS_RANK[String(status ?? '').toUpperCase()] ?? 3
+
+const planCodeOrder = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true })
+
+/** > 0 when plan `a`'s line should stand over plan `b`'s for the same machine-shift. */
+export function standsOver(a: RaiFactorySuiteWorkPlanRow, b: RaiFactorySuiteWorkPlanRow): number {
+  return statusRank(a.status) - statusRank(b.status)
+    || String(a.reviewedAt ?? '').localeCompare(String(b.reviewedAt ?? ''))
+    || String(a.submittedAt ?? '').localeCompare(String(b.submittedAt ?? ''))
+    || planCodeOrder(a.planCode, b.planCode)
+}
+
+/**
+ * The plans with no duplicate line: a line another plan's line stands over for
+ * the same machine, day and shift is taken out of its plan, and a plan left
+ * with no active line by that is dropped. Plans are one day each; the key uses
+ * startDate. Returns the same array when nothing was duplicated.
+ */
+export function collapsePlans(plans: RaiFactorySuiteWorkPlanRow[]): RaiFactorySuiteWorkPlanRow[] {
+  const winner = new Map<string, { plan: RaiFactorySuiteWorkPlanRow; lineId: string }>()
+  let dup = false
+  for (const p of plans) {
+    for (const l of p.lines ?? []) {
+      if (l.active === false) continue
+      const k = requestKey(l.machine, p.startDate, l.shiftNo)
+      const cur = winner.get(k)
+      if (!cur) { winner.set(k, { plan: p, lineId: l.id }); continue }
+      dup = true
+      if (standsOver(p, cur.plan) > 0) winner.set(k, { plan: p, lineId: l.id })
+    }
+  }
+  if (!dup) return plans
+
+  const out: RaiFactorySuiteWorkPlanRow[] = []
+  for (const p of plans) {
+    const all = p.lines ?? []
+    const lines = all.filter(l => {
+      if (l.active === false) return true
+      const w = winner.get(requestKey(l.machine, p.startDate, l.shiftNo))
+      return w?.plan === p && w.lineId === l.id
+    })
+    if (lines.length === all.length) { out.push(p); continue }
+    if (lines.some(l => l.active !== false)) out.push({ ...p, lines })
   }
   return out
 }

@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest'
 vi.mock('../../src/lib/prisma.js', () => ({ prisma: {} }))
 vi.mock('../../src/modules/planner/work-plans.service.js', () => ({ workPlansChanged: vi.fn() }))
 
-import { itemEdits, itemsFromPlans } from '../../src/modules/planner/work-plan-items.js'
+import { collapsePlans, itemEdits, itemsFromPlans } from '../../src/modules/planner/work-plan-items.js'
 import { itemId, planPass, watchWindow, type KeptItem } from '../../src/modules/planner/work-plan-watch.js'
 import type { RaiFactorySuiteWorkPlanLine, RaiFactorySuiteWorkPlanRow } from '../../src/providers/raifactorysuite/raifactorysuite.client.js'
 
@@ -43,6 +43,31 @@ describe('itemsFromPlans', () => {
 
   it('inactive lines are not items', () => {
     expect(itemsFromPlans([plan('A', 'APPROVED', [line('1', { active: false })])])).toEqual([])
+  })
+})
+
+describe('collapsePlans (no duplicate plan line)', () => {
+  it('a draft copying an approved plan line for line is dropped (WP-261119-CIV-2, 19 Nov)', () => {
+    const approved = plan('WP-261119-CIV', 'APPROVED', [line('a1'), line('a2', { shiftNo: 2 })], { reviewedAt: '2026-11-18T14:32:56' })
+    const draft = plan('WP-261119-CIV-2', 'DRAFT', [line('d1'), line('d2', { shiftNo: 2 })])
+    expect(collapsePlans([draft, approved])).toEqual([approved])
+  })
+
+  it('a machine on any number of plans in different shifts keeps every line', () => {
+    const plans = [1, 2, 3].map(s => plan(`P${s}`, 'APPROVED', [line(`L${s}`, { shiftNo: s })]))
+    expect(collapsePlans(plans)).toBe(plans)
+  })
+
+  it('between two pending copies the newer plan stands; a partly duplicated plan keeps its other lines', () => {
+    const older = plan('WP-FAC', 'SUBMITTED', [line('1'), line('2', { machine: 'WL-07' })])
+    const newer = plan('WP-FAC-3', 'SUBMITTED', [line('9')])
+    const out = collapsePlans([older, newer])
+    expect(out.map(p => [p.planCode, p.lines!.map(l => l.id)])).toEqual([['WP-FAC', ['2']], ['WP-FAC-3', ['9']]])
+  })
+
+  it('approved beats pending beats rejected beats cancelled', () => {
+    const out = collapsePlans([plan('C', 'CANCELLED', [line('c')]), plan('R', 'REJECTED', [line('r')]), plan('D', 'DRAFT', [line('d')])])
+    expect(out.map(p => p.planCode)).toEqual(['D'])
   })
 })
 
