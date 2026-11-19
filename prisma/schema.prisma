@@ -330,6 +330,8 @@ model Organisation {
   fsJobCards           FactorySuiteJobCard[]
   fsBreakdowns         FactorySuiteBreakdown[]
   fsRequisitions       FactorySuiteRequisition[]
+  fsWorkPlans          FactorySuiteWorkPlan[]
+  fsWorkPlanChanges    FactorySuiteWorkPlanChange[]
   fsParts              FactorySuitePart[]
   fuelTheftFollowUps   FuelTheftFollowUp[]
   driverConductCases   DriverConductCase[]
@@ -3915,4 +3917,56 @@ model FactorySuitePart {
 
   @@index([organisationId, partNumber])
   @@map("factorysuite_parts")
+}
+
+/// The last read of a FactorySuite work plan (GET /fuel/plans), lines and all
+/// in `raw`. The work plan watch compares the next read against it.
+model FactorySuiteWorkPlan {
+  id             String    @id
+  organisationId String    @map("organisation_id")
+  factoryCode    String    @map("factory_code")
+  planCode       String    @map("plan_code")
+  department     String?
+  /// The plan's day, YYYY-MM-DD (startDate).
+  day            String
+  status         String
+  raw            Json
+  firstSeenAt    DateTime  @default(now()) @map("first_seen_at")
+  lastSeenAt     DateTime  @default(now()) @map("last_seen_at")
+  /// Set when FactorySuite stopped returning it for its day.
+  goneAt         DateTime? @map("gone_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  @@index([factoryCode, day])
+  @@map("factorysuite_work_plans")
+}
+
+/// One change the work plan watch found (planner/work-plan-diff.ts kinds).
+model FactorySuiteWorkPlanChange {
+  id             String   @id @default(uuid())
+  organisationId String   @map("organisation_id")
+  factoryCode    String   @map("factory_code")
+  planId         String   @map("plan_id")
+  planCode       String   @map("plan_code")
+  department     String?
+  day            String
+  kind           String
+  lineId         String?  @map("line_id")
+  taskId         String?  @map("task_id")
+  machine        String?
+  shiftNo        Int?     @map("shift_no")
+  field          String?
+  fromValue      String?  @map("from_value")
+  toValue        String?  @map("to_value")
+  /// 'poll' (the reconcile cycle) or 'hook' (a webhook asked for a pass).
+  source         String
+  event          String?
+  detectedAt     DateTime @default(now()) @map("detected_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  @@index([organisationId, day])
+  @@index([planId])
+  @@map("factorysuite_work_plan_changes")
 }

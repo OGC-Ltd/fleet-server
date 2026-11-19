@@ -6,6 +6,7 @@ import { handleDispatch, handleMovement, handleSale } from './raifactorysuite-ev
 import { handleWeighment } from '../weighments/weighment.ingest.js'
 import { ingestWialonNotifications } from './wialon-notifications.service.js'
 import { workPlansChanged } from '../planner/work-plans.service.js'
+import { isWorkPlanEvent, requestWorkPlanWatch } from '../planner/work-plan-watch.js'
 import { isWorkshopEvent, requestWorkshopSync } from '../repairs/factorysuite-workshop.runner.js'
 import {
   raiFactorySuiteAlertSchema,
@@ -76,6 +77,16 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
       // meter.readings.flagged) are not wired up yet and land in `unmapped`.
       if (kind.startsWith('fuelplan.')) {
         workPlanOrgs += await workPlansChanged(kind, item)
+        requestWorkPlanWatch(kind)
+        workPlans++
+        continue
+      }
+      // A fuel request decided or a pump issue done follows a plan line: re-read
+      // the plans now (planner/work-plan-watch) and drop the cached Fuel page.
+      // Not stored themselves, so they are acknowledged here, not left unmapped.
+      if (isWorkPlanEvent(kind)) {
+        workPlanOrgs += await workPlansChanged(kind, item)
+        requestWorkPlanWatch(kind)
         workPlans++
         continue
       }

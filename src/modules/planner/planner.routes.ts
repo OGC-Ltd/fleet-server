@@ -34,5 +34,7 @@ router.get('/factory-fuel/tank-days', requirePermission('fuel_filling:read'), va
 // people screen, so the drivers' right.
 router.get('/factory-operators', requirePermission('driver:read'), validateQuery(factoryFuelQuerySchema), ctrl.factoryOperators)
 router.get('/factory-supervisors', requirePermission('driver:read'), validateQuery(factoryFuelQuerySchema), ctrl.factorySupervisors)
+// What changed on FactorySuite's work plans for days from..to (planner/work-plan-watch).
+router.get('/work-plan-changes', requirePermission('fuel_filling:read'), validateQuery(factoryFuelQuerySchema), ctrl.workPlanChanges)
 
 export default router

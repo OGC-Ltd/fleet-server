@@ -39,6 +39,7 @@ import { handleDispatch, handleSale } from '../../modules/webhooks/raifactorysui
 import { handleWeighment } from '../../modules/weighments/weighment.ingest.js'
 import { FACTORIES } from '../../modules/webhooks/factory-map.js'
 import { runWorkshopSync } from '../../modules/repairs/factorysuite-workshop.runner.js'
+import { runWorkPlanWatch } from '../../modules/planner/work-plan-watch.js'
 import { fleetDayKey } from '../../lib/provider-time.js'
 import { prisma } from '../../lib/prisma.js'
 import { syncMachineRegister } from './raifactorysuite.machine-sync.js'
@@ -136,6 +137,8 @@ class RaiFactorySuiteReconciler {
 
   /** Consecutive failed runs, for backing off the log noise when they're down. */
   private consecutiveFailures = 0
+  /** The work plan watch's own run of failed passes (see reconcile). */
+  private planWatchFailures = 0
 
   /** When the machine register last synced successfully; 0 = not this process. */
   private machinesSyncedAt = 0
@@ -279,6 +282,23 @@ class RaiFactorySuiteReconciler {
       this.logFailure('workshop', err)
     }
 
+    // Work plans: compare FactorySuite's plans with the last read and record
+    // what changed (modules/planner/work-plan-watch). The plan hook is not to
+    // be relied on: it sends nothing for a plan created, edited or cancelled.
+    // Its failures are counted on their own: a /fuel/plans outage must not hold
+    // back `primed` (Live Feed narration of dispatches and sales) or quieten
+    // the logs of the feeds above.
+    let planChanges: number | undefined
+    try {
+      planChanges = (await runWorkPlanWatch({ source: 'poll' }))?.changes
+      if (this.planWatchFailures > 0) logger.info({ after: this.planWatchFailures }, 'FactorySuite work plan watch recovered')
+      this.planWatchFailures = 0
+    } catch (err) {
+      this.planWatchFailures++
+      if (this.planWatchFailures <= 3) logger.error({ err, what: 'work plans' }, 'RaiFactorySuite reconcile failed')
+      else logger.debug({ err, what: 'work plans', planWatchFailures: this.planWatchFailures }, 'RaiFactorySuite reconcile still failing')
+    }
+
     if (failed) {
       this.consecutiveFailures++
     } else {
@@ -293,7 +313,7 @@ class RaiFactorySuiteReconciler {
       {
         durationMs: Date.now() - t0, alertsCreated, dispatchesSeen, salesSeen, weighmentsSeen, machinesWritten,
         jobCards: workshop?.cards, workshopMoves: workshop ? workshop.created + workshop.adopted + workshop.moved + workshop.voided : undefined,
-        primed: this.primed,
+        planChanges, primed: this.primed,
       },
       'RaiFactorySuite reconcile complete',
     )
