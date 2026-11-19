@@ -76,10 +76,14 @@ function normaliseSignature(sig: string): string {
 
 /**
  * Every secret a FactorySuite webhook may be signed with. Each webhook
- * registered there has its own: WORK_PLANNER_HOOK (the default from 19 Nov
- * 2026, carrying FactorySuite's whole event list) and FACTORY_SUITE_HOOK (the
- * original: alerts, dispatches, movements, weighments;
- * CONTROLTECH_WEBHOOK_SECRET is its older name). Both post to the same URL.
+ * registered there has its own, and both post to the same URL. From 19 Nov
+ * 2026 they split FactorySuite's events between them (operator's choice):
+ *   • FACTORY_SUITE_HOOK: alert.created, dispatch.created, dispatch.updated
+ *     and movement.created (CONTROLTECH_WEBHOOK_SECRET is its older name);
+ *   • WORK_PLANNER_HOOK, the default: everything else, weighments included.
+ * Either secret is accepted for any event: a mis-ticked event still lands,
+ * the log line names the webhook it came by, and a copy that comes by both is
+ * dropped as a repeat (webhooks/delivery-repeats).
  */
 export function webhookSecrets(): string[] {
   return namedSecrets().map(s => s.secret)
@@ -88,8 +92,7 @@ export function webhookSecrets(): string[] {
 /** Which FactorySuite webhook a delivery came from: the one whose secret it carried. */
 export type WebhookSource = 'factory_suite' | 'work_planner'
 
-// WORK_PLANNER_HOOK is the default from 19 Nov 2026: FactorySuite's events are
-// ticked on that webhook. The original one stays accepted while it exists.
+// WORK_PLANNER_HOOK first: the default webhook, carrying most events.
 function namedSecrets(): Array<{ source: WebhookSource; secret: string }> {
   return [
     { source: 'work_planner' as const, secret: env.WORK_PLANNER_HOOK },

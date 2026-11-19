@@ -48,8 +48,10 @@ import {
  *   every other event on FactorySuite's list (field, gate, visitor, driver,
  *   vehicle request, register) → acknowledged, not used (hook-events)
  *
- * From 19 Nov 2026 the WORK_PLANNER_HOOK webhook is the default and carries
- * all of these; the original webhook (FACTORY_SUITE_HOOK) is still accepted.
+ * From 19 Nov 2026 two FactorySuite webhooks split these: FACTORY_SUITE_HOOK
+ * carries alert.created, dispatch.* and movement.created, and WORK_PLANNER_HOOK
+ * (the default) carries the rest, weighments included. Routing is by event,
+ * not by webhook: either secret is accepted for any event (middleware/webhookAuth).
  *
  * A 4xx makes their sender retry a few times and then DROP the event, so an
  * unrecognised shape must never fail the request: acknowledge it, log the

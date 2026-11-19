@@ -1,8 +1,9 @@
 /**
  * FactorySuite webhook events by name, for the ones the receiver does not
  * route to a feature of its own. From 19 Nov 2026 the WORK_PLANNER_HOOK
- * webhook is the default and carries the whole list on FactorySuite's Webhook
- * page.
+ * webhook, the default, carries all of FactorySuite's list except
+ * alert.created, dispatch.* and movement.created, which stay on
+ * FACTORY_SUITE_HOOK.
  *
  * Machine register changes (machine.created, machine.updated) bring the
  * register sync forward. The rest below are acknowledged and not used yet.
