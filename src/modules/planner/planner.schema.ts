@@ -43,6 +43,14 @@ export const factoryFuelQuerySchema = z.object({
 }).refine(q => q.from <= q.to, { message: 'from must not be after to' })
   .refine(q => (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000 <= 30, { message: 'At most 31 days' })
 
+// The Fuel page machine panel's refills: one machine, over the page's range.
+export const factoryFuelRefillsQuerySchema = z.object({
+  from: day,
+  to: day,
+  machine: z.string().trim().min(1).max(64),
+}).refine(q => q.from <= q.to, { message: 'from must not be after to' })
+  .refine(q => (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000 <= 30, { message: 'At most 31 days' })
+
 export const stopUpdateSchema = z.object({
   outcome: z.enum(['FULL', 'PARTLY', 'REJECTED']).nullable().optional(),
   remarks: z.string().max(500).optional(),
@@ -71,3 +79,4 @@ export type PlanListQuery = z.infer<typeof planListQuerySchema>
 export type StopUpdate   = z.infer<typeof stopUpdateSchema>
 export type WorkPlansQuery = z.infer<typeof workPlansQuerySchema>
 export type FactoryFuelQuery = z.infer<typeof factoryFuelQuerySchema>
+export type FactoryFuelRefillsQuery = z.infer<typeof factoryFuelRefillsQuerySchema>

@@ -44,4 +44,23 @@ describe('buildFactoryFuel', () => {
       { reference: 'GR-04', name: null, category: null, basis: null, rate: null, status: null, downReason: null, tankLitres: null, vehicleId: null, plate: null },
     ])
   })
+
+  it("carries the voucher, the fuelling's start and FactorySuite's own probe check (EX-17, 19 Nov)", () => {
+    const issues = [
+      {
+        id: 'i17', machine: 'EX-17', issueDate: '2026-11-19', completed: true, quantityIssued: 543, siv: ' SIV-000027 ',
+        fuelingStart: '2026-11-19T08:31:45.901', fuelingEnd: '2026-11-19T09:07:33.754', physicalReading: 4215.2,
+        sensorBeforeLitres: 77, sensorBeforeAt: '2026-11-19T05:32:09Z', sensorAfterLitres: 641.9, sensorAfterAt: '2026-11-19T06:17:46Z',
+        sensorRiseLitres: 564.9, sensorGapPercent: 4, sensorCheck: 'MATCH', sensorSummary: '+564.9 L (4%)',
+      },
+      { id: 'i19', machine: 'DG-19', issueDate: '2026-11-19', completed: true, quantityIssued: 800, sensorCheck: null },
+    ]
+    const out = buildFactoryFuel('MUFINDI PAPER MILLS', '2026-11-19', '2026-11-19', [], [], issues, register, units)
+    const ex17 = out.issues.find(i => i.id === 'i17')!
+    expect(ex17).toMatchObject({ siv: 'SIV-000027', startedAt: '2026-11-19T08:31:45.901', at: '2026-11-19T09:07:33.754' })
+    expect(ex17.sensor).toEqual({
+      check: 'MATCH', beforeL: 77, beforeAt: '2026-11-19T05:32:09Z', afterL: 641.9, afterAt: '2026-11-19T06:17:46Z', riseL: 564.9, gapPercent: 4,
+    })
+    expect(out.issues.find(i => i.id === 'i19')).toMatchObject({ siv: null, sensor: null, startedAt: null })
+  })
 })

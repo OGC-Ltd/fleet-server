@@ -1,10 +1,10 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as svc from './planner.service.js'
-import { workPlansForMap, factoryFuelFor, factoryOperatorsFor, factorySupervisorsFor } from './work-plans.service.js'
+import { workPlansForMap, factoryFuelFor, factoryFuelRefillsFor, factoryOperatorsFor, factorySupervisorsFor } from './work-plans.service.js'
 import { tankDays as tankDaysFor } from './tank-days.js'
 import { workPlanUpdatesFor } from './work-plan-watch.js'
-import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, CustomerFence, WorkPlansQuery, FactoryFuelQuery } from './planner.schema.js'
+import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, CustomerFence, WorkPlansQuery, FactoryFuelQuery, FactoryFuelRefillsQuery } from './planner.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -72,6 +72,14 @@ export const tankDays: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as FactoryFuelQuery
     sendSuccess(res, await tankDaysFor(p(req, 'orgId'), q.from, q.to, req.authz?.vehicleIds ?? null))
+  } catch (err) { next(err) }
+}
+
+/** The Fuel page machine panel's refills: one machine's fuellings with the tracker's figures. */
+export const factoryFuelRefills: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as FactoryFuelRefillsQuery
+    sendSuccess(res, await factoryFuelRefillsFor(p(req, 'orgId'), q.from, q.to, q.machine, req.authz?.vehicleIds ?? null))
   } catch (err) { next(err) }
 }
 
