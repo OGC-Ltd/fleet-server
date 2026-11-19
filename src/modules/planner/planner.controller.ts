@@ -1,7 +1,7 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as svc from './planner.service.js'
-import { workPlansForMap, factoryFuelFor, factoryOperatorsFor } from './work-plans.service.js'
+import { workPlansForMap, factoryFuelFor, factoryOperatorsFor, factorySupervisorsFor } from './work-plans.service.js'
 import { tankDays as tankDaysFor } from './tank-days.js'
 import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, CustomerFence, WorkPlansQuery, FactoryFuelQuery } from './planner.schema.js'
 
@@ -86,5 +86,12 @@ export const factoryOperators: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as FactoryFuelQuery
     sendSuccess(res, await factoryOperatorsFor(p(req, 'orgId'), q.from, q.to))
+  } catch (err) { next(err) }
+}
+
+export const factorySupervisors: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as FactoryFuelQuery
+    sendSuccess(res, await factorySupervisorsFor(p(req, 'orgId'), q.from, q.to))
   } catch (err) { next(err) }
 }

@@ -33,5 +33,6 @@ router.get('/factory-fuel/tank-days', requirePermission('fuel_filling:read'), va
 // The Drivers page's Operators tab: who the work plans put on each machine. A
 // people screen, so the drivers' right.
 router.get('/factory-operators', requirePermission('driver:read'), validateQuery(factoryFuelQuerySchema), ctrl.factoryOperators)
+router.get('/factory-supervisors', requirePermission('driver:read'), validateQuery(factoryFuelQuerySchema), ctrl.factorySupervisors)
 
 export default router
