@@ -3,7 +3,7 @@ import { sendSuccess } from '../../core/response/response.js'
 import * as svc from './planner.service.js'
 import { workPlansForMap, factoryFuelFor, factoryOperatorsFor, factorySupervisorsFor } from './work-plans.service.js'
 import { tankDays as tankDaysFor } from './tank-days.js'
-import { workPlanChangesFor } from './work-plan-watch.js'
+import { workPlanUpdatesFor } from './work-plan-watch.js'
 import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, CustomerFence, WorkPlansQuery, FactoryFuelQuery } from './planner.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -97,10 +97,10 @@ export const factorySupervisors: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
-/** The Fuel page's Plan changes: what the work plan watch recorded for these days. */
-export const workPlanChanges: RequestHandler = async (req, res, next) => {
+/** The Fuel page's Plan updates: work plan items that changed on these days. */
+export const workPlanUpdates: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as FactoryFuelQuery
-    sendSuccess(res, await workPlanChangesFor(p(req, 'orgId'), q.from, q.to))
+    sendSuccess(res, await workPlanUpdatesFor(p(req, 'orgId'), q.from, q.to))
   } catch (err) { next(err) }
 }

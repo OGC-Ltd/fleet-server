@@ -282,15 +282,16 @@ class RaiFactorySuiteReconciler {
       this.logFailure('workshop', err)
     }
 
-    // Work plans: compare FactorySuite's plans with the last read and record
-    // what changed (modules/planner/work-plan-watch). The plan hook is not to
+    // Work plans: bring the kept work plan items up to FactorySuite's plans,
+    // updating each in place (modules/planner/work-plan-watch). The plan hook is not to
     // be relied on: it sends nothing for a plan created, edited or cancelled.
     // Its failures are counted on their own: a /fuel/plans outage must not hold
     // back `primed` (Live Feed narration of dispatches and sales) or quieten
     // the logs of the feeds above.
     let planChanges: number | undefined
     try {
-      planChanges = (await runWorkPlanWatch({ source: 'poll' }))?.changes
+      const w = await runWorkPlanWatch()
+      planChanges = w ? w.added + w.updated + w.removed : undefined
       if (this.planWatchFailures > 0) logger.info({ after: this.planWatchFailures }, 'FactorySuite work plan watch recovered')
       this.planWatchFailures = 0
     } catch (err) {

@@ -330,8 +330,7 @@ model Organisation {
   fsJobCards           FactorySuiteJobCard[]
   fsBreakdowns         FactorySuiteBreakdown[]
   fsRequisitions       FactorySuiteRequisition[]
-  fsWorkPlans          FactorySuiteWorkPlan[]
-  fsWorkPlanChanges    FactorySuiteWorkPlanChange[]
+  fsWorkPlanItems      FactorySuiteWorkPlanItem[]
   fsParts              FactorySuitePart[]
   fuelTheftFollowUps   FuelTheftFollowUp[]
   driverConductCases   DriverConductCase[]
@@ -3919,54 +3918,45 @@ model FactorySuitePart {
   @@map("factorysuite_parts")
 }
 
-/// The last read of a FactorySuite work plan (GET /fuel/plans), lines and all
-/// in `raw`. The work plan watch compares the next read against it.
-model FactorySuiteWorkPlan {
-  id             String    @id
-  organisationId String    @map("organisation_id")
-  factoryCode    String    @map("factory_code")
-  planCode       String    @map("plan_code")
-  department     String?
-  /// The plan's day, YYYY-MM-DD (startDate).
-  day            String
-  status         String
-  raw            Json
-  firstSeenAt    DateTime  @default(now()) @map("first_seen_at")
-  lastSeenAt     DateTime  @default(now()) @map("last_seen_at")
-  /// Set when FactorySuite stopped returning it for its day.
-  goneAt         DateTime? @map("gone_at")
+/// One FactorySuite work plan line (planner/work-plan-items.ts), keyed by
+/// FactorySuite's line id and updated in place by the work plan watch: a line
+/// on a pending plan becomes approved or rejected on its own row, and the same
+/// line is never kept twice. A machine can be on any number of plans. No
+/// history is kept beyond the status before the last status change and the
+/// last fields edited.
+model FactorySuiteWorkPlanItem {
+  /// "<factory>|<FactorySuite line id>"
+  id              String    @id
+  organisationId  String    @map("organisation_id")
+  factoryCode     String    @map("factory_code")
+  /// YYYY-MM-DD, the plan's day.
+  day             String
+  machine         String
+  shiftNo         Int?      @map("shift_no")
+  planId          String    @map("plan_id")
+  planCode        String    @map("plan_code")
+  department      String?
+  /// The standing plan's status: DRAFT, SUBMITTED, APPROVED, REJECTED, CANCELLED.
+  status          String
+  lineId          String    @map("line_id")
+  taskId          String?   @map("task_id")
+  /// The standing line as FactorySuite returned it.
+  line            Json
+  reviewedBy      String?   @map("reviewed_by")
+  /// FactorySuite's offsetless local wall clock, as read.
+  reviewedAt      String?   @map("reviewed_at")
+  previousStatus  String?   @map("previous_status")
+  statusChangedAt DateTime? @map("status_changed_at")
+  /// The fields that differed on the last update: [{ field, from, to }].
+  lastEdits       Json?     @map("last_edits")
+  editedAt        DateTime? @map("edited_at")
+  firstSeenAt     DateTime  @default(now()) @map("first_seen_at")
+  lastSeenAt      DateTime  @default(now()) @map("last_seen_at")
 
   organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
 
-  @@index([factoryCode, day])
-  @@map("factorysuite_work_plans")
-}
-
-/// One change the work plan watch found (planner/work-plan-diff.ts kinds).
-model FactorySuiteWorkPlanChange {
-  id             String   @id @default(uuid())
-  organisationId String   @map("organisation_id")
-  factoryCode    String   @map("factory_code")
-  planId         String   @map("plan_id")
-  planCode       String   @map("plan_code")
-  department     String?
-  day            String
-  kind           String
-  lineId         String?  @map("line_id")
-  taskId         String?  @map("task_id")
-  machine        String?
-  shiftNo        Int?     @map("shift_no")
-  field          String?
-  fromValue      String?  @map("from_value")
-  toValue        String?  @map("to_value")
-  /// 'poll' (the reconcile cycle) or 'hook' (a webhook asked for a pass).
-  source         String
-  event          String?
-  detectedAt     DateTime @default(now()) @map("detected_at")
-
-  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
-
+  @@unique([factoryCode, lineId])
   @@index([organisationId, day])
-  @@index([planId])
-  @@map("factorysuite_work_plan_changes")
+  @@index([factoryCode, day])
+  @@map("factorysuite_work_plan_items")
 }
