@@ -53,6 +53,12 @@ export interface FuelPlanLine {
   /** The fuel request's status, or null while the line has none. */
   requestStatus: string | null
   requestId: string | null
+  /**
+   * Litres on the fuel request. A full-tank line carries none, but its request
+   * does (EX-17, 19 Nov: 650 L; 63 of 66 full-tank requests that day), so
+   * this is the planned figure for a full tank.
+   */
+  requestLitres: number | null
   /** Litres the pump issued against this line's request. */
   issuedLitres: number
 }
@@ -169,6 +175,7 @@ export function buildFactoryFuel(
           needLitres: needLitres(l, machineByRef.get(foldName(l.machine))),
           requestStatus: req?.status ?? null,
           requestId: req?.id ?? null,
+          requestLitres: req?.litresRequested ?? null,
           issuedLitres: req ? issuedFor.get(req.id) ?? 0 : 0,
         })
       }

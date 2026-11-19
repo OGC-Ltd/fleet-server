@@ -75,11 +75,11 @@ export const tankDays: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
-/** The Fuel page machine panel's refills: one machine's fuellings with the tracker's figures. */
+/** The Fuel page's refills with the tracker's figures: one machine in full, or every machine's meters. */
 export const factoryFuelRefills: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as FactoryFuelRefillsQuery
-    sendSuccess(res, await factoryFuelRefillsFor(p(req, 'orgId'), q.from, q.to, q.machine, req.authz?.vehicleIds ?? null))
+    sendSuccess(res, await factoryFuelRefillsFor(p(req, 'orgId'), q.from, q.to, q.machine ?? null, req.authz?.vehicleIds ?? null))
   } catch (err) { next(err) }
 }
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  METER_REACH_MS, refillFigures, refillSpan, refillWindows, wallClock, type RefillReading, type RefillWindow,
+  METER_REACH_MS, meterRefill, refillFigures, refillSpan, refillWindows, wallClock, type RefillReading, type RefillWindow,
 } from '../../src/modules/planner/fuel-refills.js'
 import type { FactoryFuel, FuelIssue, FuelPlanLine } from '../../src/modules/planner/factory-fuel.js'
 
@@ -10,7 +10,7 @@ const line = (over: Partial<FuelPlanLine> = {}): FuelPlanLine => ({
   lineId: 'l1', taskId: 't1', planId: 'p1', planCode: 'WP-261119-ROA-2', planStatus: 'APPROVED', department: 'ROADS',
   day: '2026-11-19', machine: 'EX-17', activity: 'Excavation', workLocation: null, fuelingLocation: null, operator: null,
   operators: [], supervisor: null, shiftNo: 1, shiftStart: '06:00:00', plannedHours: 8, plannedKm: null, fullTank: true,
-  litresRequested: null, needLitres: 240, requestStatus: 'APPROVED', requestId: 'r1', issuedLitres: 543, ...over,
+  litresRequested: null, needLitres: 240, requestStatus: 'APPROVED', requestId: 'r1', requestLitres: 650, issuedLitres: 543, ...over,
 })
 const issue = (over: Partial<FuelIssue> = {}): FuelIssue => ({
   id: 'i1', machine: 'EX-17', day: '2026-11-19', department: 'ROADS', operator: null, activity: null, minutes: 35,
@@ -44,10 +44,18 @@ describe('refillWindows', () => {
     const { machine, windows } = refillWindows(fuel(), 'ex-17')
     expect(machine?.vehicleId).toBe('v17')
     expect(windows).toEqual([{
-      issueId: 'i1', km: false,
+      issueId: 'i1', machine: 'EX-17', vehicleId: 'v17', km: false,
       fuelStart: new Date('2026-11-19T05:31:45.901Z'), fuelEnd: new Date('2026-11-19T06:07:33.754Z'),
       shift: { lineId: 'l1', start: new Date('2026-11-19T03:00:00Z'), end: new Date('2026-11-19T11:00:00Z') },
     }])
+  })
+
+  it('with no machine named, every machine, each with its own unit', () => {
+    const { machine, windows } = refillWindows(fuel({ issues: [issue(), issue({ id: 'i3', machine: 'EX-02', requestId: null })] }), null)
+    expect(machine).toBeNull()
+    expect(windows.map(w => [w.issueId, w.machine, w.vehicleId, w.shift?.lineId ?? null])).toEqual([
+      ['i1', 'EX-17', 'v17', 'l1'], ['i3', 'EX-02', null, null],
+    ])
   })
 
   it('leaves out fuellings still running and other machines; a fuelling on no plan line has no shift', () => {
@@ -122,7 +130,7 @@ describe('refillFigures', () => {
 
   it('an untracked machine keeps its refill with no tracker figures', () => {
     const out = refillFigures(w, null, [], [], new Date('2026-11-20T00:00:00Z'))
-    expect(out).toMatchObject({ issueId: 'i1', tracked: false, meterBefore: null, meterAfter: null })
+    expect(out).toMatchObject({ issueId: 'i1', machine: 'EX-17', tracked: false, meterBefore: null, meterAfter: null })
     expect(out.shift).toMatchObject({ consumedL: null, engineHours: null })
   })
 
@@ -131,5 +139,25 @@ describe('refillFigures', () => {
     const out = refillFigures({ ...w, km: true, shift: null }, km, [], [], new Date('2026-11-20T00:00:00Z'))
     expect(out.meterBefore?.value).toBe(12_340.3)
     expect(out.meterAfter?.value).toBe(12_340.3)
+  })
+})
+
+describe('meterRefill', () => {
+  const w = refillWindows(fuel(), 'EX-17').windows[0]!
+  it("gives the table the tracker's meter either side of the fuelling, and no shift", () => {
+    const out = meterRefill(w, {
+      beforeAt: new Date('2026-11-19T05:30:00Z'), before: 4214.06, afterAt: new Date('2026-11-19T06:10:00Z'), after: 4214.14,
+    })
+    expect(out).toEqual({
+      issueId: 'i1', machine: 'EX-17', tracked: true,
+      meterBefore: { value: 4214.1, at: '2026-11-19T05:30:00.000Z' },
+      meterAfter: { value: 4214.1, at: '2026-11-19T06:10:00.000Z' },
+      shift: null,
+    })
+  })
+  it('an untracked machine, or one the query found nothing for, has no meters', () => {
+    expect(meterRefill({ ...w, vehicleId: null }, null)).toMatchObject({ tracked: false, meterBefore: null, meterAfter: null })
+    expect(meterRefill(w, { beforeAt: null, before: null, afterAt: new Date('2026-11-19T06:10:00Z'), after: 4214.1 }))
+      .toMatchObject({ tracked: true, meterBefore: null, meterAfter: { value: 4214.1 } })
   })
 })

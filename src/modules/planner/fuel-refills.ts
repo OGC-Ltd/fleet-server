@@ -34,6 +34,10 @@ const PUMP_OFFSET = '+03:00'
 
 export interface RefillWindow {
   issueId: string
+  /** The machine's register reference, as the issue names it. */
+  machine: string
+  /** Our unit for the machine; null when it is not one of ours. */
+  vehicleId: string | null
   /** Km-rated: the meter is the odometer, in km. Otherwise engine hours. */
   km: boolean
   fuelStart: Date | null
@@ -68,18 +72,26 @@ export interface ShiftUse {
 
 export interface MachineRefill {
   issueId: string
+  machine: string
   /** The machine is one of our units with telemetry in reach. */
   tracked: boolean
   meterBefore: MeterAt | null
   meterAfter: MeterAt | null
+  /** Null when the fuelling has no plan shift, and in the meters-only read. */
   shift: ShiftUse | null
 }
 
+/**
+ * One machine's refills in full, or, with no machine named (`machine` null),
+ * every machine's refills with the meters only: the Fuel page's table shows
+ * the latest refill's figures in each row, and a shift balance for every
+ * fuelling in a month is more than a table needs.
+ */
 export interface MachineRefills {
   factory: string
   from: string
   to: string
-  machine: string
+  machine: string | null
   basis: string | null
   refills: MachineRefill[]
 }
@@ -92,27 +104,55 @@ export function wallClock(s: string | null | undefined): Date | null {
   return Number.isNaN(t.getTime()) ? null : t
 }
 
-/** The machine `reference` names and a window for each of its finished fuellings in the read. */
-export function refillWindows(fuel: FactoryFuel, reference: string): { machine: FuelMachine | null; windows: RefillWindow[] } {
-  const k = foldName(reference)
-  const machine = fuel.machines.find(m => foldName(m.reference) === k) ?? null
-  const lineOf = new Map(fuel.lines.filter(l => l.requestId && foldName(l.machine) === k).map(l => [l.requestId!, l]))
+/**
+ * A window for each finished fuelling in the read: of the machine `reference`
+ * names, or of every machine when it is null. `machine` is the one named.
+ */
+export function refillWindows(fuel: FactoryFuel, reference: string | null): { machine: FuelMachine | null; windows: RefillWindow[] } {
+  const k = reference == null ? null : foldName(reference)
+  const machineOf = new Map(fuel.machines.map(m => [foldName(m.reference), m]))
+  const lineOf = new Map(fuel.lines.filter(l => l.requestId && (k == null || foldName(l.machine) === k)).map(l => [l.requestId!, l]))
   const windows = fuel.issues
-    .filter(i => i.done && foldName(i.machine) === k)
+    .filter(i => i.done && (k == null || foldName(i.machine) === k))
     .map((i): RefillWindow => {
+      const machine = machineOf.get(foldName(i.machine))
       const line = i.requestId ? lineOf.get(i.requestId) : undefined
       const w = line ? lineWindow(line.day, line.shiftStart, line.plannedHours) : null
       const start = wallClock(i.startedAt)
       const end = wallClock(i.at)
       return {
         issueId: i.id,
+        machine: i.machine,
+        vehicleId: machine?.vehicleId ?? null,
         km: machine?.basis === 'KM_PER_LITRE',
         fuelStart: start ?? end,
         fuelEnd: end ?? start,
         shift: line && w ? { lineId: line.lineId, ...w } : null,
       }
     })
-  return { machine, windows }
+  return { machine: k == null ? null : machineOf.get(k) ?? null, windows }
+}
+
+/** The tracker's meter either side of a fuelling, as the meters-only read finds them. */
+export interface MeterRow {
+  beforeAt: Date | null
+  before: number | null
+  afterAt: Date | null
+  after: number | null
+}
+
+/** A refill with the meters only (no shift), for the Fuel page's table. */
+export function meterRefill(w: RefillWindow, row: MeterRow | null): MachineRefill {
+  const at = (value: number | null, t: Date | null): MeterAt | null =>
+    value != null && Number.isFinite(value) && t ? { value: r1(value), at: t.toISOString() } : null
+  return {
+    issueId: w.issueId,
+    machine: w.machine,
+    tracked: w.vehicleId != null && row != null,
+    meterBefore: row ? at(row.before, row.beforeAt) : null,
+    meterAfter: row ? at(row.after, row.afterAt) : null,
+    shift: null,
+  }
 }
 
 /** The stretch of telemetry a window needs, cut at now; null when it needs none. */
@@ -182,5 +222,5 @@ export function refillFigures(
     }
   }
 
-  return { issueId: w.issueId, tracked: readings != null && readings.length > 0, meterBefore, meterAfter, shift }
+  return { issueId: w.issueId, machine: w.machine, tracked: readings != null && readings.length > 0, meterBefore, meterAfter, shift }
 }

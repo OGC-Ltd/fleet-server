@@ -43,11 +43,12 @@ export const factoryFuelQuerySchema = z.object({
 }).refine(q => q.from <= q.to, { message: 'from must not be after to' })
   .refine(q => (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000 <= 30, { message: 'At most 31 days' })
 
-// The Fuel page machine panel's refills: one machine, over the page's range.
+// The Fuel page's refills over its range: one machine in full (the panel), or
+// every machine's meters (the table) when none is named.
 export const factoryFuelRefillsQuerySchema = z.object({
   from: day,
   to: day,
-  machine: z.string().trim().min(1).max(64),
+  machine: z.string().trim().min(1).max(64).optional(),
 }).refine(q => q.from <= q.to, { message: 'from must not be after to' })
   .refine(q => (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000 <= 30, { message: 'At most 31 days' })
 

@@ -29,8 +29,8 @@ router.get('/work-plans',      requirePermission('map:read'),      validateQuery
 router.get('/factory-fuel',    requirePermission('fuel_filling:read'), validateQuery(factoryFuelQuerySchema), ctrl.factoryFuel)
 // Its Consumed column: each probed machine's tank day by day (tank-days.ts)
 router.get('/factory-fuel/tank-days', requirePermission('fuel_filling:read'), validateQuery(factoryFuelQuerySchema), ctrl.tankDays)
-// Its machine panel's refills: the tracker's meter either side of each
-// fuelling, and the fuel burned in the shift it was for (fuel-refills.ts)
+// Its refills: the tracker's meter either side of each fuelling (the table),
+// and for one machine the fuel burned in the shift it was for (fuel-refills.ts)
 router.get('/factory-fuel/refills', requirePermission('fuel_filling:read'), validateQuery(factoryFuelRefillsQuerySchema), ctrl.factoryFuelRefills)
 
 // The Drivers page's Operators tab: who the work plans put on each machine. A
