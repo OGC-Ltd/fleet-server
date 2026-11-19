@@ -8,6 +8,8 @@ import { ingestWialonNotifications } from './wialon-notifications.service.js'
 import { workPlansChanged } from '../planner/work-plans.service.js'
 import { isWorkPlanEvent, requestWorkPlanWatch } from '../planner/work-plan-watch.js'
 import { isWorkshopEvent, requestWorkshopSync } from '../repairs/factorysuite-workshop.runner.js'
+import { webhookSourceOf } from '../../middleware/webhookAuth.js'
+import { deliveryKey, firstDelivery, newShape } from './delivery-repeats.js'
 import {
   raiFactorySuiteAlertSchema,
   raiFactorySuiteDispatchSchema,
@@ -42,6 +44,12 @@ import {
  * unrecognised shape must never fail the request: acknowledge it, log the
  * shape so it can be wired up, and move on. Persistence is idempotent on the
  * provider's own ids, so a retry is harmless.
+ *
+ * FactorySuite gives 5 s to answer and says to reply straight away and do the
+ * work afterwards, and to ignore a repeat. So a work plan or workshop event
+ * seen moments ago (both webhooks may carry it) is acknowledged and dropped
+ * (delivery-repeats), and telling open pages a plan changed waits for the
+ * reply. The log line names the webhook a delivery came from (`source`).
  */
 export async function providerWebhook(req: Request, res: Response, next: NextFunction) {
   try {
@@ -57,6 +65,11 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
     let workPlans  = 0
     let workPlanOrgs = 0
     let workshop   = 0
+    let repeats    = 0
+    // Work that only refreshes (telling open pages a plan changed). FactorySuite
+    // asks for a 2xx straight away and the work afterwards, so it runs once the
+    // reply has gone.
+    const afterReply: Array<() => Promise<void>> = []
 
     const wialonNotifications: Parameters<typeof ingestWialonNotifications>[0] = []
 
@@ -69,23 +82,20 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
         continue
       }
 
-      // Work plan events, from the WORK_PLANNER_HOOK webhook. Nothing is
-      // stored: the map reads plans through from FactorySuite, so all this
-      // does is clear that read's cache and tell the org's open maps. By
-      // NAME, first, so no plan payload is ever tried against a dispatch or
-      // alert shape. The field events on the same hook (sighting.recorded,
-      // meter.readings.flagged) are not wired up yet and land in `unmapped`.
-      if (kind.startsWith('fuelplan.')) {
-        workPlanOrgs += await workPlansChanged(kind, item)
-        requestWorkPlanWatch(kind)
-        workPlans++
-        continue
-      }
-      // A fuel request decided or a pump issue done follows a plan line: re-read
-      // the plans now (planner/work-plan-watch) and drop the cached Fuel page.
-      // Not stored themselves, so they are acknowledged here, not left unmapped.
+      // Work plan events (fuelplan.*), and the fuel request and pump issue
+      // events that follow a plan line (fuel.request.*, fuel.issue.*), from
+      // the WORK_PLANNER_HOOK webhook. Nothing is stored from the payload:
+      // the plans are re-read from FactorySuite (planner/work-plan-watch, in
+      // a moment) and the cached map and Fuel page reads are dropped, with
+      // the org's open pages told to read again. By NAME, first, so no plan
+      // payload is ever tried against a dispatch or alert shape. The field
+      // events on the same hook (sighting.recorded, meter.readings.flagged)
+      // are not wired up yet and land in `unmapped`.
       if (isWorkPlanEvent(kind)) {
-        workPlanOrgs += await workPlansChanged(kind, item)
+        if (!firstDelivery(deliveryKey(kind, item))) { repeats++; continue }
+        const keys = newShape(kind, item)
+        if (keys) logger.info({ event: kind, keys }, 'Work plan event: first of its kind since start')
+        afterReply.push(async () => { workPlanOrgs += await workPlansChanged(kind, item) })
         requestWorkPlanWatch(kind)
         workPlans++
         continue
@@ -95,6 +105,7 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
       // that something changed, and the feeds are re-read in a moment; the
       // same pass the reconcile loop runs every cycle.
       if (isWorkshopEvent(kind)) {
+        if (!firstDelivery(deliveryKey(kind, item))) { repeats++; continue }
         requestWorkshopSync(kind)
         workshop++
         continue
@@ -192,13 +203,6 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
         'Webhook event received that we do not map yet',
       )
     }
-    if (result || dispatches || movements || sales || weighments || workPlans || workshop || wialon) {
-      logger.info(
-        { event, dispatches, movements, sales, weighments, workPlans, workPlanOrgs, workshop, wialon, ...(result ?? {}) },
-        'Provider webhook processed',
-      )
-    }
-
     sendSuccess(res, {
       event,
       received: items.length,
@@ -209,11 +213,35 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
       weighments,
       workPlans,
       workshop,
+      repeats,
       wialonNotifications: wialon?.created ?? 0,
       ignored:  unmapped.length,
       ...(result ?? {}),
     })
+
+    // The reply has gone: a failure from here on is logged, never sent.
+    for (const work of afterReply) {
+      try {
+        await work()
+      } catch (err) {
+        logger.warn({ err, event }, 'Webhook follow-up failed after the reply')
+      }
+    }
+
+    const source = webhookSourceOf(req)
+    if (result || dispatches || movements || sales || weighments || workPlans || workshop || wialon) {
+      logger.info(
+        { event, source, dispatches, movements, sales, weighments, workPlans, workPlanOrgs, workshop, repeats, wialon, ...(result ?? {}) },
+        'Provider webhook processed',
+      )
+    } else if (repeats) {
+      logger.info({ event, source, repeats }, 'Webhook repeat ignored')
+    }
   } catch (err) {
+    if (res.headersSent) {
+      logger.warn({ err }, 'Webhook failed after the reply')
+      return
+    }
     next(err)
   }
 }

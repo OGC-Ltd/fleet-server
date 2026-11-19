@@ -35,8 +35,9 @@ vi.mock('../../src/modules/webhooks/wialon-notifications.service.js', () => ({
   ingestWialonNotifications: vi.fn().mockResolvedValue({ created: 0 }),
 }))
 
-import { webhookAuth } from '../../src/middleware/webhookAuth.js'
+import { webhookAuth, webhookSourceOf } from '../../src/middleware/webhookAuth.js'
 import { providerWebhook } from '../../src/modules/webhooks/webhooks.controller.js'
+import { deliveryKey, firstDelivery, forgetDeliveries, REPEAT_TTL_MS } from '../../src/modules/webhooks/delivery-repeats.js'
 import { workPlansChanged } from '../../src/modules/planner/work-plans.service.js'
 import { emitDashboardWorkPlansChanged } from '../../src/lib/sse.js'
 import { prisma } from '../../src/lib/prisma.js'
@@ -72,6 +73,16 @@ describe('webhookAuth with two FactorySuite webhooks', () => {
     expect(await runAuth({ headers: { 'x-webhook-secret': 'plans-secret' }, rawBody: Buffer.alloc(0) })).toBeUndefined()
     expect(await runAuth({ headers: { 'x-webhook-secret': 'nope' }, rawBody: Buffer.alloc(0) })).toBeInstanceOf(Error)
   })
+
+  it('tags each delivery with the webhook whose secret it carried', async () => {
+    const plans = signed('plans-secret'), alerts = signed('alerts-secret')
+    await runAuth(plans); await runAuth(alerts)
+    expect(webhookSourceOf(plans)).toBe('work_planner')
+    expect(webhookSourceOf(alerts)).toBe('factory_suite')
+    const verbatim: any = { headers: { authorization: 'Bearer plans-secret' }, rawBody: Buffer.alloc(0) }
+    await runAuth(verbatim)
+    expect(webhookSourceOf(verbatim)).toBe('work_planner')
+  })
 })
 
 function reply() {
@@ -82,7 +93,41 @@ function reply() {
 }
 
 describe('providerWebhook routes plan events', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => { vi.clearAllMocks(); forgetDeliveries() })
+
+  it('refreshes once when both webhooks deliver the same plan event', async () => {
+    // 19 Nov 2026: fuelplan.decided for WP-261120-FAC came twice, 0.16 s apart.
+    const first = reply(), second = reply()
+    await providerWebhook({ body: BODY } as any, first, (e?: unknown) => { throw e })
+    await providerWebhook({ body: { ...BODY, occurredAt: '2026-11-14T10:00:00.160Z' } } as any, second, (e?: unknown) => { throw e })
+    expect(first.json.mock.calls[0][0].data).toMatchObject({ workPlans: 1, repeats: 0 })
+    expect(second.json.mock.calls[0][0].data).toMatchObject({ workPlans: 0, repeats: 1, ignored: 0 })
+    expect(emitDashboardWorkPlansChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('still refreshes for the same plan once its data has changed', async () => {
+    await providerWebhook({ body: BODY } as any, reply(), (e?: unknown) => { throw e })
+    await providerWebhook({ body: { ...BODY, event: 'fuelplan.released' } } as any, reply(), (e?: unknown) => { throw e })
+    await providerWebhook({ body: { ...BODY, data: { ...BODY.data, status: 'REJECTED' } } } as any, reply(), (e?: unknown) => { throw e })
+    expect(emitDashboardWorkPlansChanged).toHaveBeenCalledTimes(3)
+  })
+
+  it('replies before telling the open pages', async () => {
+    const res = reply()
+    await providerWebhook({ body: BODY } as any, res, (e?: unknown) => { throw e })
+    const replied = res.json.mock.invocationCallOrder[0]
+    const told = (emitDashboardWorkPlansChanged as any).mock.invocationCallOrder[0]
+    expect(replied).toBeLessThan(told)
+  })
+
+  it('keeps the reply when telling the pages fails afterwards', async () => {
+    ;(prisma.organisation.findMany as any).mockRejectedValueOnce(new Error('db down'))
+    const res = reply()
+    const next = vi.fn()
+    await providerWebhook({ body: BODY } as any, res, next)
+    expect(res.json).toHaveBeenCalledTimes(1)
+    expect(next).not.toHaveBeenCalled()
+  })
 
   it('sends fuelplan.* to the work plans, never to dispatches or alerts', async () => {
     for (const event of ['fuelplan.decided', 'fuelplan.change.requested', 'fuelplan.change.decided', 'fuelplan.released']) {
@@ -124,5 +169,23 @@ describe('workPlansChanged', () => {
     expect(await workPlansChanged('fuelplan.released', { plan: { factoryCode: 'MUFINDI PAPER MILLS' } })).toBe(1)
     expect(await workPlansChanged('fuelplan.released', { id: 'x' })).toBe(1)
     expect((prisma.organisation.findMany as any).mock.calls[1][0].where).toEqual({ code: { in: ['KASULU'] } })
+  })
+})
+
+describe('delivery repeats', () => {
+  beforeEach(() => forgetDeliveries())
+
+  it('is the same event whatever order the data keys come in', () => {
+    expect(deliveryKey('fuelplan.decided', { a: 1, b: { c: 2, d: [1, 2] } }))
+      .toBe(deliveryKey('fuelplan.decided', { b: { d: [1, 2], c: 2 }, a: 1 }))
+    expect(deliveryKey('fuelplan.decided', { a: 1 })).not.toBe(deliveryKey('fuelplan.released', { a: 1 }))
+    expect(deliveryKey('fuelplan.decided', { d: [1, 2] })).not.toBe(deliveryKey('fuelplan.decided', { d: [2, 1] }))
+  })
+
+  it('counts a delivery as new again once REPEAT_TTL_MS has passed', () => {
+    const key = deliveryKey('fuel.issue.completed', { id: 'i1' })
+    expect(firstDelivery(key, 0)).toBe(true)
+    expect(firstDelivery(key, REPEAT_TTL_MS - 1)).toBe(false)
+    expect(firstDelivery(key, REPEAT_TTL_MS + 1)).toBe(true)
   })
 })
