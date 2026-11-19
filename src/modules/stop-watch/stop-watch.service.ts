@@ -23,6 +23,7 @@ import {
   ORG_CODE, flagWords, flaggedUnits, nearestPlace, placesOf, storePlaces, withMovement,
   type Nearest, type Place, type RawSnapshotRow, type StopFlag,
 } from './stop-watch.rules.js'
+import { WK_ALLOWED, WK_ORGS, westKenyaStops, type WkUnit } from './stop-watch.west-kenya.js'
 
 export const CHECK_MS = 60_000
 const ZONES_MS = 60 * 60_000
@@ -60,7 +61,7 @@ const fromFile = placesOf(AUTHORISED)
 /** Announced already? Redis across restarts; this process's memory when Redis is down. */
 const announced = new Map<string, number>()
 let primed = false
-async function firstTime(key: string, now: number): Promise<boolean> {
+async function firstTime(key: string, now: number, isPrimed: boolean): Promise<boolean> {
   for (const [k, at] of announced) if (now - at > KEEP_S * 1000) announced.delete(k)
   if (announced.has(key)) return false
   announced.set(key, now)
@@ -72,7 +73,7 @@ async function firstTime(key: string, now: number): Promise<boolean> {
   }
   // No Redis: after a start, the first check only learns what is already
   // standing, so a deploy does not toast the whole list again.
-  return primed
+  return isPrimed
 }
 
 async function menengaiId(): Promise<string | null> {
@@ -105,6 +106,21 @@ export async function checkStops(now = Date.now()): Promise<void> {
   }))
   state = { orgId, status: 'done', flags, checkedAt: now, message: null }
 
+  const sent = await announce(orgId, ORG_CODE, flags, now, primed)
+  primed = true
+  if (sent) logger.info({ sent, flagged: flags.length }, 'stop watch: new stops toasted')
+}
+
+/**
+ * Toast each flag not announced yet to the connected people who may see its unit.
+ * `quiet`: only mark them announced, toasting none (a watch's first check after
+ * a start, so a deploy does not toast every stop already standing at once).
+ */
+async function announce(orgId: string, orgCode: string, flags: readonly StopWatchFlag[], now: number, isPrimed: boolean, quiet = false): Promise<number> {
+  if (quiet) {
+    for (const f of flags) await firstTime(f.key, now, false)
+    return 0
+  }
   let sent = 0
   for (const f of flags) {
     // Who can hear it first: a stop raised while nobody is connected must not
@@ -112,7 +128,7 @@ export async function checkStops(now = Date.now()): Promise<void> {
     // never hears of it (the 24 h key would already be spent).
     const people = await connectedUsersReaching(orgId, f.vehicleId)
     if (!people.length) continue
-    if (!(await firstTime(f.key, now))) continue
+    if (!(await firstTime(f.key, now, isPrimed))) continue
     toastUsers(people, makeToast({
       kind: 'stop',
       level: f.kind === 'nogo' ? 'critical' : 'warning',
@@ -120,13 +136,58 @@ export async function checkStops(now = Date.now()): Promise<void> {
       body: f.text,
       orgId,
       vehicleId: f.vehicleId,
-      // orgCode: the toast draws Menengai's logo (lib/push-org)
-      data: { ...f, orgCode: ORG_CODE },
+      // orgCode: the toast draws the organisation's logo (lib/push-org)
+      data: { ...f, orgCode },
     }))
     sent++
   }
-  primed = true
-  if (sent) logger.info({ sent, flagged: flags.length }, 'stop watch: new stops toasted')
+  return sent
+}
+
+// ── West Kenya (operator, 2026-11-19) ──────────────────────────────────────
+// Its trucks and prime movers stopped five minutes off site or weighbridge
+// (stop-watch.west-kenya), for West Kenya, Kabras and Nzoia alike, each with its
+// own list; the places on site are pooled from all three.
+
+const wkStates = new Map<string, State>()
+let wkZones: { at: number; places: Place[] } = { at: 0, places: [] }
+let wkPrimed = false
+
+export async function checkWestKenya(now = Date.now()): Promise<void> {
+  const orgs = await prisma.organisation.findMany({ where: { code: { in: [...WK_ORGS] } }, select: { id: true, code: true } })
+  if (!orgs.length) return
+  if (now - wkZones.at > ZONES_MS) {
+    const fcs = await Promise.all(orgs.map((o) => findAllAsGeoJSON(o.id).catch(() => null)))
+    if (fcs.some(Boolean)) {
+      const onSite = fcs.flatMap((fc) => fc?.features ?? [])
+        .filter((f) => f.properties.isActive !== false && WK_ALLOWED.has(String(f.properties.category)))
+      wkZones = { at: now, places: placesOf(onSite as never) }
+    }
+  }
+  // No factory, yard or weighbridge read: every stop would read unauthorised. Skip, and try again next minute.
+  if (!wkZones.places.length) {
+    wkZones = { at: 0, places: [] }
+    logger.warn('stop watch: no West Kenya site or weighbridge geofences read, check skipped')
+    return
+  }
+  for (const org of orgs) {
+    try {
+      const snap = await getFleetSnapshotCached(org.id)
+      const units = withMovement(snap as unknown as RawSnapshotRow[], movementState) as WkUnit[]
+      const found = westKenyaStops(units, wkZones.places, now)
+      const places = await Promise.all(found.map((f) => placeOf(f.lat, f.lng)))
+      const flags: StopWatchFlag[] = found.map((f, i) => ({ ...f, place: places[i], nearest: null, text: flagWords(f, now, places[i]) }))
+      wkStates.set(org.id, { orgId: org.id, status: 'done', flags, checkedAt: now, message: null })
+      // The first check after a start only learns what already stands (quiet)
+      const sent = await announce(org.id, org.code, flags, now, wkPrimed, !wkPrimed)
+      if (sent) logger.info({ org: org.code, sent, flagged: flags.length }, 'stop watch: new West Kenya stops toasted')
+    } catch (err) {
+      const was = wkStates.get(org.id)
+      wkStates.set(org.id, { orgId: org.id, status: 'error', flags: was?.flags ?? [], checkedAt: now, message: err instanceof Error ? err.message : String(err) })
+      logger.warn({ err, org: org.code }, 'stop watch: West Kenya check failed')
+    }
+  }
+  wkPrimed = true
 }
 
 /** Start the background check. Returns a stop function. */
@@ -139,6 +200,12 @@ export function startStopWatch(): () => void {
     } catch (err) {
       state = { ...state, status: 'error', message: err instanceof Error ? err.message : String(err), checkedAt: Date.now() }
       logger.warn({ err }, 'stop watch: check failed')
+    }
+    // West Kenya apart: a failure of one never holds up the other
+    try {
+      await checkWestKenya()
+    } catch (err) {
+      logger.warn({ err }, 'stop watch: West Kenya check failed')
     } finally {
       if (live) { timer = setTimeout(tick, CHECK_MS); timer.unref?.() }
     }
@@ -148,14 +215,15 @@ export function startStopWatch(): () => void {
   return () => { live = false; if (timer) clearTimeout(timer) }
 }
 
-/** GET /organisations/:orgId/stop-watch: what is flagged now (Menengai only). */
+/** GET /organisations/:orgId/stop-watch: what is flagged now (Menengai, and West Kenya's three). */
 export const current: RequestHandler = (req, res) => {
   const orgId = req.params.orgId
-  if (!state.orgId || orgId !== state.orgId) {
+  const s = state.orgId && orgId === state.orgId ? state : wkStates.get(String(orgId))
+  if (!s) {
     res.json({ data: { status: 'off', flags: [], checkedAt: state.checkedAt, message: null } })
     return
   }
   const scope = req.authz?.vehicleIds ?? null
-  const flags = scope ? state.flags.filter((f) => scope.has(f.vehicleId)) : state.flags
-  res.json({ data: { status: state.status, flags, checkedAt: state.checkedAt, message: state.message } })
+  const flags = scope ? s.flags.filter((f) => scope.has(f.vehicleId)) : s.flags
+  res.json({ data: { status: s.status, flags, checkedAt: s.checkedAt, message: s.message } })
 }
