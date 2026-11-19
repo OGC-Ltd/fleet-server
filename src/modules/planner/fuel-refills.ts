@@ -79,6 +79,8 @@ export interface MachineRefill {
   tracked: boolean
   meterBefore: MeterAt | null
   meterAfter: MeterAt | null
+  /** The machine's odometer now, on the same telemetry as meterBefore (filled by the service). */
+  meterNow?: MeterAt | null
   /** Null when the fuelling has no plan shift, and in the meters-only read. */
   shift: ShiftUse | null
 }
