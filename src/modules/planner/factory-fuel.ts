@@ -53,6 +53,12 @@ export interface FuelPlanLine {
   /** The fuel request's status, or null while the line has none. */
   requestStatus: string | null
   requestId: string | null
+  /**
+   * Litres on the fuel request. A full-tank line carries none, but its request
+   * does (EX-17, 19 Nov: 650 L; 63 of 66 full-tank requests that day), so
+   * this is the planned figure for a full tank.
+   */
+  requestLitres: number | null
   /** Litres the pump issued against this line's request. */
   issuedLitres: number
 }
@@ -68,6 +74,24 @@ export interface FuelIssue extends PumpIssue {
   /** The meter at the pump: before, as estimated, as read. */
   readings: { previous: number | null; estimated: number | null; physical: number | null }
   requestId: string | null
+  /** When the nozzle went in (local wall clock); `at` is when it came out once done. */
+  startedAt: string | null
+  /** The fuel voucher, "SIV-000027". */
+  siv: string | null
+  /** FactorySuite's own probe check of the fuelling; null when it made none. */
+  sensor: FuelIssueSensor | null
+}
+
+/** FactorySuite's probe check of one fuelling (RaiFactorySuiteFuelIssueRow sensor*). */
+export interface FuelIssueSensor {
+  /** MATCH, MISMATCH or NO_SENSOR. */
+  check: string | null
+  beforeL: number | null
+  beforeAt: string | null
+  afterL: number | null
+  afterAt: string | null
+  riseL: number | null
+  gapPercent: number | null
 }
 
 export interface FuelMachine {
@@ -151,6 +175,7 @@ export function buildFactoryFuel(
           needLitres: needLitres(l, machineByRef.get(foldName(l.machine))),
           requestStatus: req?.status ?? null,
           requestId: req?.id ?? null,
+          requestLitres: req?.litresRequested ?? null,
           issuedLitres: req ? issuedFor.get(req.id) ?? 0 : 0,
         })
       }
@@ -171,6 +196,9 @@ export function buildFactoryFuel(
       minutes: i.fuelingMinutes ?? null,
       readings: { previous: i.previousReading ?? null, estimated: i.estimatedReading ?? null, physical: i.physicalReading ?? null },
       requestId: i.requestId ?? null,
+      startedAt: i.fuelingStart ?? null,
+      siv: i.siv?.trim() || null,
+      sensor: issueSensor(i),
     }))
     .sort((a, b) => String(b.at ?? b.day).localeCompare(String(a.at ?? a.day)))
 
@@ -198,6 +226,20 @@ export function buildFactoryFuel(
   }).sort((a, b) => a.reference.localeCompare(b.reference, undefined, { numeric: true }))
 
   return { factory, from, to, lines, issues, machines }
+}
+
+function issueSensor(i: RaiFactorySuiteFuelIssueRow): FuelIssueSensor | null {
+  const check = i.sensorCheck?.trim().toUpperCase() || null
+  if (!check && i.sensorBeforeLitres == null && i.sensorAfterLitres == null) return null
+  return {
+    check,
+    beforeL: i.sensorBeforeLitres ?? null,
+    beforeAt: i.sensorBeforeAt ?? null,
+    afterL: i.sensorAfterLitres ?? null,
+    afterAt: i.sensorAfterAt ?? null,
+    riseL: i.sensorRiseLitres ?? null,
+    gapPercent: i.sensorGapPercent ?? null,
+  }
 }
 
 function nextDay(day: string): string {

@@ -32,6 +32,10 @@ import { collapsePlans } from './work-plan-items.js'
 import { buildFactorySupervisors, lineWindow, runKey, type FactorySupervisors, type LineRun } from './factory-supervisors.js'
 import { buildFactoryFuel, type FactoryFuel } from './factory-fuel.js'
 import { buildFactoryOperators, type FactoryOperators } from './factory-operators.js'
+import { meterRefill, refillFigures, refillSpan, refillWindows, type MachineRefill, type MachineRefills, type RefillWindow } from './fuel-refills.js'
+import { createHash } from 'node:crypto'
+import { asDaySeries } from '../fuel/fuel-balance.js'
+import { reportDb } from '../../lib/report-db.js'
 
 const FACTORY_OF_ORG: Record<string, string> = Object.fromEntries(
   Object.entries(MACHINE_FACTORY_TO_ORG).map(([factory, org]) => [org, factory]),
@@ -256,6 +260,135 @@ export async function factorySupervisorsFor(orgId: string, from: string, to: str
   }
   const out = await supervisorCache.get(key)!.out
   return { ...out, fetchedAt: new Date().toISOString() }
+}
+
+/**
+ * The Fuel page machine panel's refills: one machine's fuellings over
+ * `from`..`to`, each with what only our telemetry knows (fuel-refills.ts):
+ * the tracker's meter either side of the fuelling, and the fuel burned and
+ * engine hours run in the shift it was for. The rest of the seven figures are
+ * on the Fuel page's read already. Telemetry comes through the report pool
+ * (lib/report-db), a shift at a time: a month of one machine's fuellings is a
+ * few dozen windows of a day or less.
+ *
+ * With no machine named, every machine's fuellings with the meters only, in
+ * one query (readRefillMeters): the Fuel page's table shows each row's latest
+ * refill, and the shift balance stays with the panel.
+ *
+ * A machine that is not one of our units, or one outside the caller's
+ * vehicles (`scope`), gets its refills with no tracker figures.
+ */
+export type MachineRefillsForPage = (MachineRefills & { fetchedAt: string }) | { factory: null; from: string; to: string }
+const REFILLS_CACHE_MS = 2 * 60_000
+const refillsCache = new Map<string, { at: number; out: Promise<MachineRefills> }>()
+
+export async function factoryFuelRefillsFor(
+  orgId: string, from: string, to: string, reference: string | null, scope: ReadonlySet<string> | null = null,
+): Promise<MachineRefillsForPage> {
+  const fuel = await factoryFuelFor(orgId, from, to)
+  if (fuel.factory === null) return fuel
+  const found = refillWindows(fuel, reference)
+  // A unit outside the caller's vehicles reads as untracked.
+  const windows = found.windows.map(w => (w.vehicleId && scope && !scope.has(w.vehicleId) ? { ...w, vehicleId: null } : w))
+  const units = [...new Set(windows.map(w => w.vehicleId ?? '-'))].sort().join(',')
+  const key = `${orgId}|${from}|${to}|${reference?.toUpperCase() ?? '*'}|${createHash('sha1').update(units).digest('hex')}`
+  const hit = refillsCache.get(key)
+  if (!hit || Date.now() - hit.at >= REFILLS_CACHE_MS) {
+    const read = reference == null ? readRefillMeters(windows) : readRefills(windows)
+    const out = read.then(refills => ({
+      factory: fuel.factory, from, to,
+      machine: reference == null ? null : found.machine?.reference ?? reference,
+      basis: found.machine?.basis ?? null,
+      refills,
+    }))
+    refillsCache.set(key, { at: Date.now(), out })
+    out.catch(() => refillsCache.delete(key))
+    for (const [k, v] of refillsCache) if (Date.now() - v.at >= REFILLS_CACHE_MS) refillsCache.delete(k)
+  }
+  const out = await refillsCache.get(key)!.out
+  return { ...out, fetchedAt: new Date().toISOString() }
+}
+
+/**
+ * Every fuelling's meters in one query: the last fix with a meter in the two
+ * hours before the nozzle went in, and the first in the two hours after it
+ * came out. Two index seeks a fuelling, so a month of them stays cheap.
+ */
+async function readRefillMeters(windows: RefillWindow[]): Promise<MachineRefill[]> {
+  const asked = windows.filter(w => w.vehicleId && w.fuelStart && w.fuelEnd)
+  if (!asked.length) return windows.map(w => meterRefill(w, null))
+  const rows = await reportDb().$queryRaw<Array<{ k: string; before_at: Date | null; before: number | null; after_at: Date | null; after: number | null }>>`
+    WITH w AS (
+      SELECT * FROM unnest(${asked.map(w => w.issueId)}::text[], ${asked.map(w => w.vehicleId!)}::text[],
+                           ${asked.map(w => w.fuelStart!)}::timestamptz[], ${asked.map(w => w.fuelEnd!)}::timestamptz[],
+                           ${asked.map(w => w.km)}::boolean[]) AS w(k, vid, st, en, km))
+    SELECT w.k, b.captured_at AS before_at, b.meter AS before, a.captured_at AS after_at, a.meter AS after
+      FROM w
+      LEFT JOIN LATERAL (
+        SELECT t.captured_at, (CASE WHEN w.km THEN t.odometer_m / 1000.0 ELSE t.engine_hours_meter END)::float8 AS meter
+          FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at <= w.st AND t.captured_at >= w.st - interval '2 hours'
+           AND (CASE WHEN w.km THEN t.odometer_m ELSE t.engine_hours_meter END) IS NOT NULL
+         ORDER BY t.captured_at DESC LIMIT 1) b ON true
+      LEFT JOIN LATERAL (
+        SELECT t.captured_at, (CASE WHEN w.km THEN t.odometer_m / 1000.0 ELSE t.engine_hours_meter END)::float8 AS meter
+          FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.en AND t.captured_at <= w.en + interval '2 hours'
+           AND (CASE WHEN w.km THEN t.odometer_m ELSE t.engine_hours_meter END) IS NOT NULL
+         ORDER BY t.captured_at ASC LIMIT 1) a ON true`
+  const byKey = new Map(rows.map(r => [r.k, { beforeAt: r.before_at, before: r.before, afterAt: r.after_at, after: r.after }]))
+  return windows.map(w => meterRefill(w, byKey.get(w.issueId) ?? null))
+}
+
+async function readRefills(windows: RefillWindow[]): Promise<MachineRefill[]> {
+  const now = new Date()
+  // One machine's windows: one unit, or none.
+  const vehicleId = windows.find(w => w.vehicleId)?.vehicleId ?? null
+  if (!vehicleId || !windows.length) return windows.map(w => refillFigures(w, null, [], [], now))
+  const spans = windows.map(w => refillSpan(w, now))
+  const known = spans.filter((s): s is { from: Date; to: Date } => s != null)
+  if (!known.length) return windows.map(w => refillFigures(w, null, [], [], now))
+  const lo = new Date(Math.min(...known.map(s => s.from.getTime())))
+  const hi = new Date(Math.max(...known.map(s => s.to.getTime())))
+  const db = reportDb()
+  const [fillings, drains] = await Promise.all([
+    db.fuelFilling.findMany({
+      where: { vehicleId, filledAt: { gte: lo, lte: hi } },
+      select: { filledAt: true, verdict: true, observedRiseMl: true, filledMl: true, initialFuelLevelMl: true, finalFuelLevelMl: true },
+    }),
+    db.fuelTheft.findMany({
+      where: { vehicleId, beganAt: { gte: lo, lte: hi }, OR: [{ drainCause: 'SIPHON' }, { reviewStatus: 'CONFIRMED_THEFT' }] },
+      select: { beganAt: true, verdict: true, drainCause: true, cleanDropMl: true, measuredDropMl: true,
+                stolenMl: true, finalFuelLevelMl: true, reviewStatus: true, dismissedAt: true },
+    }),
+  ])
+  const fills = fillings.map(f => ({ ...f, verdict: f.verdict as string | null, at: f.filledAt.getTime() }))
+  const lost = drains.map(d => ({ ...d, verdict: d.verdict as string | null, drainCause: d.drainCause as string | null,
+    reviewStatus: d.reviewStatus as string | null, at: d.beganAt.getTime() }))
+
+  const out: MachineRefill[] = new Array(windows.length)
+  let next = 0
+  const worker = async () => {
+    while (next < windows.length) {
+      const i = next++
+      const span = spans[i]
+      if (!span) { out[i] = refillFigures(windows[i]!, null, fills, lost, now); continue }
+      const rows = await db.$queryRaw<Array<{ captured_at: Date; lat: number | null; lng: number | null; speed_kmh: number | null;
+        fuel_level_ml: number | null; engine_hours_meter: number | null; odometer_m: number | null }>>`
+        SELECT captured_at, lat, lng, speed_kmh, fuel_level_ml, engine_hours_meter, odometer_m
+          FROM vehicle_telemetries
+         WHERE vehicle_id = ${vehicleId} AND captured_at >= ${span.from} AND captured_at <= ${span.to}
+         ORDER BY captured_at ASC`
+      const readings = rows.map(r => ({
+        ...asDaySeries({ t: r.captured_at.getTime(), lat: r.lat, lng: r.lng, speedKmh: r.speed_kmh, fuelMl: r.fuel_level_ml }),
+        engineHours: r.engine_hours_meter,
+        odometerKm: r.odometer_m != null ? r.odometer_m / 1000 : null,
+      }))
+      out[i] = refillFigures(windows[i]!, readings, fills, lost, now)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(3, windows.length) }, worker))
+  return out
 }
 
 async function readLineRuns(windows: Array<{ key: string; vehicleId: string; start: Date; end: Date }>): Promise<Map<string, LineRun>> {

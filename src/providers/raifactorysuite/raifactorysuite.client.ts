@@ -318,6 +318,24 @@ export interface RaiFactorySuiteFuelIssueRow {
   flagNotes?:         string | null
   completed?:         boolean | null
   requestId?:         string | null
+  /** The fuel voucher, "SIV-000027" (seen 2026-11-19). */
+  siv?:               string | null
+  /**
+   * FactorySuite's own probe check, added by 2026-11-19: the tank before and
+   * after the fuelling read off the unit's Wialon fuel sensor (with the same
+   * calibration we use), the rise, and its gap to the litres issued.
+   * `sensorCheck` is MATCH, MISMATCH or NO_SENSOR; the times carry a Z.
+   */
+  sensorBeforeLitres?: number | null
+  sensorBeforeAt?:     string | null
+  sensorAfterLitres?:  number | null
+  sensorAfterAt?:      string | null
+  sensorRiseLitres?:   number | null
+  sensorGapPercent?:   number | null
+  sensorCheck?:        string | null
+  sensorSummary?:      string | null
+  sensorRoomLitres?:   number | null
+  sensorNotFull?:      boolean | null
 }
 
 /**
