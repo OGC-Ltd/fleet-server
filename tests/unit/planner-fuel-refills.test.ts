@@ -44,7 +44,8 @@ describe('refillWindows', () => {
     const { machine, windows } = refillWindows(fuel(), 'ex-17')
     expect(machine?.vehicleId).toBe('v17')
     expect(windows).toEqual([{
-      issueId: 'i1', machine: 'EX-17', vehicleId: 'v17', km: false,
+      // km even on an hour-rated excavator: the odometer is the meter (20 Nov 2026)
+      issueId: 'i1', machine: 'EX-17', vehicleId: 'v17', km: true,
       fuelStart: new Date('2026-11-19T05:31:45.901Z'), fuelEnd: new Date('2026-11-19T06:07:33.754Z'),
       shift: { lineId: 'l1', start: new Date('2026-11-19T03:00:00Z'), end: new Date('2026-11-19T11:00:00Z') },
     }])
@@ -100,10 +101,11 @@ describe('refillFigures', () => {
   const fillings = [{ at: at('05:40:00'), verdict: 'REFILL', observedRiseMl: 564_000, filledMl: 560_000, initialFuelLevelMl: 78_000, finalFuelLevelMl: 642_000 }]
 
   it("gives the tracker's meter either side of the fuelling and the shift's balance", () => {
-    const out = refillFigures(w, readings, fillings, [], new Date('2026-11-20T00:00:00Z'))
+    // the hours meter, as a window not on km reads it
+    const out = refillFigures({ ...w, km: false }, readings, fillings, [], new Date('2026-11-20T00:00:00Z'))
     expect(out.tracked).toBe(true)
-    expect(out.meterBefore).toEqual({ value: 4214.1, at: '2026-11-19T05:30:00.000Z' })
-    expect(out.meterAfter).toEqual({ value: 4214.1, at: '2026-11-19T06:10:00.000Z' })
+    expect(out.meterBefore).toEqual({ value: 4214.1, at: '2026-11-19T05:30:00.000Z', unit: 'h' })
+    expect(out.meterAfter).toEqual({ value: 4214.1, at: '2026-11-19T06:10:00.000Z', unit: 'h' })
     expect(out.shift).toMatchObject({
       start: '2026-11-19T03:00:00.000Z', end: '2026-11-19T11:00:00.000Z', open: false, ahead: false,
       filledL: 564, engineHours: 5.4,
@@ -137,7 +139,7 @@ describe('refillFigures', () => {
   it('reads the odometer in km on a km-rated machine', () => {
     const km = [fix('05:00:00', 78, 4214.1, 12_340.26), fix('06:30:00', 642, 4214.1, 12_340.31)]
     const out = refillFigures({ ...w, km: true, shift: null }, km, [], [], new Date('2026-11-20T00:00:00Z'))
-    expect(out.meterBefore?.value).toBe(12_340.3)
+    expect(out.meterBefore).toMatchObject({ value: 12_340.3, unit: 'km' })
     expect(out.meterAfter?.value).toBe(12_340.3)
   })
 })
@@ -150,8 +152,8 @@ describe('meterRefill', () => {
     })
     expect(out).toEqual({
       issueId: 'i1', machine: 'EX-17', tracked: true,
-      meterBefore: { value: 4214.1, at: '2026-11-19T05:30:00.000Z' },
-      meterAfter: { value: 4214.1, at: '2026-11-19T06:10:00.000Z' },
+      meterBefore: { value: 4214.1, at: '2026-11-19T05:30:00.000Z', unit: 'km' },
+      meterAfter: { value: 4214.1, at: '2026-11-19T06:10:00.000Z', unit: 'km' },
       shift: null,
     })
   })
