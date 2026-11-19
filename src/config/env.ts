@@ -113,14 +113,16 @@ const schema = z.object({
 
   // Shared signing secret for the inbound alert webhook (POST /webhook/rai).
   // FACTORY_SUITE_HOOK is the canonical name (it is what the provider calls
-  // it); CONTROLTECH_WEBHOOK_SECRET is accepted as a legacy alias. UNSET =
-  // the receiver rejects every delivery, so alerts can't be spoofed into the
+  // it); CONTROLTECH_WEBHOOK_SECRET is accepted as a legacy alias. From
+  // 2026-11-19 that webhook carries alert.created, dispatch.created,
+  // dispatch.updated and movement.created only. With neither secret set the
+  // receiver rejects every delivery, so alerts can't be spoofed into the
   // operations feed.
   FACTORY_SUITE_HOOK:         z.string().optional().default(''),
   CONTROLTECH_WEBHOOK_SECRET: z.string().optional().default(''),
-  // The second FactorySuite webhook, WORK_PLANNER_HOOK (2026-11-14): the work
-  // plan events (fuelplan.*) on the same callback, signed with its own secret.
-  // Either secret is accepted on /webhook/rai.
+  // The second FactorySuite webhook, WORK_PLANNER_HOOK (2026-11-14), signed
+  // with its own secret. The default from 2026-11-19: every other event,
+  // weighments included. Either secret is accepted on /webhook/rai.
   WORK_PLANNER_HOOK:          z.string().optional().default(''),
 
   // Fleet AI Insight (dashboard/ai-insight.ts). Unset key = the endpoint

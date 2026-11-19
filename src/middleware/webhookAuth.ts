@@ -76,20 +76,48 @@ function normaliseSignature(sig: string): string {
 
 /**
  * Every secret a FactorySuite webhook may be signed with. Each webhook
- * registered there has its own: FACTORY_SUITE_HOOK (alerts, dispatches,
- * movements, weighments; CONTROLTECH_WEBHOOK_SECRET is its older name) and
- * WORK_PLANNER_HOOK (the work plan events). Both post to the same URL.
+ * registered there has its own, and both post to the same URL. From 19 Nov
+ * 2026 they split FactorySuite's events between them (operator's choice):
+ *   • FACTORY_SUITE_HOOK: alert.created, dispatch.created, dispatch.updated
+ *     and movement.created (CONTROLTECH_WEBHOOK_SECRET is its older name);
+ *   • WORK_PLANNER_HOOK, the default: everything else, weighments included.
+ * Either secret is accepted for any event: a mis-ticked event still lands,
+ * the log line names the webhook it came by, and a copy that comes by both is
+ * dropped as a repeat (webhooks/delivery-repeats).
  */
 export function webhookSecrets(): string[] {
-  return [env.FACTORY_SUITE_HOOK || env.CONTROLTECH_WEBHOOK_SECRET, env.WORK_PLANNER_HOOK].filter(Boolean)
+  return namedSecrets().map(s => s.secret)
+}
+
+/** Which FactorySuite webhook a delivery came from: the one whose secret it carried. */
+export type WebhookSource = 'factory_suite' | 'work_planner'
+
+// WORK_PLANNER_HOOK first: the default webhook, carrying most events.
+function namedSecrets(): Array<{ source: WebhookSource; secret: string }> {
+  return [
+    { source: 'work_planner' as const, secret: env.WORK_PLANNER_HOOK },
+    { source: 'factory_suite' as const, secret: env.FACTORY_SUITE_HOOK || env.CONTROLTECH_WEBHOOK_SECRET },
+  ].filter(s => Boolean(s.secret))
+}
+
+/** The webhook an accepted delivery was authenticated as (set by webhookAuth). */
+export function webhookSourceOf(req: unknown): WebhookSource | null {
+  return (req as { webhookSource?: WebhookSource }).webhookSource ?? null
 }
 
 export const webhookAuth: RequestHandler = (req, _res, next) => {
-  const secrets = webhookSecrets()
+  const named = namedSecrets()
+  const secrets = named.map(s => s.secret)
+  // Tags the request with the webhook whose secret matched. Both webhooks may
+  // be subscribed to the same event, so this is how a repeat is traced.
+  const accept = (index: number) => {
+    (req as { webhookSource?: WebhookSource }).webhookSource = named[index]?.source
+    return next()
+  }
   if (secrets.length === 0) {
     // Fail closed: an unset secret must never mean "allow anyone to inject
     // alerts into the operations feed".
-    logger.error('FACTORY_SUITE_HOOK is not set — rejecting webhook delivery')
+    logger.error('No FactorySuite webhook secret is set (WORK_PLANNER_HOOK, FACTORY_SUITE_HOOK) — rejecting webhook delivery')
     return next(new UnauthorizedError('Webhook receiver is not configured'))
   }
 
@@ -106,11 +134,11 @@ export const webhookAuth: RequestHandler = (req, _res, next) => {
     const received = normaliseSignature(sig)
     // Every secret is compared, not just until one matches, so the time
     // taken does not say which webhook a signature was checked against.
-    let ok = false
-    for (const e of expected) {
-      if (safeEqual(e.hex, received.toLowerCase()) || safeEqual(e.base64, received)) ok = true
-    }
-    if (ok) return next()
+    let match = -1
+    expected.forEach((e, i) => {
+      if (safeEqual(e.hex, received.toLowerCase()) || safeEqual(e.base64, received)) match = i
+    })
+    if (match >= 0) return accept(match)
     // A present-but-wrong signature is a hard failure: don't fall through to
     // the weaker shared-secret path, or a bad signature could be bypassed by
     // also sending the secret in the clear.
@@ -119,21 +147,24 @@ export const webhookAuth: RequestHandler = (req, _res, next) => {
   }
 
   // 2. The shared secret sent verbatim, under any known header.
-  const anySecret = (provided: string) => {
-    let ok = false
-    for (const s of secrets) if (safeEqual(s, provided)) ok = true
-    return ok
+  const secretIndex = (provided: string) => {
+    let match = -1
+    secrets.forEach((s, i) => { if (safeEqual(s, provided)) match = i })
+    return match
   }
   for (const name of SECRET_HEADERS) {
     const provided = header(req, name)
-    if (provided && anySecret(provided.trim())) return next()
+    if (!provided) continue
+    const match = secretIndex(provided.trim())
+    if (match >= 0) return accept(match)
   }
 
   // 3. Authorization: Bearer <secret> (or the bare secret).
   const auth = header(req, 'authorization')
   if (auth) {
     const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : auth.trim()
-    if (anySecret(token)) return next()
+    const match = secretIndex(token)
+    if (match >= 0) return accept(match)
   }
 
   logRejection(req)
