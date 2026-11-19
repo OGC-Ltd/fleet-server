@@ -14,8 +14,9 @@
  *                              here, to compare
  *   7 issued                   litres the pump put in (FactorySuite)
  *
- * The meter is engine hours (Wialon `cneh`), or the odometer in km on a
- * km-rated machine. Consumed is fuel-balance's figure, the one Vehicle
+ * The meter is the tracker's GPS odometer in km on every machine (operator,
+ * 20 Nov 2026: "do conversion into km for the odometers"), hour-rated ones
+ * included: engine hours still give the hours run in a shift. Consumed is fuel-balance's figure, the one Vehicle
  * analytics and the reports print (start + filled - theft - end over the
  * shift), with the engine hours run in it; up to now while the shift runs.
  *
@@ -38,7 +39,7 @@ export interface RefillWindow {
   machine: string
   /** Our unit for the machine; null when it is not one of ours. */
   vehicleId: string | null
-  /** Km-rated: the meter is the odometer, in km. Otherwise engine hours. */
+  /** The meter is the odometer, in km (always since 20 Nov 2026); else engine hours. */
   km: boolean
   fuelStart: Date | null
   fuelEnd: Date | null
@@ -52,7 +53,8 @@ export interface RefillReading extends BalanceReading {
   odometerKm: number | null
 }
 
-export interface MeterAt { value: number; at: string }
+/** A meter reading; `unit` says which meter, so a client never shows hours as km. */
+export interface MeterAt { value: number; at: string; unit: 'km' | 'h' }
 
 export interface ShiftUse {
   start: string
@@ -124,7 +126,7 @@ export function refillWindows(fuel: FactoryFuel, reference: string | null): { ma
         issueId: i.id,
         machine: i.machine,
         vehicleId: machine?.vehicleId ?? null,
-        km: machine?.basis === 'KM_PER_LITRE',
+        km: true,
         fuelStart: start ?? end,
         fuelEnd: end ?? start,
         shift: line && w ? { lineId: line.lineId, ...w } : null,
@@ -144,7 +146,7 @@ export interface MeterRow {
 /** A refill with the meters only (no shift), for the Fuel page's table. */
 export function meterRefill(w: RefillWindow, row: MeterRow | null): MachineRefill {
   const at = (value: number | null, t: Date | null): MeterAt | null =>
-    value != null && Number.isFinite(value) && t ? { value: r1(value), at: t.toISOString() } : null
+    value != null && Number.isFinite(value) && t ? { value: r1(value), at: t.toISOString(), unit: w.km ? 'km' : 'h' } : null
   return {
     issueId: w.issueId,
     machine: w.machine,
@@ -188,13 +190,13 @@ export function refillFigures(
   if (w.fuelStart) {
     const t = w.fuelStart.getTime()
     const r = metered.filter(x => x.t <= t && x.t >= t - METER_REACH_MS).at(-1)
-    if (r) meterBefore = { value: r1(meterOf(r)!), at: iso(r.t) }
+    if (r) meterBefore = { value: r1(meterOf(r)!), at: iso(r.t), unit: w.km ? 'km' : 'h' }
   }
   let meterAfter: MeterAt | null = null
   if (w.fuelEnd) {
     const t = w.fuelEnd.getTime()
     const r = metered.find(x => x.t >= t && x.t <= t + METER_REACH_MS)
-    if (r) meterAfter = { value: r1(meterOf(r)!), at: iso(r.t) }
+    if (r) meterAfter = { value: r1(meterOf(r)!), at: iso(r.t), unit: w.km ? 'km' : 'h' }
   }
 
   let shift: ShiftUse | null = null
