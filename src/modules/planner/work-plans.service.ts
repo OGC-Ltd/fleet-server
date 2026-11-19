@@ -294,7 +294,7 @@ export async function factoryFuelRefillsFor(
   const key = `${orgId}|${from}|${to}|${reference?.toUpperCase() ?? '*'}|${createHash('sha1').update(units).digest('hex')}`
   const hit = refillsCache.get(key)
   if (!hit || Date.now() - hit.at >= REFILLS_CACHE_MS) {
-    const read = reference == null ? readRefillMeters(windows) : readRefills(windows)
+    const read = (reference == null ? readRefillMeters(windows) : readRefills(windows)).then(withMeterNow(windows))
     const out = read.then(refills => ({
       factory: fuel.factory, from, to,
       machine: reference == null ? null : found.machine?.reference ?? reference,
@@ -307,6 +307,33 @@ export async function factoryFuelRefillsFor(
   }
   const out = await refillsCache.get(key)!.out
   return { ...out, fetchedAt: new Date().toISOString() }
+}
+
+/**
+ * Each tracked machine's odometer now, off the same telemetry column as its
+ * refill meters (odometer_m): the live snapshot's mileage is Wialon's own
+ * counter (cnm_km) and runs on another base (MTR-21: 37,488 km there against
+ * 1,815 km here), so Odometer after must not mix the two. The latest fix with
+ * an odometer in the last 7 days.
+ */
+function withMeterNow(windows: RefillWindow[]) {
+  return async (refills: MachineRefill[]): Promise<MachineRefill[]> => {
+    const vids = [...new Set(windows.map(w => w.vehicleId).filter((v): v is string => v != null))]
+    if (!vids.length) return refills
+    const rows = await reportDb().$queryRaw<Array<{ vid: string; at: Date; km: number }>>`
+      SELECT v.vid, n.captured_at AS at, (n.odometer_m / 1000.0)::float8 AS km
+        FROM unnest(${vids}::text[]) AS v(vid)
+        JOIN LATERAL (
+          SELECT t.captured_at, t.odometer_m FROM vehicle_telemetries t
+           WHERE t.vehicle_id = v.vid AND t.captured_at >= now() - interval '7 days' AND t.odometer_m IS NOT NULL
+           ORDER BY t.captured_at DESC LIMIT 1) n ON true`
+    const nowOf = new Map(rows.map(r => [r.vid, { value: Math.round(r.km * 10) / 10, at: r.at.toISOString(), unit: 'km' as const }]))
+    const vidOf = new Map(windows.map(w => [w.issueId, w.vehicleId]))
+    return refills.map(r => {
+      const vid = vidOf.get(r.issueId)
+      return { ...r, meterNow: vid ? nowOf.get(vid) ?? null : null }
+    })
+  }
 }
 
 /**
