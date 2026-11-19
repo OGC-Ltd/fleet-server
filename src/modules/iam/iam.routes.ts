@@ -17,6 +17,7 @@ import { requireRealAuth } from '../../middleware/requireRealAuth.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
 import { WILDCARD } from '../../lib/permissions.js'
 import * as ctrl from './iam.controller.js'
+import { driversCheck } from './factorysuite-drivers-check.js'
 import { listUsersQuerySchema, setFleetSchema, setGrantsSchema } from './iam.schema.js'
 
 const router = Router()
@@ -30,5 +31,9 @@ router.get('/users/:userId', ctrl.userAccess)
 router.put('/users/:userId/grants', requireRealAuth, validateBody(setGrantsSchema), ctrl.setGrants)
 // The whole fleet, or only some of its categories, in one organisation.
 router.put('/users/:userId/fleet', requireRealAuth, validateBody(setFleetSchema), ctrl.setFleet)
+
+// FactorySuite's driver register for one factory, as counts and field names
+// only (factorysuite-drivers-check): read-only, nothing stored.
+router.get('/factorysuite/drivers-check', driversCheck)
 
 export default router

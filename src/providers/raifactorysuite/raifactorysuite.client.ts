@@ -538,6 +538,14 @@ export class RaiFactorySuiteClient {
     return this.get<RaiFactorySuitePartRow>('/workshop/parts?limit=1000')
   }
 
+  /** The driver register (`GET /drivers`), one factory or all. Rows as the
+   *  provider sends them: they carry personal details (ID number, phone,
+   *  photo links), so a caller keeps only what it needs. */
+  async listDrivers(factoryCode?: string, limit = 2000): Promise<Record<string, unknown>[]> {
+    const q = new URLSearchParams({ limit: String(limit), ...(factoryCode ? { factoryCode } : {}) })
+    return this.get<Record<string, unknown>>(`/drivers?${q}`)
+  }
+
   /** Cheap liveness probe used when a reconcile run fails, to tell apart
    *  "provider is down" from "this endpoint changed shape". */
   async ping(): Promise<boolean> {
