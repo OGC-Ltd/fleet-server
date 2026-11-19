@@ -28,6 +28,7 @@ import {
 } from '../../providers/raifactorysuite/raifactorysuite.client.js'
 import { MACHINE_FACTORY_TO_ORG } from '../../providers/raifactorysuite/raifactorysuite.machine-sync.js'
 import { buildMapWorkPlans, type MapWorkPlans } from './work-plan-match.js'
+import { buildFactorySupervisors, lineWindow, runKey, type FactorySupervisors, type LineRun } from './factory-supervisors.js'
 import { buildFactoryFuel, type FactoryFuel } from './factory-fuel.js'
 import { buildFactoryOperators, type FactoryOperators } from './factory-operators.js'
 
@@ -215,4 +216,71 @@ export async function factoryOperatorsFor(orgId: string, from: string, to: strin
   const fuel = await factoryFuelFor(orgId, from, to)
   if (fuel.factory === null) return fuel
   return { ...buildFactoryOperators(fuel), fetchedAt: fuel.fetchedAt }
+}
+
+/**
+ * The Scorecard's Supervisors view: each supervisor's plan lines over
+ * `from`..`to` with what the machine ran in each line's window
+ * (factory-supervisors.ts). One query reads every judged window: the hours
+ * meter's rise inside it (Wialon `cneh`, on ~96% of fixes and the most trusted
+ * engine time), engine-on time where the meter is missing, and the first
+ * working fix from an hour before the start. Measured on prod 2026-11-19:
+ * 382 windows over two weeks in ~9 s, so the answer is cached like the Fuel
+ * page's read it is built from.
+ */
+export type FactorySupervisorsForPage = (FactorySupervisors & { fetchedAt: string }) | { factory: null; from: string; to: string }
+const supervisorCache = new Map<string, { at: number; out: Promise<FactorySupervisors> }>()
+
+export async function factorySupervisorsFor(orgId: string, from: string, to: string): Promise<FactorySupervisorsForPage> {
+  const fuel = await factoryFuelFor(orgId, from, to)
+  if (fuel.factory === null) return fuel
+  const key = `${orgId}|${from}|${to}`
+  const hit = supervisorCache.get(key)
+  if (!hit || Date.now() - hit.at >= CACHE_MS) {
+    const now = new Date()
+    const vehicleOf = new Map(fuel.machines.map(m => [m.reference.toUpperCase(), m]))
+    const windows: Array<{ key: string; vehicleId: string; start: Date; end: Date }> = []
+    for (const l of fuel.lines) {
+      const m = vehicleOf.get(l.machine.toUpperCase())
+      const w = lineWindow(l.day, l.shiftStart, l.plannedHours)
+      if (!m?.vehicleId || !w || w.end > now) continue
+      windows.push({ key: runKey(l.lineId, l.day), vehicleId: m.vehicleId, ...w })
+    }
+    const out = readLineRuns(windows).then(runs => buildFactorySupervisors(fuel, runs, now))
+    supervisorCache.set(key, { at: Date.now(), out })
+    out.catch(() => supervisorCache.delete(key))
+  }
+  const out = await supervisorCache.get(key)!.out
+  return { ...out, fetchedAt: new Date().toISOString() }
+}
+
+async function readLineRuns(windows: Array<{ key: string; vehicleId: string; start: Date; end: Date }>): Promise<Map<string, LineRun>> {
+  const runs = new Map<string, LineRun>()
+  if (!windows.length) return runs
+  const rows = await prisma.$queryRaw<Array<{ k: string; samples: bigint; meter_h: number | null; on_s: number | null; first_work: Date | null }>>`
+    WITH w AS (
+      SELECT * FROM unnest(${windows.map(w => w.key)}::text[], ${windows.map(w => w.vehicleId)}::text[],
+                           ${windows.map(w => w.start)}::timestamptz[], ${windows.map(w => w.end)}::timestamptz[]) AS w(k, vid, st, en))
+    SELECT w.k,
+           r.samples, r.meter_h, r.on_s,
+           (SELECT min(t.captured_at) FROM vehicle_telemetries t
+             WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st - interval '1 hour' AND t.captured_at < w.en
+               AND (coalesce(t.speed_kmh, 0) > 0 OR (t.engine_on AND t.ignition_known))) AS first_work
+      FROM w
+      CROSS JOIN LATERAL (
+        SELECT count(*) AS samples,
+               (max(g.engine_hours_meter) - min(g.engine_hours_meter))::float8 AS meter_h,
+               coalesce(sum(least(g.gap, 900)) FILTER (WHERE g.engine_on AND g.gap > 0), 0)::float8 AS on_s
+          FROM (SELECT t.engine_hours_meter, t.engine_on,
+                       EXTRACT(EPOCH FROM (t.captured_at - lag(t.captured_at) OVER (ORDER BY t.captured_at))) AS gap
+                  FROM vehicle_telemetries t
+                 WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en) g) r`
+  for (const r of rows) {
+    runs.set(r.k, {
+      samples: Number(r.samples),
+      hours: r.meter_h != null ? r.meter_h : r.on_s != null ? r.on_s / 3600 : null,
+      firstWorkAt: r.first_work,
+    })
+  }
+  return runs
 }
