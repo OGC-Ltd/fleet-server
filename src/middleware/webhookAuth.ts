@@ -76,9 +76,10 @@ function normaliseSignature(sig: string): string {
 
 /**
  * Every secret a FactorySuite webhook may be signed with. Each webhook
- * registered there has its own: FACTORY_SUITE_HOOK (alerts, dispatches,
- * movements, weighments; CONTROLTECH_WEBHOOK_SECRET is its older name) and
- * WORK_PLANNER_HOOK (the work plan events). Both post to the same URL.
+ * registered there has its own: WORK_PLANNER_HOOK (the default from 19 Nov
+ * 2026, carrying FactorySuite's whole event list) and FACTORY_SUITE_HOOK (the
+ * original: alerts, dispatches, movements, weighments;
+ * CONTROLTECH_WEBHOOK_SECRET is its older name). Both post to the same URL.
  */
 export function webhookSecrets(): string[] {
   return namedSecrets().map(s => s.secret)
@@ -87,10 +88,12 @@ export function webhookSecrets(): string[] {
 /** Which FactorySuite webhook a delivery came from: the one whose secret it carried. */
 export type WebhookSource = 'factory_suite' | 'work_planner'
 
+// WORK_PLANNER_HOOK is the default from 19 Nov 2026: FactorySuite's events are
+// ticked on that webhook. The original one stays accepted while it exists.
 function namedSecrets(): Array<{ source: WebhookSource; secret: string }> {
   return [
-    { source: 'factory_suite' as const, secret: env.FACTORY_SUITE_HOOK || env.CONTROLTECH_WEBHOOK_SECRET },
     { source: 'work_planner' as const, secret: env.WORK_PLANNER_HOOK },
+    { source: 'factory_suite' as const, secret: env.FACTORY_SUITE_HOOK || env.CONTROLTECH_WEBHOOK_SECRET },
   ].filter(s => Boolean(s.secret))
 }
 
@@ -111,7 +114,7 @@ export const webhookAuth: RequestHandler = (req, _res, next) => {
   if (secrets.length === 0) {
     // Fail closed: an unset secret must never mean "allow anyone to inject
     // alerts into the operations feed".
-    logger.error('FACTORY_SUITE_HOOK is not set — rejecting webhook delivery')
+    logger.error('No FactorySuite webhook secret is set (WORK_PLANNER_HOOK, FACTORY_SUITE_HOOK) — rejecting webhook delivery')
     return next(new UnauthorizedError('Webhook receiver is not configured'))
   }
 

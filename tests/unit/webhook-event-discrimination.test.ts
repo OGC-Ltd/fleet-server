@@ -29,6 +29,7 @@ vi.mock('../../src/modules/webhooks/wialon-notifications.service.js', () => ({
 }))
 
 import { providerWebhook } from '../../src/modules/webhooks/webhooks.controller.js'
+import { forgetDeliveries } from '../../src/modules/webhooks/delivery-repeats.js'
 import {
   handleDispatch, handleMovement, handleSale,
 } from '../../src/modules/webhooks/raifactorysuite-events.service.js'
@@ -85,7 +86,9 @@ const post = async (body: unknown) => {
   return res
 }
 
-beforeEach(() => vi.clearAllMocks())
+// Each test starts with nothing seen: the same fixture is sent in several tests,
+// and a repeat inside REPEAT_TTL_MS is acknowledged and dropped (delivery-repeats).
+beforeEach(() => { vi.clearAllMocks(); forgetDeliveries() })
 
 describe('a sales payload delivered under the cane event names', () => {
   it('reaches handleSale, not handleDispatch, under dispatch.created', async () => {
@@ -142,7 +145,7 @@ describe('mixed batches', () => {
   it('sorts a sales run out of a batch of cane dispatches', async () => {
     // The case that matters: one delivery, one event name, both lifecycles in
     // it. Each item is sorted on its own shape rather than on the batch's name.
-    await post({ event: 'dispatch.created', data: [DISPATCH, SALE, DISPATCH] })
+    await post({ event: 'dispatch.created', data: [DISPATCH, SALE, { ...DISPATCH, id: 'a1f0c2d4-0000-4000-8000-000000000002' }] })
 
     expect(handleSale).toHaveBeenCalledTimes(1)
     expect(handleDispatch).toHaveBeenCalledTimes(2)

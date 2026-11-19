@@ -95,4 +95,5 @@ export function requestWorkshopSync(event: string) {
 /** Webhook event names that belong to the workshop. */
 export function isWorkshopEvent(kind: string) {
   return kind.startsWith('jobcard.') || kind.startsWith('breakdown.') || kind.startsWith('requisition.') || kind.startsWith('part.')
+    || kind.startsWith('purchaseorder.')
 }

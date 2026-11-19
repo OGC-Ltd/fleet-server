@@ -42,7 +42,7 @@ import { runWorkshopSync } from '../../modules/repairs/factorysuite-workshop.run
 import { runWorkPlanWatch } from '../../modules/planner/work-plan-watch.js'
 import { fleetDayKey } from '../../lib/provider-time.js'
 import { prisma } from '../../lib/prisma.js'
-import { syncMachineRegister } from './raifactorysuite.machine-sync.js'
+import { requestMachineRegisterSync, syncMachineRegister, takeMachineRegisterRequest } from './raifactorysuite.machine-sync.js'
 
 /**
  * How many alerts to re-read each pass. Only genuinely new ones are written or
@@ -252,8 +252,10 @@ class RaiFactorySuiteReconciler {
     // Machine register — what each KASULU unit is and its rated consumption.
     // Hourly, and silent: it changes vehicle attributes, not events. Only rows
     // the register changed are written, so a quiet hour writes nothing.
+    // A machine.created / machine.updated webhook brings the pass forward.
     let machinesWritten: number | undefined
-    if (Date.now() - this.machinesSyncedAt >= MACHINE_SYNC_INTERVAL_MS) {
+    const asked = takeMachineRegisterRequest()
+    if (asked || Date.now() - this.machinesSyncedAt >= MACHINE_SYNC_INTERVAL_MS) {
       try {
         const machines = await this.client.listMachines()
         const r = await syncMachineRegister(prisma, machines, { apply: true })
@@ -268,6 +270,8 @@ class RaiFactorySuiteReconciler {
       } catch (err) {
         failed = true
         this.logFailure('machines', err)
+        // An ask that failed is asked again, so the next cycle retries it.
+        if (asked) requestMachineRegisterSync()
       }
     }
 

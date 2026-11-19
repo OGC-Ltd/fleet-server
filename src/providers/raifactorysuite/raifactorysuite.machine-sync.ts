@@ -152,3 +152,21 @@ export async function syncMachineRegister(
     cleared,
   }
 }
+
+/**
+ * A machine.created or machine.updated webhook: the register changed, so the
+ * next reconcile cycle (5 min) re-reads it instead of waiting out its hour.
+ * A flag, not a pass of its own, so it never runs beside the reconciler's.
+ */
+let registerSyncWanted = false
+
+export function requestMachineRegisterSync(): void {
+  registerSyncWanted = true
+}
+
+/** Whether a webhook asked for a register pass since the last call; clears the ask. */
+export function takeMachineRegisterRequest(): boolean {
+  const wanted = registerSyncWanted
+  registerSyncWanted = false
+  return wanted
+}

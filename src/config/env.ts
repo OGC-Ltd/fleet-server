@@ -118,9 +118,9 @@ const schema = z.object({
   // operations feed.
   FACTORY_SUITE_HOOK:         z.string().optional().default(''),
   CONTROLTECH_WEBHOOK_SECRET: z.string().optional().default(''),
-  // The second FactorySuite webhook, WORK_PLANNER_HOOK (2026-11-14): the work
-  // plan events (fuelplan.*) on the same callback, signed with its own secret.
-  // Either secret is accepted on /webhook/rai.
+  // The second FactorySuite webhook, WORK_PLANNER_HOOK (2026-11-14), signed
+  // with its own secret. The default from 2026-11-19: FactorySuite's whole
+  // event list is ticked on it. Either secret is accepted on /webhook/rai.
   WORK_PLANNER_HOOK:          z.string().optional().default(''),
 
   // Fleet AI Insight (dashboard/ai-insight.ts). Unset key = the endpoint

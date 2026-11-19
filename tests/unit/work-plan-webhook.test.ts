@@ -34,6 +34,10 @@ vi.mock('../../src/modules/webhooks/raifactorysuite-alerts.service.js', () => ({
 vi.mock('../../src/modules/webhooks/wialon-notifications.service.js', () => ({
   ingestWialonNotifications: vi.fn().mockResolvedValue({ created: 0 }),
 }))
+vi.mock('../../src/modules/repairs/factorysuite-workshop.runner.js', async (orig) => ({
+  ...(await orig<typeof import('../../src/modules/repairs/factorysuite-workshop.runner.js')>()),
+  requestWorkshopSync: vi.fn(),
+}))
 
 import { webhookAuth, webhookSourceOf } from '../../src/middleware/webhookAuth.js'
 import { providerWebhook } from '../../src/modules/webhooks/webhooks.controller.js'
@@ -41,7 +45,10 @@ import { deliveryKey, firstDelivery, forgetDeliveries, REPEAT_TTL_MS } from '../
 import { workPlansChanged } from '../../src/modules/planner/work-plans.service.js'
 import { emitDashboardWorkPlansChanged } from '../../src/lib/sse.js'
 import { prisma } from '../../src/lib/prisma.js'
-import { handleDispatch } from '../../src/modules/webhooks/raifactorysuite-events.service.js'
+import { handleDispatch, handleSale } from '../../src/modules/webhooks/raifactorysuite-events.service.js'
+import { requestWorkshopSync } from '../../src/modules/repairs/factorysuite-workshop.runner.js'
+import { takeMachineRegisterRequest } from '../../src/providers/raifactorysuite/raifactorysuite.machine-sync.js'
+import { logger } from '../../src/lib/logger.js'
 import { ingestAlerts } from '../../src/modules/webhooks/raifactorysuite-alerts.service.js'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -187,5 +194,52 @@ describe('delivery repeats', () => {
     expect(firstDelivery(key, 0)).toBe(true)
     expect(firstDelivery(key, REPEAT_TTL_MS - 1)).toBe(false)
     expect(firstDelivery(key, REPEAT_TTL_MS + 1)).toBe(true)
+  })
+})
+
+describe('the work planner hook as the default webhook (19 Nov 2026)', () => {
+  beforeEach(() => { vi.clearAllMocks(); forgetDeliveries(); takeMachineRegisterRequest() })
+  const post = async (body: unknown) => {
+    const res = reply()
+    await providerWebhook({ body } as any, res, (e?: unknown) => { throw e })
+    return res.json.mock.calls[0][0].data
+  }
+
+  it('brings the machine register sync forward on machine.created and machine.updated', async () => {
+    expect(await post({ event: 'machine.updated', data: { reference: 'EX-17' } })).toMatchObject({ register: 1, ignored: 0 })
+    expect(takeMachineRegisterRequest()).toBe(true)
+    expect(takeMachineRegisterRequest()).toBe(false)
+  })
+
+  it('sends purchase orders to the workshop with the rest of its events', async () => {
+    expect(await post({ event: 'purchaseorder.raised', data: { id: 'po1' } })).toMatchObject({ workshop: 1 })
+    expect(requestWorkshopSync).toHaveBeenCalledWith('purchaseorder.raised')
+  })
+
+  it('never stores a vehicle request or a gate delivery because its shape fits', async () => {
+    // A vehicle request has a plate, a driver and a type, like a dispatch; a
+    // delivery has tonnage and sign-out times, like a sale.
+    const asDispatch = { id: 'vr1', factoryCode: 'MUFINDI PAPER MILLS', type: 'VEHICLE', vehicleNumberPlate: 'T405EPD', driverName: 'A Driver', status: 'CREATED' }
+    const asSale = { id: 'd1', factoryCode: 'MUFINDI PAPER MILLS', vehicleNumberPlate: 'T1', driverName: 'B', tonnage: 12, signOutTime: '2026-11-19T10:00:00', returnTime: null }
+    expect(await post({ event: 'vehiclerequest.created', data: asDispatch })).toMatchObject({ ignored: 1, dispatches: 0 })
+    expect(await post({ event: 'delivery.arrived', data: asSale })).toMatchObject({ ignored: 1, sales: 0 })
+    expect(handleDispatch).not.toHaveBeenCalled()
+    expect(handleSale).not.toHaveBeenCalled()
+  })
+
+  it('logs only the field names of an event it does not use, once per name', async () => {
+    await post({ event: 'visitor.checked_in', data: { name: 'Jane Visitor', idNumber: '12345678' } })
+    await post({ event: 'visitor.checked_in', data: { name: 'John Visitor', idNumber: '87654321' } })
+    const lines = (logger.info as any).mock.calls.filter((c: any[]) => c[0]?.event === 'visitor.checked_in')
+    expect(lines).toHaveLength(1)
+    expect(lines[0][0]).toEqual({ event: 'visitor.checked_in', keys: ['idNumber', 'name'] })
+    expect(JSON.stringify((logger.info as any).mock.calls)).not.toContain('Jane Visitor')
+  })
+
+  it('stores a dispatch once when both webhooks deliver it', async () => {
+    const dispatch = { id: 'd2', factoryCode: 'NAITIRI', vehicleType: 'TRUCK', vehicleNumberPlate: 'KCP 134P', driverName: 'D', status: 'DISPATCHED', dispatchTime: '2026-11-19T14:08:49' }
+    expect(await post({ event: 'dispatch.created', data: dispatch })).toMatchObject({ dispatches: 1, repeats: 0 })
+    expect(await post({ event: 'dispatch.created', data: dispatch })).toMatchObject({ dispatches: 0, repeats: 1 })
+    expect(handleDispatch).toHaveBeenCalledTimes(1)
   })
 })
