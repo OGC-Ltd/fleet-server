@@ -305,7 +305,8 @@ export async function factorySupervisorsFor(orgId: string, from: string, to: str
  *
  * With no machine named, every machine's fuellings with the meters only, in
  * one query (readRefillMeters): the Fuel page's table shows each row's latest
- * refill, and the shift balance stays with the panel.
+ * refill. Only each machine's latest fuelling gets its shift balance
+ * (withLatestShift), for the table's Consumed; the rest stay with the panel.
  *
  * A machine that is not one of our units, or one outside the caller's
  * vehicles (`scope`), gets its refills with no tracker figures.
@@ -326,7 +327,7 @@ export async function factoryFuelRefillsFor(
   const key = `${orgId}|${from}|${to}|${reference?.toUpperCase() ?? '*'}|${createHash('sha1').update(units).digest('hex')}`
   const hit = refillsCache.get(key)
   if (!hit || Date.now() - hit.at >= REFILLS_CACHE_MS) {
-    const read = (reference == null ? readRefillMeters(windows) : readRefills(windows)).then(withMeterNow(windows))
+    const read = (reference == null ? readRefillMeters(windows).then(withLatestShift(windows)) : readRefills(windows)).then(withMeterNow(windows))
     const out = read.then(refills => ({
       factory: fuel.factory, from, to,
       machine: reference == null ? null : found.machine?.reference ?? reference,
@@ -404,6 +405,38 @@ async function readRefillMeters(windows: RefillWindow[]): Promise<MachineRefill[
          ORDER BY t.captured_at ASC LIMIT 1) a ON true`
   const byKey = new Map(rows.map(r => [r.k, { beforeAt: r.before_at, before: r.before, afterAt: r.after_at, after: r.after }]))
   return windows.map(w => meterRefill(w, byKey.get(w.issueId) ?? null))
+}
+
+/**
+ * The table's Consumed is the machine panel's (operator 2026-11-20: "we need
+ * the one populated on the side panel to reflect on the row"): the shift
+ * balance of each machine's latest fuelling, read exactly as the panel reads
+ * it (readRefills), and put on that refill of the meters-only answer. Only the
+ * latest per machine, so a month's read costs one shift of telemetry a
+ * machine; four machines at a time.
+ */
+function withLatestShift(windows: RefillWindow[]) {
+  return async (refills: MachineRefill[]): Promise<MachineRefill[]> => {
+    const latest = new Map<string, RefillWindow>()
+    for (const w of windows) {
+      if (!w.vehicleId || !w.shift || !w.fuelEnd) continue
+      const had = latest.get(w.vehicleId)
+      if (!had || had.fuelEnd!.getTime() < w.fuelEnd.getTime()) latest.set(w.vehicleId, w)
+    }
+    const asked = [...latest.values()]
+    const shiftOf = new Map<string, MachineRefill['shift']>()
+    let next = 0
+    const worker = async () => {
+      while (next < asked.length) {
+        const w = asked[next++]!
+        // One machine's read failing leaves its Consumed blank, not the table's meters.
+        const [r] = await readRefills([w]).catch(() => [] as MachineRefill[])
+        if (r?.shift) shiftOf.set(w.issueId, r.shift)
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(4, asked.length) }, worker))
+    return refills.map(r => (shiftOf.has(r.issueId) ? { ...r, shift: shiftOf.get(r.issueId)! } : r))
+  }
 }
 
 async function readRefills(windows: RefillWindow[]): Promise<MachineRefill[]> {
