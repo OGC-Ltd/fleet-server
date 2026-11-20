@@ -11,6 +11,12 @@
  *     only when something actually changed, so a quiet cycle writes nothing;
  *   · a unit gone from Wialon is deactivated: it keeps its history and leaves
  *     the live fleet. Nothing is ever hard-deleted.
+ *   · a unit Wialon marks DEACTIVATED (Controltech switched it off; `act` 0 in
+ *     its advanced properties) leaves the live fleet the same way, and comes
+ *     back when Wialon reactivates it (operator, 2026-11-20: Menengai KCV 071A,
+ *     deactivated 2026-10-16, was still on the map). If the activation status
+ *     cannot be read, or more than MAX_DEACTIVATED_SHARE of a fleet is marked
+ *     deactivated at once, nothing is hidden for that reason in that run.
  *
  * What a sync never does to a stored value: replace a vehicle type with
  * UNSPECIFIED (operators set types Wialon does not carry, e.g. the West Kenya
@@ -54,6 +60,49 @@ export class WialonUnitSource {
   all(): Promise<WialonUnit[]> {
     return (this.everything ??= this.client.listUnits())
   }
+  private activationStatus: Promise<Map<number, UnitActivation>> | null = null
+  /** Every unit's activation status, read once per cycle (one request, ~1 s). */
+  activation(): Promise<Map<number, UnitActivation>> {
+    return (this.activationStatus ??= this.client.listActivation().then(r => new Map(r.units.map(u => [u.id, u]))))
+  }
+}
+
+export interface UnitActivation { act?: unknown; dactt?: unknown }
+
+/**
+ * More than this share of one fleet marked deactivated at once reads as a bad
+ * answer from Wialon, not a fleet change: nothing is hidden for it. Measured
+ * 2026-11-20: Kasulu 19 of 210 (9 %), Menengai 6 of 244 (2 %), others 0.
+ */
+export const MAX_DEACTIVATED_SHARE = 0.25
+
+/** Pure: Wialon marks the unit deactivated (`act` 0; or, with no `act`, a deactivation time). */
+export function isDeactivatedInWialon(a: UnitActivation | undefined): boolean {
+  if (!a) return false
+  const act = a.act
+  if (act === 0 || act === false || act === '0') return true
+  if (act === 1 || act === true || act === '1') return false
+  return typeof a.dactt === 'number' && a.dactt > 0
+}
+
+/**
+ * Pure: the fleet's units Wialon marks deactivated, or none with the reason
+ * when that is more than MAX_DEACTIVATED_SHARE of the fleet.
+ */
+export function deactivatedInWialon(
+  units: ReadonlyArray<Pick<WialonUnit, 'id'>>,
+  activation: ReadonlyMap<number, UnitActivation>,
+  maxShare = MAX_DEACTIVATED_SHARE,
+): { ids: Set<number>; refused: string | null } {
+  const ids = new Set(units.filter(u => isDeactivatedInWialon(activation.get(u.id))).map(u => u.id))
+  if (units.length > 0 && ids.size > units.length * maxShare) {
+    return {
+      ids: new Set(),
+      refused: `Wialon marks ${ids.size} of ${units.length} units deactivated (over ${Math.round(maxShare * 100)} %): ` +
+        'too large a change to hide unattended, so none is hidden this run',
+    }
+  }
+  return { ids, refused: null }
 }
 
 export interface RegistrySyncOptions {
@@ -87,12 +136,16 @@ export interface RegistrySyncReport {
   unchanged:    number
   /** Active rows whose unit is gone from Wialon. */
   toDeactivate: Array<{ plate: string; name: string; externalId: string }>
+  /** Active rows whose unit Wialon marks deactivated: they leave the live fleet. */
+  toHide:       Array<{ plate: string; name: string; externalId: string }>
+  /** Why no unit was hidden for being deactivated this run; null when the check ran. */
+  activationSkipped: string | null
   skipped:      number
   withTank:     number
   withPos:      number
   applied: null | {
     created: number; updated: number; failed: number
-    deactivated: number; pings: number; stale: number
+    deactivated: number; hidden: number; pings: number; stale: number
     failures: Array<{ name: string; externalId: string; error: string }>
   }
 }
@@ -214,6 +267,18 @@ export async function syncWialonFleet(
     tankCapacityLitres: tankOf(u),
   })
 
+  // ── deactivated in Wialon: kept, but out of the live fleet ─────────────────
+  // A failed read hides nothing this run; the rest of the sync goes on.
+  let held = new Set<number>()
+  let activationSkipped: string | null = null
+  try {
+    const r = deactivatedInWialon(units, await source.activation())
+    held = r.ids
+    activationSkipped = r.refused
+  } catch (err) {
+    activationSkipped = `activation status not read: ${errorText(err)}`
+  }
+
   const existingRows = await prisma.vehicle.findMany({
     where:  { externalId: { in: units.map(u => `wialon:${u.id}`) } },
     select: {
@@ -239,7 +304,8 @@ export async function syncWialonFleet(
     if (row.registrationPlate !== d.registrationPlate)          data.registrationPlate = d.registrationPlate
     if (d.vehicleType !== 'UNSPECIFIED' && row.vehicleType !== d.vehicleType) data.vehicleType = d.vehicleType
     if (row.status !== d.status)                                data.status = d.status
-    if (!row.isActive)                                          data.isActive = true
+    // Back on only while Wialon has it active (a deactivated unit stays off).
+    if (!row.isActive && !held.has(u.id))                       data.isActive = true
     if (d.tankCapacityLitres != null && row.tankCapacityLitres !== d.tankCapacityLitres) {
       data.tankCapacityLitres = d.tankCapacityLitres
     }
@@ -248,7 +314,10 @@ export async function syncWialonFleet(
     changes.push({ unit: u, fields, data })
   }
 
-  const toCreateUnits = units.filter(u => !existing.has(`wialon:${u.id}`) && !blocked.has(plateFor.get(u.id)!))
+  // A unit already deactivated in Wialon is not brought onto the platform.
+  const toCreateUnits = units.filter(u => !existing.has(`wialon:${u.id}`) && !blocked.has(plateFor.get(u.id)!) && !held.has(u.id))
+  const heldIds = [...held].map(id => `wialon:${id}`)
+  const toHideRows = existingRows.filter(r => r.isActive && r.organisationId === org.id && held.has(Number(r.externalId!.slice(7))))
 
   // ── plate hand-overs (a tracker swap: the replacement unit takes the plate)
   const unitIds = new Set(units.map(u => `wialon:${u.id}`))
@@ -277,6 +346,8 @@ export async function syncWialonFleet(
     toUpdate:  changes.map(c => ({ plate: plateFor.get(c.unit.id)!, name: c.unit.nm, fields: c.fields })),
     unchanged,
     toDeactivate: goneRows.map(r => ({ plate: r.registrationPlate, name: r.name, externalId: r.externalId! })),
+    toHide:    toHideRows.map(r => ({ plate: r.registrationPlate, name: r.name, externalId: r.externalId! })),
+    activationSkipped,
     skipped:   blocked.size,
     withTank:  units.filter(u => tankOf(u) != null).length,
     withPos:   units.filter(u => u.pos).length,
@@ -306,7 +377,7 @@ export async function syncWialonFleet(
   }
 
   const applied: NonNullable<RegistrySyncReport['applied']> = {
-    created: 0, updated: 0, failed: 0, deactivated: 0, pings: 0, stale: 0, failures: [],
+    created: 0, updated: 0, failed: 0, deactivated: 0, hidden: 0, pings: 0, stale: 0, failures: [],
   }
   const now = Date.now()
 
@@ -432,6 +503,16 @@ export async function syncWialonFleet(
     data:  { isActive: false },
   })
   applied.deactivated = gone.count
+
+  // Deactivated in Wialon: same switch, nothing deleted; undone by the update
+  // above on the first run after Wialon reactivates the unit.
+  if (heldIds.length > 0) {
+    const hidden = await prisma.vehicle.updateMany({
+      where: { organisationId: org.id, isActive: true, externalId: { in: heldIds } },
+      data:  { isActive: false },
+    })
+    applied.hidden = hidden.count
+  }
 
   report.applied = applied
   return report
