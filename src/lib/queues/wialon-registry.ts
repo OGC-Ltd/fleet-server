@@ -42,6 +42,10 @@ export interface WialonRegistryCycle {
   fleets:  Array<{
     org: string
     created: number; updated: number; deactivated: number; unchanged: number; failed: number
+    /** Units hidden because Wialon marks them deactivated. */
+    hidden?: number
+    /** Why that check did not hide anything this run. */
+    activationSkipped?: string
     refused?: string; error?: string
   }>
   ms: number
@@ -80,21 +84,24 @@ export async function runWialonRegistrySync(apply = env.WIALON_REGISTRY_SYNC ===
   }
 
   cycle.ms = Date.now() - startedAt
-  const busy = cycle.fleets.some(f => f.created || f.updated || f.deactivated || f.failed || f.refused || f.error)
+  const busy = cycle.fleets.some(f => f.created || f.updated || f.deactivated || f.hidden || f.activationSkipped || f.failed || f.refused || f.error)
   ;(busy ? logger.info.bind(logger) : logger.debug.bind(logger))(cycle, 'Wialon registry sync cycle complete')
   return cycle
 }
 
 function summarise(r: RegistrySyncReport, apply: boolean): WialonRegistryCycle['fleets'][number] {
+  const skipped = r.activationSkipped ? { activationSkipped: r.activationSkipped } : {}
   if (apply && r.applied) {
     return {
       org: r.orgCode, created: r.applied.created, updated: r.applied.updated,
-      deactivated: r.applied.deactivated, unchanged: r.unchanged, failed: r.applied.failed,
+      deactivated: r.applied.deactivated, hidden: r.applied.hidden, unchanged: r.unchanged, failed: r.applied.failed,
+      ...skipped,
     }
   }
   return {
     org: r.orgCode, created: r.toCreate.length, updated: r.toUpdate.length,
-    deactivated: r.toDeactivate.length, unchanged: r.unchanged, failed: 0,
+    deactivated: r.toDeactivate.length, hidden: r.toHide.length, unchanged: r.unchanged, failed: 0,
+    ...skipped,
   }
 }
 
@@ -104,6 +111,8 @@ function logChanges(r: RegistrySyncReport, apply: boolean): void {
   for (const v of r.toCreate)     logger.info({ org: r.orgCode, plate: v.plate, unit: v.name, type: v.type }, `Wialon registry: new unit ${verb}`)
   for (const v of r.toUpdate)     logger.info({ org: r.orgCode, plate: v.plate, unit: v.name, fields: v.fields }, `Wialon registry: unit update ${verb}`)
   for (const v of r.toDeactivate) logger.info({ org: r.orgCode, plate: v.plate, unit: v.name, externalId: v.externalId }, `Wialon registry: unit gone from Wialon, deactivation ${verb}`)
+  for (const v of r.toHide)       logger.info({ org: r.orgCode, plate: v.plate, unit: v.name, externalId: v.externalId }, `Wialon registry: unit deactivated in Wialon, hiding ${verb}`)
+  if (r.activationSkipped)        logger.warn({ org: r.orgCode, reason: r.activationSkipped }, 'Wialon registry: deactivated units NOT hidden this run')
   for (const h of r.handOvers)    logger.info({ org: r.orgCode, plate: h.plate, from: h.externalId }, `Wialon registry: plate hand-over ${verb}`)
   for (const f of r.applied?.failures ?? []) logger.warn({ org: r.orgCode, unit: f.name, externalId: f.externalId, error: f.error }, 'Wialon registry: unit write failed')
 }

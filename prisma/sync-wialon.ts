@@ -127,6 +127,9 @@ async function main() {
     if (r.toUpdate.length > 8) console.log(`      … and ${r.toUpdate.length - 8} more`)
     for (const v of r.toDeactivate.slice(0, 8)) console.log(`      − ${v.plate.padEnd(28)} ${v.name} (gone from Wialon)`)
     if (r.toDeactivate.length > 8) console.log(`      … and ${r.toDeactivate.length - 8} more`)
+    for (const v of r.toHide.slice(0, 8)) console.log(`      − ${v.plate.padEnd(28)} ${v.name} (deactivated in Wialon)`)
+    if (r.toHide.length > 8) console.log(`      … and ${r.toHide.length - 8} more`)
+    if (r.activationSkipped) console.log(`  ⚠  deactivated units not hidden: ${r.activationSkipped}`)
     if (r.handOvers.length > 0) {
       console.log(`\n  ↪  ${r.handOvers.length} plate(s) pass from a unit that left Wialon to its replacement:`)
       for (const h of r.handOvers) console.log(`      ${h.plate}: ${h.externalId} "${h.name}" (gone) → released`)
@@ -142,6 +145,7 @@ async function main() {
     console.log(`  ✓ positions: ${a.pings} new pings written`)
     if (a.stale > 0) console.log(`    · ${a.stale} of those fixes are over 30 days old — they will show on the map as long-stale`)
     if (a.deactivated > 0) console.log(`  ✓ deactivated ${a.deactivated} units no longer in Wialon`)
+    if (a.hidden > 0) console.log(`  ✓ hid ${a.hidden} units Wialon marks deactivated (kept in the database)`)
 
     const org = await prisma.organisation.findUnique({ where: { code: fleet.orgCode }, select: { id: true } })
     const total = await prisma.vehicle.count({ where: { organisationId: org!.id, isActive: true } })
