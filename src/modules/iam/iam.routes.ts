@@ -18,6 +18,7 @@ import { validateBody, validateQuery } from '../../middleware/validate.js'
 import { WILDCARD } from '../../lib/permissions.js'
 import * as ctrl from './iam.controller.js'
 import { driversCheck } from './factorysuite-drivers-check.js'
+import { deactivatedUnits } from './wialon-deactivated.js'
 import { listUsersQuerySchema, setFleetSchema, setGrantsSchema } from './iam.schema.js'
 
 const router = Router()
@@ -35,5 +36,9 @@ router.put('/users/:userId/fleet', requireRealAuth, validateBody(setFleetSchema)
 // FactorySuite's driver register for one factory, as counts and field names
 // only (factorysuite-drivers-check): read-only, nothing stored.
 router.get('/factorysuite/drivers-check', driversCheck)
+
+// The units Wialon has deactivated, and those already gone from it, per
+// organisation (wialon-deactivated): read-only, nothing stored or hidden.
+router.get('/wialon/deactivated-units', deactivatedUnits)
 
 export default router
