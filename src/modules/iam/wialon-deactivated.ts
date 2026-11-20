@@ -43,14 +43,44 @@ export interface DeactivatedUnit {
 
 export interface RemovedUnit { name: string; plate: string; externalId: string }
 
+/**
+ * Still on our platform, but not in the unit list Wialon gives us (operator,
+ * 2026-11-20: Menengai units Controltech deactivated, gone from Wialon, still
+ * shown here). A deactivated unit is usually invisible to our Wialon user, so
+ * it does not come back marked deactivated; it is simply not there. `link`:
+ * 'wialon' for a unit the sync made from Wialon, 'other' for one made another
+ * way, which the sync never switches off.
+ */
+export interface MissingUnit { name: string; plate: string; link: 'wialon' | 'other'; lastReportedAt: string | null }
+
 export interface CompanyUnits {
   orgCode: string
   orgName: string
   units: number
   deactivated: DeactivatedUnit[]
   removed: RemovedUnit[]
+  missing: MissingUnit[]
   error: string | null
 }
+
+/**
+ * Pure: our active vehicles that are not in Wialon's list for the fleet (its
+ * units, plus those billed to another account). Last report added by the caller.
+ */
+export function missingFromWialon(
+  active: ReadonlyArray<{ id: string, name: string, registrationPlate: string, externalId: string | null }>,
+  wialonIds: ReadonlySet<number>,
+): Array<{ id: string, name: string, plate: string, link: 'wialon' | 'other' }> {
+  return active
+    .filter((v) => {
+      const m = /^wialon:(\d+)$/.exec(v.externalId ?? '')
+      return !m || !wialonIds.has(Number(m[1]))
+    })
+    .map((v) => ({ id: v.id, name: v.name, plate: v.registrationPlate, link: v.externalId?.startsWith('wialon:') ? 'wialon' as const : 'other' as const }))
+}
+
+/** Units listed as missing per organisation at most (a last-report lookup each). */
+const MISSING_MAX = 300
 
 const iso = (sec: unknown) => (typeof sec === 'number' && sec > 0 ? new Date(sec * 1000).toISOString() : null)
 
@@ -82,7 +112,7 @@ export const deactivatedUnits: RequestHandler = async (_req, res, next) => {
       const fleet = findFleet(code)!
       const org = await prisma.organisation.findUnique({ where: { code }, select: { id: true, name: true } })
       if (!org) continue
-      const out: CompanyUnits = { orgCode: code, orgName: org.name, units: 0, deactivated: [], removed: [], error: null }
+      const out: CompanyUnits = { orgCode: code, orgName: org.name, units: 0, deactivated: [], removed: [], missing: [], error: null }
       try {
         const units = fleetUnits(await source.account(fleet.accountId), fleet)
         out.units = units.length
@@ -105,11 +135,25 @@ export const deactivatedUnits: RequestHandler = async (_req, res, next) => {
         const inList = new Set(units.map((u) => `wialon:${u.id}`))
         out.removed = ours.filter((v) => !v.isActive && v.externalId && !inList.has(v.externalId))
           .map((v) => ({ name: v.name, plate: v.registrationPlate, externalId: v.externalId! }))
+        // On our platform, not in Wialon's list (any link), and when each last reported
+        const wialonIds = new Set([...units.map((u) => u.id), ...(fleet.extraUnitIds ?? [])])
+        const active = await prisma.vehicle.findMany({
+          where: { organisationId: org.id, isActive: true },
+          select: { id: true, name: true, registrationPlate: true, externalId: true },
+        })
+        const gone = missingFromWialon(active, wialonIds).slice(0, MISSING_MAX)
+        out.missing = await Promise.all(gone.map(async (v) => {
+          const last = await prisma.vehicleTelemetry.findFirst({
+            where: { vehicleId: v.id }, orderBy: { capturedAt: 'desc' }, select: { capturedAt: true },
+          })
+          return { name: v.name, plate: v.plate, link: v.link, lastReportedAt: last?.capturedAt.toISOString() ?? null }
+        }))
       } catch (err) {
         out.error = err instanceof Error ? err.message : String(err)
       }
       out.deactivated.sort((x, y) => (y.deactivatedAt ?? '').localeCompare(x.deactivatedAt ?? '') || x.name.localeCompare(y.name))
       out.removed.sort((x, y) => x.name.localeCompare(y.name))
+      out.missing.sort((x, y) => (x.lastReportedAt ?? '').localeCompare(y.lastReportedAt ?? '') || x.name.localeCompare(y.name))
       companies.push(out)
     }
 
