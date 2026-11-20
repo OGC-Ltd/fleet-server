@@ -16,7 +16,11 @@
  *     time `dactt`), with the date, the last message, and whether our platform
  *     still shows them;
  *   - removed: units we already switched off because they left the list
- *     (deleted, moved to another account, or renamed out of the fleet).
+ *     (deleted, moved to another account, or renamed out of the fleet);
+ *   - missing: our active units Wialon no longer returns at all.
+ * The activation flag comes from Wialon's advanced properties, asked for on
+ * their own (WialonClient.listActivation; operator, 2026-11-20: the sweep's
+ * flags do not carry it, so deactivated units looked active).
  * `fieldsSeen`: the top-level fields Wialon sent for the units, names only, so
  * an empty list can be told apart from a field Wialon does not send.
  */
@@ -39,6 +43,8 @@ export interface DeactivatedUnit {
   lastMessageAt: string | null
   /** Still on our live map and in our reports (until the sync is changed). */
   shownByUs: boolean
+  /** Wialon's `act_reason`, as sent; null when it gives none. */
+  reason: string | null
 }
 
 export interface RemovedUnit { name: string; plate: string; externalId: string }
@@ -84,6 +90,10 @@ const MISSING_MAX = 300
 
 const iso = (sec: unknown) => (typeof sec === 'number' && sec > 0 ? new Date(sec * 1000).toISOString() : null)
 
+/** Pure: Wialon's `act_reason` as text; empty, 0 or absent is no reason. */
+export const reasonText = (r: unknown): string | null =>
+  (typeof r === 'string' && r.trim() ? r.trim() : typeof r === 'number' && r !== 0 ? String(r) : null)
+
 /** Pure: whether Wialon marks a unit deactivated, and since when. */
 export function wialonActivation(u: Record<string, unknown>): { deactivated: boolean; since: string | null } {
   const act = u['act']
@@ -106,6 +116,18 @@ export const deactivatedUnits: RequestHandler = async (_req, res, next) => {
     await client.login()
     const source = new WialonUnitSource(client)
     const fieldsSeen = new Set<string>()
+    // The activation flag, from its own request; a failure there leaves the
+    // other lists working and is reported as activationError.
+    let activation = new Map<number, { act?: unknown; dactt?: unknown; act_reason?: unknown }>()
+    let activationFields: string[] = []
+    let activationError: string | null = null
+    try {
+      const a = await client.listActivation()
+      activation = new Map(a.units.map((u) => [u.id, u]))
+      activationFields = a.fieldsSeen
+    } catch (err) {
+      activationError = err instanceof Error ? err.message : String(err)
+    }
     const companies: CompanyUnits[] = []
 
     for (const code of syncableOrgCodes()) {
@@ -123,13 +145,15 @@ export const deactivatedUnits: RequestHandler = async (_req, res, next) => {
         const byExt = new Map(ours.map((v) => [v.externalId, v]))
         for (const u of units) {
           for (const k of Object.keys(u)) fieldsSeen.add(k)
-          const a = wialonActivation(u as unknown as Record<string, unknown>)
-          if (!a.deactivated) continue
           const v = byExt.get(`wialon:${u.id}`)
+          const lastT = u.lmsg?.t ?? u.pos?.t
+          const a = wialonActivation({ ...(u as unknown as Record<string, unknown>), ...activation.get(u.id) })
+          if (!a.deactivated) continue
           out.deactivated.push({
             unitId: u.id, name: u.nm.trim(), plate: v?.registrationPlate ?? null,
-            deactivatedAt: a.since, lastMessageAt: iso(u.lmsg?.t ?? u.pos?.t),
+            deactivatedAt: a.since, lastMessageAt: iso(lastT),
             shownByUs: Boolean(v?.isActive),
+            reason: reasonText(activation.get(u.id)?.act_reason),
           })
         }
         const inList = new Set(units.map((u) => `wialon:${u.id}`))
@@ -157,6 +181,13 @@ export const deactivatedUnits: RequestHandler = async (_req, res, next) => {
       companies.push(out)
     }
 
-    sendSuccess(res, { checkedAt: new Date().toISOString(), fieldsSeen: [...fieldsSeen].sort(), companies })
+    sendSuccess(res, {
+      checkedAt: new Date().toISOString(),
+      // Includes the activation request's field names, so the page's "no
+      // activation status" note reads the request that carries the flag.
+      fieldsSeen: [...new Set([...fieldsSeen, ...activationFields])].sort(),
+      activationError,
+      companies,
+    })
   } catch (err) { next(err) }
 }
