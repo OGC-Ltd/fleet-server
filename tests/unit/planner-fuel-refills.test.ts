@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  METER_REACH_MS, meterRefill, refillFigures, refillSpan, refillWindows, wallClock, type RefillReading, type RefillWindow,
+  METER_REACH_MS, hourRated, meterRefill, refillFigures, refillSpan, refillWindows, wallClock, type RefillReading, type RefillWindow,
 } from '../../src/modules/planner/fuel-refills.js'
 import type { FactoryFuel, FuelIssue, FuelPlanLine } from '../../src/modules/planner/factory-fuel.js'
 
@@ -44,8 +44,8 @@ describe('refillWindows', () => {
     const { machine, windows } = refillWindows(fuel(), 'ex-17')
     expect(machine?.vehicleId).toBe('v17')
     expect(windows).toEqual([{
-      // km even on an hour-rated excavator: the odometer is the meter (20 Nov 2026)
-      issueId: 'i1', machine: 'EX-17', vehicleId: 'v17', km: true,
+      // an hour-rated excavator: its meter is engine hours, not the GPS odometer
+      issueId: 'i1', machine: 'EX-17', vehicleId: 'v17', km: false,
       fuelStart: new Date('2026-11-19T05:31:45.901Z'), fuelEnd: new Date('2026-11-19T06:07:33.754Z'),
       shift: { lineId: 'l1', start: new Date('2026-11-19T03:00:00Z'), end: new Date('2026-11-19T11:00:00Z') },
     }])
@@ -71,6 +71,27 @@ describe('refillWindows', () => {
       machines: [{ reference: 'EX-17', name: null, category: null, basis: 'KM_PER_LITRE', rate: 3, status: null, downReason: null, tankLitres: null, vehicleId: 'v17', plate: null }],
     }), 'EX-17')
     expect(windows[0]!.km).toBe(true)
+  })
+
+  it('reads engine hours on an hour-rated machine such as a generator, the odometer on the rest', () => {
+    const machine = (reference: string, basis: string | null) =>
+      ({ reference, name: null, category: null, basis, rate: null, status: null, downReason: null, tankLitres: null, vehicleId: `v-${reference}`, plate: null })
+    const { windows } = refillWindows(fuel({
+      lines: [],
+      issues: [issue({ id: 'g', machine: 'GEN-03' }), issue({ id: 'h', machine: 'WL-07' }), issue({ id: 't', machine: 'FTT-10' }), issue({ id: 'n', machine: 'MTR-21' })],
+      machines: [machine('GEN-03', 'HOUR'), machine('WL-07', 'hours'), machine('FTT-10', 'KM_PER_LITRE'), machine('MTR-21', null)],
+    }), null)
+    expect(windows.map(w => [w.machine, w.km])).toEqual([['GEN-03', false], ['WL-07', false], ['FTT-10', true], ['MTR-21', true]])
+  })
+})
+
+describe('hourRated', () => {
+  it("is the register's HOUR basis, in any case, and nothing else", () => {
+    expect(hourRated('HOUR')).toBe(true)
+    expect(hourRated(' Hours ')).toBe(true)
+    expect(hourRated('KM_PER_LITRE')).toBe(false)
+    expect(hourRated(null)).toBe(false)
+    expect(hourRated(undefined)).toBe(false)
   })
 })
 
@@ -152,8 +173,8 @@ describe('meterRefill', () => {
     })
     expect(out).toEqual({
       issueId: 'i1', machine: 'EX-17', tracked: true,
-      meterBefore: { value: 4214.1, at: '2026-11-19T05:30:00.000Z', unit: 'km' },
-      meterAfter: { value: 4214.1, at: '2026-11-19T06:10:00.000Z', unit: 'km' },
+      meterBefore: { value: 4214.1, at: '2026-11-19T05:30:00.000Z', unit: 'h' },
+      meterAfter: { value: 4214.1, at: '2026-11-19T06:10:00.000Z', unit: 'h' },
       shift: null,
     })
   })
