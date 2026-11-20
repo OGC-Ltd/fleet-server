@@ -14,9 +14,12 @@
  *                              here, to compare
  *   7 issued                   litres the pump put in (FactorySuite)
  *
- * The meter is the tracker's GPS odometer in km on every machine (operator,
- * 20 Nov 2026: "do conversion into km for the odometers"), hour-rated ones
- * included: engine hours still give the hours run in a shift. Consumed is fuel-balance's figure, the one Vehicle
+ * The meter follows the register's basis (operator, 20 Nov 2026: a generator
+ * showed an odometer in km). An hour-rated machine (basis HOUR: generators,
+ * excavators, loaders) reads its engine hours meter, in h; every other machine
+ * reads the tracker's GPS odometer, in km (operator, 20 Nov 2026: "do
+ * conversion into km for the odometers"). A standing machine's GPS odometer
+ * only drifts, so it says nothing about how long it ran. Consumed is fuel-balance's figure, the one Vehicle
  * analytics and the reports print (start + filled - theft - end over the
  * shift), with the engine hours run in it; up to now while the shift runs.
  *
@@ -39,7 +42,7 @@ export interface RefillWindow {
   machine: string
   /** Our unit for the machine; null when it is not one of ours. */
   vehicleId: string | null
-  /** The meter is the odometer, in km (always since 20 Nov 2026); else engine hours. */
+  /** The meter is the odometer, in km; false on an hour-rated machine, whose meter is engine hours. */
   km: boolean
   fuelStart: Date | null
   fuelEnd: Date | null
@@ -100,6 +103,11 @@ export interface MachineRefills {
   refills: MachineRefill[]
 }
 
+/** The register rates the machine by the hour (basis HOUR), so its meter is engine hours. */
+export function hourRated(basis: string | null | undefined): boolean {
+  return /^HOURS?$/i.test(String(basis ?? '').trim())
+}
+
 /** FactorySuite's offsetless pump time as an instant; a time with a zone stands as it is. */
 export function wallClock(s: string | null | undefined): Date | null {
   if (!s) return null
@@ -128,7 +136,7 @@ export function refillWindows(fuel: FactoryFuel, reference: string | null): { ma
         issueId: i.id,
         machine: i.machine,
         vehicleId: machine?.vehicleId ?? null,
-        km: true,
+        km: !hourRated(machine?.basis),
         fuelStart: start ?? end,
         fuelEnd: end ?? start,
         shift: line && w ? { lineId: line.lineId, ...w } : null,
