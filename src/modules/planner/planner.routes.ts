@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission } from '../../middleware/authorize.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
-import { previewSheetSchema, saveSheetSchema, planListQuerySchema, stopUpdateSchema, customerListQuerySchema, customerFenceSchema, workPlansQuerySchema, factoryFuelQuerySchema, factoryFuelRefillsQuerySchema } from './planner.schema.js'
+import { previewSheetSchema, saveSheetSchema, planListQuerySchema, stopUpdateSchema, customerListQuerySchema, customerFenceSchema, workPlansQuerySchema, planSubmissionsQuerySchema, factoryFuelQuerySchema, factoryFuelRefillsQuerySchema } from './planner.schema.js'
 import * as ctrl from './planner.controller.js'
 
 // Planner: delivery sheets per truck and day, their customers' geofences, and
@@ -39,5 +39,9 @@ router.get('/factory-operators', requirePermission('driver:read'), validateQuery
 router.get('/factory-supervisors', requirePermission('driver:read'), validateQuery(factoryFuelQuerySchema), ctrl.factorySupervisors)
 // Work plan items that changed on days from..to (planner/work-plan-watch).
 router.get('/work-plan-updates', requirePermission('fuel_filling:read'), validateQuery(factoryFuelQuerySchema), ctrl.workPlanUpdates)
+
+// The Maintenance page's Plan submissions board: which departments sent
+// tomorrow's work plan by 16:00. A Maintenance screen, so its right.
+router.get('/plan-submissions', requirePermission('sensor:read'), validateQuery(planSubmissionsQuerySchema), ctrl.planSubmissions)
 
 export default router

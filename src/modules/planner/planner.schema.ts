@@ -36,6 +36,11 @@ export const workPlansQuerySchema = z.object({
   day: day.optional(),
 })
 
+/** The Maintenance page's Plan submissions: the 14 days ending on `day`. */
+export const planSubmissionsQuerySchema = z.object({
+  day: day.optional(),
+})
+
 // The Fuel page's range: both days inclusive, at most 31 (FactorySuite's own limit).
 export const factoryFuelQuerySchema = z.object({
   from: day,
@@ -79,5 +84,6 @@ export type SaveSheet    = z.infer<typeof saveSheetSchema>
 export type PlanListQuery = z.infer<typeof planListQuerySchema>
 export type StopUpdate   = z.infer<typeof stopUpdateSchema>
 export type WorkPlansQuery = z.infer<typeof workPlansQuerySchema>
+export type PlanSubmissionsQuery = z.infer<typeof planSubmissionsQuerySchema>
 export type FactoryFuelQuery = z.infer<typeof factoryFuelQuerySchema>
 export type FactoryFuelRefillsQuery = z.infer<typeof factoryFuelRefillsQuerySchema>
