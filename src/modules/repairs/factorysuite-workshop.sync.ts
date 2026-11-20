@@ -563,7 +563,8 @@ export async function searchParts(orgId: string, q: string | undefined, opts: { 
       ] } : {}),
     },
     orderBy: [{ quantityOnHand: { sort: 'desc', nulls: 'last' } }, { description: 'asc' }],
-    take: opts.lowOnly ? 2000 : Math.min(opts.limit ?? 50, 200),
+    // FactorySuite serves at most 1,000 parts: the Stores table may read them all.
+    take: opts.lowOnly ? 2000 : Math.min(opts.limit ?? 50, 1000),
   })
   const out = rows.map((p) => ({
     id: p.id, partNumber: p.partNumber, description: p.description, unit: p.unit,

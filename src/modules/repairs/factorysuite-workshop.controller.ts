@@ -15,7 +15,7 @@ const handle = (fn: (req: Request) => Promise<unknown>): RequestHandler =>
 const partsQuery = z.object({
   q: z.string().trim().max(100).optional(),
   low: z.enum(['1', 'true']).optional(),
-  limit: z.coerce.number().int().min(1).max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(1000).optional(),
 })
 const boardQuery = z.object({ days: z.coerce.number().int().min(1).max(90).optional() })
 
