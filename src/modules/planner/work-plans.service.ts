@@ -36,6 +36,7 @@ import { meterRefill, refillFigures, refillSpan, refillWindows, type MachineRefi
 import { createHash } from 'node:crypto'
 import { asDaySeries } from '../fuel/fuel-balance.js'
 import { reportDb } from '../../lib/report-db.js'
+import { addDays, buildPlanSubmissions, type PlanSubmissions } from './plan-submissions.js'
 
 const FACTORY_OF_ORG: Record<string, string> = Object.fromEntries(
   Object.entries(MACHINE_FACTORY_TO_ORG).map(([factory, org]) => [org, factory]),
@@ -120,7 +121,7 @@ const str = (v: unknown) => (typeof v === 'string' && v ? v : null)
 export async function workPlansChanged(event: string, data: unknown): Promise<number> {
   const factory = eventFactory(data)
   const factories = factory ? [factory] : Object.keys(MACHINE_FACTORY_TO_ORG)
-  for (const c of [cache, extrasCache, fuelCache]) {
+  for (const c of [cache, extrasCache, fuelCache, submissionsCache]) {
     for (const key of c.keys()) {
       if (factories.some(f => key.startsWith(`${f}|`))) c.delete(key)
     }
@@ -141,6 +142,36 @@ export async function workPlansChanged(event: string, data: unknown): Promise<nu
     })
   }
   return orgs.length
+}
+
+/**
+ * The Maintenance page's Plan submissions board (plan-submissions.ts): the 14
+ * days ending on `day` (tomorrow in EAT by default, the day plans are being
+ * sent for). Reads 31 days of plan headers so every department that plans
+ * gets a row. Cached like the map's plans and cleared by the same hooks
+ * (workPlansChanged), which also tell the open page to re-read.
+ */
+const submissionsCache = new Map<string, { at: number; out: Promise<PlanSubmissions> }>()
+export type PlanSubmissionsForPage = (PlanSubmissions & { today: string; fetchedAt: string }) | { factory: null; today: string }
+
+export async function planSubmissionsFor(orgId: string, day?: string): Promise<PlanSubmissionsForPage> {
+  const today = eatToday()
+  const org = await prisma.organisation.findUnique({ where: { id: orgId }, select: { code: true } })
+  const factory = org ? FACTORY_OF_ORG[org.code] : undefined
+  if (!factory || !client().isConfigured) return { factory: null, today }
+
+  const to = day ?? addDays(today, 1)
+  const key = `${factory}|${to}`
+  const hit = submissionsCache.get(key)
+  if (!hit || Date.now() - hit.at >= CACHE_MS) {
+    // Collapsing is for plan LINES; the board reads every plan header.
+    const out = client().listWorkPlans(addDays(to, -30), to, factory)
+      .then(plans => buildPlanSubmissions(factory, to, plans))
+    submissionsCache.set(key, { at: Date.now(), out })
+    out.catch(() => submissionsCache.delete(key))
+  }
+  const out = await submissionsCache.get(key)!.out
+  return { ...out, today, fetchedAt: new Date().toISOString() }
 }
 
 export type WorkPlansForMap =(MapWorkPlans & { fetchedAt: string }) | { factory: null; day: string }
