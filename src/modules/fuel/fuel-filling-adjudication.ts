@@ -169,6 +169,38 @@ export const FILL_LATE_MINUTES = 240
 /** Readings needed either side before the series is worth believing. */
 const MIN_SAMPLES = 3
 
+/**
+ * Which reading, counted up from the lowest, is the level the tank stood at
+ * when the pump started: the third. That is the lowest level the tank HELD for
+ * three readings, so one or two low readings (the slosh as the nozzle goes in)
+ * cannot set it, and FILL_BASELINE_TOLERANCE_ML above it keeps the pre-fill
+ * readings while leaving the ramp out.
+ *
+ * It used to be the median of the last three readings before the claim. That
+ * assumes the provider stamps a filling where the pump starts, and on a long
+ * delivery it does not: MUFINDI - EX 21, 20 Nov 2026, held 74.6 to 75.1 L
+ * until 04:48 UTC, rose steadily to 359.1 L by 05:06, and Wialon stamped the
+ * filling at 05:02:45, at 300 L. The last three readings sat at about 290 L, so
+ * the cap kept nearly the whole lookbehind, ramp included, and its median came
+ * out at about 149 L: 209.6 L "observed" for a 284.3 L fill, which every fuel
+ * balance then read (fuel-balance stopLitres), leaving the day 60 L short.
+ * From the lowest level held, the baseline is the 75 L plateau and the rise
+ * about 278 L.
+ *
+ * Where the claim IS stamped at the pump, the two agree: the tank's lowest held
+ * level is the one it was at when the pump started (the engine only burns fuel
+ * before a delivery, and a drain just before one only lowers it), which is the
+ * case FILL_BASELINE_TOLERANCE_ML was measured on.
+ */
+export const FILL_PUMP_LEVEL_RANK = 3
+
+/**
+ * A reading below this is a probe reading nothing (a dead or dropped-out
+ * gauge), not a tank level, and cannot be the level at the pump. The same line
+ * fuel-balance draws for a reading that "reads a tank".
+ */
+export const FILL_LIVE_PROBE_ML = 1_000
+
 export interface FillingClaim {
   filledAt: Date
   filledMl: number
@@ -276,12 +308,18 @@ export function adjudicateFilling(
     ? before
     : (() => {
         // The level at the pump, from our own series rather than the provider's
-        // figure: this module measures the claim, it does not adopt it.
-        const atPump = median(before.slice(-MIN_SAMPLES).map(s => s.fuelLevelMl))
-        const kept = before.filter(s => s.fuelLevelMl <= atPump + FILL_BASELINE_TOLERANCE_ML)
-        // A sparse reporter with too little left falls back to the whole
-        // window, which is the old behaviour and the honest answer when there
-        // is nothing finer to measure.
+        // figure: this module measures the claim, it does not adopt it. It is
+        // the lowest level the tank HELD (for MIN_SAMPLES readings) in the
+        // lookbehind — see FILL_PUMP_LEVEL_RANK for why not the last readings.
+        const live = before.filter(s => s.fuelLevelMl >= FILL_LIVE_PROBE_ML)
+        const kept = (() => {
+          if (live.length < MIN_SAMPLES) return []
+          const atPump = [...live.map(s => s.fuelLevelMl)].sort((a, b) => a - b)[FILL_PUMP_LEVEL_RANK - 1]!
+          return live.filter(s => s.fuelLevelMl <= atPump + FILL_BASELINE_TOLERANCE_ML)
+        })()
+        // A probe with too few live readings falls back to the whole window,
+        // which is the old behaviour and the honest answer when there is
+        // nothing finer to measure.
         return kept.length >= MIN_SAMPLES ? kept : before
       })()
 
