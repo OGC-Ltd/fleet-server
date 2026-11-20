@@ -16,6 +16,7 @@ router.use(authenticate, requireOrgAccess, requirePermission('telemetry:read'))
 router.get('/days',         validateQuery(daysQuerySchema), ctrl.listDays)
 router.get('/days/:day',    ctrl.getDay)
 router.put('/days/:day',    validateBody(daySaveSchema), ctrl.saveDay)
+router.get('/days/:day/versions', ctrl.getDayVersions)
 router.get('/orders',       ctrl.getOrders)
 router.put('/orders/:plate', validateBody(orderSaveSchema), ctrl.saveOrder)
 

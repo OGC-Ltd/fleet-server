@@ -13,6 +13,11 @@ export const saveDay: RequestHandler = async (req, res, next) => {
   try { sendSuccess(res, await svc.saveDay(p(req, 'orgId'), p(req, 'day'), req.user?.id ?? null, req.body as DaySave)) } catch (err) { next(err) }
 }
 
+/** What each save of the day replaced, the latest first: a day emptied by mistake is put back from here. */
+export const getDayVersions: RequestHandler = async (req, res, next) => {
+  try { sendSuccess(res, await svc.dayVersions(p(req, 'orgId'), p(req, 'day'))) } catch (err) { next(err) }
+}
+
 /** ?before=day: the latest earlier day with a list. ?from=&to=: every day of the range, in order. */
 export const listDays: RequestHandler = async (req, res, next) => {
   try {

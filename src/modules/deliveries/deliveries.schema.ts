@@ -27,6 +27,12 @@ const vehicle = z.object({
 
 export const daySaveSchema = z.object({
   vehicles: z.array(vehicle).max(500),
+  /**
+   * The operator confirmed emptying the day. Without it, an empty list never
+   * replaces one that has vehicles (operator, 20 Nov 2026: 18 and 19 Nov were
+   * saved empty from the range view and lost).
+   */
+  clear: z.boolean().optional(),
 })
 
 /** The longest range one read returns (a month); the report itself runs 7 days at most. */

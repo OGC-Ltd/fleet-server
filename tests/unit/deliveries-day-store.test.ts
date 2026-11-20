@@ -22,7 +22,7 @@ vi.mock('../../src/lib/prisma.js')
 const { syncKeyedPlans } = vi.hoisted(() => ({ syncKeyedPlans: vi.fn(async (..._a: unknown[]) => ({ made: 0, updated: 0, removed: 0 })) }))
 vi.mock('../../src/modules/planner/keyed-plans.js', () => ({ syncKeyedPlans }))
 import { prismaMock } from '../helpers/prisma.mock.js'
-import { getDay, getDays, daysBetween, saveDay, lastDayBefore, getOrders, saveOrder, ORDERS_KEEP_DAYS } from '../../src/modules/deliveries/deliveries.service.js'
+import { getDay, getDays, daysBetween, saveDay, dayVersions, lastDayBefore, getOrders, saveOrder, ORDERS_KEEP_DAYS, VERSIONS_LIMIT } from '../../src/modules/deliveries/deliveries.service.js'
 import { dayKey, keep, DAY_TTL_S } from '../../src/modules/deliveries/delivery-days.cache.js'
 import { daysQuerySchema, daySaveSchema, MAX_RANGE_DAYS } from '../../src/modules/deliveries/deliveries.schema.js'
 
@@ -44,6 +44,8 @@ describe('a day list: persisted, then read from the cache', () => {
     expect(saved.vehicles).toEqual([KCA])
     expect(JSON.parse(store.get(dayKey(ORG, DAY))!).v.vehicles).toEqual([KCA])
 
+    // The save read the row it replaces (for its guard and history); the read after it is all Redis
+    prismaMock.deliveryDay.findUnique.mockClear()
     const read = await getDay(ORG, DAY)
     expect(read).toEqual(saved)
     expect(syncKeyedPlans).toHaveBeenCalledWith(ORG, DAY, [KCA], 'u1')
@@ -69,7 +71,7 @@ describe('a day list: persisted, then read from the cache', () => {
     const KBB = { key: 'kbb', plate: 'KBB 880A', vehicleIds: ['v2'], customers: [] }
     // The reader misses, starts its Postgres read, and is slow
     let release!: (v: unknown) => void
-    prismaMock.deliveryDay.findUnique.mockReturnValue(new Promise((r) => { release = r }) as never)
+    prismaMock.deliveryDay.findUnique.mockReturnValueOnce(new Promise((r) => { release = r }) as never)
     const reading = getDay(ORG, DAY)
     await new Promise((r) => setTimeout(r, 5))
     // Meanwhile a save lands and caches the new list
@@ -121,6 +123,7 @@ describe('Van Sales and Finished Goods in one day list (raitrack #81)', () => {
     prismaMock.deliveryDay.upsert.mockImplementation((async (a: { create: { vehicles: unknown } }) =>
       ({ vehicles: a.create.vehicles, updatedAt: at })) as never)
     await saveDay(ORG, DAY, 'u1', body)
+    prismaMock.deliveryDay.findUnique.mockClear()
     const written = prismaMock.deliveryDay.upsert.mock.calls[0][0]
     expect((written.create.vehicles as Array<{ list?: string }>).map((v) => v.list)).toEqual(['vs', undefined])
     expect((written.update.vehicles as Array<{ list?: string }>)[0].list).toBe('vs')
@@ -216,5 +219,75 @@ describe('typed orders: by plate, kept 30 days', () => {
     await saveOrder(ORG, 'KCA 226M', '  ', 'u1', now)
     expect(prismaMock.deliveryOrder.deleteMany).toHaveBeenCalledWith({ where: { organisationId: ORG, plate: 'KCA 226M' } })
     expect(prismaMock.deliveryOrder.upsert).not.toHaveBeenCalled()
+  })
+})
+
+describe('a day is never emptied by mistake, and what a save replaced is kept (operator, 20 Nov 2026)', () => {
+  const KDE = { key: 'kde', plate: 'KDE 140E', vehicleIds: ['v2'], customers: ['menengai: Chandarana Abc'] }
+  const before = new Date('2026-11-19T23:03:04Z')
+  const had = (vehicles: unknown[]) => prismaMock.deliveryDay.findUnique.mockResolvedValue({ vehicles, updatedById: 'night', updatedAt: before } as never)
+  beforeEach(() => {
+    prismaMock.deliveryDay.upsert.mockImplementation((async (a: { create: { vehicles: unknown } }) => ({ vehicles: a.create.vehicles, updatedAt: at })) as never)
+  })
+
+  it('an empty list does not replace one with vehicles: 409, nothing written, the Planner untouched', async () => {
+    had([KCA, KDE])
+    syncKeyedPlans.mockClear()
+    await expect(saveDay(ORG, '2026-11-18', 'u2', { vehicles: [] })).rejects.toMatchObject({ statusCode: 409 })
+    expect(prismaMock.deliveryDay.upsert).not.toHaveBeenCalled()
+    expect(prismaMock.deliveryDayVersion.create).not.toHaveBeenCalled()
+    expect(syncKeyedPlans).not.toHaveBeenCalled()
+  })
+
+  it('emptied when the operator confirmed it (clear), the list it held kept first', async () => {
+    had([KCA, KDE])
+    const saved = await saveDay(ORG, '2026-11-18', 'u2', { vehicles: [], clear: true })
+    expect(saved.vehicles).toEqual([])
+    expect(prismaMock.deliveryDayVersion.create).toHaveBeenCalledWith({ data: {
+      organisationId: ORG, day: '2026-11-18', vehicles: [KCA, KDE], savedById: 'night', savedAt: before, replacedById: 'u2',
+    } })
+  })
+
+  it('an empty day, or one never saved, takes an empty list without a word', async () => {
+    had([])
+    await expect(saveDay(ORG, DAY, 'u1', { vehicles: [] })).resolves.toMatchObject({ vehicles: [] })
+    prismaMock.deliveryDay.findUnique.mockResolvedValue(null)
+    await expect(saveDay(ORG, DAY, 'u1', { vehicles: [] })).resolves.toMatchObject({ vehicles: [] })
+    expect(prismaMock.deliveryDayVersion.create).not.toHaveBeenCalled()
+  })
+
+  it('every change keeps the list it replaced; a save that changes nothing (keys reordered by jsonb) keeps none', async () => {
+    had([KCA])
+    await saveDay(ORG, DAY, 'u1', { vehicles: [KCA, KDE] })
+    expect(prismaMock.deliveryDayVersion.create).toHaveBeenCalledOnce()
+    prismaMock.deliveryDayVersion.create.mockClear()
+    // Postgres hands the object back with its keys in its own order
+    const reordered = Object.fromEntries(Object.entries(KCA).reverse())
+    had([reordered])
+    await saveDay(ORG, DAY, 'u1', { vehicles: [KCA] })
+    expect(prismaMock.deliveryDayVersion.create).not.toHaveBeenCalled()
+  })
+
+  it('the list is saved even when its earlier version cannot be kept (the table not there yet)', async () => {
+    had([KCA])
+    prismaMock.deliveryDayVersion.create.mockRejectedValueOnce(new Error('relation "delivery_day_versions" does not exist'))
+    await expect(saveDay(ORG, DAY, 'u1', { vehicles: [KDE] })).resolves.toMatchObject({ vehicles: [KDE] })
+  })
+
+  it('the clear flag passes the route’s validation; anything else is refused', () => {
+    expect(daySaveSchema.parse({ vehicles: [], clear: true }).clear).toBe(true)
+    expect(daySaveSchema.safeParse({ vehicles: [], clear: 'yes' }).success).toBe(false)
+  })
+
+  it('the day’s earlier versions, the latest replaced first', async () => {
+    prismaMock.deliveryDayVersion.findMany.mockResolvedValue([
+      { id: 'b', vehicles: [KCA, KDE], savedById: 'night', savedAt: before, replacedById: 'u2', replacedAt: new Date('2026-11-20T01:03:43Z') },
+    ] as never)
+    const got = await dayVersions(ORG, '2026-11-18')
+    expect(got).toEqual([{ id: 'b', vehicles: [KCA, KDE], savedById: 'night', savedAt: before.toISOString(), replacedById: 'u2', replacedAt: '2026-11-20T01:03:43.000Z' }])
+    expect(prismaMock.deliveryDayVersion.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { organisationId: ORG, day: '2026-11-18' }, orderBy: { replacedAt: 'desc' }, take: VERSIONS_LIMIT,
+    }))
+    await expect(dayVersions(ORG, '18-11-2026')).rejects.toThrow(/YYYY-MM-DD/)
   })
 })

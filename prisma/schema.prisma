@@ -341,6 +341,7 @@ model Organisation {
   plannerCustomers     PlannerCustomer[]
   deliveryPlans        DeliveryPlan[]
   deliveryDays         DeliveryDay[]
+  deliveryDayVersions  DeliveryDayVersion[]
   deliveryOrders       DeliveryOrder[]
 
   @@map("organisations")
@@ -3707,6 +3708,28 @@ model DeliveryDay {
 
   @@id([organisationId, day])
   @@map("delivery_days")
+}
+
+/// A Deliveries day list as it was before a save replaced it (operator's 18 and
+/// 19 Nov 2026 lists were saved empty and could not be brought back). Written on
+/// every save that changes the list; read by GET /deliveries/days/:day/versions.
+model DeliveryDayVersion {
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  day            String
+  /// The list that was replaced, as delivery_days.vehicles held it.
+  vehicles       Json
+  /// Who saved that list, and when (delivery_days.updated_by / updated_at then).
+  savedById      String?  @map("saved_by")
+  savedAt        DateTime @map("saved_at")
+  /// The save that replaced it.
+  replacedById   String?  @map("replaced_by")
+  replacedAt     DateTime @default(now()) @map("replaced_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@index([organisationId, day, replacedAt])
+  @@map("delivery_day_versions")
 }
 
 /// Orders fulfilled typed over the report's own count, by plate ("8/10"):

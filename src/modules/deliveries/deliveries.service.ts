@@ -9,7 +9,7 @@
 
 import type { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
-import { BadRequestError } from '../../core/errors/errors.js'
+import { BadRequestError, ConflictError } from '../../core/errors/errors.js'
 import { DAY_RE, MAX_RANGE_DAYS, type DaySave } from './deliveries.schema.js'
 import { readThrough, keep, dayKey, ordersKey, DAY_TTL_S, ORDERS_TTL_S } from './delivery-days.cache.js'
 import { syncKeyedPlans } from '../planner/keyed-plans.js'
@@ -19,6 +19,8 @@ import { logger } from '../../lib/logger.js'
 export const LOOKBACK_DAYS = 14
 /** A typed count is offered again for this long, then forgotten, as the browser did. */
 export const ORDERS_KEEP_DAYS = 30
+/** The most earlier versions of one day's list GET .../versions returns. */
+export const VERSIONS_LIMIT = 50
 
 export interface DayList {
   day: string
@@ -66,8 +68,43 @@ export async function getDays(orgId: string, from: string, to: string): Promise<
   return Promise.all(daysBetween(from, to).map((day) => getDay(orgId, day)))
 }
 
+/** The words a refused emptying answers with; new-ui matches the 409, not these. */
+export const EMPTY_REFUSED = 'This would remove every vehicle from the day’s list. Confirm it on the page to empty the day.'
+
+const vehicleCount = (v: unknown) => (Array.isArray(v) ? v.length : 0)
+/** JSON with object keys sorted: Postgres jsonb reorders keys, so a plain stringify would see a change in every save. */
+const stable = (v: unknown): string => JSON.stringify(v, (_k, x) => (x && typeof x === 'object' && !Array.isArray(x)
+  ? Object.fromEntries(Object.entries(x as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+  : x))
+
+/**
+ * Save a day's whole list. Two guards (operator, 20 Nov 2026: the 18 and 19 Nov
+ * lists were saved empty from the range view, and nothing kept what they held):
+ * - an empty list never replaces one with vehicles unless `clear` says the
+ *   operator confirmed it (409 otherwise);
+ * - the list a save replaces is kept first in delivery_day_versions, so a day
+ *   can be put back. Keeping it is best effort: a failure is logged and the
+ *   save goes on, so the list can always be saved.
+ */
 export async function saveDay(orgId: string, day: string, userId: string | null, body: DaySave): Promise<DayList> {
   checkDay(day)
+  const prev = await prisma.deliveryDay.findUnique({
+    where: { organisationId_day: { organisationId: orgId, day } },
+    select: { vehicles: true, updatedById: true, updatedAt: true },
+  })
+  if (!body.vehicles.length && vehicleCount(prev?.vehicles) > 0 && !body.clear) throw new ConflictError(EMPTY_REFUSED)
+  if (prev && vehicleCount(prev.vehicles) > 0 && stable(prev.vehicles) !== stable(body.vehicles)) {
+    try {
+      await prisma.deliveryDayVersion.create({
+        data: {
+          organisationId: orgId, day, vehicles: prev.vehicles as Prisma.InputJsonValue,
+          savedById: prev.updatedById, savedAt: prev.updatedAt, replacedById: userId,
+        },
+      })
+    } catch (err) {
+      logger.error({ err, orgId, day }, 'deliveries: the replaced day list could not be kept')
+    }
+  }
   const vehicles = body.vehicles as unknown as Prisma.InputJsonValue
   const row = await prisma.deliveryDay.upsert({
     where: { organisationId_day: { organisationId: orgId, day } },
@@ -86,6 +123,32 @@ export async function saveDay(orgId: string, day: string, userId: string | null,
     logger.error({ err, orgId, day }, 'deliveries: keyed plans could not be synced to the Planner')
   }
   return list
+}
+
+export interface DayVersion {
+  id: string
+  vehicles: DaySave['vehicles']
+  savedById: string | null
+  savedAt: string
+  replacedById: string | null
+  replacedAt: string
+}
+
+/** The day's earlier lists, the latest replaced first: what each save replaced. */
+export async function dayVersions(orgId: string, day: string): Promise<DayVersion[]> {
+  checkDay(day)
+  const rows = await prisma.deliveryDayVersion.findMany({
+    where: { organisationId: orgId, day },
+    orderBy: { replacedAt: 'desc' },
+    take: VERSIONS_LIMIT,
+    select: { id: true, vehicles: true, savedById: true, savedAt: true, replacedById: true, replacedAt: true },
+  })
+  return rows.map((r) => ({
+    id: r.id,
+    vehicles: Array.isArray(r.vehicles) ? (r.vehicles as DaySave['vehicles']) : [],
+    savedById: r.savedById, savedAt: r.savedAt.toISOString(),
+    replacedById: r.replacedById, replacedAt: r.replacedAt.toISOString(),
+  }))
 }
 
 /** The latest earlier day with vehicles on it, within LOOKBACK_DAYS, or null. */
