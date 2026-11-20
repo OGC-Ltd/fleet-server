@@ -32,6 +32,9 @@ router.get('/factory-fuel/tank-days', requirePermission('fuel_filling:read'), va
 // Its refills: the tracker's meter either side of each fuelling (the table),
 // and for one machine the fuel burned in the shift it was for (fuel-refills.ts)
 router.get('/factory-fuel/refills', requirePermission('fuel_filling:read'), validateQuery(factoryFuelRefillsQuerySchema), ctrl.factoryFuelRefills)
+// Its Probe used column: each machine's fuel burned over its planned shifts,
+// by its probe, with the hours run (fuel-shifts.ts)
+router.get('/factory-fuel/shifts', requirePermission('fuel_filling:read'), validateQuery(factoryFuelQuerySchema), ctrl.factoryFuelShifts)
 
 // The Drivers page's Operators tab: who the work plans put on each machine. A
 // people screen, so the drivers' right.

@@ -1,7 +1,7 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as svc from './planner.service.js'
-import { workPlansForMap, factoryFuelFor, factoryFuelRefillsFor, factoryOperatorsFor, factorySupervisorsFor, planSubmissionsFor } from './work-plans.service.js'
+import { workPlansForMap, factoryFuelFor, factoryFuelRefillsFor, factoryFuelShiftsFor, factoryOperatorsFor, factorySupervisorsFor, planSubmissionsFor } from './work-plans.service.js'
 import { tankDays as tankDaysFor } from './tank-days.js'
 import { workPlanUpdatesFor } from './work-plan-watch.js'
 import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, CustomerFence, WorkPlansQuery, PlanSubmissionsQuery, FactoryFuelQuery, FactoryFuelRefillsQuery } from './planner.schema.js'
@@ -80,6 +80,14 @@ export const factoryFuelRefills: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as FactoryFuelRefillsQuery
     sendSuccess(res, await factoryFuelRefillsFor(p(req, 'orgId'), q.from, q.to, q.machine ?? null, req.authz?.vehicleIds ?? null))
+  } catch (err) { next(err) }
+}
+
+/** The Fuel page's Probe used: each machine's fuel over its planned shifts, by its probe, with the hours run. */
+export const factoryFuelShifts: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as FactoryFuelQuery
+    sendSuccess(res, await factoryFuelShiftsFor(p(req, 'orgId'), q.from, q.to, req.authz?.vehicleIds ?? null))
   } catch (err) { next(err) }
 }
 

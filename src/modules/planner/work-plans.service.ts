@@ -34,7 +34,8 @@ import { buildFactoryFuel, type FactoryFuel } from './factory-fuel.js'
 import { buildFactoryOperators, type FactoryOperators } from './factory-operators.js'
 import { meterRefill, refillFigures, refillSpan, refillWindows, type MachineRefill, type MachineRefills, type RefillWindow } from './fuel-refills.js'
 import { createHash } from 'node:crypto'
-import { asDaySeries } from '../fuel/fuel-balance.js'
+import { asDaySeries, EDGE_READING_COUNT, type BalanceDrain, type BalanceFilling } from '../fuel/fuel-balance.js'
+import { machineShiftUse, measureSpan, shiftWindows, type MachineShiftUse, type ShiftWindow, type WindowEdges } from './fuel-shifts.js'
 import { reportDb } from '../../lib/report-db.js'
 import { addDays, buildPlanSubmissions, type PlanSubmissions } from './plan-submissions.js'
 
@@ -453,6 +454,116 @@ async function readRefills(windows: RefillWindow[]): Promise<MachineRefill[]> {
     }
   }
   await Promise.all(Array.from({ length: Math.min(3, windows.length) }, worker))
+  return out
+}
+
+/**
+ * The Fuel page's Probe used column (fuel-shifts.ts): each machine's fuel
+ * burned over its planned shifts from..to, by its probe, with the engine hours
+ * and kilometres it ran in them; a shift still running up to now. Every
+ * window's edges come in one query (readShiftEdges), the units' fills and
+ * drains in two, so a month of plans stays a few index seeks a shift.
+ *
+ * A machine outside the caller's vehicles (`scope`), or not one of our units,
+ * gets its shifts counted with nothing measured.
+ */
+export type MachineShiftsForPage =
+  | { factory: string; from: string; to: string; machines: MachineShiftUse[]; fetchedAt: string }
+  | { factory: null; from: string; to: string }
+const SHIFTS_CACHE_MS = 2 * 60_000
+const shiftsCache = new Map<string, { at: number; out: Promise<{ factory: string; machines: MachineShiftUse[] }> }>()
+
+export async function factoryFuelShiftsFor(
+  orgId: string, from: string, to: string, scope: ReadonlySet<string> | null = null,
+): Promise<MachineShiftsForPage> {
+  const fuel = await factoryFuelFor(orgId, from, to)
+  if (fuel.factory === null) return fuel
+  const windows = shiftWindows(fuel).map(w => (w.vehicleId && scope && !scope.has(w.vehicleId) ? { ...w, vehicleId: null } : w))
+  const units = [...new Set(windows.map(w => w.vehicleId ?? '-'))].sort().join(',')
+  const key = `${orgId}|${from}|${to}|${createHash('sha1').update(units).digest('hex')}`
+  const hit = shiftsCache.get(key)
+  if (!hit || Date.now() - hit.at >= SHIFTS_CACHE_MS) {
+    const now = new Date()
+    const out = readShifts(windows, now).then(machines => ({ factory: fuel.factory, machines }))
+    shiftsCache.set(key, { at: Date.now(), out })
+    out.catch(() => shiftsCache.delete(key))
+    for (const [k, v] of shiftsCache) if (Date.now() - v.at >= SHIFTS_CACHE_MS) shiftsCache.delete(k)
+  }
+  const out = await shiftsCache.get(key)!.out
+  return { factory: out.factory, from, to, machines: out.machines, fetchedAt: new Date().toISOString() }
+}
+
+async function readShifts(windows: ShiftWindow[], now: Date): Promise<MachineShiftUse[]> {
+  const asked = windows
+    .map(w => ({ w, span: w.vehicleId ? measureSpan(w, now) : null }))
+    .filter((x): x is { w: ShiftWindow; span: { from: Date; to: Date } } => x.span != null)
+  const edges = await readShiftEdges(asked.map(({ w, span }) => ({ key: w.key, vehicleId: w.vehicleId!, ...span })))
+  const ids = [...new Set(asked.map(x => x.w.vehicleId!))]
+  const ledger = new Map<string, { fillings: BalanceFilling[]; drains: BalanceDrain[] }>()
+  if (ids.length) {
+    const lo = new Date(Math.min(...asked.map(x => x.span.from.getTime())))
+    const hi = new Date(Math.max(...asked.map(x => x.span.to.getTime())))
+    const db = reportDb()
+    const [fillings, drains] = await Promise.all([
+      db.fuelFilling.findMany({
+        where: { vehicleId: { in: ids }, filledAt: { gte: lo, lte: hi } },
+        select: { vehicleId: true, filledAt: true, verdict: true, observedRiseMl: true, filledMl: true, initialFuelLevelMl: true, finalFuelLevelMl: true },
+      }),
+      db.fuelTheft.findMany({
+        where: { vehicleId: { in: ids }, beganAt: { gte: lo, lte: hi }, OR: [{ drainCause: 'SIPHON' }, { reviewStatus: 'CONFIRMED_THEFT' }] },
+        select: { vehicleId: true, beganAt: true, verdict: true, drainCause: true, cleanDropMl: true, measuredDropMl: true,
+                  stolenMl: true, finalFuelLevelMl: true, reviewStatus: true, dismissedAt: true },
+      }),
+    ])
+    for (const id of ids) ledger.set(id, { fillings: [], drains: [] })
+    for (const f of fillings) ledger.get(f.vehicleId)?.fillings.push({ ...f, verdict: f.verdict as string | null, at: f.filledAt.getTime() })
+    for (const d of drains) ledger.get(d.vehicleId)?.drains.push({ ...d, verdict: d.verdict as string | null, drainCause: d.drainCause as string | null,
+      reviewStatus: d.reviewStatus as string | null, at: d.beganAt.getTime() })
+  }
+  return machineShiftUse(windows, edges, ledger, now)
+}
+
+/**
+ * Each window's two ends in one query: the first and last 7 fixes that read a
+ * tank, and the first and last engine-hours and odometer readings. Index seeks
+ * on (vehicle_id, captured_at), a handful a window.
+ */
+async function readShiftEdges(windows: Array<{ key: string; vehicleId: string; from: Date; to: Date }>): Promise<Map<string, WindowEdges>> {
+  const out = new Map<string, WindowEdges>()
+  if (!windows.length) return out
+  const rows = await reportDb().$queryRaw<Array<{
+    k: string; first: number[] | null; last: number[] | null
+    h0: number | null; h1: number | null; o0: number | null; o1: number | null
+  }>>`
+    WITH w AS (
+      SELECT * FROM unnest(${windows.map(w => w.key)}::text[], ${windows.map(w => w.vehicleId)}::text[],
+                           ${windows.map(w => w.from)}::timestamptz[], ${windows.map(w => w.to)}::timestamptz[]) AS w(k, vid, st, en))
+    SELECT w.k,
+      (SELECT array_agg(x.f) FROM (SELECT t.fuel_level_ml AS f FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.fuel_level_ml >= 1000
+         ORDER BY t.captured_at ASC LIMIT ${EDGE_READING_COUNT}) x) AS first,
+      (SELECT array_agg(x.f) FROM (SELECT t.fuel_level_ml AS f FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.fuel_level_ml >= 1000
+         ORDER BY t.captured_at DESC LIMIT ${EDGE_READING_COUNT}) x) AS last,
+      (SELECT t.engine_hours_meter::float8 FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.engine_hours_meter IS NOT NULL
+         ORDER BY t.captured_at ASC LIMIT 1) AS h0,
+      (SELECT t.engine_hours_meter::float8 FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.engine_hours_meter IS NOT NULL
+         ORDER BY t.captured_at DESC LIMIT 1) AS h1,
+      (SELECT (t.odometer_m / 1000.0)::float8 FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.odometer_m IS NOT NULL
+         ORDER BY t.captured_at ASC LIMIT 1) AS o0,
+      (SELECT (t.odometer_m / 1000.0)::float8 FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.odometer_m IS NOT NULL
+         ORDER BY t.captured_at DESC LIMIT 1) AS o1
+      FROM w`
+  for (const r of rows) {
+    out.set(r.k, {
+      first: (r.first ?? []).map(Number), last: (r.last ?? []).map(Number),
+      hoursFirst: r.h0, hoursLast: r.h1, kmFirst: r.o0, kmLast: r.o1,
+    })
+  }
   return out
 }
 
