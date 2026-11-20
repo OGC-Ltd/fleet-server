@@ -84,15 +84,16 @@ export interface MachineRefill {
   meterAfter: MeterAt | null
   /** The machine's odometer now, on the same telemetry as meterBefore (filled by the service). */
   meterNow?: MeterAt | null
-  /** Null when the fuelling has no plan shift, and in the meters-only read. */
+  /** Null when the fuelling has no plan shift, and in the meters-only read except on each machine's latest fuelling. */
   shift: ShiftUse | null
 }
 
 /**
  * One machine's refills in full, or, with no machine named (`machine` null),
- * every machine's refills with the meters only: the Fuel page's table shows
- * the latest refill's figures in each row, and a shift balance for every
- * fuelling in a month is more than a table needs.
+ * every machine's refills with the meters only, and the shift balance on each
+ * machine's latest one: the Fuel page's table shows the latest refill's
+ * figures in each row, and a shift balance for every fuelling in a month is
+ * more than a table needs.
  */
 export interface MachineRefills {
   factory: string
