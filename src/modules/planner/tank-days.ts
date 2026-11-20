@@ -8,9 +8,7 @@
  *
  * from these rows: the start is the first day's opening level, the end the
  * last day's closing level (or the live probe reading when the period runs to
- * today, whose row is only written tonight by fuel-trend.service). A day with
- * no row yet, today, opens at the day before's closing level, so a period
- * that starts today still has a start.
+ * today, whose row is only written tonight by fuel-trend.service).
  *
  * A balance over the whole period rather than a sum of daily burns, because
  * the daily burns are gappy (vehicle-fuel-days: about 4 days in 10 qualify);
@@ -51,17 +49,6 @@ export async function tankDays(orgId: string, from: string, to: string, scope: R
         JOIN vehicles v ON v.id = t.vehicle_id
        WHERE v.organisation_id = ${orgId} AND t.day >= ${from}::date AND t.day <= ${to}::date ${only}
     ),
-    -- The day before's closing level, as the opening of a day with no trend
-    -- row yet: today's is only written tonight (operator 2026-11-20, DG-08 on
-    -- Today: "The fuel probe gave no tank level at the start" with the probe
-    -- reading 59 of 135 L). Only the day before, never an older level.
-    p AS (
-      SELECT t.vehicle_id, t.day + 1 AS day, t.closing_ml
-        FROM fuel_daily_trends t
-        JOIN vehicles v ON v.id = t.vehicle_id
-       WHERE v.organisation_id = ${orgId} AND t.day >= ${from}::date - 1 AND t.day < ${to}::date
-         AND t.closing_ml IS NOT NULL ${only}
-    ),
     f AS (
       SELECT f.vehicle_id, (f.filled_at + interval '3 hours')::date AS day,
              sum(coalesce(f.observed_rise_ml, f.filled_ml))::float8 AS ml
@@ -81,14 +68,12 @@ export async function tankDays(orgId: string, from: string, to: string, scope: R
        GROUP BY 1, 2
     ),
     keys AS (
-      SELECT vehicle_id, day FROM t UNION SELECT vehicle_id, day FROM p
-      UNION SELECT vehicle_id, day FROM f UNION SELECT vehicle_id, day FROM d
+      SELECT vehicle_id, day FROM t UNION SELECT vehicle_id, day FROM f UNION SELECT vehicle_id, day FROM d
     )
-    SELECT k.vehicle_id, k.day, coalesce(t.opening_ml, p.closing_ml) AS opening_ml, t.closing_ml,
+    SELECT k.vehicle_id, k.day, t.opening_ml, t.closing_ml,
            coalesce(f.ml, 0) AS fill_ml, coalesce(d.ml, 0) AS drain_ml
       FROM keys k
       LEFT JOIN t ON t.vehicle_id = k.vehicle_id AND t.day = k.day
-      LEFT JOIN p ON p.vehicle_id = k.vehicle_id AND p.day = k.day
       LEFT JOIN f ON f.vehicle_id = k.vehicle_id AND f.day = k.day
       LEFT JOIN d ON d.vehicle_id = k.vehicle_id AND d.day = k.day
      ORDER BY k.vehicle_id, k.day`
