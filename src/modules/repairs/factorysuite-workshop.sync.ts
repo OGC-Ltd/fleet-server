@@ -38,7 +38,7 @@ import {
   partUnchanged, stageRank, suspectedFaultOf, type CardStage, type StoredCard,
 } from '../../providers/raifactorysuite/raifactorysuite.workshop.js'
 import { appendStage, type StageEvent } from './repairs.repository.js'
-import { jobSelect, nextTicketNo, refOf, tell, type Job } from './repairs.workflow.js'
+import { jobSelect, refOf, tell, type Job } from './repairs.workflow.js'
 import { COMPLETED_PUSH } from './repairs.workflow.notify.js'
 import type { Stage } from './repairs.schema.js'
 
@@ -50,6 +50,9 @@ const BY = 'FactorySuite'
 const HISTORY_AFTER_MS = 24 * 3_600_000
 
 const short = (cardNumber: string) => cardNumber.replace(/^.*-JC-/, 'JC-')
+/** A job FactorySuite runs is known by its card's number, not one of ours
+ *  (operator, 2026-11-21): the ticket IS the card number, e.g. JC-2026-0308. */
+const isCardTicket = (t: string | null | undefined) => !!t && t.startsWith('JC-')
 
 interface Context {
   /** factoryCode → our organisation id */
@@ -164,7 +167,7 @@ async function createJob(tx: Tx, card: Card, orgId: string, vehicleId: string, s
   const category = categoryFor(card.reportedFault, card.diagnosis)
   const suspected = suspectedFaultOf(card)
   const at = card.checkedInAt ?? new Date()
-  const ticketNo = await nextTicketNo(tx)
+  const ticketNo = short(card.cardNumber)
   const closed = stage === 'completed'
   const voided = stage === 'void'
   const finalStage: Stage = closed ? 'fixed' : voided ? 'void' : stage
@@ -206,8 +209,9 @@ async function advance(tx: Tx, job: Job, card: Card, to: CardStage, adopting: bo
   if (adopting || (AWAITING_ARRIVAL as readonly string[]).includes(job.stage)) {
     data.queue = 'workshop'
     data.path = 'physical'
-    if (!job.ticketNo) {
-      data.ticketNo = await nextTicketNo(tx)
+    // The card's number replaces ours; a job another card already named keeps that card's.
+    if (!isCardTicket(job.ticketNo)) {
+      data.ticketNo = short(card.cardNumber)
       data.ticketIssuedAt = card.checkedInAt ?? new Date()
     }
     await tx.workshopBooking.updateMany({
