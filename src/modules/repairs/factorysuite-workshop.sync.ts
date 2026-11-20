@@ -7,24 +7,26 @@
  *                           workshop) is that job ARRIVING, not a second job.
  *   repair started        → fixing
  *   awaiting parts        → spare_outsourced
- *   released              → completed: the Control Room verifies it, like
- *                           every other repair (the second pair of eyes stays)
+ *   released              → fixed and closed. The Workshop is view-only in
+ *                           every org (operator, 2026-11-21), so nobody here
+ *                           verifies: FactorySuite's release is the sign-off
  *   cancelled             → void, for a job the card itself raised
  *   breakdown CONFIRMED   → a flag at awaiting_assessment, until a card opens
  *
  * Called from the reconcile loop and on the workshop webhook events. Every
  * pass re-reads the whole feed and writes only what changed. A job moves only
  * FORWARD, and only when its card's stage has changed since the card last
- * moved it (`appliedStage`), so a verification the Control Room rejected is
- * not completed again by the next pass.
+ * moved it (`appliedStage`), so a pass that reads the same card twice does
+ * nothing the second time.
  *
  * A card already released on the first (silent) pass, the backlog, or released
- * more than a day before we first see it (an outage), is history: filed closed, verified by
- * the release itself, and announces nothing.
+ * more than a day before we first see it (an outage), is history: filed closed
+ * like any release, and announces nothing.
  */
 
 import { Prisma } from '../../../generated/prisma/client.js'
 import { logger } from '../../lib/logger.js'
+import { repairSignedOff } from '../fuel/fuel-followup.service.js'
 import { prisma } from '../../lib/prisma.js'
 import { emitDashboardRepairChanged } from '../../lib/sse.js'
 import { MACHINE_FACTORY_TO_ORG } from '../../providers/raifactorysuite/raifactorysuite.machine-sync.js'
@@ -112,6 +114,12 @@ function completion(card: Card, at = card.releasedAt ?? card.workCompletedAt ?? 
   }
 }
 
+/** A released card closes its job: completed, verified by the release, resolved. */
+function release(card: Card) {
+  const at = card.releasedAt ?? card.workCompletedAt ?? new Date()
+  return { ...completion(card, at), verifiedAt: at, verifyNote: 'Released in FactorySuite', resolvedAt: at }
+}
+
 export interface WorkshopSyncReport {
   cards: number
   created: number
@@ -157,14 +165,15 @@ async function createJob(tx: Tx, card: Card, orgId: string, vehicleId: string, s
   const suspected = suspectedFaultOf(card)
   const at = card.checkedInAt ?? new Date()
   const ticketNo = await nextTicketNo(tx)
-  const closed = history && stage === 'completed'
+  const closed = stage === 'completed'
   const voided = stage === 'void'
   const finalStage: Stage = closed ? 'fixed' : voided ? 'void' : stage
   const trail = cardTimeline(card, stage)
   if (closed) {
     trail.push({
       stage: 'fixed', at: (card.releasedAt ?? new Date()).toISOString(), by: null, byName: BY,
-      note: 'Released in FactorySuite before the platform saw the card: filed as history',
+      note: history ? 'Released in FactorySuite before the platform saw the card: filed as history'
+        : 'Released in FactorySuite: fixed and available',
     })
   }
   const report = await tx.repairReport.create({
@@ -179,11 +188,7 @@ async function createJob(tx: Tx, card: Card, orgId: string, vehicleId: string, s
           stage: finalStage, queue: 'workshop', path: 'physical', forwardedAt: at,
           ticketNo, ticketIssuedAt: at, stageChangedAt: new Date(trail[trail.length - 1]!.at),
           stageHistory: trail as unknown as Prisma.InputJsonValue,
-          ...(stage === 'completed' ? completion(card) : {}),
-          ...(closed ? {
-            verifiedAt: card.releasedAt ?? new Date(), verifyNote: 'Released in FactorySuite',
-            resolvedAt: card.releasedAt ?? new Date(),
-          } : {}),
+          ...(closed ? release(card) : {}),
           ...(voided ? { voidReason: `FactorySuite card ${short(card.cardNumber)} cancelled`, resolvedAt: new Date() } : {}),
         }],
       },
@@ -247,15 +252,22 @@ async function advance(tx: Tx, job: Job, card: Card, to: CardStage, adopting: bo
     in_workshop: `Checked into the workshop in FactorySuite (${n})`,
     fixing: card.partsReceivedAt && job.stage === 'spare_outsourced' ? `Parts received (${n})` : `Repair started (${n})`,
     spare_outsourced: `Waiting on parts in FactorySuite (${n})`,
-    completed: `Released from the workshop in FactorySuite (${n}): verify it`,
+    completed: `Released from the workshop in FactorySuite (${n})`,
   }[to]
+  const event = { stage: to, at: at.toISOString(), by: null, byName: BY, note }
+  // Released closes the job: no one in the app verifies (view-only Workshop).
   const { count } = await tx.repairReportItem.updateMany({
     where: { id: job.id, resolvedAt: null, stage: job.stage },
-    data: {
-      ...data, ...(to === 'completed' ? completion(card) : {}),
-      stage: to, stageChangedAt: new Date(),
-      stageHistory: appendStage(job.stageHistory, { stage: to, at: at.toISOString(), by: null, byName: BY, note }),
-    },
+    data: to === 'completed'
+      ? {
+        ...data, ...release(card), stage: 'fixed', stageChangedAt: new Date(),
+        stageHistory: appendStage(appendStage(job.stageHistory, event),
+          { stage: 'fixed', at: at.toISOString(), by: null, byName: BY, note: 'Released in FactorySuite: fixed and available' }),
+      }
+      : {
+        ...data, stage: to, stageChangedAt: new Date(),
+        stageHistory: appendStage(job.stageHistory, event),
+      },
   })
   return count ? to : null
 }
@@ -316,17 +328,18 @@ async function syncCard(
 
 async function announce(o: Outcome, card: RaiFactorySuiteJobCardRow) {
   const n = short(card.cardNumber)
-  const ref = refOf(o.job, o.to)
-  if (o.to === 'completed') {
+  const closed = o.to === 'completed' || o.to === 'fixed'
+  const ref = refOf(o.job, closed ? 'fixed' : o.to)
+  if (closed) {
     await tell(ref, {
-      key: 'completed', severity: 'warning', headline: 'Released from the workshop: verify it',
-      text: `released in FactorySuite (${n}), awaiting the Control Room${card.diagnosis ? `: ${card.diagnosis}` : ''}`,
+      key: 'verified', severity: 'info', headline: 'Released from the workshop: unit available',
+      text: `released in FactorySuite (${n}); the unit is fixed and available${card.diagnosis ? `: ${card.diagnosis}` : ''}`,
       lines: [
         { label: 'Job card', value: card.cardNumber },
         ...(card.reportedFault ? [{ label: 'Reported fault', value: card.reportedFault }] : []),
         ...(card.diagnosis ? [{ label: 'Diagnosis', value: card.diagnosis }] : []),
       ],
-      audience: ['channel'], source: 'repair_ticket', push: COMPLETED_PUSH,
+      audience: ['channel'], source: 'repair_verified', push: COMPLETED_PUSH,
     })
   } else if (o.event === 'adopted') {
     await tell(ref, {
@@ -367,6 +380,9 @@ export async function syncJobCards(rows: RaiFactorySuiteJobCardRow[], opts: { si
       else if (o.event === 'history') report.history++
       else if (o.event === 'void') report.voided++
       else report.moved++
+      // A release closes the job, so the sign-off chain runs as on a verify:
+      // Fuel Audit cases close and "Probe reported" lifts.
+      if (o.event !== 'history' && (o.to === 'completed' || o.to === 'fixed')) await repairSignedOff(o.orgId, o.job.id)
       if (!opts.silent && o.event !== 'history') await announce(o, row)
     } catch (err) {
       logger.warn({ err, card: row.cardNumber }, 'FactorySuite workshop: could not sync a job card')
