@@ -1,5 +1,22 @@
 import { describe, it, expect } from 'vitest'
-import { wialonActivation, fleetUnits, missingFromWialon } from '../../src/modules/iam/wialon-deactivated.js'
+import { wialonActivation, fleetUnits, missingFromWialon, reasonText } from '../../src/modules/iam/wialon-deactivated.js'
+
+describe('reasonText', () => {
+  it('keeps a text or non-zero code; drops empty, zero and absent', () => {
+    expect(reasonText(' Not paid ')).toBe('Not paid')
+    expect(reasonText(3)).toBe('3')
+    expect(reasonText('')).toBeNull()
+    expect(reasonText(0)).toBeNull()
+    expect(reasonText(undefined)).toBeNull()
+  })
+})
+
+describe('wialonActivation with the advanced-properties flag merged in', () => {
+  it('takes act from the activation request over a sweep unit that has none', () => {
+    expect(wialonActivation({ id: 5, nm: 'x', ...{ act: 0, dactt: 1763600000 } }).deactivated).toBe(true)
+    expect(wialonActivation({ id: 5, nm: 'x', ...{ act: 1 } }).deactivated).toBe(false)
+  })
+})
 
 describe('wialonActivation', () => {
   it('reads the activation flag, with the deactivation time as the date', () => {

@@ -267,6 +267,36 @@ export class WialonClient {
   }
 
   /**
+   * Activation only: every unit's `act` (1 active, 0 deactivated), `dactt`
+   * (deactivation time, s) and `act_reason`, from the advanced properties
+   * (flag 0x100), which the sweep does not ask for. Checked live 2026-11-20 on
+   * Menengai KCV 071A (unit 27251120): the sweep's flags return no `act`; 0x100
+   * returns act 0, dactt 2026-10-16. Those properties also carry the device's phone
+   * numbers and password, so only the two activation fields are kept; nothing
+   * else leaves this method. `fieldsSeen`: the field names Wialon sent, so a
+   * token without the right to read them can be told apart (operator,
+   * 2026-11-20: units Controltech deactivated came back looking active).
+   */
+  async listActivation(): Promise<{ units: Array<{ id: number; act?: unknown; dactt?: unknown; act_reason?: unknown }>; fieldsSeen: string[] }> {
+    const res = await this.call<{ items?: Array<Record<string, unknown>> }>(
+      'core/search_items',
+      {
+        spec: { itemsType: 'avl_unit', propName: 'sys_name', propValueMask: '*', sortType: 'sys_name' },
+        force: 1,
+        flags: 1 | 0x100,
+        from: 0,
+        to: 0xFFFFFFFF,
+      },
+    )
+    const seen = new Set<string>()
+    const units = (res.items ?? []).map((u) => {
+      for (const k of Object.keys(u)) seen.add(k)
+      return { id: Number(u['id']), act: u['act'], dactt: u['dactt'], act_reason: u['act_reason'] }
+    })
+    return { units, fieldsSeen: [...seen].sort() }
+  }
+
+  /**
    * Connection state only — every unit's `netconn`, nothing else.
    *
    * Deliberately its own call rather than a field of the full sweep. Measured
