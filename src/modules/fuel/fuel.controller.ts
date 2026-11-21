@@ -203,7 +203,12 @@ export const createTheft: RequestHandler = async (req, res, next) => {
  */
 export const listProbeHealth: RequestHandler = async (req, res, next) => {
   try {
-    const rows = await getProbeReport(p(req, 'orgId'))
+    // A caller limited to some units (a technician: units with an open repair
+    // job) sees only those units' probes, and the tallies count only them
+    // (operator, 2026-11-21: "on the probes they will only see the flagged units").
+    const scope = req.authz?.vehicleIds ?? null
+    const all = await getProbeReport(p(req, 'orgId'))
+    const rows = scope ? all.filter((r) => scope.has(r.vehicleId)) : all
     const state = String(req.query['state'] ?? '').toLowerCase()
     const filtered = state === 'faulty'  ? rows.filter(r => r.needsAttention)
                    : state === 'healthy' ? rows.filter(r => !r.needsAttention)
