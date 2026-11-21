@@ -67,6 +67,7 @@ export function categoryFor(fault: string | null | undefined, diagnosis?: string
 const EXPECTED_BACK_KEYS = [
   'expectedBackAt', 'expectedReleaseAt', 'expectedReleaseDate', 'expectedCompletionAt', 'expectedCompletionDate',
   'estimatedCompletionAt', 'estimatedCompletionDate', 'estimatedReleaseAt', 'expectedReturnAt', 'eta',
+  'expectedOperationalAt', 'expectedOperationalDate', 'operationalAt', 'etaToOperational', 'etaOperational',
 ]
 export function expectedBackOf(raw: unknown): Date | null {
   if (!raw || typeof raw !== 'object') return null
