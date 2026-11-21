@@ -9,8 +9,10 @@
 #     it as a PUSH into its working tree (`receive.denyCurrentBranch=updateInstead`
 #     is set on this repo's clone there), not as a copied build output. A box
 #     carrying files no commit describes is what made past deploys a guess.
-#   · Nothing is built on the box until the same commit has compiled and passed
-#     its unit tests on a clean runner.
+#   · Nothing is compiled on the box at all. The runner compiles and tests the
+#     commit, and its `dist/` is what the box runs (the "install, ship
+#     dist" step below). The source still arrives by the push, so the checkout and
+#     the build it runs describe the same commit.
 #
 # The push is also the safety interlock: `updateInstead` REFUSES when the box's
 # working tree is dirty, so a deploy that would silently discard someone's
@@ -112,6 +114,20 @@ jobs:
       - name: tests
         run: npm test
 
+      # The box runs THIS dist/, so it never compiles. `tsc` on the box (2 vCPU,
+      # 3.8 GB shared with the live server and the observability stack) needed
+      # ~1.4 GB, ran out of memory, paged into swap and took 8 to 15 minutes at
+      # 17% CPU with the load at 10, slowing the live API for the whole deploy
+      # (measured 2026-11-21, runs #509 and #510). dist/ is self-contained apart
+      # from node_modules: tsc compiles generated/prisma into it as well.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fleet-server-dist
+          path: dist/
+          retention-days: 7
+          include-hidden-files: true
+          if-no-files-found: error
+
   deploy:
     name: deploy to the box
     needs: build
@@ -130,6 +146,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+
+      # The build job's compiled output, shipped to the box below in place of
+      # building there.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fleet-server-dist
+          path: dist-built
 
       # An unset secret is an empty string, not an error. Without this the run
       # writes an empty key file, reports "open an ssh channel to the box" as a
@@ -357,7 +380,7 @@ jobs:
           # conditions to force past.
           git push "ssh://ubuntu@${HOST}/home/ubuntu/prod/fleet-server" HEAD:main
 
-      - name: install, build and restart (pm2) / build the fallback (containers)
+      - name: install, ship dist and restart (pm2) / ship the fallback (containers)
         id: fallback_build
         if: (steps.mode.outputs.mode == 'pm2' && steps.scope.outputs.pm2 == 'true') || (steps.mode.outputs.mode == 'containers' && steps.fallback_push.outcome == 'success')
         continue-on-error: ${{ steps.mode.outputs.mode == 'containers' }}
@@ -366,6 +389,18 @@ jobs:
           MODE: ${{ steps.mode.outputs.mode }}
         run: |
           set -euo pipefail
+          # The runner's dist/, not a build on the box (see the upload step in
+          # the build job for why). Checked first: --delete into the directory
+          # pm2 runs from must never be fed an empty or partial artifact.
+          [ -f dist-built/src/index.js ] && [ -f dist-built/src/report-worker.js ] || {
+            echo "::error::the dist artifact has no src/index.js or src/report-worker.js; refusing to ship it"
+            exit 1
+          }
+          # --delete so a removed module cannot linger and be imported by stale
+          # code. Running processes keep what they already loaded; the restart
+          # below (pm2 mode) is what picks the new files up.
+          rsync -az --delete -e 'ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes' \
+            dist-built/ "ubuntu@${HOST}:/home/ubuntu/prod/fleet-server/dist/"
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" bash -s -- "${MODE}" <<'REMOTE'
           set -euo pipefail
           mode=$1
@@ -375,10 +410,13 @@ jobs:
           cd /home/ubuntu/prod/fleet-server
 
           echo "--- deploying $(git log --oneline -1)"
+          # node_modules still come from the box's own install: dist/ needs
+          # them at run time, and with an unchanged lockfile this takes seconds.
+          # Its postinstall regenerates generated/prisma, which only src/ reads;
+          # the compiled client pm2 loads is the one inside dist/.
           npm install --no-audit --no-fund
-          npx prisma generate --config prisma.config.ts
-          # pm2 runs dist/, not src/ — skipping this restarts the OLD code.
-          npm run build
+          # dist/ arrived from the runner above. Do NOT build here: tsc on this
+          # box is what made deploys take 15 minutes and slowed the live API.
           # What the pm2 fallback would run: fleet-deploy back-to-pm2 compares
           # this with the containers' commit and refuses a stale fallback.
           git rev-parse HEAD > dist/.built-commit
