@@ -609,7 +609,7 @@ export async function workshopBoard(orgId: string, days = 7) {
     prisma.factorySuiteJobCard.findMany({
       where: { organisationId: orgId, status: { notIn: ['RELEASED', 'CANCELLED'] } },
       orderBy: { checkedInAt: 'asc' },
-      include: { vehicle: { select: { id: true, registrationPlate: true, name: true } }, repairItem: { select: { id: true, stage: true, ticketNo: true } } },
+      include: { vehicle: { select: { id: true, registrationPlate: true, name: true } }, repairItem: { select: { id: true, stage: true, ticketNo: true, queue: true } } },
     }),
     // Checked in OR released in the window: a card in for a fortnight still counts on the day it leaves.
     prisma.factorySuiteJobCard.findMany({

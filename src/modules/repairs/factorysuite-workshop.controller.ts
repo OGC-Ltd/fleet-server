@@ -2,6 +2,7 @@ import type { Request, RequestHandler } from 'express'
 import { z } from 'zod'
 import { sendSuccess } from '../../core/response/response.js'
 import { ForbiddenError } from '../../core/errors/errors.js'
+import { flaggedOnlyIn } from '../../lib/authz/subject.js'
 import { searchParts, vehicleJobCards as cardsOf, workshopBoard } from './factorysuite-workshop.sync.js'
 
 const p = (req: Request, key: string) => req.params[key] as string
@@ -28,6 +29,20 @@ export const board = handle(async (req) => {
   const q = boardQuery.parse(req.query)
   const out = await workshopBoard(p(req, 'orgId'), q.days ?? 7)
   const s = scope(req)
+  // A technician sees only the cards of their ControlTech jobs that went on
+  // to the workshop: no other card on the unit, no booked-and-released
+  // history, no workshop-wide figures (operator, 2026-11-21: "technicians
+  // don't need to see what is in the autoworkshop unless it's a unit under
+  // their controltech page that was flagged and has progressed into the
+  // autoworkshop").
+  if (s && req.authz && await flaggedOnlyIn(req.authz.userId, p(req, 'orgId'))) {
+    return {
+      ...out,
+      open: out.open.filter((c) => c.vehicleId && s.has(c.vehicleId) && c.repairItem?.queue === 'controltech'),
+      moves: [],
+      summary: null,
+    }
+  }
   return s ? {
     ...out,
     open:  out.open.filter((c) => c.vehicleId && s.has(c.vehicleId)),

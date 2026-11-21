@@ -282,6 +282,25 @@ describe('a role restricted to flagged units (operator, 2026-10-27)', () => {
     expect(vehicleScopeIn(s, ORG_B)!.size).toBe(0)
   })
 
+  it("reads only ControlTech's open jobs, not the workshop's (2026-11-21)", async () => {
+    setup([membership(ORG_A)], [grant(ORG_A, 'map:read', 'vehicle:flagged_only')])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const find = prismaMock.repairReportItem.findMany as any
+    find.mockResolvedValue([open(ORG_A, 'v1')])
+    await resolveSubject('u1')
+    const where = find.mock.calls.at(-1)[0].where
+    expect(where.resolvedAt).toBeNull()
+    expect(where.OR).toEqual(expect.arrayContaining([
+      { queue: 'controltech' },
+      expect.objectContaining({ stage: 'pending', faultCategory: { in: expect.arrayContaining(['fuel_probe', 'gps', 'tracker']) }, assignmentStatus: { not: 'declined' } }),
+      // Their own jobs, as My jobs lists them
+      { assignedToId: 'u1', assignmentStatus: { not: 'declined' } },
+      { workshopTechnicianId: 'u1' },
+    ]))
+    // Never the workshop queue as such: another unit's mechanical job is not theirs
+    expect(where.OR).not.toContainEqual({ queue: 'workshop' })
+  })
+
   it('leaves other organisations, and a platform administrator, unrestricted', async () => {
     setup(
       [membership(ORG_A), membership(ORG_B)],

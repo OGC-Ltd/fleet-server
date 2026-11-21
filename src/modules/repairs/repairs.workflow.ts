@@ -361,6 +361,8 @@ export async function forwardJob(orgId: string, itemId: string, userId: string, 
     const ticket = land.path === 'physical' ? await ticketFields(tx, job) : {}
     await move(tx, job, land.stage, userId, land.queue === 'controltech' ? 'Forwarded to ControlTech' : 'Forwarded to the workshop for assessment', {
       queue: land.queue, path: land.path, forwardedAt: land.forwardedAt,
+      // A job ControlTech rejected goes back on the queue unclaimed.
+      ...(job.assignmentStatus === 'declined' ? { assignedToId: null, assignedById: null, assignedAt: null, assignmentStatus: 'accepted', assignmentNote: null } : {}),
       ...(job.faultCategory ? {} : { faultCategory: category }), ...ticket,
     })
     return { ...job, stage: land.stage, queue: land.queue, ticketNo: ticket.ticketNo ?? job.ticketNo, issued: !!ticket.ticketNo }
@@ -532,6 +534,37 @@ export async function claim(orgId: string, itemId: string, userId: string) {
   await tell(refOf(job), {
     key: 'claimed', severity: 'info', headline: 'Repair claimed by ControlTech',
     text: `claimed by ${job.byName ?? 'a ControlTech technician'}`, audience: ['control_room'],
+  }, userId)
+  return findItemById(itemId, orgId)
+}
+
+/**
+ * A ControlTech technician turns a job down (operator, 2026-11-21: "we need
+ * to add a reject"), with the reason. It goes back to the Control Room as a
+ * pending flag, off the ControlTech queue and out of the technicians' units;
+ * the Control Room forwards it again, sends it to the workshop, or voids it.
+ * Only a job not yet sent remote or physical, and not one another technician
+ * has accepted.
+ */
+export async function reject(orgId: string, itemId: string, userId: string, reason: string) {
+  const ok = await canReceiveTriage(userId, orgId)
+  if (!ok.ok) throw new ForbiddenError('Only a technician of this organisation can reject a job')
+  const job = await prisma.$transaction(async (tx) => {
+    const job = await openJob(tx, itemId, orgId)
+    assertStage(job, ['forwarded'], 'rejected')
+    if (job.assignedToId && job.assignedToId !== userId) throw new ConflictError('Another technician has accepted this job')
+    const byName = await nameOf(tx, userId)
+    await move(tx, job, 'pending', userId, `Rejected by ControlTech: ${reason}`, {
+      queue: null, forwardedAt: null,
+      assignedToId: userId, assignedById: userId, assignedAt: new Date(),
+      assignmentStatus: 'declined', assignmentNote: reason,
+    })
+    return { ...job, byName }
+  })
+  await tell(refOf(job, 'pending'), {
+    key: 'rejected', severity: 'warning', headline: 'Repair rejected by ControlTech',
+    text: `rejected by ${job.byName ?? 'a ControlTech technician'}: ${reason}`,
+    lines: [{ label: 'Reason', value: reason }], audience: ['control_room'],
   }, userId)
   return findItemById(itemId, orgId)
 }

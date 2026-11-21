@@ -34,7 +34,7 @@ import * as fsw from './factorysuite-workshop.controller.js'
 import {
   flagUnitsSchema, spotFixSchema, pathSchema, assessmentSchema, bookingSchema, cancelBookingSchema,
   workshopAssignSchema, damageSchema, warrantyVoidSchema, warrantyClearSchema, workEntrySchema, workEditSchema,
-  completeSchema, verifySchema, voidSchema, movePhaseSchema, sourcePartSchema, issuePartSchema,
+  completeSchema, verifySchema, voidSchema, rejectSchema, movePhaseSchema, sourcePartSchema, issuePartSchema,
   investigationUpdateSchema, availabilityQuerySchema, dayQuerySchema, workshopUpdateSchema,
 } from './repairs.workflow.schema.js'
 import { z } from 'zod'
@@ -123,6 +123,8 @@ router.post('/flags', requirePermissionStrict('repair:flag'), validateBody(flagU
 router.post('/spot-fixes', requirePermissionStrict('repair:resolve'), validateBody(spotFixSchema), wf.spotFix)
 router.post('/items/:itemId/forward', requirePermissionStrict('repair:flag'), validateBody(z.object({ queue: z.enum(['controltech', 'workshop']).optional() })), wf.forward)
 router.post('/items/:itemId/claim', requirePermissionStrict('repair:claim'), wf.claim)
+// A technician turns a ControlTech job down, back to the Control Room (operator, 2026-11-21)
+router.post('/items/:itemId/reject', requirePermissionStrict('repair:claim'), validateBody(rejectSchema), wf.reject)
 router.post('/items/:itemId/path', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(pathSchema), wf.path)
 router.post('/items/:itemId/assessment', requirePermissionStrict('repair:assess'), validateBody(assessmentSchema), wf.assess)
 router.post('/items/:itemId/booking', requirePermissionStrict('repair:book'), validateBody(bookingSchema), wf.book)

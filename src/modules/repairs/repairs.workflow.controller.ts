@@ -23,6 +23,7 @@ export const forward = handle((req) => wf.forwardJob(p(req, 'orgId'), p(req, 'it
 export const queue = handle((req) => wf.queue(p(req, 'orgId')))
 export const mine = handle((req) => wf.mine(p(req, 'orgId'), req.user!.id))
 export const claim = handle((req) => wf.claim(p(req, 'orgId'), p(req, 'itemId'), req.user!.id))
+export const reject = handle((req) => wf.reject(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, (req.body as { reason: string }).reason))
 export const path = handle((req) => wf.decidePath(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as PathBody))
 export const assess = handle((req) => wf.assess(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as Assessment, scope(req)))
 

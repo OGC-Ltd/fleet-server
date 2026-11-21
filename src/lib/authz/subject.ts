@@ -253,14 +253,14 @@ async function loadSubject(userId: string): Promise<Subject> {
   const denied = applyPersonalGrants(personal ?? [], { isPlatform, platformPermissions, orgs })
 
   // Where the person is restricted to flagged units (by role, or by their own
-  // grant in IAM since 2026-11-14), the units with an open repair job, read
+  // grant in IAM since 2026-11-14), the units with an open ControlTech job, read
   // fresh on every resolution. AFTER the personal grants, so IAM can set or
   // clear the restriction. Cached with the rest, and dropped early by
   // refreshFlaggedScopes when a job opens or closes.
   const flaggedOrgs = [...orgs.entries()]
     .filter(([, g]) => g.permissions.has(FLAGGED_ONLY))
     .map(([orgId]) => orgId)
-  const flagged = await openRepairVehicles(flaggedOrgs)
+  const flagged = await openRepairVehicles(flaggedOrgs, userId)
   for (const [orgId, open] of flagged) {
     const grant = orgs.get(orgId)
     if (!grant) continue
@@ -343,12 +343,34 @@ export function applyPersonalGrants(
   return denied
 }
 
-/** Units with an open repair job, per organisation asked about. */
-export async function openRepairVehicles(orgIds: string[]): Promise<Map<string, Set<string>>> {
+/** The telematics fault categories (repairs.workflow.schema TELEMATICS), restated to keep authz free of the repairs module. */
+const TELEMATICS_CATEGORIES = ['fuel_probe', 'tracker', 'gps', 'ignition', 'sensor']
+
+/**
+ * Units with an open ControlTech job, per organisation asked about: on the
+ * ControlTech queue, or a telematics flag the Control Room has not forwarded
+ * yet (the Workshop ControlTech tab's own rule). A technician sees these units
+ * and no others (operator, 2026-11-21: "they should only see the unit flagged
+ * and which they appear in the controltech page"). Until then it was every
+ * unit with any open job, the workshop's mechanical ones included.
+ */
+export async function openRepairVehicles(orgIds: string[], userId?: string): Promise<Map<string, Set<string>>> {
   const out = new Map<string, Set<string>>(orgIds.map((id) => [id, new Set<string>()]))
   if (orgIds.length === 0) return out
   const rows = await prisma.repairReportItem.findMany({
-    where:    { organisationId: { in: orgIds }, resolvedAt: null },
+    where:    {
+      organisationId: { in: orgIds }, resolvedAt: null,
+      OR: [
+        { queue: 'controltech' },
+        // Not one ControlTech rejected back to the Control Room
+        { stage: 'pending', faultCategory: { in: TELEMATICS_CATEGORIES }, assignmentStatus: { not: 'declined' } },
+        { stage: 'pending', targetKind: 'probe', assignmentStatus: { not: 'declined' } },
+        // And their own jobs, as My jobs lists them, wherever the job has got
+        // to (operator, 2026-11-21: "if the unit is not in controltech page or
+        // my jobs page it should not be on the live map for technicians")
+        ...(userId ? [{ assignedToId: userId, assignmentStatus: { not: 'declined' } }, { workshopTechnicianId: userId }] : []),
+      ],
+    },
     select:   { organisationId: true, vehicleId: true },
     distinct: ['organisationId', 'vehicleId'],
   })
@@ -367,7 +389,14 @@ const lastFlagged = new Map<string, string>()
  */
 export async function refreshFlaggedScopes(orgId: string): Promise<void> {
   try {
+    // Which units are ControlTech's, and who holds each open job: a claim or a
+    // workshop hand-over changes a technician's units without changing the first
+    const held = await prisma.repairReportItem.findMany({
+      where:  { organisationId: orgId, resolvedAt: null, OR: [{ assignedToId: { not: null } }, { workshopTechnicianId: { not: null } }] },
+      select: { vehicleId: true, assignedToId: true, assignmentStatus: true, workshopTechnicianId: true },
+    })
     const now = [...((await openRepairVehicles([orgId])).get(orgId) ?? [])].sort().join(',')
+      + '|' + held.map((h) => `${h.vehicleId}:${h.assignedToId ?? ''}:${h.assignmentStatus}:${h.workshopTechnicianId ?? ''}`).sort().join(',')
     if (lastFlagged.get(orgId) === now) return
     lastFlagged.set(orgId, now)
     // Restricted by role, or by their own grant (IAM). Over-inclusive on
@@ -471,18 +500,26 @@ function restrictedSourcesHeld(subject: Subject, orgId: string): string[] {
   ]
 }
 
+/** Limited to flagged units in this organisation (a technician), and not a platform administrator. */
+export async function flaggedOnlyIn(userId: string, orgId: string): Promise<boolean> {
+  const subject = await resolveSubject(userId)
+  return !subject.isPlatform && !!subject.orgs.get(orgId)?.permissions.has(FLAGGED_ONLY)
+}
+
 /**
  * The feed sources this person is limited to in an organisation, or null for
- * every source. Somebody restricted to flagged units who does NOT hold
- * `notification:all_events` sees the repair notices on those units rather
- * than the tracking feed (operator, 2026-10-27, for technicians; a right in
- * IAM since 2026-11-14, held by every role to start with).
+ * every source. Somebody restricted to flagged units sees only the repair
+ * notices on those units: the flags and each stage of the case (operator,
+ * 2026-10-27, for technicians). `notification:all_events` no longer widens
+ * that (operator, 2026-11-21: "on the alerts live feed they should only see
+ * alerts for flagged cases and stages of the cases created only"). It was a
+ * right held by every role from 2026-11-14, which had quietly given
+ * technicians the whole tracking feed for their units.
  */
 export async function feedSourcesFor(userId: string, orgId: string): Promise<string[] | null> {
   const subject = await resolveSubject(userId)
   if (subject.isPlatform) return null
   if (!subject.orgs.get(orgId)?.permissions.has(FLAGGED_ONLY)) return null
-  if (can(subject, orgId, 'notification:all_events')) return null
   return [...FLAGGED_ONLY_FEED_SOURCES, ...restrictedSourcesHeld(subject, orgId)]
 }
 

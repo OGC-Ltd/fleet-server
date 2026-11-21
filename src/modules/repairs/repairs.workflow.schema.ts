@@ -211,6 +211,12 @@ export const movePhaseSchema = z.object({
   note:  note(500).optional(),
 })
 
+/** A technician turning a ControlTech job down, and why. */
+export const rejectSchema = z.object({
+  reason: required(500, 'Say why you are rejecting this job'),
+})
+export type RejectBody = z.infer<typeof rejectSchema>
+
 export const voidSchema = z.object({
   reason:       required(500, 'Say why this job is void'),
   precededById: z.string().min(1).optional(),
