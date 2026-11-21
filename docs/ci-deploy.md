@@ -149,6 +149,12 @@ export PATH=$HOME/.nvm/versions/node/v24.20.0/bin:$PATH
 cd ~/prod/fleet-server && git reset --hard <previous-sha> && npm run build && pm2 restart server
 ```
 
+`npm run build` here compiles on the box, which takes 10 minutes or more there
+(2 vCPU, 3.8 GB shared with the live server; `tsc` pages into swap). The
+workflow no longer builds on the box: it ships the runner's `dist/`. When the
+previous commit's run is less than 7 days old, re-running its deploy job is the
+faster way back.
+
 The pm2 app is **`server`**, not `fleet-server`. There were two apps on this
 directory until 2026-08-10 — `server` held port 3000 and did the polling,
 `fleet-server` held neither and raced it into duplicate-key errors — and the

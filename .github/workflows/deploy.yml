@@ -389,6 +389,8 @@ jobs:
           MODE: ${{ steps.mode.outputs.mode }}
         run: |
           set -euo pipefail
+          ssh_box() { ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" "$@"; }
+
           # The runner's dist/, not a build on the box (see the upload step in
           # the build job for why). Checked first: --delete into the directory
           # pm2 runs from must never be fed an empty or partial artifact.
@@ -396,27 +398,38 @@ jobs:
             echo "::error::the dist artifact has no src/index.js or src/report-worker.js; refusing to ship it"
             exit 1
           }
-          # --delete so a removed module cannot linger and be imported by stale
-          # code. Running processes keep what they already loaded; the restart
-          # below (pm2 mode) is what picks the new files up.
-          rsync -az --delete -e 'ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes' \
-            dist-built/ "ubuntu@${HOST}:/home/ubuntu/prod/fleet-server/dist/"
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@${HOST}" bash -s -- "${MODE}" <<'REMOTE'
+
+          # 1. Dependencies FIRST, while dist/ is still the old build. If the
+          #    install fails, nothing below runs and the box is left exactly as
+          #    it was: old dist/, old process, no half-applied deploy.
+          ssh_box bash -s <<'REMOTE'
           set -euo pipefail
-          mode=$1
           # `bash -lc` over ssh does not load nvm — node, npm and pm2 are all
           # "command not found" without this.
           export PATH="$HOME/.nvm/versions/node/v24.20.0/bin:$PATH"
           cd /home/ubuntu/prod/fleet-server
-
           echo "--- deploying $(git log --oneline -1)"
-          # node_modules still come from the box's own install: dist/ needs
-          # them at run time, and with an unchanged lockfile this takes seconds.
-          # Its postinstall regenerates generated/prisma, which only src/ reads;
-          # the compiled client pm2 loads is the one inside dist/.
+          # dist/ needs node_modules at run time, and with an unchanged lockfile
+          # this takes seconds. Its postinstall regenerates generated/prisma,
+          # which only src/ reads; the compiled client pm2 loads is in dist/.
           npm install --no-audit --no-fund
-          # dist/ arrived from the runner above. Do NOT build here: tsc on this
-          # box is what made deploys take 15 minutes and slowed the live API.
+          REMOTE
+
+          # 2. Then the new dist/, immediately before the restart. The running
+          #    server lazy-loads some modules (await import() in lib/sse.ts and
+          #    lib/notifications), so the gap between replacing dist/ and the
+          #    restart is kept to seconds rather than an npm install.
+          #    --delete so a removed module cannot linger and be imported.
+          rsync -az --delete -e 'ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes' \
+            dist-built/ "ubuntu@${HOST}:/home/ubuntu/prod/fleet-server/dist/"
+
+          # 3. Record the commit and, in pm2 mode, restart. Do NOT build here:
+          #    tsc on this box is what made deploys take 15 minutes.
+          ssh_box bash -s -- "${MODE}" <<'REMOTE'
+          set -euo pipefail
+          mode=$1
+          export PATH="$HOME/.nvm/versions/node/v24.20.0/bin:$PATH"
+          cd /home/ubuntu/prod/fleet-server
           # What the pm2 fallback would run: fleet-deploy back-to-pm2 compares
           # this with the containers' commit and refuses a stale fallback.
           git rev-parse HEAD > dist/.built-commit
