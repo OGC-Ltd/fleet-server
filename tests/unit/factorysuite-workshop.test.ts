@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  boardDays, cardStage, categoryFor, eatDayStart, jobCardColumns, parseFsTime, stageRank, suspectedFaultOf,
+  boardDays, cardStage, categoryFor, eatDayStart, jobCardColumns, parseFsTime, periodMoves, stageRank, suspectedFaultOf,
 } from '../../src/providers/raifactorysuite/raifactorysuite.workshop.js'
 
 describe('parseFsTime', () => {
@@ -112,4 +112,28 @@ describe('board days (East Africa time)', () => {
     const out = boardDays(3, [], [], now, new Date('2026-11-17T05:00:00Z'))
     expect(out.map((r) => r.day)).toEqual(['2026-11-17', '2026-11-18'])
   })
+})
+
+describe('periodMoves (booked followed through)', () => {
+  const since = new Date('2026-11-15T21:00:00Z')
+  const card = (id: string, checkedInAt: string | null, releasedAt: string | null, status = releasedAt ? 'RELEASED' : 'IN_PROGRESS') => ({
+    id, cardNumber: `JC-${id}`, machine: `EX-${id}`, status, reportedFault: null,
+    checkedInAt: checkedInAt ? new Date(checkedInAt) : null, releasedAt: releasedAt ? new Date(releasedAt) : null,
+    vehicle: null,
+  })
+  const cards = [
+    card('1', '2026-11-16T06:00:00Z', '2026-11-16T12:00:00Z'),       // booked and fixed in the window
+    card('2', '2026-11-17T06:00:00Z', null),                          // booked, still in
+    card('3', '2026-11-10T06:00:00Z', '2026-11-18T09:00:00Z'),       // booked before, released in it
+    card('4', '2026-11-18T06:00:00Z', null, 'CANCELLED'),             // cancelled: not a booking
+  ]
+  const out = periodMoves(cards, since)
+  it('counts only the window\'s bookings, and how many of those left', () => {
+    expect(out.booked.map((c) => c.id)).toEqual(['1', '2'])
+    expect(out.bookedFixed).toBe(1)
+  })
+  it('lists every booking and release, newest first', () => {
+    expect(out.moves.map((m) => `${m.kind}:${m.cardId}`)).toEqual(['released:3', 'booked:2', 'released:1', 'booked:1'])
+  })
+  it('caps the list', () => expect(periodMoves(cards, since, 2).moves).toHaveLength(2))
 })

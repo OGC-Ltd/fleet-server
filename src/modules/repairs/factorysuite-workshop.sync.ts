@@ -35,8 +35,7 @@ import type {
 } from '../../providers/raifactorysuite/raifactorysuite.client.js'
 import {
   AWAITING_ARRIVAL, boardDays, breakdownColumns, cardStage, cardUnchanged, eatDayStart, categoryFor, jobCardColumns, partColumns,
-  partUnchanged, stableJson, stageRank, suspectedFaultOf, type CardStage, type StoredCard,
-} from '../../providers/raifactorysuite/raifactorysuite.workshop.js'
+  partUnchanged, stableJson, stageRank, suspectedFaultOf, type CardStage, type StoredCard, periodMoves } from '../../providers/raifactorysuite/raifactorysuite.workshop.js'
 import { appendStage, type StageEvent } from './repairs.repository.js'
 import { jobSelect, refOf, tell, type Job } from './repairs.workflow.js'
 import { COMPLETED_PUSH } from './repairs.workflow.notify.js'
@@ -615,7 +614,11 @@ export async function workshopBoard(orgId: string, days = 7) {
     // Checked in OR released in the window: a card in for a fortnight still counts on the day it leaves.
     prisma.factorySuiteJobCard.findMany({
       where: { organisationId: orgId, OR: [{ checkedInAt: { gte: since } }, { releasedAt: { gte: since } }] },
-      select: { status: true, checkedInAt: true, releasedAt: true, fuelDiscrepancy: true, category: true, priority: true, isService: true },
+      select: {
+        id: true, cardNumber: true, machine: true, status: true, reportedFault: true, checkedInAt: true, releasedAt: true,
+        fuelDiscrepancy: true, category: true, priority: true, isService: true,
+        vehicle: { select: { id: true, registrationPlate: true, name: true } },
+      },
     }),
     // The feed's first card: days before it are days FactorySuite had not started, not quiet days.
     prisma.factorySuiteJobCard.aggregate({ where: { organisationId: orgId }, _min: { checkedInAt: true } }),
@@ -623,12 +626,15 @@ export async function workshopBoard(orgId: string, days = 7) {
   const inWindow = (d: Date | null) => !!d && d >= since
   const opened = recent.filter((c) => inWindow(c.checkedInAt))
   const released = recent.filter((c) => inWindow(c.releasedAt))
+  const { booked, bookedFixed, moves } = periodMoves(recent, since)
   const hours = released.filter((c) => c.checkedInAt)
     .map((c) => (c.releasedAt!.getTime() - c.checkedInAt!.getTime()) / 3_600_000).sort((a, b) => a - b)
   return {
     open,
+    moves,
     summary: {
       days, cards: opened.length, released: released.length,
+      booked: booked.length, bookedFixed, bookedStillIn: booked.length - bookedFixed,
       fuelDiscrepancies: opened.filter((c) => c.fuelDiscrepancy).length,
       major: opened.filter((c) => c.category === 'MAJOR').length,
       urgent: opened.filter((c) => c.priority === 'Urgent').length,

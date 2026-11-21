@@ -254,3 +254,31 @@ export function boardDays(days: number, opened: Date[], released: Date[], now = 
   const from = feedStart ? dayOf(feedStart) : ''
   return [...out.values()].filter((r) => r.day >= from)
 }
+
+type PeriodCard = {
+  id: string; cardNumber: string; machine: string; status: string; reportedFault: string | null
+  checkedInAt: Date | null; releasedAt: Date | null
+  vehicle: { id: string; registrationPlate: string; name: string | null } | null
+}
+
+/**
+ * The period's bookings followed through, and its moves. Of the cards booked in
+ * the window (cancelled ones left out), how many have left the workshop: the
+ * "16 / 17 fixed" figure. Released-in-the-window counts machines booked before
+ * it too, so it cannot be that figure's numerator. Moves: every booking and
+ * release in the window, newest first, the workshop's days as FactorySuite saw them.
+ */
+export function periodMoves<C extends PeriodCard>(cards: C[], since: Date, cap = 300) {
+  const inWindow = (d: Date | null) => !!d && d >= since
+  const booked = cards.filter((c) => inWindow(c.checkedInAt) && c.status !== 'CANCELLED')
+  const bookedFixed = booked.filter((c) => c.releasedAt || c.status === 'RELEASED').length
+  const moveOf = (c: C, kind: 'booked' | 'released', at: Date) => ({
+    kind, at, cardId: c.id, cardNumber: c.cardNumber, machine: c.machine, vehicle: c.vehicle,
+    status: c.status, reportedFault: c.reportedFault, checkedInAt: c.checkedInAt, releasedAt: c.releasedAt,
+  })
+  const moves = [
+    ...booked.map((c) => moveOf(c, 'booked', c.checkedInAt!)),
+    ...cards.filter((c) => inWindow(c.releasedAt)).map((c) => moveOf(c, 'released', c.releasedAt!)),
+  ].sort((x, y) => y.at.getTime() - x.at.getTime()).slice(0, cap)
+  return { booked, bookedFixed, moves }
+}

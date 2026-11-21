@@ -28,7 +28,11 @@ export const board = handle(async (req) => {
   const q = boardQuery.parse(req.query)
   const out = await workshopBoard(p(req, 'orgId'), q.days ?? 7)
   const s = scope(req)
-  return s ? { ...out, open: out.open.filter((c) => c.vehicleId && s.has(c.vehicleId)) } : out
+  return s ? {
+    ...out,
+    open:  out.open.filter((c) => c.vehicleId && s.has(c.vehicleId)),
+    moves: out.moves.filter((m) => m.vehicle && s.has(m.vehicle.id)),
+  } : out
 })
 
 const cardsFor = async (req: Request) => {
