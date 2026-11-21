@@ -36,7 +36,7 @@ import { holdersOf, userHolds } from '../../lib/authz/holders.js'
 import {
   checklistFor, queueFor, type Assessment, type Booking, type Complete, type Damage,
   type FaultCategory, type FlagUnits, type InvestigationUpdate, type PathBody, type SpotFix, type Verify,
-  type VoidBody, type WarrantyVoid, type ExpectedBack, type WorkEntry, type WorkEdit, type WorkshopAssign, type MovePhase,
+  type VoidBody, type WarrantyVoid, type WorkEntry, type WorkEdit, type WorkshopAssign, type MovePhase,
 } from './repairs.workflow.schema.js'
 import type { Stage } from './repairs.schema.js'
 
@@ -846,30 +846,6 @@ export async function classifyDamage(orgId: string, itemId: string, userId: stri
       audience: ['control_room', 'head_of_security'],
     }, userId)
   }
-  return findItemById(itemId, orgId)
-}
-
-/**
- * Sets (or clears) when the unit is supposed to be back. Any open job, at any
- * stage short of closed: the date is wanted from the moment it is booked. The
- * stage does not move; the trail gets a `kind: 'expected_back'` entry, as an
- * escalation does, so who promised which day stays on the ticket.
- */
-export async function setExpectedBack(orgId: string, itemId: string, userId: string, dto: ExpectedBack) {
-  await prisma.$transaction(async (tx) => {
-    const job = await openJob(tx, itemId, orgId)
-    const day = dto.expectedBack ? dto.expectedBack.toISOString().slice(0, 10) : null
-    const byName = await nameOf(tx, userId)
-    const entry = {
-      kind: 'expected_back', at: new Date().toISOString(), by: userId, ...(byName ? { byName } : {}),
-      note: day ? `Expected back ${day}${dto.note ? `: ${dto.note}` : ''}` : `Expected back date cleared${dto.note ? `: ${dto.note}` : ''}`,
-    }
-    const { count } = await tx.repairReportItem.updateMany({
-      where: { id: job.id, resolvedAt: null, stage: job.stage },
-      data: { expectedResolutionAt: dto.expectedBack, stageHistory: appendHistory(job.stageHistory, entry) },
-    })
-    if (count === 0) throw new ConflictError('This job changed while you were working on it. Reload and try again')
-  })
   return findItemById(itemId, orgId)
 }
 

@@ -150,16 +150,6 @@ export const damageSchema = z.object({
   path: ['note'], message: 'Describe the damage: it goes to the Head of Security',
 })
 
-/**
- * When the unit is supposed to be back in service: a calendar day, or null to
- * clear it. The same column the repair report's fix date fills
- * (expectedResolutionAt), so the overdue escalation and the board's ETA read it.
- */
-export const expectedBackSchema = z.object({
-  expectedBack: calendarDay.nullable(),
-  note:         note(500).optional(),
-})
-
 export const warrantyVoidSchema = z.object({
   note:       required(1000, 'Say why the warranty is void'),
   components: z.array(z.string().min(1).max(64)).max(20).default([]),
@@ -269,7 +259,6 @@ export type Booking       = z.infer<typeof bookingSchema>
 export type WorkshopAssign = z.infer<typeof workshopAssignSchema>
 export type Damage        = z.infer<typeof damageSchema>
 export type WarrantyVoid  = z.infer<typeof warrantyVoidSchema>
-export type ExpectedBack  = z.infer<typeof expectedBackSchema>
 export type WorkEntry     = z.infer<typeof workEntrySchema>
 export type WorkEdit      = z.infer<typeof workEditSchema>
 export type Complete      = z.infer<typeof completeSchema>

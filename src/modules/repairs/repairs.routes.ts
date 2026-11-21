@@ -33,7 +33,7 @@ import * as wf from './repairs.workflow.controller.js'
 import * as fsw from './factorysuite-workshop.controller.js'
 import {
   flagUnitsSchema, spotFixSchema, pathSchema, assessmentSchema, bookingSchema, cancelBookingSchema,
-  workshopAssignSchema, damageSchema, expectedBackSchema, warrantyVoidSchema, warrantyClearSchema, workEntrySchema, workEditSchema,
+  workshopAssignSchema, damageSchema, warrantyVoidSchema, warrantyClearSchema, workEntrySchema, workEditSchema,
   completeSchema, verifySchema, voidSchema, movePhaseSchema, sourcePartSchema, issuePartSchema,
   investigationUpdateSchema, availabilityQuerySchema, dayQuerySchema, workshopUpdateSchema,
 } from './repairs.workflow.schema.js'
@@ -130,8 +130,6 @@ router.post('/items/:itemId/booking/cancel', requirePermissionStrict('repair:boo
 router.post('/items/:itemId/arrive', requirePermissionStrict('repair:book'), wf.arrive)
 router.post('/items/:itemId/workshop-assign', requirePermissionStrict('repair:book'), validateBody(workshopAssignSchema), wf.workshopAssign)
 router.post('/items/:itemId/damage', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(damageSchema), wf.damage)
-// When the unit is supposed to be back: the board's ETA and the overdue escalation read it.
-router.post('/items/:itemId/expected-back', requirePermissionStrict('repair:resolve'), validateBody(expectedBackSchema), wf.expectedBack)
 router.post('/items/:itemId/warranty-void', requirePermissionStrict('repair:resolve'), requireWorkableJob, validateBody(warrantyVoidSchema), wf.voidWarranty)
 router.post('/items/:itemId/warranty-void/clear', requirePermissionStrict('security_case:update'), validateBody(warrantyClearSchema), wf.clearWarranty)
 // The work log opens by stage (repairs.workflow WORK_KINDS_AT): the Control

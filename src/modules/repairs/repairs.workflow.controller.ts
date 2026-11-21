@@ -4,7 +4,7 @@ import * as wf from './repairs.workflow.js'
 import * as overhaul from './repairs.overhaul.js'
 import type {
   Assessment, Booking, Complete, Damage, FlagUnits, InvestigationUpdate, IssuePart, PathBody,
-  SourcePart, SpotFix, Verify, VoidBody, WarrantyVoid, ExpectedBack, WorkEdit, WorkEntry, WorkshopAssign, MovePhase,
+  SourcePart, SpotFix, Verify, VoidBody, WarrantyVoid, WorkEdit, WorkEntry, WorkshopAssign, MovePhase,
 } from './repairs.workflow.schema.js'
 
 const p = (req: Request, key: string) => req.params[key] as string
@@ -36,7 +36,6 @@ export const arrive = handle((req) => wf.arrive(p(req, 'orgId'), p(req, 'itemId'
 export const workshopAssign = handle((req) => wf.workshopAssign(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as WorkshopAssign))
 
 export const damage = handle((req) => wf.classifyDamage(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as Damage))
-export const expectedBack = handle((req) => wf.setExpectedBack(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as ExpectedBack))
 export const voidWarranty = handle((req) => wf.voidWarranty(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, req.body as WarrantyVoid))
 export const clearWarranty = handle((req) => wf.clearWarranty(p(req, 'orgId'), p(req, 'itemId'), req.user!.id, (req.body as { note: string }).note))
 
