@@ -57,14 +57,18 @@ const COMPLETABLE: Stage[] = ['remote_fix', 'in_workshop', 'field_inspection', '
 
 export const jobSelect = {
   id: true, organisationId: true, vehicleId: true, stage: true, stageHistory: true, resolvedAt: true,
-  outcome: true, targetKind: true, faultKind: true, faultCategory: true, queue: true, path: true,
+  outcome: true, targetKind: true, faultKind: true, faultCategory: true, faultCategories: true, queue: true, path: true,
   ticketNo: true, assignedToId: true, assignmentStatus: true, workshopTechnicianId: true,
   damageClass: true, completedById: true, stageChangedAt: true, diagnosis: true, fixNote: true,
   vehicle: { select: { registrationPlate: true } },
 } as const
 export type Job = Prisma.RepairReportItemGetPayload<{ select: typeof jobSelect }>
 
-export function labelOf(job: Pick<Job, 'faultCategory' | 'faultKind'>): string {
+export function labelOf(job: Pick<Job, 'faultCategory' | 'faultKind'> & { faultCategories?: string[] | null }): string {
+  // A consolidated telematics job names every fault it covers: "Fuel probe, GPS".
+  if ((job.faultCategories?.length ?? 0) > 1) {
+    return job.faultCategories!.map((c) => CATEGORY_LABEL[c as FaultCategory] ?? c).join(', ')
+  }
   return job.faultCategory ? CATEGORY_LABEL[job.faultCategory as FaultCategory] ?? job.faultCategory : humanKind(job.faultKind)
 }
 
@@ -161,16 +165,18 @@ async function ticketFields(tx: Tx, job: { ticketNo: string | null }, at = new D
  * repair_ticket item: only the operator, supervisor and both security heads
  * see it (notifications/restricted-sources), never the technicians.
  */
-async function tellTickets(jobs: Job[], how: string, by?: string) {
+async function tellTickets(jobs: Job[], how: string | ((j: Job) => string), by?: string) {
+  const howOf = typeof how === 'function' ? how : () => how
   const byUnit = new Map<string, Job[]>()
   for (const j of jobs) if (j.ticketNo) byUnit.set(j.vehicleId, [...(byUnit.get(j.vehicleId) ?? []), j])
   for (const group of byUnit.values()) {
     const nos = group.map((j) => j.ticketNo!).join(', ')
     const tickets = group.map((j) => `${j.ticketNo} (${labelOf(j)})`).join(', ')
+    const paths = [...new Set(group.map(howOf))].join('; ')
     await tell({ ...refOf(group[0]!), label: group.map(labelOf).join(', '), ticketNo: nos }, {
       key: 'ticket', severity: 'info', headline: 'Repair ticket issued',
-      text: `ticket issued: ${how}`,
-      lines: [{ label: group.length > 1 ? 'Tickets' : 'Ticket', value: tickets }, { label: 'Path', value: how }],
+      text: `ticket issued: ${paths}`,
+      lines: [{ label: group.length > 1 ? 'Tickets' : 'Ticket', value: tickets }, { label: 'Path', value: paths }],
       audience: [], push: TICKET_PUSH, source: 'repair_ticket',
     }, by)
   }
@@ -233,9 +239,19 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
   for (const v of vehicles) assertInScope(scope, v.id)
 
   // A probe flag is a probe job, so Fuel Audit and "Probe reported" see it.
-  // Everything else is a fault on the unit, keyed by its category. Several
-  // categories make one job each per unit, all refused if any is already open.
+  // Everything else is a fault on the unit, keyed by its category.
+  //
+  // Every fault bound for ControlTech is ONE job per unit, with one ticket
+  // (operator, 2026-11-21: "that should not create individual items but a
+  // consolidated item with a single ticket"). It leads with the fuel probe
+  // when that is among them, so Fuel Audit and "Probe reported" still see a
+  // probe job, and lists every category in faultCategories. A workshop fault
+  // is still one job per category. All are refused if any is already open.
   const categories = dto.faultCategories as FaultCategory[]
+  const ctCats = categories.filter((c) => queueFor(c, dto.queue) === 'controltech')
+  const ctLead = ctCats.includes('fuel_probe') ? 'fuel_probe' as FaultCategory : ctCats[0]
+  const leads = [...(ctLead ? [ctLead] : []), ...categories.filter((c) => !ctCats.includes(c))]
+  const coverOf = (c: FaultCategory): string[] => (c === ctLead ? [ctLead, ...ctCats.filter((x) => x !== ctLead)] : [c])
   const kindOf = (c: FaultCategory) => (c === 'fuel_probe' ? 'probe' : 'unit') as 'probe' | 'unit'
   const unitCats = categories.filter((c) => kindOf(c) === 'unit')
   const open = await prisma.repairReportItem.findMany({
@@ -244,27 +260,33 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
       OR: [
         ...(categories.includes('fuel_probe') ? [{ targetKind: 'probe' }] : []),
         ...(unitCats.length ? [{ targetKind: 'unit', faultCategory: { in: unitCats } }] : []),
+        // A consolidated job holding one of these among its others.
+        { faultCategories: { hasSome: categories } },
       ],
     },
-    select: { targetKind: true, faultCategory: true, vehicle: { select: { registrationPlate: true } } },
+    select: { targetKind: true, faultCategory: true, faultCategories: true, vehicle: { select: { registrationPlate: true } } },
   })
   if (open.length > 0) {
-    const what = [...new Set(open.map((o) =>
-      CATEGORY_LABEL[(o.targetKind === 'probe' ? 'fuel_probe' : o.faultCategory) as FaultCategory]?.toLowerCase() ?? 'repair'))]
+    const what = [...new Set(open.flatMap((o) => ((o.faultCategories?.length ?? 0) > 1
+      ? o.faultCategories.filter((c) => categories.includes(c as FaultCategory))
+      : [o.targetKind === 'probe' ? 'fuel_probe' : o.faultCategory]
+    ).map((c) => CATEGORY_LABEL[c as FaultCategory]?.toLowerCase() ?? 'repair')))]
     const plates = [...new Set(open.map((o) => o.vehicle.registrationPlate))].join(', ')
     throw new ConflictError(`A ${what.join(' and ')} repair is already open for ${plates}`)
   }
 
   const flaggedAt = new Date()
   const byName = await nameOf(prisma, userId)
-  const lands = new Map(categories.map((c) => [c, landing(c, dto.queue, dto.forward)]))
+  const lands = new Map(leads.map((c) => [c, landing(c, dto.queue, dto.forward)]))
   const noteOf = (stage: Stage) => stage === 'forwarded' ? 'Flagged and forwarded to ControlTech'
     : stage === 'awaiting_assessment' ? 'Flagged; mechanical fault, to the workshop for assessment'
       : 'Flagged'
-  // A mechanical fault lands on the physical path at once, so it is ticketed now.
+  // A mechanical fault lands on the physical path at once, so it is ticketed
+  // now. So is the ControlTech job: one ticket for every telematics fault on
+  // the unit, from the moment it is flagged (operator, 2026-11-21).
   const ticketsFor = new Map<FaultCategory, string[]>()
-  for (const c of categories) {
-    if (lands.get(c)!.path !== 'physical') continue
+  for (const c of leads) {
+    if (lands.get(c)!.path !== 'physical' && c !== ctLead) continue
     const nos: string[] = []
     for (let i = 0; i < vehicles.length; i++) nos.push(await nextTicketNo(prisma))
     ticketsFor.set(c, nos)
@@ -275,13 +297,13 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
       data: {
         organisationId: orgId, reportedById: userId, note: `Control Room flag: ${dto.suspectedFault}`,
         items: {
-          create: vehicles.flatMap((v, vi) => categories.map((c) => {
+          create: vehicles.flatMap((v, vi) => leads.map((c) => {
             const land = lands.get(c)!
             const ticketNo = ticketsFor.get(c)?.[vi]
             return {
               ...(ticketNo ? { ticketNo, ticketIssuedAt: flaggedAt } : {}),
               organisationId: orgId, targetKind: kindOf(c), vehicleId: v.id, outcome: 'flagged',
-              faultCategory: c, suspectedFault: dto.suspectedFault,
+              faultCategory: c, faultCategories: coverOf(c), suspectedFault: dto.suspectedFault,
               problemNote: dto.suspectedFault,
               ...(c === 'fuel_probe' ? { faultKind: 'fuel_probe_dead' } : {}),
               stage: land.stage, queue: land.queue, path: land.path, forwardedAt: land.forwardedAt,
@@ -324,7 +346,8 @@ export async function flagUnits(orgId: string, userId: string, dto: FlagUnits, s
       audience: [], source: 'repair_flag',
     }, userId)
   }
-  await tellTickets(report.items, 'physical: to the workshop for assessment', userId)
+  // One ticket notice per unit, naming the workshop's and ControlTech's tickets alike.
+  await tellTickets(report.items, (j) => (j.path === 'physical' ? 'physical: to the workshop for assessment' : 'to ControlTech'), userId)
   return Promise.all(report.items.map((i) => findItemById(i.id, orgId)))
 }
 
@@ -865,7 +888,7 @@ export async function voidWarranty(orgId: string, itemId: string, userId: string
     if (job.damageClass !== 'suspected_malicious') {
       throw new ConflictError('A warranty is voided only for suspected malicious damage. Classify the damage first')
     }
-    const list = checklistFor(job.faultCategory)
+    const list = checklistFor(job.faultCategory, job.faultCategories)
     const stray = dto.components.find((c) => list.length > 0 && !list.includes(c))
     if (stray) throw new UnprocessableError(`${stray} is not on this job's checklist`)
     await tx.repairReportItem.update({
@@ -1223,7 +1246,7 @@ export async function ticket(orgId: string, itemId: string) {
   const nameFor = (id: string | null) => people.find((p) => p.id === id)?.fullName ?? null
   return {
     ...item,
-    checklist: checklistFor(item.faultCategory),
+    checklist: checklistFor(item.faultCategory, item.faultCategories),
     completedByName: nameFor(item.completedById),
     verifiedByName: nameFor(item.verifiedById),
     pathDecidedByName: nameFor(item.pathDecidedById),

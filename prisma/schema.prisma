@@ -1596,6 +1596,10 @@ model RepairReportItem {
   /// suspension_steering | tyres | electrical | hydraulics | body | other (CHECK).
   /// Routes the job (repairs.workflow.schema FAULT_CATEGORIES) and picks its checklist.
   faultCategory          String?   @map("fault_category")
+  /// Every category the job covers, `faultCategory` first (migration
+  /// 20261121120000). A flag's telematics faults on one unit are ONE ControlTech
+  /// job (operator, 2026-11-21). Empty on older jobs: they cover faultCategory.
+  faultCategories        String[]  @default([]) @map("fault_categories")
   /// What the Control Room saw. Required with outcome 'flagged' (CHECK).
   suspectedFault         String?   @map("suspected_fault")
   /// controltech | workshop. Null = a hand-assigned job from before the workflow.

@@ -58,7 +58,9 @@ export const CHECKLISTS: Record<FaultCategory, readonly string[]> = {
 export const ALL_COMPONENTS = [...new Set(Object.values(CHECKLISTS).flat())]
 
 /** The checklist a job uses. A job from before the workflow is a probe job. */
-export function checklistFor(category: string | null | undefined): readonly string[] {
+export function checklistFor(category: string | null | undefined, categories: readonly string[] = []): readonly string[] {
+  // A consolidated telematics job checks every part of every fault it covers.
+  if (categories.length > 1) return [...new Set(categories.flatMap((c) => CHECKLISTS[c as FaultCategory] ?? []))]
   return CHECKLISTS[(category ?? 'fuel_probe') as FaultCategory] ?? []
 }
 

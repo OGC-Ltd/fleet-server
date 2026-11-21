@@ -107,7 +107,7 @@ describe('one flag, several faults (2026-10-22)', () => {
     expect(() => flagUnitsSchema.parse({ vehicleIds: ['v1'], faultCategories: [], suspectedFault: 'x' })).toThrow()
   })
 
-  it('makes one job per unit per category, each routed by its own category', async () => {
+  it('makes one ControlTech job per unit for its telematics faults, and one workshop job per mechanical fault (2026-11-21)', async () => {
     const create = vi.fn(async ({ data }: { data: { items: { create: Array<Record<string, unknown>> } } }) => ({
       items: data.items.create.map((it, i) => ({ id: `j${i}`, ...it })),
     }))
@@ -123,11 +123,37 @@ describe('one flag, several faults (2026-10-22)', () => {
     }), null).catch(() => undefined)
 
     const items = create.mock.calls[0][0].data.items.create
-    expect(items).toHaveLength(6)
+    expect(items).toHaveLength(4)
     const of = (v: string, c: string) => items.find((i) => i.vehicleId === v && i.faultCategory === c)
-    expect(of('v1', 'gps')).toMatchObject({ targetKind: 'unit', queue: 'controltech', stage: 'forwarded' })
-    expect(of('v2', 'ignition')).toMatchObject({ queue: 'controltech' })
-    expect(of('v1', 'brakes')).toMatchObject({ queue: 'workshop', stage: 'awaiting_assessment', path: 'physical' })
+    expect(of('v1', 'gps')).toMatchObject({ targetKind: 'unit', queue: 'controltech', stage: 'forwarded', faultCategories: ['gps', 'ignition'] })
+    expect(of('v2', 'gps')).toMatchObject({ queue: 'controltech', faultCategories: ['gps', 'ignition'] })
+    expect(of('v1', 'ignition')).toBeUndefined()
+    expect(of('v1', 'brakes')).toMatchObject({ queue: 'workshop', stage: 'awaiting_assessment', path: 'physical', faultCategories: ['brakes'] })
+    // One ticket per ControlTech job, issued at the flag.
+    expect(items.filter((i) => i.queue === 'controltech').every((i) => typeof i.ticketNo === 'string')).toBe(true)
+  })
+
+  it('leads the ControlTech job with the fuel probe, so it stays a probe job', async () => {
+    const create = vi.fn(async ({ data }: { data: { items: { create: Array<Record<string, unknown>> } } }) => ({
+      items: data.items.create.map((it, i) => ({ id: `j${i}`, ...it })),
+    }))
+    const extra = prismaMock as unknown as Record<string, unknown>
+    extra.vehicle = { findMany: vi.fn(async () => [{ id: 'v1', registrationPlate: 'KBL 126W' }]) }
+    extra.repairReport = { create }
+    tx.repairReportItem.findMany.mockResolvedValueOnce([])
+    tx.repairReportItem.findFirst.mockResolvedValue(null)
+
+    await flagUnits(ORG, 'u1', flagUnitsSchema.parse({
+      vehicleIds: ['v1'], faultCategories: ['gps', 'tracker', 'fuel_probe'], suspectedFault: 'Silent since noon',
+    }), null).catch(() => undefined)
+
+    const items = create.mock.calls[0][0].data.items.create
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({
+      targetKind: 'probe', faultCategory: 'fuel_probe', faultKind: 'fuel_probe_dead',
+      faultCategories: ['fuel_probe', 'gps', 'tracker'], queue: 'controltech', stage: 'forwarded',
+    })
+    expect(items[0]!.ticketNo).toMatch(/^RT-/)
   })
 
   it('sends one notice per unit, naming every fault, not one per job', async () => {
@@ -158,15 +184,14 @@ describe('one flag, several faults (2026-10-22)', () => {
       expect(ev.source).toBe('repair_flag')
     }
 
-    // Transmission lands on the physical path, so it is ticketed at the flag;
-    // the fuel probe waits for ControlTech's remote-or-physical decision.
+    // Both are ticketed at the flag: transmission for the workshop, the fuel
+    // probe for ControlTech (2026-11-21). Still one ticket notice per unit.
     const items = create.mock.calls[0][0].data.items.create
-    expect(items.filter((i) => i.ticketNo)).toHaveLength(2)
-    expect(items.find((i) => i.faultCategory === 'fuel_probe')?.ticketNo).toBeUndefined()
+    expect(items.filter((i) => i.ticketNo)).toHaveLength(4)
     const tickets = all.filter(([, ev]) => ev.key === 'ticket')
     expect(tickets).toHaveLength(2)
     for (const [ref, ev] of tickets) {
-      expect(ref.ticketNo).toMatch(/^RT-\d{4}-000\d\d$/)
+      expect(ref.ticketNo).toMatch(/^RT-\d{4}-000\d\d, RT-\d{4}-000\d\d$/)
       expect(ev.audience).toEqual([])
       expect(ev.push).toEqual(['notification:push_tickets'])
       expect(ev.source).toBe('repair_ticket')
@@ -179,6 +204,22 @@ describe('one flag, several faults (2026-10-22)', () => {
     tx.repairReportItem.findMany.mockResolvedValueOnce([{ targetKind: 'unit', faultCategory: 'gps', vehicle: { registrationPlate: 'KBL 126W' } }])
     await expect(flagUnits(ORG, 'u1', flagUnitsSchema.parse({
       vehicleIds: ['v1'], faultCategories: ['gps', 'brakes'], suspectedFault: 'x',
+    }), null)).rejects.toThrow('A gps repair is already open for KBL 126W')
+  })
+
+  it('checks every part of every fault on a consolidated job', () => {
+    const list = checklistFor('gps', ['gps', 'tracker'])
+    for (const c of [...CHECKLISTS.gps, ...CHECKLISTS.tracker]) expect(list).toContain(c)
+    expect(new Set(list).size).toBe(list.length)
+    expect(checklistFor('gps', ['gps'])).toEqual(CHECKLISTS.gps)
+  })
+
+  it('refuses a flag naming a fault a consolidated job already holds', async () => {
+    const extra = prismaMock as unknown as Record<string, unknown>
+    extra.vehicle = { findMany: vi.fn(async () => [{ id: 'v1', registrationPlate: 'KBL 126W' }]) }
+    tx.repairReportItem.findMany.mockResolvedValueOnce([{ targetKind: 'probe', faultCategory: 'fuel_probe', faultCategories: ['fuel_probe', 'gps'], vehicle: { registrationPlate: 'KBL 126W' } }])
+    await expect(flagUnits(ORG, 'u1', flagUnitsSchema.parse({
+      vehicleIds: ['v1'], faultCategories: ['gps'], suspectedFault: 'x',
     }), null)).rejects.toThrow('A gps repair is already open for KBL 126W')
   })
 

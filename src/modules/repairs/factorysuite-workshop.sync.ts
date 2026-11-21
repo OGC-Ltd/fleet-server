@@ -159,7 +159,8 @@ async function adoptable(tx: Tx, orgId: string, vehicleId: string, category: str
   })
   const waiting = open.find((j) => (AWAITING_ARRIVAL as readonly string[]).includes(j.stage) && j.fsJobCards.length === 0)
   if (waiting) return waiting
-  return open.find((j) => j.faultCategory === category) ?? null
+  // A consolidated ControlTech job covers each category in its list.
+  return open.find((j) => j.faultCategory === category || j.faultCategories.includes(category)) ?? null
 }
 
 async function createJob(tx: Tx, card: Card, orgId: string, vehicleId: string, stage: CardStage, history: boolean) {
@@ -432,7 +433,7 @@ export async function syncBreakdowns(rows: RaiFactorySuiteBreakdownRow[], opts: 
         if (prev?.repairItemId || !vehicleId || row.status.toUpperCase() !== 'CONFIRMED' || row.jobCardNumber) return null
         const category = categoryFor(cols.reportedFault)
         const open = await tx.repairReportItem.findFirst({
-          where: { organisationId: orgId, vehicleId, resolvedAt: null, targetKind: 'unit', faultCategory: category },
+          where: { organisationId: orgId, vehicleId, resolvedAt: null, targetKind: 'unit', OR: [{ faultCategory: category }, { faultCategories: { has: category } }] },
           select: { id: true },
         })
         if (open) {

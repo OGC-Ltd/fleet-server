@@ -56,7 +56,7 @@ async function nameOf(tx: Prisma.TransactionClient, userId: string): Promise<str
 async function openJob(tx: Prisma.TransactionClient, itemId: string, orgId: string) {
   const job = await tx.repairReportItem.findFirst({
     where: { id: itemId, organisationId: orgId },
-    select: { id: true, stage: true, resolvedAt: true, stageHistory: true, faultCategory: true },
+    select: { id: true, stage: true, resolvedAt: true, stageHistory: true, faultCategory: true, faultCategories: true },
   })
   if (!job) throw new NotFoundError('Repair job not found')
   if (job.resolvedAt) throw new ConflictError('This job has been signed off; its overhaul can no longer change')
@@ -108,7 +108,7 @@ export async function setInspection(orgId: string, itemId: string, userId: strin
   return prisma.$transaction(async (tx) => {
     const job = await openJob(tx, itemId, orgId)
     // The job's own checklist. 'other' has none, so any component goes.
-    const list = checklistFor(job.faultCategory)
+    const list = checklistFor(job.faultCategory, job.faultCategories)
     if (list.length > 0 && !list.includes(dto.component)) {
       throw new UnprocessableError(`${dto.component} is not on this job's checklist`)
     }
