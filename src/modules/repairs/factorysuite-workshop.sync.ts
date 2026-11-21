@@ -35,7 +35,7 @@ import type {
 } from '../../providers/raifactorysuite/raifactorysuite.client.js'
 import {
   AWAITING_ARRIVAL, boardDays, breakdownColumns, cardStage, cardUnchanged, eatDayStart, categoryFor, jobCardColumns, partColumns,
-  partUnchanged, stageRank, suspectedFaultOf, type CardStage, type StoredCard,
+  partUnchanged, stableJson, stageRank, suspectedFaultOf, type CardStage, type StoredCard,
 } from '../../providers/raifactorysuite/raifactorysuite.workshop.js'
 import { appendStage, type StageEvent } from './repairs.repository.js'
 import { jobSelect, refOf, tell, type Job } from './repairs.workflow.js'
@@ -377,8 +377,12 @@ export async function syncJobCards(rows: RaiFactorySuiteJobCardRow[], opts: { si
     try {
       const o = await syncCard(row, ctx, now, report, opts.silent, stored.get(row.id))
       if (o === 'unchanged') { unchanged.push(row.id); continue }
+      // Written, so something on the card moved (a diagnosis, a parts time, a
+      // status inside one stage): open Auto Workshop pages read it again even
+      // when no job changed stage.
+      const org = ctx.orgs.get(row.factoryCode)
+      if (org) touched.add(org)
       if (!o) continue
-      touched.add(o.orgId)
       if (o.event === 'created') report.created++
       else if (o.event === 'adopted') report.adopted++
       else if (o.event === 'history') report.history++
@@ -419,7 +423,8 @@ export async function syncBreakdowns(rows: RaiFactorySuiteBreakdownRow[], opts: 
     const cols = breakdownColumns(row, orgId, vehicleId)
     try {
       const raised = await prisma.$transaction(async (tx) => {
-        const prev = await tx.factorySuiteBreakdown.findUnique({ where: { id: row.id }, select: { repairItemId: true } })
+        const prev = await tx.factorySuiteBreakdown.findUnique({ where: { id: row.id }, select: { repairItemId: true, raw: true } })
+        if (!prev || stableJson(prev.raw) !== stableJson(row)) touched.add(orgId)
         await tx.factorySuiteBreakdown.upsert({
           where: { id: row.id },
           create: { id: row.id, ...cols, raw: row as unknown as Prisma.InputJsonValue },
@@ -488,6 +493,11 @@ export async function syncBreakdowns(rows: RaiFactorySuiteBreakdownRow[], opts: 
 /** Stored raw: no requisition had been raised when this was written. */
 export async function syncRequisitions(rows: RaiFactorySuiteRequisitionRow[], report = empty()) {
   const ctx = await context()
+  const touched = new Set<string>()
+  const stored = new Map(
+    (await prisma.factorySuiteRequisition.findMany({ where: { id: { in: rows.map((r) => r.id).filter(Boolean) } }, select: { id: true, raw: true } }))
+      .map((r) => [r.id, stableJson(r.raw)] as const),
+  )
   for (const row of rows) {
     const orgId = ctx.orgs.get(row.factoryCode)
     if (!orgId || !row.id) continue
@@ -500,8 +510,10 @@ export async function syncRequisitions(rows: RaiFactorySuiteRequisitionRow[], re
     await prisma.factorySuiteRequisition.upsert({
       where: { id: row.id }, create: { id: row.id, ...cols }, update: { ...cols, syncedAt: new Date() },
     })
+    if (stored.get(row.id) !== stableJson(row)) touched.add(orgId)
     report.requisitions++
   }
+  for (const orgId of touched) emitDashboardRepairChanged(orgId)
   if (rows.length && report.requisitions) {
     logger.info({ sample: rows[0] }, 'FactorySuite workshop: requisitions are live; map them onto spare parts')
   }
@@ -535,14 +547,17 @@ export async function syncParts(rows: RaiFactorySuitePartRow[], report = empty()
       })).map(({ id, ...p }) => [id, p as Record<string, unknown>] as const),
     )
     const changed = parts.filter((row) => !partUnchanged(stored.get(row.id), partColumns(row, orgId)))
+    let dropped = 0
     await prisma.$transaction(async (tx) => {
       for (const row of changed) {
         const cols = partColumns(row, orgId)
         await tx.factorySuitePart.upsert({ where: { id: row.id }, create: { id: row.id, ...cols }, update: { ...cols, syncedAt: now } })
       }
       await tx.factorySuitePart.updateMany({ where: { id: { in: parts.map((r) => r.id) } }, data: { syncedAt: now } })
-      await tx.factorySuitePart.deleteMany({ where: { organisationId: orgId, syncedAt: { lt: now } } })
+      dropped = (await tx.factorySuitePart.deleteMany({ where: { organisationId: orgId, syncedAt: { lt: now } } })).count
     }, { timeout: 60_000 })
+    // Stock moved, or a part came or went: open Stores tables read again.
+    if (changed.length || dropped) emitDashboardRepairChanged(orgId)
     report.parts += parts.length
     report.unchanged += parts.length - changed.length
   }
