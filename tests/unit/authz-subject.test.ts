@@ -314,3 +314,10 @@ describe('a role restricted to flagged units (operator, 2026-10-27)', () => {
     expect(vehicleScopeIn(await resolveSubject('u1'), ORG_A)).toBeNull()
   })
 })
+
+describe('FactorySuite telematics jobs are ControlTech\'s too', () => {
+  it('matches a telematics fault with a FactorySuite job card', async () => {
+    const { FS_TELEMATICS_WHERE, TELEMATICS_CATEGORIES } = await import('../../src/lib/authz/subject.js')
+    expect(FS_TELEMATICS_WHERE).toEqual({ faultCategory: { in: TELEMATICS_CATEGORIES }, fsJobCards: { some: {} } })
+  })
+})

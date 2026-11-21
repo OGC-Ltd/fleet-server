@@ -364,11 +364,17 @@ export async function respondToAssignment(
   })
 }
 
-export async function findItems(orgId: string, q: ListItemsQuery, vehicleScope: Set<string> | null = null) {
+export async function findItems(
+  orgId: string, q: ListItemsQuery, vehicleScope: Set<string> | null = null,
+  // Jobs outside the scope that are still theirs to see (a technician: the
+  // FactorySuite telematics jobs, open or closed).
+  alsoWhere: Prisma.RepairReportItemWhereInput | null = null,
+) {
+  const inScope: Prisma.RepairReportItemWhereInput = { vehicleId: { in: [...(vehicleScope ?? [])] } }
   const rows = await prisma.repairReportItem.findMany({
     where: {
       organisationId: orgId,
-      ...(vehicleScope ? { vehicleId: { in: [...vehicleScope] } } : {}),
+      ...(vehicleScope ? (alsoWhere ? { OR: [inScope, alsoWhere] } : inScope) : {}),
       ...(q.queue ? { queue: q.queue } : {}),
       ...(q.status === 'open'       ? { resolvedAt: null }                              : {}),
       // Signed off, split by WHICH end it reached. See the note on `status` in

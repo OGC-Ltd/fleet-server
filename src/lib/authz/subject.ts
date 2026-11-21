@@ -344,7 +344,13 @@ export function applyPersonalGrants(
 }
 
 /** The telematics fault categories (repairs.workflow.schema TELEMATICS), restated to keep authz free of the repairs module. */
-const TELEMATICS_CATEGORIES = ['fuel_probe', 'tracker', 'gps', 'ignition', 'sensor']
+export const TELEMATICS_CATEGORIES = ['fuel_probe', 'tracker', 'gps', 'ignition', 'sensor']
+/**
+ * A FactorySuite workshop job for a telematics fault: ControlTech sees it too
+ * (operator, 2026-11-21: "if both are factory suite then we include them on
+ * the controltech team to see").
+ */
+export const FS_TELEMATICS_WHERE = { faultCategory: { in: TELEMATICS_CATEGORIES }, fsJobCards: { some: {} } }
 
 /**
  * Units with an open ControlTech job, per organisation asked about: on the
@@ -365,6 +371,7 @@ export async function openRepairVehicles(orgIds: string[], userId?: string): Pro
         // Not one ControlTech rejected back to the Control Room
         { stage: 'pending', faultCategory: { in: TELEMATICS_CATEGORIES }, assignmentStatus: { not: 'declined' } },
         { stage: 'pending', targetKind: 'probe', assignmentStatus: { not: 'declined' } },
+        FS_TELEMATICS_WHERE,
         // And their own jobs, as My jobs lists them, wherever the job has got
         // to (operator, 2026-11-21: "if the unit is not in controltech page or
         // my jobs page it should not be on the live map for technicians")

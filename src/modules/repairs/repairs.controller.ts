@@ -4,6 +4,7 @@ import { holdsPermission } from '../../middleware/authorize.js'
 import { sendSuccess } from '../../core/response/response.js'
 import { ConflictError, NotFoundError, UnprocessableError } from '../../core/errors/errors.js'
 import * as repo from './repairs.repository.js'
+import { flaggedOnlyIn, FS_TELEMATICS_WHERE } from '../../lib/authz/subject.js'
 import * as svc from './repairs.service.js'
 import type {
   AssignRepairItem, CreateRepairReport, ResolveItem, SetStage, ListReportsQuery, ListItemsQuery,
@@ -22,7 +23,11 @@ export const listReports: RequestHandler = async (req, res, next) => {
 export const listItems: RequestHandler = async (req, res, next) => {
   try {
     // A vehicle-scoped Control Room holder sees the jobs on their own units.
-    const result = await repo.findItems(p(req, 'orgId'), req.query as unknown as ListItemsQuery, req.authz?.vehicleIds ?? null)
+    const scope = req.authz?.vehicleIds ?? null
+    // A technician also reads the FactorySuite telematics jobs, fixed ones too
+    // (operator, 2026-11-21); the closed ones' units stay off their map.
+    const also = scope && await flaggedOnlyIn(req.user!.id, p(req, 'orgId')) ? FS_TELEMATICS_WHERE : null
+    const result = await repo.findItems(p(req, 'orgId'), req.query as unknown as ListItemsQuery, scope, also)
     sendSuccess(res, result.data, 200, { cursor: result.cursor, hasNextPage: result.hasNextPage })
   } catch (err) { next(err) }
 }
