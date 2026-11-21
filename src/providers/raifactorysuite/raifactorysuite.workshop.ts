@@ -57,6 +57,30 @@ export function categoryFor(fault: string | null | undefined, diagnosis?: string
   return 'other'
 }
 
+/**
+ * When FactorySuite says the machine is expected back, or null. The card
+ * carries no such field yet (none of 337 cards to 21 Nov 2026 has one), so
+ * this reads the names FactorySuite is likely to give it and returns null
+ * until one arrives: the board shows no ETA rather than one we made up
+ * (operator, 21 Nov 2026).
+ */
+const EXPECTED_BACK_KEYS = [
+  'expectedBackAt', 'expectedReleaseAt', 'expectedReleaseDate', 'expectedCompletionAt', 'expectedCompletionDate',
+  'estimatedCompletionAt', 'estimatedCompletionDate', 'estimatedReleaseAt', 'expectedReturnAt', 'eta',
+]
+export function expectedBackOf(raw: unknown): Date | null {
+  if (!raw || typeof raw !== 'object') return null
+  const row = raw as Record<string, unknown>
+  for (const k of EXPECTED_BACK_KEYS) {
+    const v = row[k]
+    if (typeof v === 'string' && v.trim()) {
+      const d = parseFsTime(v.trim())
+      if (d) return d
+    }
+  }
+  return null
+}
+
 /** The workflow stages a card can put its job on, in the order a job moves. */
 export type CardStage = 'in_workshop' | 'fixing' | 'spare_outsourced' | 'completed' | 'void'
 

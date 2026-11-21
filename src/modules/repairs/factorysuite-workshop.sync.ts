@@ -35,7 +35,7 @@ import type {
 } from '../../providers/raifactorysuite/raifactorysuite.client.js'
 import {
   AWAITING_ARRIVAL, boardDays, breakdownColumns, cardStage, cardUnchanged, eatDayStart, categoryFor, jobCardColumns, partColumns,
-  partUnchanged, stableJson, stageRank, suspectedFaultOf, type CardStage, type StoredCard, periodMoves } from '../../providers/raifactorysuite/raifactorysuite.workshop.js'
+  partUnchanged, stableJson, stageRank, suspectedFaultOf, type CardStage, type StoredCard, periodMoves, expectedBackOf } from '../../providers/raifactorysuite/raifactorysuite.workshop.js'
 import { appendStage, type StageEvent } from './repairs.repository.js'
 import { jobSelect, refOf, tell, type Job } from './repairs.workflow.js'
 import { COMPLETED_PUSH } from './repairs.workflow.notify.js'
@@ -604,11 +604,10 @@ export async function vehicleJobCards(orgId: string, vehicleId: string, limit = 
 export async function workshopBoard(orgId: string, days = 7) {
   // Whole East Africa days, today included, so the first bar of the chart is not a part day.
   const since = eatDayStart(new Date(), days - 1)
-  const [open, recent, first] = await Promise.all([
+  const [openRows, recent, first] = await Promise.all([
     prisma.factorySuiteJobCard.findMany({
       where: { organisationId: orgId, status: { notIn: ['RELEASED', 'CANCELLED'] } },
       orderBy: { checkedInAt: 'asc' },
-      omit: { raw: true },
       include: { vehicle: { select: { id: true, registrationPlate: true, name: true } }, repairItem: { select: { id: true, stage: true, ticketNo: true } } },
     }),
     // Checked in OR released in the window: a card in for a fortnight still counts on the day it leaves.
@@ -627,6 +626,8 @@ export async function workshopBoard(orgId: string, days = 7) {
   const opened = recent.filter((c) => inWindow(c.checkedInAt))
   const released = recent.filter((c) => inWindow(c.releasedAt))
   const { booked, bookedFixed, moves } = periodMoves(recent, since)
+  // Expected back only as FactorySuite gives it; the raw row stays on the server.
+  const open = openRows.map(({ raw, ...c }) => ({ ...c, expectedBackAt: expectedBackOf(raw) }))
   const hours = released.filter((c) => c.checkedInAt)
     .map((c) => (c.releasedAt!.getTime() - c.checkedInAt!.getTime()) / 3_600_000).sort((a, b) => a - b)
   return {

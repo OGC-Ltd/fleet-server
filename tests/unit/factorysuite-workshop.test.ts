@@ -137,3 +137,16 @@ describe('periodMoves (booked followed through)', () => {
   })
   it('caps the list', () => expect(periodMoves(cards, since, 2).moves).toHaveLength(2))
 })
+
+describe('expectedBackOf', () => {
+  it('is null while FactorySuite sends no expected date', async () => {
+    const { expectedBackOf } = await import('../../src/providers/raifactorysuite/raifactorysuite.workshop.js')
+    expect(expectedBackOf({ cardNumber: 'X', checkedInAt: '2026-11-20T08:00:00' })).toBeNull()
+    expect(expectedBackOf(null)).toBeNull()
+    expect(expectedBackOf({ expectedReleaseAt: '' })).toBeNull()
+  })
+  it('reads a FactorySuite date as East Africa wall clock', async () => {
+    const { expectedBackOf } = await import('../../src/providers/raifactorysuite/raifactorysuite.workshop.js')
+    expect(expectedBackOf({ expectedReleaseAt: '2026-11-22T17:00:00' })?.toISOString()).toBe('2026-11-22T14:00:00.000Z')
+  })
+})
