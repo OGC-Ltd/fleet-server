@@ -14,15 +14,19 @@ vi.mock('../../src/modules/fuel/probe-report.service.js', () => ({
   ]),
 }))
 
+const flagged = vi.hoisted(() => ({ only: false }))
+vi.mock('../../src/lib/authz/subject.js', () => ({ flaggedOnlyIn: vi.fn(async () => flagged.only) }))
+
 const { listProbeHealth } = await import('../../src/modules/fuel/fuel.controller.js')
 
 type Sent = { rows: { vehicleId: string }[]; summary: { total: number; needsAttention: number } }
 
-async function call(vehicleIds: Set<string> | null) {
+async function call(vehicleIds: Set<string> | null, technician = false) {
+  flagged.only = technician
   const json = vi.fn()
   const res = { status: vi.fn(() => res), json } as unknown as Parameters<typeof listProbeHealth>[1]
   const next = vi.fn()
-  const req = { params: { orgId: 'o1' }, query: {}, authz: { vehicleIds } } as unknown as Parameters<typeof listProbeHealth>[0]
+  const req = { params: { orgId: 'o1' }, query: {}, authz: { vehicleIds }, user: { id: 'u1' } } as unknown as Parameters<typeof listProbeHealth>[0]
   await listProbeHealth(req, res, next)
   expect(next).not.toHaveBeenCalled()
   return (json.mock.calls[0]![0] as { data: Sent }).data
@@ -34,6 +38,12 @@ describe('probe health for a caller limited to some units', () => {
     expect(sent.rows.map((r) => r.vehicleId)).toEqual(['v1', 'v2'])
     expect(sent.summary.total).toBe(2)
     expect(sent.summary.needsAttention).toBe(1)
+  })
+
+  it('sends a technician every unit (operator, 2026-11-21)', async () => {
+    const sent = await call(new Set(['v1']), true)
+    expect(sent.rows).toHaveLength(3)
+    expect(sent.summary.total).toBe(3)
   })
 
   it('sends the whole fleet to an unlimited caller', async () => {

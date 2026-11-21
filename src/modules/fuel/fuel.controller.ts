@@ -5,6 +5,7 @@ import * as service from './fuel.service.js'
 import * as followUps from './fuel-followup.service.js'
 import { UnauthorizedError, GoneError } from '../../core/errors/errors.js'
 import { getProbeReport } from './probe-report.service.js'
+import { flaggedOnlyIn } from '../../lib/authz/subject.js'
 import { getFleetTankState } from './fuel-tank-state.service.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
 import * as signals from './fuel-signal-alerts.service.js'
@@ -203,10 +204,12 @@ export const createTheft: RequestHandler = async (req, res, next) => {
  */
 export const listProbeHealth: RequestHandler = async (req, res, next) => {
   try {
-    // A caller limited to some units (a technician: units with an open repair
-    // job) sees only those units' probes, and the tallies count only them
-    // (operator, 2026-11-21: "on the probes they will only see the flagged units").
-    const scope = req.authz?.vehicleIds ?? null
+    // A caller limited to some units sees only those units' probes, and the
+    // tallies count only them. A technician is not: they read every unit's
+    // probes (operator, 2026-11-21: "it should pull all data not limited to
+    // the reported one"); the site shows them the Not working state alone.
+    const limited = req.authz?.vehicleIds ?? null
+    const scope = limited && req.user && await flaggedOnlyIn(req.user.id, p(req, 'orgId')) ? null : limited
     const all = await getProbeReport(p(req, 'orgId'))
     const rows = scope ? all.filter((r) => scope.has(r.vehicleId)) : all
     const state = String(req.query['state'] ?? '').toLowerCase()
