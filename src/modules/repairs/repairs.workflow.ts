@@ -668,13 +668,15 @@ export async function workshopDay(orgId: string, workshopId: string, iso: string
     }),
     // An arrival is the in_workshop step on the trail. The ticket's date no
     // longer says it: a job is ticketed when its path is set, days earlier.
+    // A FactorySuite check-in arrives this way too: its card is the booking,
+    // so the card goes with it and the day board names it (operator, 21 Nov).
     prisma.repairReportItem.findMany({
       where: {
         organisationId: orgId, stageChangedAt: { gte: date },
         stageHistory: { array_contains: [{ stage: 'in_workshop' }] },
         bookings: { none: { status: { in: LIVE_BOOKING } } },
       },
-      include: itemInclude,
+      include: { ...itemInclude, fsJobCards: { select: { cardNumber: true, checkedInAt: true }, orderBy: { checkedInAt: 'asc' as const } } },
     }).then((rows) => rows.filter((r) => arrivedOn(r.stageHistory, date))),
   ])
   const booked = bookings.filter((b) => LIVE_BOOKING.includes(b.status)).length
