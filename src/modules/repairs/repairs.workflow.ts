@@ -659,6 +659,9 @@ export async function workshopDay(orgId: string, workshopId: string, iso: string
   const itemInclude = {
     vehicle: { select: { id: true, registrationPlate: true, name: true } },
     workshopTechnician: { select: { id: true, fullName: true } },
+    // The FactorySuite card, when there is one: its check-in and release are
+    // when the unit arrived and left, and a check-in is the unit's booking.
+    fsJobCards: { select: { cardNumber: true, checkedInAt: true, releasedAt: true }, orderBy: { checkedInAt: 'asc' as const } },
   } as const
   const [bookings, arrivals] = await Promise.all([
     prisma.workshopBooking.findMany({
@@ -668,15 +671,15 @@ export async function workshopDay(orgId: string, workshopId: string, iso: string
     }),
     // An arrival is the in_workshop step on the trail. The ticket's date no
     // longer says it: a job is ticketed when its path is set, days earlier.
-    // A FactorySuite check-in arrives this way too: its card is the booking,
-    // so the card goes with it and the day board names it (operator, 21 Nov).
+    // A FactorySuite check-in arrives this way too: its card is the booking
+    // (operator, 21 Nov).
     prisma.repairReportItem.findMany({
       where: {
         organisationId: orgId, stageChangedAt: { gte: date },
         stageHistory: { array_contains: [{ stage: 'in_workshop' }] },
         bookings: { none: { status: { in: LIVE_BOOKING } } },
       },
-      include: { ...itemInclude, fsJobCards: { select: { cardNumber: true, checkedInAt: true }, orderBy: { checkedInAt: 'asc' as const } } },
+      include: itemInclude,
     }).then((rows) => rows.filter((r) => arrivedOn(r.stageHistory, date))),
   ])
   const booked = bookings.filter((b) => LIVE_BOOKING.includes(b.status)).length
