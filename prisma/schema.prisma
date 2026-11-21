@@ -3642,6 +3642,9 @@ model DeliveryPlan {
   source         String    @default("sheet")
   /// A Wialon itinerary's name, e.g. "VS - Menengai - KDE 268P".
   routeName      String    @default("") @map("route_name")
+  /// The Deliveries report it is read on: 'vs' | 'fg' (CHECK), or null for
+  /// the truck's fleet group (migration 20261121140000, operator 2026-11-21).
+  list           String?
   /// The itinerary's planned run and km, its return home included.
   plannedStart   DateTime? @map("planned_start")
   plannedEnd     DateTime? @map("planned_end")

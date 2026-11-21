@@ -4,7 +4,7 @@ import * as svc from './planner.service.js'
 import { workPlansForMap, factoryFuelFor, factoryFuelRefillsFor, factoryFuelShiftsFor, factoryOperatorsFor, factorySupervisorsFor, planSubmissionsFor } from './work-plans.service.js'
 import { tankDays as tankDaysFor } from './tank-days.js'
 import { workPlanUpdatesFor } from './work-plan-watch.js'
-import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, CustomerFence, WorkPlansQuery, PlanSubmissionsQuery, FactoryFuelQuery, FactoryFuelRefillsQuery } from './planner.schema.js'
+import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, PlanList, CustomerFence, WorkPlansQuery, PlanSubmissionsQuery, FactoryFuelQuery, FactoryFuelRefillsQuery } from './planner.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -36,6 +36,12 @@ export const getOne: RequestHandler = async (req, res, next) => {
 export const updateStop: RequestHandler = async (req, res, next) => {
   try {
     sendSuccess(res, await svc.updateStop(p(req, 'orgId'), p(req, 'planId'), p(req, 'stopId'), req.user?.id ?? null, req.body as StopUpdate))
+  } catch (err) { next(err) }
+}
+
+export const setList: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await svc.setPlanList(p(req, 'orgId'), p(req, 'planId'), (req.body as PlanList).list))
   } catch (err) { next(err) }
 }
 

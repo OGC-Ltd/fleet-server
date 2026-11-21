@@ -64,6 +64,12 @@ export const stopUpdateSchema = z.object({
   dueDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
 })
 
+/** Which Deliveries report the sheet is read on: Van Sales, Finished Goods, or null for its fleet group. */
+export const planListSchema = z.object({
+  list: z.enum(['vs', 'fg']).nullable(),
+})
+export type PlanList = z.infer<typeof planListSchema>
+
 /** A fence for a customer that has none, drawn as a circle where the person says. */
 export const customerFenceSchema = z.object({
   name:    z.string().trim().min(1).max(200),

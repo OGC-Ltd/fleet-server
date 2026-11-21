@@ -455,6 +455,18 @@ export async function updateStop(orgId: string, planId: string, stopId: string, 
   return { ...row, amount: num(row.amount), tonnage: num(row.tonnage) }
 }
 
+/**
+ * Move a sheet between the Deliveries reports (operator, 2026-11-21: "swap a
+ * planner from FG to VS and vice versa"): 'vs', 'fg', or null to go back to
+ * its truck's fleet group.
+ */
+export async function setPlanList(orgId: string, id: string, list: 'vs' | 'fg' | null) {
+  const plan = await prisma.deliveryPlan.findFirst({ where: { id, organisationId: orgId }, select: { id: true } })
+  if (!plan) throw new NotFoundError('Plan not found')
+  const row = await prisma.deliveryPlan.update({ where: { id }, data: { list }, select: { id: true, list: true } })
+  return row
+}
+
 export async function removePlan(orgId: string, id: string) {
   const plan = await prisma.deliveryPlan.findFirst({ where: { id, organisationId: orgId }, select: { id: true } })
   if (!plan) throw new NotFoundError('Plan not found')
