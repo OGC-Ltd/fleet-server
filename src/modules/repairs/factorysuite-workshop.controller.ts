@@ -36,9 +36,13 @@ export const board = handle(async (req) => {
   // their controltech page that was flagged and has progressed into the
   // autoworkshop").
   if (s && req.authz && await flaggedOnlyIn(req.authz.userId, p(req, 'orgId'))) {
+    const me = req.authz.userId
+    // A card of a ControlTech job, or of one of their own jobs (My jobs)
+    const theirs = (j: NonNullable<(typeof out.open)[number]['repairItem']>) => j.queue === 'controltech'
+      || (j.assignedToId === me && j.assignmentStatus !== 'declined') || j.workshopTechnicianId === me
     return {
       ...out,
-      open: out.open.filter((c) => c.vehicleId && s.has(c.vehicleId) && c.repairItem?.queue === 'controltech'),
+      open: out.open.filter((c) => c.vehicleId && s.has(c.vehicleId) && !!c.repairItem && theirs(c.repairItem)),
       moves: [],
       summary: null,
     }

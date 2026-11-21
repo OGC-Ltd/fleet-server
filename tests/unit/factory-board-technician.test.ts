@@ -15,6 +15,9 @@ vi.mock('../../src/modules/repairs/factorysuite-workshop.sync.js', () => ({
       { id: 'c2', vehicleId: 'v1', repairItem: { queue: 'workshop' } },
       { id: 'c3', vehicleId: 'v2', repairItem: { queue: 'controltech' } },
       { id: 'c4', vehicleId: 'v1', repairItem: null },
+      { id: 'c5', vehicleId: 'v1', repairItem: { queue: 'workshop', workshopTechnicianId: 'u1' } },
+      { id: 'c6', vehicleId: 'v1', repairItem: { queue: 'workshop', assignedToId: 'u1', assignmentStatus: 'accepted' } },
+      { id: 'c7', vehicleId: 'v1', repairItem: { queue: 'workshop', assignedToId: 'u1', assignmentStatus: 'declined' } },
     ],
     moves: [{ vehicle: { id: 'v1' } }],
     summary: { cards: 40 },
@@ -36,9 +39,9 @@ async function read(vehicleIds: Set<string> | null) {
 describe('the Auto Workshop board for a technician', () => {
   beforeEach(() => { flagged.on = true })
 
-  it("shows only their ControlTech jobs' cards, with no history or figures", async () => {
+  it("shows only their ControlTech and My jobs cards, with no history or figures", async () => {
     const out = await read(new Set(['v1']))
-    expect(out.open.map((c) => c.id)).toEqual(['c1'])
+    expect(out.open.map((c) => c.id)).toEqual(['c1', 'c5', 'c6'])
     expect(out.moves).toEqual([])
     expect(out.summary).toBeNull()
   })
@@ -46,7 +49,7 @@ describe('the Auto Workshop board for a technician', () => {
   it('leaves a vehicle-scoped non-technician as before', async () => {
     flagged.on = false
     const out = await read(new Set(['v1']))
-    expect(out.open.map((c) => c.id)).toEqual(['c1', 'c2', 'c4'])
+    expect(out.open.map((c) => c.id)).toEqual(['c1', 'c2', 'c4', 'c5', 'c6', 'c7'])
     expect(out.moves).toHaveLength(1)
     expect(out.summary).toEqual({ cards: 40 })
   })
