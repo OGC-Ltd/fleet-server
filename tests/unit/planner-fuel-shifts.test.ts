@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { machineShiftUse, measureSpan, shiftUse, shiftWindows, type WindowEdges } from '../../src/modules/planner/fuel-shifts.js'
+import { endedInGap, machineShiftUse, measureSpan, middleL, shiftUse, shiftWindows, type WindowEdges } from '../../src/modules/planner/fuel-shifts.js'
 import type { FactoryFuel, FuelPlanLine } from '../../src/modules/planner/factory-fuel.js'
 import type { BalanceFilling } from '../../src/modules/fuel/fuel-balance.js'
 
@@ -109,5 +109,66 @@ describe('machineShiftUse', () => {
     const ws = shiftWindows(fuel([line({ machine: 'DG-22' })], [machine('DG-22', null)]))
     const [m] = machineShiftUse(ws, new Map(), new Map(), NOW)
     expect(m).toMatchObject({ machine: 'DG-22', tracked: false, shifts: 1, measured: 0, usedL: null, hours: null, perHour: null })
+  })
+})
+
+describe('firstTenL: the tank over a shift\'s first ten minutes (Fuel before)', () => {
+  // EX-17, 23 Nov 2026: 194.4 L from midnight until it started work at 06:45 EAT;
+  // its first plan line starts at 06:00 EAT.
+  it('is the middle of every reading in the first ten minutes after the engine came on, a slosh left out', () => {
+    const [w] = shiftWindows(fuel([line({ machine: 'EX-17', day: '2026-11-23' })], [machine('EX-17', 'v17')]))
+    const workAt = new Date('2026-11-23T03:45:00Z') // engine on at 06:45 EAT, 45 min into the shift
+    const e = { ...edges(194.4, 52, 4215, 4223), workAt, firstTen: [194400, 194400, 194500, 188900, 194400, 191900, 194400] }
+    const u = shiftUse(w!, e, [], [], new Date('2026-11-23T19:00:00Z'))
+    expect(u).toMatchObject({ firstTenL: 194.4, firstTenAt: '2026-11-23T03:45:00.000Z', firstTenFrom: 'engine', startL: 194.4 })
+  })
+
+  it("counts from the planned start when the tracker gives no ignition (MTR-10's planned 06:00)", () => {
+    const [w] = shiftWindows(fuel([line({ machine: 'MTR-10', day: '2026-11-23' })], [machine('MTR-10', 'v10')]))
+    const u = shiftUse(w!, { ...edges(36.7, 30, null, null), workAt: null, firstTen: [36700] }, [], [], new Date('2026-11-23T19:00:00Z'))
+    expect(u).toMatchObject({ firstTenL: 36.7, firstTenAt: '2026-11-23T03:00:00.000Z', firstTenFrom: 'shift' })
+  })
+
+  it('is null with no reading in those ten minutes, and on a shift not started', () => {
+    const [w] = shiftWindows(fuel([line({ machine: 'EX-17', day: '2026-11-23' })], [machine('EX-17', 'v17')]))
+    expect(shiftUse(w!, edges(194.4, 52, null, null), [], [], new Date('2026-11-23T19:00:00Z')).firstTenL).toBeNull()
+    expect(shiftUse(w!, { ...edges(194.4, 52, null, null), firstTen: [194400] }, [], [], new Date('2026-11-23T02:00:00Z')).firstTenL).toBeNull()
+  })
+
+  it('middleL takes the middle reading, an even count halfway, and skips an empty tank', () => {
+    expect(middleL([100000, 300000, 200000])).toBe(200)
+    expect(middleL([100000, 200000])).toBe(150)
+    expect(middleL([0, 500, 104000])).toBe(104)
+    expect(middleL([])).toBeNull()
+  })
+})
+
+describe('a shift that ended while the tracker was silent', () => {
+  // EX-17, 23 Nov 2026: shift 2 14:00–22:00 EAT; the tracker sent nothing from
+  // 19:30 to 22:30 with the engine on, then 522.2 L and 4,270.5 h.
+  const [, w2] = shiftWindows(fuel([
+    line({ machine: 'EX-17', day: '2026-11-23', plannedHours: 8 }),
+    line({ lineId: 'l2', machine: 'EX-17', day: '2026-11-23', shiftNo: 2, shiftStart: '14:00:00', plannedHours: 8 }),
+  ], [machine('EX-17', 'v17')]))
+  const late = new Date('2026-11-23T20:00:00Z')
+  const gapped: WindowEdges = {
+    ...edges(52, 606.7, 4265.0, 4266.9),
+    lastAt: new Date('2026-11-23T16:30:00Z'),
+    after: level(522.2), afterAt: new Date('2026-11-23T19:30:00Z'), hoursAfter: 4270.5, kmAfter: null,
+  }
+
+  it('reads its end, tank and hours, from the first readings once the tracker came back', () => {
+    const u = shiftUse(w2!, gapped, [], [], late)
+    expect(u).toMatchObject({ endL: 522.2, endAt: '2026-11-23T19:30:00.000Z', endGap: true, hours: 5.5 })
+  })
+
+  it('keeps the window end when the last reading came close to it, or nothing came after', () => {
+    const close = { ...gapped, lastAt: new Date('2026-11-23T18:45:00Z') }
+    expect(shiftUse(w2!, close, [], [], late)).toMatchObject({ endL: 606.7, endAt: '2026-11-23T19:00:00.000Z', endGap: false })
+    expect(endedInGap(w2!, { ...gapped, after: [], afterAt: null }, new Date('2026-11-23T19:00:00Z'))).toBe(false)
+  })
+
+  it('does not look past a shift still running', () => {
+    expect(endedInGap(w2!, gapped, new Date('2026-11-23T17:00:00Z'))).toBe(false)
   })
 })

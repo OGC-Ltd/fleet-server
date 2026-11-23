@@ -33,6 +33,25 @@ const OFF = /CANCEL|REJECT|WITHDRAW/i
 /** Fewer engine hours than this, or kilometres, and a rate per hour or per km says nothing. */
 const MIN_HOURS = 0.1
 const MIN_KM = 1
+/**
+ * The tank before the day's work is read over a shift's first ten minutes
+ * (operator 2026-11-23: "we need to capture the fuel level first 10 minutes of
+ * work"): the middle of the readings then, so one slosh does not set it.
+ */
+export const FIRST_TEN_MS = 10 * 60_000
+/**
+ * A shift that ended while its tracker was silent (operator 2026-11-23, EX-17:
+ * nothing from 19:30 to 22:30 EAT with the engine on, its shift ending at
+ * 22:00): when the last tank reading in the window is more than END_GAP_MS
+ * before its end, the end is read from the first readings once the tracker
+ * came back, up to AFTER_GAP_REACH_MS later, tank, hours and km alike. The
+ * work done in the gap is then counted; so is any done after the shift
+ * before the tracker returned.
+ */
+export const END_GAP_MS = 30 * 60_000
+export const AFTER_GAP_REACH_MS = 6 * 3_600_000
+/** The meters at a gap's end: the highest in this long after the tracker's first fix back (its first fixes can carry the old meter). */
+export const AFTER_GAP_METER_MS = 15 * 60_000
 
 /** One stretch of a machine's planned work: one plan line, or several that overlap. */
 export interface ShiftWindow {
@@ -51,6 +70,16 @@ export interface WindowEdges {
   /** Up to 7 tank levels (ml) from the start, and up to 7 back from the end. */
   first: number[]
   last: number[]
+  /** Every tank level (ml) in the first FIRST_TEN_MS of work: from the engine coming on (workAt), else the window's start. */
+  firstTen?: number[]
+  /** When the engine came on for the shift's work; null when the tracker gives no ignition. */
+  workAt?: Date | null
+  /** The last tank reading's time in the window, and the first readings after it ended (END_GAP_MS). */
+  lastAt?: Date | null
+  after?: number[]
+  afterAt?: Date | null
+  hoursAfter?: number | null
+  kmAfter?: number | null
   /** The engine-hours meter at the first and last fix that carried it. */
   hoursFirst: number | null
   hoursLast: number | null
@@ -68,6 +97,19 @@ export interface ShiftUse {
   ahead: boolean
   usedL: number | null
   startL: number | null
+  /**
+   * The tank over the first ten minutes of work (FIRST_TEN_MS), from the
+   * engine coming on, as FactorySuite's Fuel per shift reads it: the Fuel
+   * page's Fuel before. `firstTenAt` is when those ten minutes began, and
+   * `firstTenFrom` whether that was the engine ('engine') or, with no ignition
+   * on the tracker, the planned start ('shift').
+   */
+  firstTenL: number | null
+  firstTenAt: string | null
+  firstTenFrom: 'engine' | 'shift' | null
+  /** When `endL` was read: the window's end, now, or the tracker's first reading after a gap (`endGap`). */
+  endAt: string | null
+  endGap: boolean
   endL: number | null
   filledL: number
   theftL: number
@@ -99,6 +141,14 @@ export interface MachineShiftUse {
 
 const r1 = (v: number) => Math.round(v * 10) / 10
 const r2 = (v: number) => Math.round(v * 100) / 100
+
+/** The middle of every tank reading given (ml, a tank at 1 L and up), in litres; null with none. */
+export function middleL(mls: number[]): number | null {
+  const v = mls.filter(x => Number.isFinite(x) && x >= 1000).sort((a, b) => a - b)
+  if (!v.length) return null
+  const m = v.length >> 1
+  return r1((v.length % 2 ? v[m]! : (v[m - 1]! + v[m]!) / 2) / 1000)
+}
 
 /**
  * The planned stretches of each machine in `fuel`, in time order: a window per
@@ -144,15 +194,37 @@ export function measureSpan(w: Pick<ShiftWindow, 'start' | 'end'>, now: Date): {
 const run = (first: number | null, last: number | null) =>
   first != null && last != null && Number.isFinite(first) && Number.isFinite(last) && last >= first ? last - first : null
 
+/** The first ten minutes of work's tank level, and where those minutes began. */
+function firstTen(w: ShiftWindow, edges: WindowEdges): Pick<ShiftUse, 'firstTenL' | 'firstTenAt' | 'firstTenFrom'> {
+  const firstTenL = middleL(edges.firstTen ?? [])
+  if (firstTenL == null) return { firstTenL: null, firstTenAt: null, firstTenFrom: null }
+  const at = edges.workAt ?? null
+  return { firstTenL, firstTenAt: (at ?? w.start).toISOString(), firstTenFrom: at ? 'engine' : 'shift' }
+}
+
+/**
+ * The shift has ended, its last tank reading came more than END_GAP_MS before
+ * the end, and the tracker sent readings after it (within AFTER_GAP_REACH_MS).
+ */
+export function endedInGap(w: Pick<ShiftWindow, 'end'>, edges: WindowEdges, to: Date): boolean {
+  if (to.getTime() < w.end.getTime()) return false
+  if (!edges.after?.length || !edges.afterAt) return false
+  const lastAt = edges.lastAt?.getTime()
+  return lastAt == null || w.end.getTime() - lastAt > END_GAP_MS
+}
+
 /** One window's figures from its edges and the unit's ledger. */
 export function shiftUse(
   w: ShiftWindow, edges: WindowEdges | null, fillings: BalanceFilling[], drains: BalanceDrain[], now: Date,
 ): ShiftUse {
   const span = measureSpan(w, now)
   const base = { start: w.start.toISOString(), end: w.end.toISOString(), open: w.end.getTime() > now.getTime(), ahead: span == null }
-  if (!span || !edges) return { ...base, usedL: null, startL: null, endL: null, filledL: 0, theftL: 0, hours: null, km: null }
-  const hours = run(edges.hoursFirst, edges.hoursLast)
-  const km = run(edges.kmFirst, edges.kmLast)
+  if (!span || !edges) return { ...base, usedL: null, startL: null, firstTenL: null, firstTenAt: null, firstTenFrom: null, endL: null, endAt: null, endGap: false, filledL: 0, theftL: 0, hours: null, km: null }
+  // Ended in a tracker gap: the end from the first readings after it.
+  const gap = endedInGap(w, edges, span.to)
+  const endAt = gap ? edges.afterAt! : span.to
+  const hours = run(edges.hoursFirst, gap ? edges.hoursAfter ?? edges.hoursLast : edges.hoursLast)
+  const km = run(edges.kmFirst, gap ? edges.kmAfter ?? edges.kmLast : edges.kmLast)
   // A fill counts as the probe recorded it (its own level before and after,
   // the table's Probe filled), not the verifier's later rise. The verifier
   // reads its baseline from the 20 minutes before the fill's timestamp, which
@@ -162,8 +234,8 @@ export function shiftUse(
   // tank (REDISTRIBUTION) is still left out by its verdict.
   const recorded = fillings.map(f => ({ ...f, observedRiseMl: null }))
   const bal = balanceFrom({
-    startL: edgeLevelL(edges.first), endL: edgeLevelL(edges.last), distanceKm: km ?? 0,
-    fillings: recorded, drains, from: span.from.getTime(), to: span.to.getTime(),
+    startL: edgeLevelL(edges.first), endL: edgeLevelL(gap ? edges.after! : edges.last), distanceKm: km ?? 0,
+    fillings: recorded, drains, from: span.from.getTime(), to: endAt.getTime(),
   })
   // The tank ended fuller than the recorded fills explain while the machine
   // worked: fuel went in that the ledger does not know of, so 0 L is a figure
@@ -171,7 +243,7 @@ export function shiftUse(
   const worked = (hours ?? 0) >= MIN_HOURS || (km ?? 0) >= MIN_KM
   const usedL = bal.consumedL === 0 && (bal.unrecordedL ?? 0) > 0 && worked ? null : bal.consumedL
   return {
-    ...base, usedL, startL: bal.startL, endL: bal.endL, filledL: bal.filledL, theftL: bal.theftL,
+    ...base, usedL, startL: bal.startL, ...firstTen(w, edges), endL: bal.endL, endAt: endAt.toISOString(), endGap: gap, filledL: bal.filledL, theftL: bal.theftL,
     hours: hours == null ? null : r2(hours), km: km == null ? null : r1(km),
   }
 }
