@@ -909,6 +909,10 @@ model VehicleAssignment {
   assignmentType AssignmentType @default(PRIMARY) @map("assignment_type")
   assignedAt     DateTime       @default(now()) @map("assigned_at")
   unassignedAt   DateTime?      @map("unassigned_at") // NULL = currently active
+  /// When the yard signed the run back in (Control Tech `actualReturnTime`).
+  /// A run's driver stays on the truck after this, until its next dispatch,
+  /// which is what sets `unassignedAt`. See vehicles/run-assignment.
+  returnedAt     DateTime?      @map("returned_at")
   assignedById   String?        @map("assigned_by")
   notes          String?
 
