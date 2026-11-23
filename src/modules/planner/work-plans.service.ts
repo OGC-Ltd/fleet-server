@@ -35,7 +35,7 @@ import { buildFactoryOperators, type FactoryOperators } from './factory-operator
 import { meterRefill, refillFigures, refillSpan, refillWindows, type MachineRefill, type MachineRefills, type RefillWindow } from './fuel-refills.js'
 import { createHash } from 'node:crypto'
 import { asDaySeries, EDGE_READING_COUNT, type BalanceDrain, type BalanceFilling } from '../fuel/fuel-balance.js'
-import { machineShiftUse, measureSpan, shiftWindows, type MachineShiftUse, type ShiftWindow, type WindowEdges } from './fuel-shifts.js'
+import { AFTER_GAP_METER_MS, AFTER_GAP_REACH_MS, FIRST_TEN_MS, machineShiftUse, measureSpan, shiftWindows, type MachineShiftUse, type ShiftWindow, type WindowEdges } from './fuel-shifts.js'
 import { reportDb } from '../../lib/report-db.js'
 import { addDays, buildPlanSubmissions, type PlanSubmissions } from './plan-submissions.js'
 
@@ -565,7 +565,8 @@ async function readShiftEdges(windows: Array<{ key: string; vehicleId: string; f
   const out = new Map<string, WindowEdges>()
   if (!windows.length) return out
   const rows = await reportDb().$queryRaw<Array<{
-    k: string; first: number[] | null; last: number[] | null
+    k: string; first: number[] | null; last: number[] | null; ten: number[] | null; work_at: Date | null
+    last_at: Date | null; after: number[] | null; after_at: Date | null; h_after: number | null; o_after: number | null
     h0: number | null; h1: number | null; o0: number | null; o1: number | null
   }>>`
     WITH w AS (
@@ -578,6 +579,11 @@ async function readShiftEdges(windows: Array<{ key: string; vehicleId: string; f
       (SELECT array_agg(x.f) FROM (SELECT t.fuel_level_ml AS f FROM vehicle_telemetries t
          WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.fuel_level_ml >= 1000
          ORDER BY t.captured_at DESC LIMIT ${EDGE_READING_COUNT}) x) AS last,
+      e.eng AS work_at,
+      (SELECT array_agg(t.fuel_level_ml) FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= coalesce(e.eng, w.st)
+           AND t.captured_at < least(w.en, coalesce(e.eng, w.st) + ${FIRST_TEN_MS / 1000} * interval '1 second')
+           AND t.fuel_level_ml >= 1000) AS ten,
       (SELECT t.engine_hours_meter::float8 FROM vehicle_telemetries t
          WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.engine_hours_meter IS NOT NULL
          ORDER BY t.captured_at ASC LIMIT 1) AS h0,
@@ -589,12 +595,53 @@ async function readShiftEdges(windows: Array<{ key: string; vehicleId: string; f
          ORDER BY t.captured_at ASC LIMIT 1) AS o0,
       (SELECT (t.odometer_m / 1000.0)::float8 FROM vehicle_telemetries t
          WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.odometer_m IS NOT NULL
-         ORDER BY t.captured_at DESC LIMIT 1) AS o1
-      FROM w`
+         ORDER BY t.captured_at DESC LIMIT 1) AS o1,
+      -- The tracker's last tank reading in the window, and the first ones after
+      -- it, for a shift that ended while the tracker was silent (fuel-shifts
+      -- END_GAP_MS): its end is read from the first readings once it came back.
+      (SELECT max(t.captured_at) FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.fuel_level_ml >= 1000) AS last_at,
+      (SELECT array_agg(x.f) FROM (SELECT t.fuel_level_ml AS f FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.en AND t.captured_at < w.en + ${AFTER_GAP_REACH_MS / 1000} * interval '1 second'
+           AND t.fuel_level_ml >= 1000
+         ORDER BY t.captured_at ASC LIMIT ${EDGE_READING_COUNT}) x) AS after,
+      (SELECT min(t.captured_at) FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.en AND t.captured_at < w.en + ${AFTER_GAP_REACH_MS / 1000} * interval '1 second'
+           AND t.fuel_level_ml >= 1000) AS after_at,
+      -- The meters a few minutes into the tracker's return: the first fixes back
+      -- can still carry the meter from before the gap (EX-17, 23 Nov: 4,267.3 h
+      -- at 22:39, 4,270.5 h by 22:44), so the highest in AFTER_GAP_METER_MS.
+      (SELECT max(t.engine_hours_meter)::float8 FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.en AND t.captured_at < w.en + ${AFTER_GAP_REACH_MS / 1000} * interval '1 second'
+           AND t.captured_at < (SELECT min(t2.captured_at) FROM vehicle_telemetries t2
+                                 WHERE t2.vehicle_id = w.vid AND t2.captured_at >= w.en) + ${AFTER_GAP_METER_MS / 1000} * interval '1 second') AS h_after,
+      (SELECT max(t.odometer_m / 1000.0)::float8 FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.en AND t.captured_at < w.en + ${AFTER_GAP_REACH_MS / 1000} * interval '1 second'
+           AND t.captured_at < (SELECT min(t2.captured_at) FROM vehicle_telemetries t2
+                                 WHERE t2.vehicle_id = w.vid AND t2.captured_at >= w.en) + ${AFTER_GAP_METER_MS / 1000} * interval '1 second') AS o_after
+      FROM w
+      -- When the work began (FactorySuite's "first 10 min of work" counts from
+      -- the engine coming on): the first fix where the engine turned on, from an
+      -- hour before the planned start; else, the engine already running, the
+      -- first fix in the shift with it on; else nothing, and the shift's start.
+      LEFT JOIN LATERAL (
+        SELECT coalesce(
+          (SELECT min(s.captured_at) FROM (
+             SELECT t.captured_at, (t.engine_on AND t.ignition_known) AS lit,
+                    lag(t.engine_on AND t.ignition_known) OVER (ORDER BY t.captured_at) AS was
+               FROM vehicle_telemetries t
+              WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st - interval '75 minutes' AND t.captured_at < w.en) s
+            WHERE s.lit AND NOT coalesce(s.was, false) AND s.captured_at >= w.st - interval '1 hour'),
+          (SELECT min(t.captured_at) FROM vehicle_telemetries t
+            WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.engine_on AND t.ignition_known)
+        ) AS eng
+      ) e ON true`
   for (const r of rows) {
     out.set(r.k, {
-      first: (r.first ?? []).map(Number), last: (r.last ?? []).map(Number),
+      first: (r.first ?? []).map(Number), last: (r.last ?? []).map(Number), firstTen: (r.ten ?? []).map(Number),
+      workAt: r.work_at,
       hoursFirst: r.h0, hoursLast: r.h1, kmFirst: r.o0, kmLast: r.o1,
+      lastAt: r.last_at, after: (r.after ?? []).map(Number), afterAt: r.after_at, hoursAfter: r.h_after, kmAfter: r.o_after,
     })
   }
   return out
