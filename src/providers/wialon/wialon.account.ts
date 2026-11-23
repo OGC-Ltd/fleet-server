@@ -106,6 +106,22 @@ export const TIMSALES_WIALON_ACCOUNT_ID = 26777960
  */
 export const AQUAMIST_RESOURCE_ID = 29561763
 
+/**
+ * Sukari's "SUKARI - Nzoia Sugar - …" trucks that belong to Nzoia: KDZ 129S,
+ * 132S, 138S, 139S (operator, 2026-11-23). Wialon unit ids. They are Wialon-
+ * keyed rows (external id `wialon:<id>`), so the Nzoia sync adopts them and
+ * moves the existing rows, history and all; a plain move in the database
+ * would have been switched off by that sync as units it does not know.
+ * Fuel: West Kenya's template gives the same fills as Sukari's for all four
+ * (14 days compared, 2026-11-23).
+ */
+export const NZOIA_FROM_SUKARI: readonly number[] = [30505255, 30505248, 30505257, 30505254]
+
+/** Nzoia's groups; a "SUKARI - Nzoia Sugar - …" name joins "WKS · NZOIA SUGAR". */
+export function nzoiaGroup(unitName: string): { code: string; name: string } {
+  return westSugarGroup(unitName.replace(/^\s*SUKARI\b/i, 'WKS'))
+}
+
 export interface WialonFleet {
   /** Our `organisations.code`. */
   orgCode:  string
@@ -207,12 +223,14 @@ const FLEETS: WialonFleet[] = [
   {
     // Nzoia Sugar: "WKS - Nzoia Sugar - …" (59) and "WKS - Nzoia Quarry - …"
     // (1), split out of West Kenya on request (2026-10-07), as Kabras was.
-    // The six "SUKARI - Nzoia Sugar - …" units are Sukari's register and stay.
+    // The "SUKARI - Nzoia Sugar - …" units stayed with Sukari, except the four
+    // in NZOIA_FROM_SUKARI, moved on request (2026-11-23).
     orgCode:   'NZOIA',
     orgName:   'Nzoia Sugar',
     accountId: RAI_GROUP_WIALON_ACCOUNT_ID,
     nameMask:  /^\s*(west\s*sugar|wks)\s*-\s*nzoia\b/i,
-    groupOf:   westSugarGroup,
+    extraUnitIds: NZOIA_FROM_SUKARI,
+    groupOf:   nzoiaGroup,
     plateOf:   (nm) => parseWestSugarUnit(nm).plate ?? nm.trim(),
     tankOf:    statedTankCapacity,
   },
