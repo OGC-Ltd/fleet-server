@@ -38,6 +38,7 @@ import {
   resolveEventOrg, skipUnmappedFactory, bagsFromTonnes, BAG_KG, type EventOrg,
 } from './factory-map.js'
 import { markDispatchChanged } from '../dispatches/dispatch-refresh.js'
+import { linkRun } from '../vehicles/run-assignment.js'
 
 /**
  * Narrate an event into the Live Feed via the bus (notification.worker owns the
@@ -210,20 +211,20 @@ export async function handleDispatch(
     take:   2,
   })
 
-  if (vehicle && drivers.length === 1) {
-    const marker = `controltech:dispatch:${d.id}`
-    const existing = await prisma.vehicleAssignment.findFirst({ where: { notes: marker }, select: { id: true } })
-    const payload = {
-      vehicleId:      vehicle.id,
-      userId:         drivers[0]!.id,
-      assignmentType: 'PRIMARY' as const,
-      assignedAt:     when,
-      unassignedAt:   parseProviderTime(d.actualReturnTime),
-      notes:          marker,
-    }
-    if (existing) await prisma.vehicleAssignment.update({ where: { id: existing.id }, data: payload })
-    else          await prisma.vehicleAssignment.create({ data: payload })
-  } else {
+  if (vehicle) {
+    // Linked until the truck's next dispatch, not until this one's sign-in;
+    // the sign-in is kept as returnedAt. See vehicles/run-assignment.
+    await linkRun({
+      vehicleId:  vehicle.id,
+      userId:     drivers.length === 1 ? drivers[0]!.id : null,
+      marker:     `controltech:dispatch:${d.id}`,
+      externalId: d.id,
+      startedAt:  when,
+      returnedAt: parseProviderTime(d.actualReturnTime),
+      cancelled:  row.status === 'CANCELLED',
+    })
+  }
+  if (!vehicle || drivers.length !== 1) {
     logger.debug(
       { plate: d.vehicleNumberPlate, driver: d.driverName, vehicleFound: !!vehicle, driverMatches: drivers.length },
       'Dispatch could not be linked to a unique vehicle+driver',
@@ -567,7 +568,7 @@ export async function handleSale(
 }
 
 /**
- * Attach the driver to the vehicle for the duration of the run.
+ * Attach the driver to the vehicle from this run until the vehicle's next one.
  *
  * Same name-only identification, and the same refusal to guess, as the cane
  * path: the provider sends no driver id on a sale either. The marker differs
@@ -580,10 +581,10 @@ async function linkSaleDriver(
   from: Date,
   to: Date | null,
 ): Promise<void> {
-  const name = s.driverName?.trim()
-  if (!org.vehicleId || !name) return
+  if (!org.vehicleId) return
+  const name = s.driverName?.trim() ?? ''
 
-  const drivers = await prisma.user.findMany({
+  const drivers = !name ? [] : await prisma.user.findMany({
     where:  { organisationId: org.organisationId, fullName: name, deletedAt: null },
     select: { id: true },
     take:   2,
@@ -593,19 +594,17 @@ async function linkSaleDriver(
       { plate: org.plate, driver: name, driverMatches: drivers.length },
       'Sales run could not be linked to a unique driver',
     )
-    return
   }
 
-  const marker   = `controltech:sale:${s.id}`
-  const existing = await prisma.vehicleAssignment.findFirst({ where: { notes: marker }, select: { id: true } })
-  const payload  = {
-    vehicleId:      org.vehicleId,
-    userId:         drivers[0]!.id,
-    assignmentType: 'PRIMARY' as const,
-    assignedAt:     from,
-    unassignedAt:   to,
-    notes:          marker,
-  }
-  if (existing) await prisma.vehicleAssignment.update({ where: { id: existing.id }, data: payload })
-  else          await prisma.vehicleAssignment.create({ data: payload })
+  // The truck is taken either way, so the previous run lets go even when this
+  // driver does not resolve. Held until the next run; see vehicles/run-assignment.
+  await linkRun({
+    vehicleId:  org.vehicleId,
+    userId:     drivers.length === 1 ? drivers[0]!.id : null,
+    marker:     `controltech:sale:${s.id}`,
+    externalId: s.id,
+    startedAt:  from,
+    returnedAt: to,
+    cancelled:  false,
+  })
 }

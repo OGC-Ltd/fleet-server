@@ -28,7 +28,7 @@ import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import { getAlarms } from '../dashcam/dashcam.service.js'
-import { assignmentAt } from '../vehicles/driver-assignment.js'
+import { assignmentAt, dutySpan } from '../vehicles/driver-assignment.js'
 import { factoryOf } from '../webhooks/factory-map.js'
 import {
   PAY_RULES, scoreDay, monthStanding, harshForceMs2, routeOf, retainerForDay, suspensionDayKes, netOf,
@@ -181,7 +181,7 @@ export async function getDriverScorecard(orgId: string, fromDay: string, toDay: 
     prisma.vehicleAssignment.findMany({
       where:  { vehicle: { organisationId: orgId }, assignedAt: { lt: end },
                 OR: [{ unassignedAt: null }, { unassignedAt: { gt: countStart } }] },
-      select: { vehicleId: true, userId: true, assignedAt: true, unassignedAt: true, notes: true,
+      select: { vehicleId: true, userId: true, assignedAt: true, unassignedAt: true, returnedAt: true, notes: true,
                 user: { select: { fullName: true } } },
     }),
     drivenDays(orgId, countStart, end),
@@ -213,7 +213,8 @@ export async function getDriverScorecard(orgId: string, fromDay: string, toDay: 
   const byVehicle = new Map<string, typeof assignments>()
   for (const a of assignments) {
     const list = byVehicle.get(a.vehicleId) ?? []
-    list.push(a)
+    // Charged up to the sign-in, not until the next dispatch: see dutySpan.
+    list.push(dutySpan(a))
     byVehicle.set(a.vehicleId, list)
   }
   const holder = (vehicleId: string | null, at: Date) =>

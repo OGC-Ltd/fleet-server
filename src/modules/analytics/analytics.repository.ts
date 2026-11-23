@@ -16,7 +16,7 @@ import { vehicleSql } from './vehicle-filter.js'
 // here rather than re-derived on the client: a second copy of that rule would
 // drift from the alerts it is supposed to describe.
 import { announces, CAUSE_NO_FUEL_LEFT } from '../fuel/fuel-theft-classifier.js'
-import { currentAssignmentWhere } from '../vehicles/driver-assignment.js'
+import { currentAssignmentWhere, dutySpan } from '../vehicles/driver-assignment.js'
 
 // `NO_FUEL_LEFT` (drains) and `NO_FUEL_ARRIVED` (fillings) are imported rather
 // than declared here. They interpret a `Verdict`, so they live beside it in
@@ -1012,7 +1012,7 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     // an instant, for the overspeeding no trip covers.
     prisma.vehicleAssignment.findMany({
       where:  { userId: { in: driverIds }, vehicle: { organisationId: orgId } },
-      select: { userId: true, vehicleId: true, assignedAt: true, unassignedAt: true },
+      select: { userId: true, vehicleId: true, assignedAt: true, unassignedAt: true, returnedAt: true },
     }),
   ])
 
@@ -1036,8 +1036,10 @@ export async function driversOverview(orgId: string, days: number): Promise<Driv
     const arr = postingsByVehicle.get(p.vehicleId) ?? []
     arr.push(p); postingsByVehicle.set(p.vehicleId, arr)
   }
+  // Charged up to the sign-in: a run's driver keeps the truck until its next
+  // dispatch, but is not on duty while it stands in the yard.
   const postedAt = (vehicleId: string, at: Date): string | null => {
-    const on = [...new Set((postingsByVehicle.get(vehicleId) ?? [])
+    const on = [...new Set((postingsByVehicle.get(vehicleId) ?? []).map(dutySpan)
       .filter(p => p.assignedAt <= at && (p.unassignedAt == null || p.unassignedAt > at))
       .map(p => p.userId))]
     return on.length === 1 ? on[0] : null
@@ -1500,7 +1502,7 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
     ? await prisma.vehicleAssignment.findMany({
         where:  { userId: driverId, vehicle: { organisationId: orgId }, assignedAt: { lte: to },
                   OR: [{ unassignedAt: null }, { unassignedAt: { gte: from } }] },
-        select: { assignedAt: true, unassignedAt: true },
+        select: { assignedAt: true, unassignedAt: true, returnedAt: true },
       })
     : []
   const finalDriverRating = driver
@@ -1508,7 +1510,8 @@ export async function driverAnalytics(orgId: string, driverId: string, q: Delive
         trips: trips.length,
         mileageKm: trips.reduce((sum, t) => sum + (t.mileageKm ?? 0), 0),
         tonnes: toTonnes(trips.reduce((sum, t) => sum + manifestKg(t.cargoManifest), 0)),
-        dutyDays: dutyDaysOf(postings.map(p => ({
+        // Up to the sign-in, not the nights the truck stood under their name.
+        dutyDays: dutyDaysOf(postings.map(dutySpan).map(p => ({
           assignedAt: p.assignedAt < from ? from : p.assignedAt, unassignedAt: p.unassignedAt,
         })), to),
         fuelTheftCases,

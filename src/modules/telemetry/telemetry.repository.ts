@@ -885,7 +885,7 @@ export async function findFleetSnapshot(orgId: string) {
       assignments: {
         where:   currentAssignmentWhere(),
         orderBy: CURRENT_ASSIGNMENT_ORDER,
-        select:  { user: { select: { fullName: true, driverRatingScore: true } } },
+        select:  { returnedAt: true, user: { select: { fullName: true, driverRatingScore: true } } },
         take:    1,
       },
     },
@@ -1092,6 +1092,10 @@ export async function findFleetSnapshot(orgId: string) {
         speedLimitKmh:  overspeedLimitFor(v.vehicleType, { orgId, lat: ping?.lat, lng: ping?.lng }, v.registrationPlate),
         driver:             v.assignments[0]?.user.fullName          ?? null,
         driverRatingScore:  v.assignments[0]?.user.driverRatingScore ?? null,
+        // When the yard signed this driver's run back in. The driver stays on
+        // the truck until its next dispatch (vehicles/run-assignment); this
+        // says they are back rather than out.
+        driverReturnedAt:   v.assignments[0]?.returnedAt?.toISOString() ?? null,
         lat:            ping?.lat          ?? null,
         lng:            ping?.lng          ?? null,
         headingDeg:     ping?.heading_deg  ?? null,

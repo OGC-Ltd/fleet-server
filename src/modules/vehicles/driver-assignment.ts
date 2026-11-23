@@ -5,9 +5,10 @@
  * list (a standing posting, open until someone ends it), POST
  * /vehicles/:id/assignments, and the Control Tech webhooks, which open one row
  * per cane dispatch or sales run (`controltech:dispatch:<id>`,
- * `controltech:sale:<id>`) and close it when the run's return time arrives.
+ * `controltech:sale:<id>`).
  *
- * A run whose return never arrives stays open for ever. Measured 2026-10-30 on
+ * Until 2026-11-23 the run's return time closed it, and a run whose return
+ * never arrived stayed open for ever. Measured 2026-10-30 on
  * SUKARI: 884 open dispatch rows on 262 trucks, 698 of them over a week old,
  * and 81 trucks naming two or more different drivers at once, while a closed
  * run lasts 13.7 h at the median and 38.9 h at p90. Every reader took
@@ -18,14 +19,17 @@
  *
  *   · the assignment that covers the moment and STARTED LAST wins — a run
  *     names who actually took the truck out, so it overrides the standing
- *     posting while it runs, and a newer run overrides an older one;
- *   · a run with no return time counts as ended RUN_OPEN_MAX_MS after it began.
- *     Standing postings have no such limit.
+ *     posting, and a newer run overrides an older one;
+ *   · a run holds its truck until the truck's NEXT dispatch, not until the
+ *     yard signs it back in (operator, 2026-11-23). The sign-in is kept as
+ *     `returnedAt`, and vehicles/run-assignment writes the next run's start
+ *     into `unassignedAt`, which also closed the runs that never came back.
+ *     The 48 h cut-off those runs needed (RUN_OPEN_MAX_MS) is gone with them.
+ *
+ * Duty is not holding: scorecards count a driver's time up to the sign-in,
+ * not the nights the truck stood in the yard under their name — see dutySpan.
  */
 import { Prisma } from '../../../generated/prisma/client.js'
-
-/** How long an un-returned Control Tech run is still taken to hold its truck. Above p90 (38.9 h). */
-export const RUN_OPEN_MAX_MS = 48 * 60 * 60_000
 
 const RUN_PREFIX = 'controltech:'
 
@@ -40,8 +44,19 @@ export const isRun = (notes: string | null | undefined): boolean => !!notes?.sta
 
 /** When this assignment stops covering its vehicle; null = still covering. */
 export function coversUntil(a: AssignmentSpan): Date | null {
-  if (a.unassignedAt) return a.unassignedAt
-  return isRun(a.notes) ? new Date(a.assignedAt.getTime() + RUN_OPEN_MAX_MS) : null
+  return a.unassignedAt
+}
+
+/**
+ * The span the driver was on DUTY: a run ends at its sign-in when there was
+ * one, even though the truck stays under their name until the next dispatch.
+ * Use this wherever time is charged to a driver (duty days, events at an
+ * instant); use the assignment itself for "who holds the truck".
+ */
+export function dutySpan<T extends { unassignedAt: Date | null; returnedAt?: Date | null }>(a: T): T {
+  const back = a.returnedAt
+  if (!back || (a.unassignedAt && a.unassignedAt <= back)) return a
+  return { ...a, unassignedAt: back }
 }
 
 /** The assignment that held the vehicle at `at`, or null. Pure. */
@@ -59,18 +74,13 @@ export function assignmentAt<T extends AssignmentSpan>(rows: readonly T[], at: D
 /**
  * The same rule as a query filter, for "who holds it NOW". Use with
  * `orderBy: { assignedAt: 'desc' }, take: 1`, which supplies "started last".
- *
- * The notes test is spelled out for NULL: `NOT { startsWith }` alone drops
- * every row whose notes are NULL, which is most manual postings.
  */
 export function currentAssignmentWhere(now = new Date()): Prisma.VehicleAssignmentWhereInput {
   return {
     assignedAt: { lte: now },
     OR: [
+      { unassignedAt: null },
       { unassignedAt: { gt: now } },
-      { unassignedAt: null, notes: null },
-      { unassignedAt: null, NOT: { notes: { startsWith: RUN_PREFIX } } },
-      { unassignedAt: null, assignedAt: { gte: new Date(now.getTime() - RUN_OPEN_MAX_MS) } },
     ],
   }
 }

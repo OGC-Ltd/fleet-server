@@ -33,6 +33,7 @@ import { PrismaPg } from '@prisma/adapter-pg'
 import { PrismaClient } from '../generated/prisma/client.js'
 import type { Prisma, UserStatus } from '../generated/prisma/client.js'
 import { parseProviderTime } from '../src/lib/provider-time.js'
+import { linkRun } from '../src/modules/vehicles/run-assignment.js'
 
 const pool    = new pg.Pool({ connectionString: process.env.DIRECT_URL })
 const adapter = new PrismaPg(pool)
@@ -195,14 +196,6 @@ async function main() {
   const ordered = [...dispatches].sort((a, b) => (a.dispatchTime ?? '').localeCompare(b.dispatchTime ?? ''))
 
   for (const dp of ordered) {
-    if (dp.status === 'CANCELLED') { cancelled++; continue }
-
-    const nameKey = norm(dp.driverName)
-    const ids = userIdByName.get(nameKey)
-    if (!ids || ids.length === 0) { unmatchedDriver++; continue }
-    if (ids.length > 1) { ambiguous++; continue }
-    const userId = ids[0]!
-
     const vehicleId = vehicleIdByPlate.get(norm(dp.vehicleNumberPlate))
     if (!vehicleId) { unmatchedVehicle++; continue }
 
@@ -210,36 +203,27 @@ async function main() {
     const assignedAt = parseProviderTime(dp.dispatchTime)
     if (!assignedAt || Number.isNaN(assignedAt.getTime())) continue
     const returnedAt = parseProviderTime(dp.actualReturnTime)
-    const isOpen = returnedAt == null && dp.status !== 'COMPLETED'
+    const isCancelled = dp.status === 'CANCELLED'
+    if (isCancelled) cancelled++
 
-    // One assignment row per dispatch, keyed by the dispatch id in `notes` so
-    // re-runs update instead of duplicating.
-    const marker = `controltech:dispatch:${dp.id}`
-    const existing = await prisma.vehicleAssignment.findFirst({
-      where: { notes: marker }, select: { id: true },
-    })
+    const ids = userIdByName.get(norm(dp.driverName)) ?? []
+    if (!isCancelled && ids.length === 0) unmatchedDriver++
+    if (!isCancelled && ids.length > 1)  ambiguous++
+    const userId = ids.length === 1 ? ids[0]! : null
 
-    const payload = {
-      vehicleId,
-      userId,
-      assignmentType: 'PRIMARY' as const,
-      assignedAt,
-      unassignedAt:   isOpen ? null : (returnedAt ?? assignedAt),
-      notes:          marker,
-    }
-
-    if (existing) {
-      await prisma.vehicleAssignment.update({ where: { id: existing.id }, data: payload })
-      if (!isOpen) assignClosed++
-    } else {
-      await prisma.vehicleAssignment.create({ data: payload })
-      assignCreated++
-      if (!isOpen) assignClosed++
-    }
+    // One row per dispatch, keyed by the dispatch id in `notes`. The driver
+    // holds the truck until its next dispatch (oldest first, so each run
+    // closes the one before it); the sign-in is kept as returnedAt. Runs
+    // whose driver does not resolve still take the truck from the last one.
+    const marker  = `controltech:dispatch:${dp.id}`
+    const existed = userId ? await prisma.vehicleAssignment.count({ where: { notes: marker } }) : 1
+    await linkRun({ vehicleId, userId, marker, externalId: dp.id, startedAt: assignedAt, returnedAt, cancelled: isCancelled }, prisma)
+    if (!existed) assignCreated++
+    if (userId && returnedAt) assignClosed++
   }
 
-  console.log(`  ✓ assignments: ${assignCreated} created (${assignClosed} already returned)`)
-  if (cancelled)        console.log(`    · ${cancelled} cancelled dispatches ignored`)
+  console.log(`  ✓ assignments: ${assignCreated} created (${assignClosed} signed back in, still held until the next dispatch)`)
+  if (cancelled)        console.log(`    · ${cancelled} cancelled dispatches (hold nothing)`)
   if (ambiguous)        console.log(`    · ${ambiguous} skipped — driver name shared by >1 person: ${ambiguousNames.join(', ')}`)
   if (unmatchedDriver)  console.log(`    · ${unmatchedDriver} skipped — driver name not in the roster`)
   if (unmatchedVehicle) console.log(`    · ${unmatchedVehicle} skipped — plate not in the vehicle registry`)
