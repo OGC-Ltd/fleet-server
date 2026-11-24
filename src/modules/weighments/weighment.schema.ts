@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { fleetDayKey } from '../../lib/provider-time.js'
 
 /**
  * Query for one weighbridge day.
@@ -39,13 +40,31 @@ export type WeighmentQuery = z.infer<typeof weighmentQuerySchema>
  * Both are plain strings for the reason `day` above is: coercion reads a bare
  * date as UTC midnight, which is 03:00 in Ndhiwa, and these bridges open
  * before dawn.
+ *
+ * `to` also takes an instant that carries its zone, and files it under the
+ * fleet day it falls in. The analytics screen sends every card the same `to`,
+ * and for a picked month that is noon on its last day ("2026-10-31T12:00:00
+ * +03:00"), which every sibling endpoint reads with `z.coerce.date()`. This one
+ * alone answered 400, so the weighbridge card went blank whenever a past month
+ * was chosen (seen 2026-11-24).
  */
 export const weighmentAnalyticsQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(90).optional(),
-  to:   z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'to must be YYYY-MM-DD').optional(),
+  to:   z.preprocess(toFleetDay, z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'to must be YYYY-MM-DD')).optional(),
   /** One bridge rather than all of them. Absent means the whole operation,
    *  which is what the per-centre breakdown always describes regardless. */
   centre: z.coerce.number().int().optional(),
 })
 
 export type WeighmentAnalyticsQuery = z.infer<typeof weighmentAnalyticsQuerySchema>
+
+const ZONED_INSTANT = /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})$/
+
+/** A zoned instant becomes the fleet day it falls in; anything else is left
+ *  for the YYYY-MM-DD check to accept or refuse. An instant WITHOUT a zone is
+ *  refused rather than guessed at: it would be read in the server's zone. */
+function toFleetDay(v: unknown): unknown {
+  if (typeof v !== 'string' || !ZONED_INSTANT.test(v)) return v
+  const at = new Date(v)
+  return Number.isNaN(at.getTime()) ? v : fleetDayKey(at).toISOString().slice(0, 10)
+}
