@@ -15,12 +15,13 @@
 import { PrismaClient } from '../../generated/prisma/client.js'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { env } from '../config/env.js'
+import { PG_POOL_TIMEOUTS } from './pg-timeouts.js'
 
 let client: PrismaClient | null = null
 
 export function reportDb(): PrismaClient {
   if (!client) {
-    const adapter = new PrismaPg({ connectionString: env.DATABASE_URL, max: env.REPORT_DB_POOL_MAX, query_timeout: 60_000 })
+    const adapter = new PrismaPg({ connectionString: env.DATABASE_URL, max: env.REPORT_DB_POOL_MAX, ...PG_POOL_TIMEOUTS })
     client = new PrismaClient({ adapter })
   }
   return client

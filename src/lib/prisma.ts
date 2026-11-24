@@ -2,6 +2,7 @@ import { PrismaClient } from '../../generated/prisma/client.js'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { env } from '../config/env.js'
 import { logger } from './logger.js'
+import { PG_POOL_TIMEOUTS } from './pg-timeouts.js'
 
 // Prisma v7 requires a driver adapter — @prisma/adapter-pg wraps the pg pool.
 // The pooler URL (pgbouncer=true) is used for the pool; DIRECT_URL is used for migrations.
@@ -14,7 +15,8 @@ function createPrismaClient() {
   // statement_timeout can't fire once the socket is dead). Worst normal
   // queries run ~5–10 s, so 60 s only catches genuinely stuck ones.
   // DB_POOL_MAX: 14 for the API; the report worker runs with a few (report-worker.ts).
-  const adapter = new PrismaPg({ connectionString: env.DATABASE_URL, max: env.DB_POOL_MAX, query_timeout: 60_000 })
+  // statement_timeout: the server-side twin, a little shorter — see pg-timeouts.
+  const adapter = new PrismaPg({ connectionString: env.DATABASE_URL, max: env.DB_POOL_MAX, ...PG_POOL_TIMEOUTS })
   return new PrismaClient({ adapter })
 }
 

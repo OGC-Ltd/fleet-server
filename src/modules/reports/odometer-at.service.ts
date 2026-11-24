@@ -80,18 +80,36 @@ export async function odometerAt(orgId: string, scope: Set<string> | null, point
              a.odometer_m AS am, (EXTRACT(EPOCH FROM a.captured_at) * 1000)::float8 AS at
         FROM unnest(${ask.map((p) => p.vehicleId)}::text[], ${ask.map((p) => new Date(p.t).toISOString())}::text[])
              WITH ORDINALITY AS p(vid, ts, i)
+        -- Each side from the fix's own reading or one filled in from Wialon
+        -- (vehicle_odometer_fills, unit-distance), whichever is nearer.
         LEFT JOIN LATERAL (
-          SELECT t.odometer_m, t.captured_at FROM vehicle_telemetries t
-           WHERE t.vehicle_id = p.vid AND t.odometer_m IS NOT NULL
-             AND t.captured_at <= (p.ts::timestamptz AT TIME ZONE 'UTC')
-             AND t.captured_at > (p.ts::timestamptz AT TIME ZONE 'UTC') - make_interval(secs => ${READ_WINDOW_MS / 1000})
-           ORDER BY t.captured_at DESC LIMIT 1) b ON true
+          SELECT x.odometer_m, x.captured_at FROM (
+            (SELECT t.odometer_m, t.captured_at FROM vehicle_telemetries t
+              WHERE t.vehicle_id = p.vid AND t.odometer_m IS NOT NULL
+                AND t.captured_at <= (p.ts::timestamptz AT TIME ZONE 'UTC')
+                AND t.captured_at > (p.ts::timestamptz AT TIME ZONE 'UTC') - make_interval(secs => ${READ_WINDOW_MS / 1000})
+              ORDER BY t.captured_at DESC LIMIT 1)
+            UNION ALL
+            (SELECT f.odometer_m, f.captured_at FROM vehicle_odometer_fills f
+              WHERE f.vehicle_id = p.vid
+                AND f.captured_at <= (p.ts::timestamptz AT TIME ZONE 'UTC')
+                AND f.captured_at > (p.ts::timestamptz AT TIME ZONE 'UTC') - make_interval(secs => ${READ_WINDOW_MS / 1000})
+              ORDER BY f.captured_at DESC LIMIT 1)
+          ) x ORDER BY x.captured_at DESC LIMIT 1) b ON true
         LEFT JOIN LATERAL (
-          SELECT t.odometer_m, t.captured_at FROM vehicle_telemetries t
-           WHERE t.vehicle_id = p.vid AND t.odometer_m IS NOT NULL
-             AND t.captured_at >= (p.ts::timestamptz AT TIME ZONE 'UTC')
-             AND t.captured_at < (p.ts::timestamptz AT TIME ZONE 'UTC') + make_interval(secs => ${READ_WINDOW_MS / 1000})
-           ORDER BY t.captured_at ASC LIMIT 1) a ON true`
+          SELECT x.odometer_m, x.captured_at FROM (
+            (SELECT t.odometer_m, t.captured_at FROM vehicle_telemetries t
+              WHERE t.vehicle_id = p.vid AND t.odometer_m IS NOT NULL
+                AND t.captured_at >= (p.ts::timestamptz AT TIME ZONE 'UTC')
+                AND t.captured_at < (p.ts::timestamptz AT TIME ZONE 'UTC') + make_interval(secs => ${READ_WINDOW_MS / 1000})
+              ORDER BY t.captured_at ASC LIMIT 1)
+            UNION ALL
+            (SELECT f.odometer_m, f.captured_at FROM vehicle_odometer_fills f
+              WHERE f.vehicle_id = p.vid
+                AND f.captured_at >= (p.ts::timestamptz AT TIME ZONE 'UTC')
+                AND f.captured_at < (p.ts::timestamptz AT TIME ZONE 'UTC') + make_interval(secs => ${READ_WINDOW_MS / 1000})
+              ORDER BY f.captured_at ASC LIMIT 1)
+          ) x ORDER BY x.captured_at ASC LIMIT 1) a ON true`
     const keep: [string, number, number | null][] = []
     for (const r of rows) {
       const p = ask[Number(r.i) - 1]!

@@ -37,7 +37,9 @@
  * "hasn't moved" are different facts and must not render as the same 0.0 km.
  */
 
+import { createHash } from 'node:crypto'
 import { prisma } from '../../lib/prisma.js'
+import { sharedQuery } from '../../lib/shared-query.js'
 import { arrivalRadiusM, YARD_RADIUS_M, type Point } from '../../lib/dispatch-trip.js'
 import { PLAUSIBLE_KMH, JITTER_FLOOR_M } from '../../lib/fix-plausibility.js'
 import { fleetDayStart } from '../../lib/provider-time.js'
@@ -540,8 +542,23 @@ export async function destinationDurations(
  * literal below — two statements measuring the same truck, agreeing only by
  * inspection and only on a UTC session. There is now one query, and it cannot
  * drift from itself.
+ *
+ * SHARED between callers asking the same question within 45 s
+ * (lib/shared-query): fleet state, machine operations and the analytics
+ * distance all ask "every active unit since the start of the fleet day" for
+ * the same org, and ran it three times at once. Callers get the same Map, so
+ * none may modify it.
  */
-export async function coveredSince(
+export const coveredSince = sharedQuery(
+  (pairs: { vehicleId: string; since: Date }[]) => createHash('sha1')
+    .update(pairs.map(p => `${p.vehicleId}@${p.since.getTime()}`).sort().join(','))
+    .digest('hex'),
+  coveredSinceQuery,
+  // Under the warm caches' 60 s refresh, so a sweep never reads an older figure than before.
+  { ttlMs: 45_000 },
+)
+
+async function coveredSinceQuery(
   pairs: { vehicleId: string; since: Date }[],
 ): Promise<Map<string, {
   coveredM: number; fixCount: number; firstFixAt: Date; lastFixAt: Date

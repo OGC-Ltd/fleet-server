@@ -2952,6 +2952,26 @@ model VehicleTelemetryRaw {
   @@map("vehicle_telemetry_raws")
 }
 
+/// Odometer readings filled in from Wialon for fixes that arrived without one
+/// (reports/unit-distance), keyed to the fix's unit and second.
+///
+/// Its own table, NOT an UPDATE of vehicle_telemetries. Until 2026-11-24 the
+/// fill wrote odometer_m onto old telemetry rows. Each update moved the row
+/// (the old pages were full), the next vacuum freed the hole it left, and
+/// Postgres then put new fixes into those holes one per page: on 24 Nov an
+/// hour of fixes sat on 41,965 pages instead of ~1,900, and every "today"
+/// query read 25x the pages. The telemetry table is append-only and stays so.
+///
+/// Readers take the telemetry row's own reading first, then this one.
+model VehicleOdometerFill {
+  vehicleId  String   @map("vehicle_id") // no Prisma relation, as VehicleTelemetryRaw
+  capturedAt DateTime @map("captured_at")
+  odometerM  Float    @map("odometer_m")
+
+  @@id([vehicleId, capturedAt])
+  @@map("vehicle_odometer_fills")
+}
+
 // ---------------------------------------------------------------------------
 // CARGO — manifest attached to a trip
 // ---------------------------------------------------------------------------
