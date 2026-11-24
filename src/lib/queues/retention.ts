@@ -719,7 +719,10 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     concurrency: 1,
   })
 
-  worker.on('failed', (job, err) => logger.error({ err, jobId: job?.id }, 'Retention job failed'))
+  // The job's NAME, not only its id: the id of a repeatable job is a hash, so
+  // "Retention job failed" said nothing about which of the nine schedulers on
+  // this queue it was (the sensor sweep, 2026-11-24, found by matching times).
+  worker.on('failed', (job, err) => logger.error({ err, job: job?.name, jobId: job?.id, attempt: job?.attemptsMade }, 'Maintenance job failed'))
 
   logger.info({
     queue: RETENTION_QUEUE,

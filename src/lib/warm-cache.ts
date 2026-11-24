@@ -23,6 +23,13 @@ const REFRESH_MS = 60_000
 /** Above this, a build is worth a log line — see the note in `refresh`. */
 const SLOW_BUILD_MS = 1_000
 
+/** How long to leave a key alone after `failures` failed builds in a row:
+ *  the refresh interval (at least a minute), doubling, capped at 30 minutes. */
+export function retryAfterMs(refreshMs: number, failures: number): number {
+  const base = Math.max(refreshMs, 60_000)
+  return Math.min(base * 2 ** Math.max(0, failures - 1), 30 * 60_000)
+}
+
 /** How many caches the sweep rebuilds at once. See the note in `sweep`. */
 const SWEEP_WIDTH = 2
 
@@ -174,6 +181,30 @@ export function createWarmCache<T>(opts: {
    */
   const inflight = new Map<string, Promise<T>>()
 
+  /**
+   * Builds that failed, per key: when the last one did and how many in a row.
+   *
+   * Without this a failing build was retried on EVERY sweep. A key that has
+   * never built has no entry, and a stale entry stays stale after a failed
+   * refresh, so both read as "due" a minute later, every minute, forever. On
+   * 2026-11-24 the probe report's build timed out (55 s statement timeout) for
+   * all nine organisations after a restart; each sweep started the nine again,
+   * so the database spent the night re-reading the same pages for builds that
+   * could not finish, which slowed every other query, which kept the builds
+   * failing. The maintenance queue's sensor sweep, which reads that report,
+   * failed on every run.
+   *
+   * After a failure the sweep and background refreshes leave the key alone for
+   * `retryAfterMs(n)`: the cache's own refresh interval (at least a minute),
+   * doubling per consecutive failure, capped at 30 minutes. A request for a
+   * key with nothing cached still computes, as before: somebody is waiting.
+   */
+  const failures = new Map<string, { at: number; n: number }>()
+  const backingOff = (key: string): boolean => {
+    const f = failures.get(key)
+    return !!f && Date.now() - f.at < retryAfterMs(refreshMs, f.n)
+  }
+
   const refresh = (key: string): Promise<T> => {
     const running = inflight.get(key)
     if (running) return running
@@ -185,7 +216,15 @@ export function createWarmCache<T>(opts: {
       // looks exactly like one that takes fifty milliseconds from outside. The
       // probe report sat at 36 s for weeks on that basis.
       const startedAt = Date.now()
-      const data = await opts.compute(key)
+      let data: T
+      try {
+        data = await opts.compute(key)
+      } catch (err) {
+        const n = (failures.get(key)?.n ?? 0) + 1
+        failures.set(key, { at: Date.now(), n })
+        throw err
+      }
+      failures.delete(key)
       const ms = Date.now() - startedAt
       // Only the slow ones. A line per cache per sweep per org would be a
       // thousand lines a day saying nothing.
@@ -220,7 +259,7 @@ export function createWarmCache<T>(opts: {
 
     const entry = store.get(key)
     if (entry) {
-      if (Date.now() - entry.fetchedAt > refreshMs && !entry.refreshing) {
+      if (Date.now() - entry.fetchedAt > refreshMs && !entry.refreshing && !backingOff(key)) {
         entry.refreshing = true
         refresh(key).catch(err => {
           entry.refreshing = false
@@ -241,6 +280,7 @@ export function createWarmCache<T>(opts: {
   const refreshIfStale = (key: string): Promise<unknown> => {
     const entry = store.get(key)
     if (entry && Date.now() - entry.fetchedAt <= refreshMs) return Promise.resolve(entry.data)
+    if (backingOff(key)) return Promise.resolve(entry?.data)
     return refresh(key)
   }
 

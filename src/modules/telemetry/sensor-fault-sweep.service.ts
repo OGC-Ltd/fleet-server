@@ -192,11 +192,25 @@ export async function sweepSensorFaults(orgId: string, now = new Date()): Promis
 export async function sweepAllOrgs(now = new Date()): Promise<SweepResult> {
   const orgs = await prisma.organisation.findMany({ select: { id: true } })
   const total: SweepResult = { opened: 0, closed: 0, skipped: 0 }
+  // One organisation's failure must not cost the others their sweep. On
+  // 2026-11-24 the probe report timed out for one organisation and the loop
+  // threw on it, so every organisation after it in the list went unswept on
+  // every run. Each is tried on its own; the job still fails (and is retried)
+  // if any did, so the failure stays visible.
+  const failed: string[] = []
   for (const o of orgs) {
-    const r = await sweepSensorFaults(o.id, now)
-    total.opened  += r.opened
-    total.closed  += r.closed
-    total.skipped += r.skipped
+    try {
+      const r = await sweepSensorFaults(o.id, now)
+      total.opened  += r.opened
+      total.closed  += r.closed
+      total.skipped += r.skipped
+    } catch (err) {
+      failed.push(o.id)
+      logger.warn({ err, orgId: o.id }, 'Sensor fault sweep failed for organisation')
+    }
+  }
+  if (failed.length) {
+    throw new Error(`Sensor fault sweep failed for ${failed.length} of ${orgs.length} organisations: ${failed.join(', ')}`)
   }
   return total
 }
