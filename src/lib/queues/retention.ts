@@ -79,6 +79,7 @@ import { runRepairSweep } from '../../modules/repairs/repairs.sweep.js'
 import { logger } from '../logger.js'
 import { fleetDayStart } from '../provider-time.js'
 import { prisma } from '../prisma.js'
+import { maintainTelemetryPartitions } from '../telemetry-partitions.js'
 import { trimCachedNotifications } from '../notifications/notification-cache.js'
 import { syncSensorInventory } from '../../modules/fuel/sensor-inventory.service.js'
 import { sweepProbeHealth } from '../../modules/fuel/fuel-probe-health.service.js'
@@ -164,6 +165,14 @@ const REPAIR_JOB = 'repairs:escalation'
 const STATS_JOB = 'vehicle:daily-stats'
 const INCIDENT_STATS_JOB = 'vehicle:incident-daily-stats'
 const SENSOR_FAULT_JOB   = 'sensor:fault-sweep'
+/**
+ * Creates the monthly vehicle_telemetries partitions ahead of need, and logs an
+ * error when fixes land outside every month (lib/telemetry-partitions.ts).
+ * Scheduled whenever this queue runs at all, under neither flag: it deletes
+ * nothing, and skipping it would eventually send every new fix to the DEFAULT
+ * partition.
+ */
+const PARTITION_JOB      = 'telemetry:partitions'
 
 /**
  * The last instant of the fleet day that has just finished.
@@ -553,6 +562,17 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     await queue.removeRepeatableByKey(r.key)
   }
 
+  await queue.add(PARTITION_JOB, {}, {
+    // 02:05 UTC (05:05 in Nairobi): the quietest hour for ingest, and clear of
+    // the 02:40 Sunday rate job. Three months are kept ahead, so missed runs
+    // cost nothing for weeks.
+    repeat:            { pattern: '5 2 * * *' },
+    removeOnComplete:  { count: 30 },
+    removeOnFail:      { count: 30 },
+    attempts:          3,
+    backoff:           { type: 'exponential', delay: 60_000 },
+  })
+
   if (sweep) await queue.add(PRUNE_JOB, {}, {
     // 03:17 UTC — off the hour, so it doesn't coincide with every other
     // cron on the box, and outside Kenyan working hours (UTC+3).
@@ -677,6 +697,7 @@ export async function startRetentionSweep(): Promise<RetentionHandle> {
     if (job.name === STATS_JOB) return recordVehicleDailyStats(lastCompleteFleetDay())
     if (job.name === INCIDENT_STATS_JOB) return recordIncidentDailyStats(lastCompleteFleetDay())
     if (job.name === SENSOR_FAULT_JOB) return sweepAllOrgs()
+    if (job.name === PARTITION_JOB) return maintainTelemetryPartitions()
     // Both figures refresh together, so a row never carries a fresh derivation
     // beside a stale balance. The measured half only ever updates rows the
     // derivation created, so it must run second.
