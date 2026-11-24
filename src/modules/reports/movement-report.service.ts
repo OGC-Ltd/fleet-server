@@ -276,19 +276,51 @@ async function everLastFixesAt(ids: string[], to: number, orgId: string): Promis
   return new Map(rows.map(r => [r.vehicle_id, { lat: r.lat, lng: r.lng, speedKmh: r.speed_kmh, at: r.captured_at.getTime() }]))
 }
 
-/** Each unit's last fix at or before `to`, from the stored telemetry: where it stood when a past window ended. */
-async function lastFixesAt(ids: string[], to: number, orgId: string): Promise<Map<string, { lat: number; lng: number; speedKmh: number | null; at: number }>> {
+/**
+ * Each unit's last fix at or before `to`, from the stored telemetry: where it stood when a past window ended.
+ *
+ * One look per unit on (vehicle_id, captured_at), walking back from `to` to its first fix
+ * (2026-11-24). As one DISTINCT ON over `vehicle_id = ANY(...)` the planner read every
+ * fleet's fixes for the whole week on the captured_at index and sorted them: about a
+ * minute for Nzoia's 68 units against 114 million rows, past the proxy's 30 s, so a past
+ * window came back empty. This form answered the same in under a second for every fleet.
+ */
+export async function lastFixesAt(ids: string[], to: number, orgId: string): Promise<Map<string, { lat: number; lng: number; speedKmh: number | null; at: number }>> {
   if (!ids.length) return new Map()
   const rows = await prisma.$queryRaw<Array<{ vehicle_id: string; lat: number; lng: number; speed_kmh: number | null; captured_at: Date }>>`
-      SELECT DISTINCT ON (vehicle_id) vehicle_id, lat, lng, speed_kmh, captured_at
-        FROM vehicle_telemetries
-       WHERE vehicle_id = ANY(${ids}::text[]) AND captured_at <= ${new Date(to)} AND captured_at > ${new Date(to - LAST_FIX_LOOKBACK_MS)}
-         AND lat IS NOT NULL AND lng IS NOT NULL
-       ORDER BY vehicle_id, captured_at DESC`.catch((err) => {
+      SELECT v.id AS vehicle_id, t.lat, t.lng, t.speed_kmh, t.captured_at
+        FROM unnest(${ids}::text[]) AS v(id)
+       CROSS JOIN LATERAL (
+         SELECT lat, lng, speed_kmh, captured_at FROM vehicle_telemetries
+          WHERE vehicle_id = v.id AND captured_at <= ${new Date(to)} AND captured_at > ${new Date(to - LAST_FIX_LOOKBACK_MS)}
+            AND lat IS NOT NULL AND lng IS NOT NULL
+          ORDER BY captured_at DESC LIMIT 1
+       ) t`.catch((err) => {
         logger.warn({ err, orgId }, 'movement report: last fixes for a past window failed — units shown without a fix')
         return []
       })
   return new Map(rows.map(r => [r.vehicle_id, { lat: r.lat, lng: r.lng, speedKmh: r.speed_kmh, at: r.captured_at.getTime() }]))
+}
+
+/**
+ * Each unit's first fix in [from, to]: where it was when the window began. One look per
+ * unit, forward from `from`, as lastFixesAt: a long window (a day, a week) read as one
+ * DISTINCT ON would read every fleet's fixes over it.
+ */
+export async function firstFixesIn(ids: string[], from: number, to: number, orgId: string): Promise<Array<{ vehicle_id: string; lat: number; lng: number }>> {
+  if (!ids.length) return []
+  return prisma.$queryRaw<Array<{ vehicle_id: string; lat: number; lng: number }>>`
+      SELECT v.id AS vehicle_id, t.lat, t.lng
+        FROM unnest(${ids}::text[]) AS v(id)
+       CROSS JOIN LATERAL (
+         SELECT lat, lng FROM vehicle_telemetries
+          WHERE vehicle_id = v.id AND captured_at >= ${new Date(from)} AND captured_at <= ${new Date(to)}
+            AND lat IS NOT NULL AND lng IS NOT NULL
+          ORDER BY captured_at ASC LIMIT 1
+       ) t`.catch((err) => {
+        logger.warn({ err, orgId }, 'movement report: window start fixes failed — directions left blank')
+        return []
+      })
 }
 
 /**
@@ -311,17 +343,7 @@ export async function getMovementReport(orgId: string, window: WindowHours | Win
 
   // Each unit's first fix in the window: where it was when the window began.
   const ids = units.map(u => u.vehicleId)
-  const starts = ids.length
-    ? await prisma.$queryRaw<Array<{ vehicle_id: string; lat: number; lng: number }>>`
-        SELECT DISTINCT ON (vehicle_id) vehicle_id, lat, lng
-          FROM vehicle_telemetries
-         WHERE vehicle_id = ANY(${ids}::text[]) AND captured_at >= ${new Date(from)} AND captured_at <= ${new Date(to)}
-           AND lat IS NOT NULL AND lng IS NOT NULL
-         ORDER BY vehicle_id, captured_at ASC`.catch((err) => {
-          logger.warn({ err, orgId }, 'movement report: window start fixes failed — directions left blank')
-          return []
-        })
-    : []
+  const starts = await firstFixesIn(ids, from, to, orgId)
   const startOf = new Map(starts.map(s => [s.vehicle_id, { lat: s.lat, lng: s.lng }]))
   // Where each unit stood when the window ended: now from the snapshot, or its last stored fix.
   const past = live ? null : await (opts.offline ? everLastFixesAt : lastFixesAt)(ids, to, orgId)
