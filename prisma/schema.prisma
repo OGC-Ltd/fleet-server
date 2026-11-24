@@ -336,6 +336,8 @@ model Organisation {
   driverConductCases   DriverConductCase[]
   operatorIncidents    OperatorIncident[]
   dashcamAlarmFeedback DashcamAlarmFeedback[]
+  dashcamAlarms        DashcamAlarm[]
+  dashcamCaptureDays   DashcamCaptureDay[]
   alertDecisions       AlertDecision[]
   vehicleInsights      VehicleInsight[]
   plannerCustomers     PlannerCustomer[]
@@ -3592,6 +3594,52 @@ model DashcamAlarmFeedback {
 
   @@index([organisationId, alarmId])
   @@map("dashcam_alarm_feedback")
+}
+
+/// One dashcam alarm, saved from VSS each night (no media: the clips and photos stay in VSS).
+/// VSS keeps about two weeks; these rows keep the numbers for good (operator, 2026-11-24).
+model DashcamAlarm {
+  /// The alarm's VSS guid: one row per alarm, however often a day is captured.
+  id             String    @id
+  organisationId String    @map("organisation_id")
+  vehicleId      String?   @map("vehicle_id")
+  plate          String    @default("")
+  deviceId       String    @default("") @map("device_id")
+  occurredAt     DateTime  @map("occurred_at")
+  /// VSS alarm type; 0 while VSS has not given it (filled in by a later capture).
+  code           Int       @default(0)
+  label          String    @default("")
+  group          String    @default("")
+  severity       String    @default("")
+  category       String    @default("")
+  speedKmh       Int?      @map("speed_kmh")
+  lat            Float?
+  lng            Float?
+  capturedAt     DateTime  @default(now()) @map("captured_at")
+  typedAt        DateTime? @map("typed_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@index([organisationId, occurredAt])
+  @@index([vehicleId, occurredAt])
+  @@map("dashcam_alarms")
+}
+
+/// That an organisation's dashcam day was captured, and what it held: tells "no alarms" from "not captured".
+model DashcamCaptureDay {
+  organisationId String   @map("organisation_id")
+  /// Fleet day, YYYY-MM-DD (Nairobi).
+  day            String
+  alarms         Int      @default(0)
+  untyped        Int      @default(0)
+  /// VSS refused part of the day's search: capture it again.
+  partial        Boolean  @default(false)
+  capturedAt     DateTime @default(now()) @map("captured_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@id([organisationId, day])
+  @@map("dashcam_capture_days")
 }
 
 
