@@ -203,11 +203,18 @@ processors:
           sampling_percentage: ${env:BACKGROUND_SAMPLE_PERCENT}
 
 exporters:
+  # Sized in SPANS, not batches. It was `queue_size: 2000` batches of up to
+  # 4096 spans each, so while Jaeger was down (OOM loop, 22–24 Nov 2026) this
+  # queue grew until the collector sat at its memory limit and memory_limiter
+  # refused EVERYTHING: ~3,000 log batches an hour never reached Loki and the
+  # container metrics fell to a tenth of their samples. 20,000 spans is ~20 MB
+  # and, at ~15 spans/s, over 20 minutes of Jaeger downtime; past that, traces
+  # are dropped and the other signals carry on. S3 still archives every trace.
   otlp/jaeger:
     endpoint: jaeger:4317
     tls: { insecure: true }
-    sending_queue: { enabled: true, queue_size: 2000 }
-    retry_on_failure: { enabled: true, max_elapsed_time: 5m }
+    sending_queue: { enabled: true, sizer: items, queue_size: 20000 }
+    retry_on_failure: { enabled: true, max_elapsed_time: 2m }
 
   otlphttp/prometheus:
     metrics_endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
