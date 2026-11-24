@@ -89,9 +89,14 @@ export async function dayKmEvidence(vehicleIds: string[], from: Date, to: Date):
   if (!vehicleIds.length) return new Map()
   const rows = await reportDb().$queryRaw<Array<{ vehicle_id: string; gps_km: number | null; odo_km: number | null; odo_n: number | bigint | null; fixes: number | bigint | null }>>`
     WITH p AS (
-      SELECT t.vehicle_id, t.captured_at, t.lat, t.lng, t.speed_kmh, t.odometer_m,
+      -- The row's own reading first, else one filled in from Wialon (unit-distance).
+      SELECT t.vehicle_id, t.captured_at, t.lat, t.lng, t.speed_kmh, COALESCE(t.odometer_m, f.odometer_m) AS odometer_m,
              LAG(t.lat) OVER w AS plat, LAG(t.lng) OVER w AS plng, LAG(t.captured_at) OVER w AS pt
         FROM vehicle_telemetries t
+        LEFT JOIN (
+          SELECT vehicle_id, captured_at, odometer_m FROM vehicle_odometer_fills
+           WHERE vehicle_id = ANY(${vehicleIds}) AND captured_at >= ${from} AND captured_at < ${to}
+        ) f ON f.vehicle_id = t.vehicle_id AND f.captured_at = t.captured_at
        WHERE t.vehicle_id = ANY(${vehicleIds}) AND t.captured_at >= ${from} AND t.captured_at < ${to}
          AND t.lat IS NOT NULL AND t.lng IS NOT NULL AND NOT (t.lat = 0 AND t.lng = 0)
       WINDOW w AS (PARTITION BY t.vehicle_id ORDER BY t.captured_at)

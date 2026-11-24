@@ -6,8 +6,9 @@
  * The odometer (Teltonika io_16) is stored per fix from 18 Nov 2026 on
  * (VehicleTelemetry.odometerM). For a unit-day that has no stored reading, a day
  * before the column or one whose rows came in without it, the unit's Wialon
- * messages for the day are read, each reading is written onto our row of the
- * same second (the rows carry the tracker's own time, so the match is exact),
+ * messages for the day are read, each reading is kept for our row of the
+ * same second in vehicle_odometer_fills (the rows carry the tracker's own time,
+ * so the match is exact; the telemetry row itself is never rewritten),
  * and the distance is worked out from Wialon's messages, which are the fuller
  * set: KTCC 787D had 2,180 messages on 17 Nov against our 1,374 rows. The next
  * read of that day is answered from the database.
@@ -93,15 +94,25 @@ async function loadDayOdometer(wialonUnit: number, fromSec: number, toSec: numbe
   }
 }
 
-/** Writes the readings onto the unit's rows of the same second that have none. Returns the rows written. */
+/**
+ * Keeps the readings for the unit's rows of the same second that have none, in
+ * vehicle_odometer_fills. Returns the readings kept.
+ *
+ * Never an UPDATE of vehicle_telemetries: rewriting old rows there left holes
+ * that new fixes were then scattered into, one per page (schema.prisma,
+ * VehicleOdometerFill). Readers take the row's own reading first, then this.
+ */
 async function storeReadings(vehicleId: string, readings: OdoReading[]): Promise<number> {
   if (!readings.length) return 0
   return prisma.$executeRaw`
-    UPDATE vehicle_telemetries t SET odometer_m = u.o
+    INSERT INTO vehicle_odometer_fills (vehicle_id, captured_at, odometer_m)
+    SELECT DISTINCT ON (t.captured_at) t.vehicle_id, t.captured_at, u.o
       FROM unnest(${readings.map((r) => r.t)}::float8[], ${readings.map((r) => r.m)}::float8[]) AS u(s, o)
-     WHERE t.vehicle_id = ${vehicleId}
+      JOIN vehicle_telemetries t
+        ON t.vehicle_id = ${vehicleId}
        AND t.captured_at = (to_timestamp(u.s) AT TIME ZONE 'UTC')
-       AND t.odometer_m IS NULL`
+       AND t.odometer_m IS NULL
+    ON CONFLICT (vehicle_id, captured_at) DO NOTHING`
 }
 
 /** When each unit-day was last asked of Wialon, answered or not. */

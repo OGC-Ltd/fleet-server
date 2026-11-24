@@ -41,6 +41,7 @@
 
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
+import { sharedQuery } from '../../lib/shared-query.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
 import { REACH_METRES, DIG_SPEED_KMH, MAX_GAP_SECONDS, MIN_DIG_FIXES, SNAP_DEGREES } from './excavator-area.service.js'
 import { dozerDay } from './dozer-area.service.js'
@@ -85,8 +86,20 @@ export const IDLE_SPEED_KMH = 0
  *
  * `orgId` narrows it for the live path, which only ever wants one org's units;
  * the job passes nothing and does the whole fleet in one pass.
+ *
+ * SHARED between callers asking for the same org and day within 45 s
+ * (lib/shared-query): fleet state and the probe report both read today's
+ * figures for an org, and three copies were seen running at once on
+ * 2026-11-24, 32 s each. Callers get the same array, so none may modify it.
  */
-export async function vehicleFiguresForDay(
+export const vehicleFiguresForDay = sharedQuery(
+  (dayStart: Date, dayEnd: Date, orgId?: string) => `${dayStart.getTime()}|${dayEnd.getTime()}|${orgId ?? '*'}`,
+  vehicleFiguresForDayQuery,
+  // Under the warm caches' 60 s refresh, so a sweep never reads an older figure than before.
+  { ttlMs: 45_000 },
+)
+
+async function vehicleFiguresForDayQuery(
   dayStart: Date, dayEnd: Date, orgId?: string,
 ): Promise<VehicleDayFigures[]> {
   // Narrowing to an org needs the join; the job wants every unit and should not
