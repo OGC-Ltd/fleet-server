@@ -69,6 +69,7 @@
     "accel:events": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/accel-events.ts",
     "backfill:notifications": "tsx prisma/backfill-notifications.ts",
     "build:trips": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/build-trips.ts",
+    "dashcam:backfill": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/dashcam-backfill.ts",
     "fuel:adjudicate": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/adjudicate-fuel.ts",
     "sim:fuel": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/simulate-fuel-theft.ts",
     "fuel:health": "cross-env DOTENV_CONFIG_PATH=.env tsx prisma/fuel-health.ts",

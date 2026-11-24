@@ -594,6 +594,15 @@ const schema = z.object({
   // is a handful of Wialon reads and writes nothing.
   WIALON_REGISTRY_SYNC_CRON: z.string().optional().default('5,35 * * * *'),
 
+  // Dashcam alarms saved from VSS each night (lib/queues/dashcam-capture.ts):
+  // VSS keeps about two weeks, these keep the numbers (no media) for good.
+  // 'off' on additional instances so only ONE runs it.
+  DASHCAM_CAPTURE: z.enum(['apply', 'off']).optional().default('apply'),
+  // 22:30 UTC = 01:30 EAT, when the Alarms page is quiet; VSS searches are 10 s apart.
+  DASHCAM_CAPTURE_CRON: z.string().optional().default('30 22 * * *'),
+  // How many past fleet days each night captures again (late uploads, alarms typed late).
+  DASHCAM_CAPTURE_DAYS: z.coerce.number().int().min(1).max(13).optional().default(3),
+
   // Pump price for costing the fuel ledger (analytics/fuel-cost). NOTHING in
   // the schema records what fuel cost — a filling stores litres, not money —
   // so cost is always litres × a price supplied here, and the endpoint echoes
