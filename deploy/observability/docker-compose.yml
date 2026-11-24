@@ -8,7 +8,7 @@
 #                   the box's auth log (SSH sign-ins and sudo), the box's CPU /
 #                   memory / disk / network, and every container's CPU / memory.
 #                   Sends them on to:
-#   jaeger          traces, searchable for JAEGER_TTL (48 h): every request, every
+#   jaeger          traces, the newest JAEGER_MAX_TRACES (3000, ~2 h), in memory: every request, every
 #                   error, every slow trace, and a share of background work
 #                   (tail sampling in otel-collector/config.yaml)
 #   prometheus      metrics, 15 days
@@ -79,11 +79,12 @@ services:
     image: jaegertracing/jaeger:2.22.0
     command: ["--config=/etc/jaeger/config.yaml"]
     environment:
-      JAEGER_TTL: ${JAEGER_TTL:-48h}
+      JAEGER_MAX_TRACES: ${JAEGER_MAX_TRACES:-3000}
+      # The Go heap is all there is now (no Badger): collect hard before the
+      # container ceiling rather than be killed at it.
+      GOMEMLIMIT: ${JAEGER_GOMEMLIMIT:-300MiB}
     volumes:
       - ./jaeger/config.yaml:/etc/jaeger/config.yaml:ro
-      # Badger, on disk. Owned by 10001 (fleet-observability setup).
-      - /var/lib/fleet-observability/jaeger:/badger
     networks: [obs]
     expose: ["4317", "4318", "8888", "16686"]
     ports:

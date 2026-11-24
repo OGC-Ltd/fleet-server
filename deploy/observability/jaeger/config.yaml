@@ -1,7 +1,16 @@
-# Jaeger v2: stores the traces the collector's tail sampling keeps, on disk
-# (Badger), for JAEGER_TTL (default 48 h). S3 keeps every span it receives; this is
-# the searchable recent window. Grafana › Explore › Jaeger reads it, and the UI
-# is on the box's loopback (ssh -L 16686:127.0.0.1:16686).
+# Jaeger v2: keeps the newest JAEGER_MAX_TRACES traces the collector's tail
+# sampling sends, in memory. S3 keeps every span it receives; this is the
+# searchable recent window. Grafana › Explore › Jaeger reads it, and the UI is
+# on the box's loopback (ssh -L 16686:127.0.0.1:16686).
+#
+# In memory, not Badger, since 2026-11-24. Jaeger opens Badger with its stock
+# options (64 MB x 5 memtables and a 256 MB block cache, none of them
+# configurable here), which cannot fit the 384 MB the box can spare: it was
+# OOM-killed ~50-95 times an hour, every write from the collector failed, the
+# store had grown to 3.4 GB, and replaying it on each restart read 5-30 MB/s
+# from disk, about half the host's CPU time spent in iowait. The memory store
+# is bounded by trace count and does no IO; a restart empties it, and S3 still
+# has every span.
 service:
   extensions: [jaeger_storage, jaeger_query, healthcheckv2]
   pipelines:
@@ -36,13 +45,10 @@ extensions:
   jaeger_storage:
     backends:
       main:
-        badger:
-          directories:
-            keys: /badger/keys
-            values: /badger/values
-          ephemeral: false
-          ttl:
-            spans: ${env:JAEGER_TTL}
+        memory:
+          # ~40 spans a trace and ~22 traces a minute (2026-11-24): 3000 is about
+          # two hours, and well inside the container's memory (see compose).
+          max_traces: ${env:JAEGER_MAX_TRACES}
 
 receivers:
   otlp:
