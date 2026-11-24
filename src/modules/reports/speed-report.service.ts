@@ -11,7 +11,7 @@
  * comes from our telemetry and says so.
  *
  *   Limit        the org's rule where it names this type (West Kenya's listed
- *                light vehicles, 110), else the limit set on the Wialon unit, as
+ *                light vehicles, 100), else the limit set on the Wialon unit, as
  *                the sheet has it, else the limit the alerts use.
  *   Occurrence   an unbroken run over the limit, of two messages at least: a
  *                single message has no length to measure and the sheet leaves it out.
