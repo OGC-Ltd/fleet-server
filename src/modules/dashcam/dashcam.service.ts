@@ -40,7 +40,15 @@ import { vssEvent, vssCategory, type Category } from './vss-events.js'
 
 const VEHICLES_TTL_MS = 5 * 60_000
 const ALARMS_TTL_MS   = 90_000
-const MAX_DAYS        = 7
+// VSS keeps about two weeks of alarms (read 2026-11-24: Aquamist's 11 Nov there, 8 Nov gone)
+const MAX_DAYS        = 14
+/** A window asked for with `until` is one day at most, so its search answers inside the proxy's 30 s. */
+const WINDOW_MAX_MS   = 26 * 3_600_000
+/** §3.25 lookups for a day window: every alarm of a busy day (Aquamist: ~860) gets its type. */
+const WINDOW_DETAIL_CALLS = 20
+/** A day window that ended this long ago no longer changes: its answer is kept longer. */
+const SETTLED_MS      = 3_600_000
+const SETTLED_TTL_MS  = 6 * 3_600_000
 let SEARCH_GAP_MS     = 10_000      // between two §3.24 searches (tests shorten it)
 const SEARCH_PAGE     = 2_000       // files per search page
 const SEARCH_PAGES    = 5
@@ -87,6 +95,8 @@ export interface AlarmsAnswer {
   to: string
   partial?: boolean
   stale?: boolean
+  /** Alarms whose type VSS could not give in time: not counted as any kind. */
+  untyped?: number
 }
 
 interface EvidenceFile { type: number; channel: number; url: string }
@@ -289,9 +299,9 @@ async function findEvidence(deviceIds: string[], devices: Map<string, OrgDevice>
 // §3.25 alarm details — kept: an alarm does not change once raised.
 const details = new Map<string, AlarmDetail>()
 
-async function alarmDetails(guids: string[]): Promise<void> {
+async function alarmDetails(guids: string[], calls = DETAIL_CALLS): Promise<void> {
   const missing = [...new Set(guids)].filter((g) => !details.has(g))
-  for (let i = 0; i < Math.min(missing.length, DETAIL_CHUNK * DETAIL_CALLS); i += DETAIL_CHUNK) {
+  for (let i = 0; i < Math.min(missing.length, DETAIL_CHUNK * calls); i += DETAIL_CHUNK) {
     let data: unknown
     try {
       data = await vssCall<unknown>('/vss/alarm/getAlarmByIds.action', { guidList: missing.slice(i, i + DETAIL_CHUNK) })
@@ -345,22 +355,31 @@ export function fileFor(orgId: string, k: string): string | null {
 const answers = new Map<string, { at: number; value: AlarmsAnswer }>()
 const inflight = new Map<string, Promise<AlarmsAnswer>>()
 
-/** The organisation's dashcam alarms with evidence since `since`, newest first. */
-export async function getAlarms(orgId: string, scope: Set<string> | null, since: string | undefined): Promise<AlarmsAnswer> {
+/**
+ * The organisation's dashcam alarms with evidence since `since`, newest first;
+ * with `until`, over that window only, one day at most (a month's Driver
+ * conduct reads a day at a time, operator 2026-11-24), every alarm's type
+ * looked up.
+ */
+export async function getAlarms(orgId: string, scope: Set<string> | null, since: string | undefined, until?: string): Promise<AlarmsAnswer> {
   const now = Date.now()
   let sinceMs = since ? Date.parse(since) : NaN
   if (!Number.isFinite(sinceMs)) sinceMs = now - 86_400_000
   sinceMs = Math.max(sinceMs, now - MAX_DAYS * 86_400_000 - 3_600_000)
   sinceMs = Math.floor(sinceMs / 600_000) * 600_000           // 10-minute steps: fewer distinct searches
+  const askedUntil = until ? Date.parse(until) : NaN
+  const windowed = Number.isFinite(askedUntil)
+  const untilMs = windowed ? Math.max(sinceMs, Math.min(askedUntil, now, sinceMs + WINDOW_MAX_MS)) : now
 
   const devices = await orgDevices(orgId, scope)
-  const from = vssTime(sinceMs), to = vssTime(now)
-  if (devices.size === 0) return { incidents: [], cameras: 0, from, to }
+  const from = vssTime(sinceMs), to = vssTime(untilMs)
+  if (devices.size === 0 || untilMs <= sinceMs) return { incidents: [], cameras: devices.size, from, to }
 
   const ids = [...devices.keys()].sort()
-  const key = crypto.createHash('sha1').update(`${orgId}|${ids.join(',')}|${sinceMs}`).digest('hex')
+  const key = crypto.createHash('sha1').update(`${orgId}|${ids.join(',')}|${sinceMs}|${windowed ? untilMs : ''}`).digest('hex')
   const hit = answers.get(key)
-  if (hit && now - hit.at < ALARMS_TTL_MS) return hit.value
+  const ttl = windowed && now - untilMs > SETTLED_MS ? SETTLED_TTL_MS : ALARMS_TTL_MS
+  if (hit && now - hit.at < ttl) return hit.value
   // One search per organisation at a time: the tab, its badge and anyone else
   // with the page open share it.
   const running = inflight.get(key)
@@ -375,7 +394,7 @@ export async function getAlarms(orgId: string, scope: Set<string> | null, since:
       throw err
     }
     const need = found.alarms.filter((a) => a.gps === '' || a.type === 0).sort((x, y) => y.time.localeCompare(x.time))
-    await alarmDetails(need.map((a) => a.guid))
+    await alarmDetails(need.map((a) => a.guid), windowed ? WINDOW_DETAIL_CALLS : DETAIL_CALLS)
 
     const incidents: DashcamIncident[] = []
     for (const a of found.alarms) {
@@ -406,7 +425,8 @@ export async function getAlarms(orgId: string, scope: Set<string> | null, since:
       })
     }
     incidents.sort((x, y) => String(y.occurredAt).localeCompare(String(x.occurredAt)))
-    const value: AlarmsAnswer = { incidents, cameras: devices.size, from, to, ...(found.partial ? { partial: true } : {}) }
+    const untyped = found.alarms.filter((a) => !(a.type || details.get(a.guid)?.y)).length
+    const value: AlarmsAnswer = { incidents, cameras: devices.size, from, to, ...(found.partial ? { partial: true } : {}), ...(untyped ? { untyped } : {}) }
     answers.set(key, { at: Date.now(), value })
     return value
   })()
