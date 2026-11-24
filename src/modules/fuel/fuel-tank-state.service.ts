@@ -250,8 +250,15 @@ async function readStoredTankState(orgId: string, asOf: Date): Promise<VehicleTa
  */
 async function closeFromTelemetry(orgId: string, dayStart: Date): Promise<Map<string, number>> {
   const prevStart = new Date(dayStart.getTime() - 24 * 3_600_000)
+  // MATERIALIZED and the LATERAL with OFFSET 0 are both load-bearing: they
+  // make the tail a per-vehicle range lookup on (vehicle_id, captured_at).
+  // Written as a plain join, the planner folded the two steps together and
+  // judged a parallel seq scan of the whole telemetry table (40 M rows with a
+  // level) cheaper. After the table was partitioned on 2026-11-24 that is the
+  // plan it picked, and every tank-state build hit the 55 s statement timeout.
+  // Measured on 2026-11-24 against production: over 70 s → 0.1–0.3 s per org.
   const rows = await prisma.$queryRaw<Array<{ vehicle_id: string; close_ml: number | null }>>`
-    WITH last_read AS (
+    WITH last_read AS MATERIALIZED (
       SELECT v.id AS vehicle_id, t.captured_at AS last_at
         FROM vehicles v
         CROSS JOIN LATERAL (
@@ -266,13 +273,17 @@ async function closeFromTelemetry(orgId: string, dayStart: Date): Promise<Map<st
         ) t
        WHERE v.organisation_id = ${orgId}
     ), tail AS (
-      SELECT l.vehicle_id, tt.fuel_level_ml
+      SELECT l.vehicle_id, x.fuel_level_ml
         FROM last_read l
-        JOIN vehicle_telemetries tt
-          ON tt.vehicle_id = l.vehicle_id
-         AND tt.captured_at <= l.last_at
-         AND tt.captured_at >= l.last_at - make_interval(mins => ${CLOSE_WINDOW_MINUTES})
-       WHERE tt.fuel_level_ml IS NOT NULL
+        CROSS JOIN LATERAL (
+          SELECT tt.fuel_level_ml
+            FROM vehicle_telemetries tt
+           WHERE tt.vehicle_id = l.vehicle_id
+             AND tt.captured_at <= l.last_at
+             AND tt.captured_at >= l.last_at - make_interval(mins => ${CLOSE_WINDOW_MINUTES})
+             AND tt.fuel_level_ml IS NOT NULL
+          OFFSET 0
+        ) x
     )
     SELECT vehicle_id,
            (array_agg(fuel_level_ml ORDER BY fuel_level_ml))[floor(count(*) / 2) + 1] AS close_ml
