@@ -64,12 +64,13 @@ export function vehicleSpeedLimitFor(registrationPlate: string | null | undefine
 
 /**
  * West Kenya and its two mills (set 2026-11-04): the operator's list of
- * non-commercial vehicles, stored as the SALOON type, drive at 110 km/h
- * everywhere. Every other unit stays on the fleet's 80.
+ * non-commercial vehicles, stored as the SALOON type, drive at 100 km/h
+ * everywhere (110 until 2026-11-24, lowered at the operator's request).
+ * Every other unit stays on the fleet's 80.
  */
 const WEST_KENYA_POLICY: SpeedPolicy = {
   default: { outsideKmh: 80 },
-  byType:  { SALOON: { outsideKmh: 110 } },
+  byType:  { SALOON: { outsideKmh: 100 } },
 }
 
 export const SPEED_POLICIES: Readonly<Record<string, SpeedPolicy>> = {
