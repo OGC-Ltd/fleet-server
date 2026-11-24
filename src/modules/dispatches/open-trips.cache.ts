@@ -48,6 +48,33 @@ export function getOpenTripsCached(orgId: string): Promise<OpenTripsForOrg> {
   return cache.get(orgId)
 }
 
+/** How long the map waits for a cold open-trips build before going on without it. */
+export const MAP_TRIPS_WAIT_MS = 3_000
+
+/**
+ * Open trips for decorating the map, never holding the map up.
+ *
+ * Warm, this is getOpenTripsCached. Cold — after a restart, or while every
+ * build fails — the build can take as long as "distance driven today" does,
+ * and on 2026-11-24 that was every build for SUKARI: the snapshot waited on it
+ * for 60 s, returned 500, and the map showed no units at all although their
+ * positions read in 26 ms. So the map waits MAP_TRIPS_WAIT_MS at most and then
+ * goes on with no trips; the build carries on and the next request has them.
+ */
+export async function getOpenTripsForMap(orgId: string): Promise<OpenTripsForOrg> {
+  const none: OpenTripsForOrg = { yard: null, yardName: null, byVehicle: new Map() }
+  const build = cache.get(orgId)
+  // The build is left running for the next request; its failure is the cache's to log.
+  build.catch(() => undefined)
+  let timer: NodeJS.Timeout | undefined
+  const gaveUp = new Promise<OpenTripsForOrg>((resolve) => { timer = setTimeout(() => resolve(none), MAP_TRIPS_WAIT_MS) })
+  try {
+    return await Promise.race([build.catch(() => none), gaveUp])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /**
  * Fold a dispatch that has JUST changed into the cached map, without rebuilding
  * the organisation.

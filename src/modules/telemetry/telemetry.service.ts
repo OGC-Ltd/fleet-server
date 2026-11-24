@@ -14,7 +14,7 @@ import { NotFoundError, BadRequestError, ServiceUnavailableError } from '../../c
 import { assignedZoneStatus } from '../../lib/zone-presence.js'
 import { movementState } from '../../lib/movement-state.js'
 import { connectionStatus } from '../../lib/connection-state.js'
-import { getOpenTripsCached } from '../dispatches/open-trips.cache.js'
+import { getOpenTripsForMap } from '../dispatches/open-trips.cache.js'
 import { tripGeometry } from '../../lib/dispatch-trip.js'
 import { fleetDayStart, fleetDayKey, fleetDayBounds as sharedFleetDayBounds } from '../../lib/provider-time.js'
 import { prisma } from '../../lib/prisma.js'
@@ -466,8 +466,9 @@ export async function getFleetSnapshot(orgId: string, vehicleIds: Set<string> | 
     : cached
 
   // What each vehicle is out on. Warmed, so this adds no query to the request
-  // path — see open-trips.cache.
-  const { yard, yardName, byVehicle: openTrips } = await getOpenTripsCached(orgId)
+  // path — see open-trips.cache. Cold, the map goes on without trips after a
+  // few seconds rather than waiting on the build (getOpenTripsForMap).
+  const { yard, yardName, byVehicle: openTrips } = await getOpenTripsForMap(orgId)
   // Hoisted: the day boundary is the same for all 597 rows, and recomputing it
   // per vehicle would allocate a Date and format it six hundred times a request.
   const dayStart = fleetDayStartIso()
