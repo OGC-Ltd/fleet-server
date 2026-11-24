@@ -14,17 +14,24 @@
  * until someone fences it in the Planner, which this sync then keeps.
  * No fence is ever drawn or changed here.
  *
- * A sheet or a Wialon itinerary for the same plate wins: no keyed plan is made
- * beside one dated that day or the day before (a sheet's date is when it was
- * printed, the run is the next day), as the Deliveries report already reports
- * the sheet instead of the hand-listed vehicle.
+ * Each report's list has its own plans (operator, 2026-11-25): a unit on both
+ * Van Sales and Finished Goods gets a keyed plan for each list, tagged with its
+ * `list`, each with that list's stops only.
+ *
+ * A sheet or a Wialon itinerary for the same plate wins on its own report: no
+ * keyed plan is made beside one dated that day or the day before (a sheet's
+ * date is when it was printed, the run is the next day), as the Deliveries
+ * report already reports the sheet instead of the hand-listed vehicle. A sheet
+ * read on the other report never does: a Van Sales itinerary leaves the unit's
+ * Finished Goods plan, and its stops, as keyed.
  */
 import type { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { LIVE_FENCE } from '../../lib/fence-archive.js'
 import { plateKey } from './planner.service.js'
+import { KEYED_SOURCE, vehicleList, planList, type DeliveryList } from './delivery-list.js'
 
-export const KEYED_SOURCE = 'manual'
+export { KEYED_SOURCE }
 
 export interface KeyedVehicle {
   key?: string
@@ -32,6 +39,8 @@ export interface KeyedVehicle {
   vehicleIds?: string[]
   customers?: string[]
   pins?: Array<{ name?: string, lat: number, lng: number, radiusM?: number }>
+  /** 'vs' Van Sales; 'fg' or none Finished Goods (deliveries.schema). */
+  list?: DeliveryList
 }
 
 export interface KeyedStop { code: string, name: string, lat: number, lng: number, geofenceId: string | null }
@@ -95,6 +104,19 @@ export function keyedStops(v: KeyedVehicle, fences: FenceRow[]): KeyedStop[] {
 
 const dayBefore = (day: string) => new Date(Date.parse(`${day}T00:00:00Z`) - 86_400_000)
 
+/** A plan's slot: one per list and plate. */
+const slot = (list: DeliveryList, plate: string) => `${list}|${plateKey(plate)}`
+
+/**
+ * The keyed plan a wanted slot takes over: the one already on that list, else
+ * one kept before plans carried a list (NULL), so its marks are not lost.
+ */
+export function priorFor<P extends { id: string, plate: string, list: string | null }>(keyed: P[], list: DeliveryList, plate: string, taken: Set<string>): P | null {
+  const k = plateKey(plate)
+  const free = keyed.filter((p) => !taken.has(p.id) && plateKey(p.plate) === k)
+  return free.find((p) => p.list === list) ?? free.find((p) => p.list == null) ?? null
+}
+
 /**
  * Bring the day's keyed plans in step with its Deliveries list. Runs after the
  * list is saved; returns what it did.
@@ -124,20 +146,31 @@ export async function syncKeyedPlans(orgId: string, day: string, vehicles: Keyed
     // Plans already there: the day's keyed ones, and sheets/itineraries that win
     const near = await tx.deliveryPlan.findMany({
       where: { organisationId: orgId, planDate: { gte: dayBefore(day), lte: planDate } },
-      select: { id: true, plate: true, source: true, planDate: true, vehicleId: true },
+      select: { id: true, plate: true, source: true, planDate: true, vehicleId: true, list: true },
     })
     const keyed = near.filter((p) => p.source === KEYED_SOURCE && p.planDate.getTime() === planDate.getTime())
-    const sheeted = new Set(near.filter((p) => p.source !== KEYED_SOURCE).map((p) => plateKey(p.plate)))
-    const want = new Map<string, { v: KeyedVehicle, stops: KeyedStop[] }>()
+    // A sheet blocks the keyed plan of its own report only
+    const sheeted = new Set(near.filter((p) => p.source !== KEYED_SOURCE).map((p) => slot(planList(p), p.plate)))
+    const want = new Map<string, { v: KeyedVehicle, list: DeliveryList, stops: KeyedStop[] }>()
     for (const v of vehicles) {
-      const k = plateKey(v.plate)
-      if (!k || sheeted.has(k) || want.has(k)) continue
+      const list = vehicleList(v)
+      const k = slot(list, v.plate)
+      if (!plateKey(v.plate) || sheeted.has(k) || want.has(k)) continue
       const stops = keyedStops(v, fences)
-      if (stops.length) want.set(k, { v, stops })
+      if (stops.length) want.set(k, { v, list, stops })
+    }
+
+    // Each wanted plan's plan already there, if any
+    const taken = new Set<string>()
+    const priorOf = new Map<string, (typeof keyed)[number] | null>()
+    for (const [k, { v, list }] of want) {
+      const prior = priorFor(keyed, list, v.plate, taken)
+      if (prior) taken.add(prior.id)
+      priorOf.set(k, prior)
     }
 
     // Taken off the list, left with no stops, or a sheet came in for it
-    const gone = keyed.filter((p) => !want.has(plateKey(p.plate)))
+    const gone = keyed.filter((p) => !taken.has(p.id))
     if (gone.length) {
       await tx.deliveryPlan.deleteMany({ where: { id: { in: gone.map((p) => p.id) } } })
       removed = gone.length
@@ -175,17 +208,21 @@ export async function syncKeyedPlans(orgId: string, day: string, vehicles: Keyed
       })
       : []
 
-    for (const [k, { v, stops }] of want) {
+    for (const [k, { v, list, stops }] of want) {
       const vehicleId = (v.vehicleIds ?? []).find((id) => units.has(id)) ?? null
       const plate = v.plate.trim()
-      const prior = keyed.find((p) => plateKey(p.plate) === k) ?? null
+      const prior = priorOf.get(k) ?? null
       const kept = prior ? priorStops.filter((x) => x.planId === prior.id) : []
       const order = stops.map((st) => ids.get(st.code)!)
       // Unchanged: left alone, so its stops keep their ids (a stop open in the Planner stays valid)
       if (prior && prior.plate === plate && prior.vehicleId === vehicleId
-        && kept.length === order.length && kept.every((x, i) => x.customerId === order[i])) continue
+        && kept.length === order.length && kept.every((x, i) => x.customerId === order[i])) {
+        // A plan kept before plans carried a list only takes its list
+        if (prior.list !== list) await tx.deliveryPlan.update({ where: { id: prior.id }, data: { list }, select: { id: true } })
+        continue
+      }
 
-      const data = { vehicleId, plate, planDate, source: KEYED_SOURCE, sourceFile: '' } satisfies Prisma.DeliveryPlanUncheckedUpdateInput
+      const data = { vehicleId, plate, planDate, source: KEYED_SOURCE, sourceFile: '', list } satisfies Prisma.DeliveryPlanUncheckedUpdateInput
       const plan = prior
         ? await tx.deliveryPlan.update({ where: { id: prior.id }, data, select: { id: true } })
         : await tx.deliveryPlan.create({ data: { ...data, organisationId: orgId, createdById: userId }, select: { id: true } })
