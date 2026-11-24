@@ -2809,8 +2809,15 @@ model VehicleSensor {
   @@map("vehicle_sensors")
 }
 
+/// Partitioned by RANGE (captured_at), one partition per UTC month, since
+/// 2026-11 (migration 20261125120000_partition_vehicle_telemetries; runbook in
+/// docs/telemetry-partitioning.md). Prisma does not model partitions: it reads
+/// and writes the parent and Postgres routes each row. The partitions
+/// themselves (vehicle_telemetries_legacy, _pYYYYMM, _default) are not drift.
 model VehicleTelemetry {
-  id         BigInt   @id @default(autoincrement())
+  /// Still unique on its own (one sequence), but a partitioned table's primary
+  /// key must include the partition column, hence the composite @@id below.
+  id         BigInt   @default(autoincrement())
   vehicleId  String   @map("vehicle_id")
   deviceId   String   @map("device_id") // denormalised — no join needed on ingest
   driverId   String?  @map("driver_id") // denormalised — active driver at ping time
@@ -2939,6 +2946,7 @@ model VehicleTelemetry {
   // full history of every vehicle that has never moved, and the query times
   // out. Details and measurements in that migration's header.
   @@index([capturedAt]) // partition key — range queries across all vehicles
+  @@id([id, capturedAt])
   @@map("vehicle_telemetries")
 }
 
