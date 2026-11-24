@@ -59,7 +59,8 @@ router.get('/cameras', ...guard, noStore, async (req, res, next) => {
 router.get('/alarms', ...guard, noStore, async (req, res, next) => {
   try {
     const since = typeof req.query['since'] === 'string' ? req.query['since'] : undefined
-    sendSuccess(res, await getAlarms(req.params['orgId'] as string, req.authz?.vehicleIds ?? null, since))
+    const until = typeof req.query['until'] === 'string' ? req.query['until'] : undefined
+    sendSuccess(res, await getAlarms(req.params['orgId'] as string, req.authz?.vehicleIds ?? null, since, until))
   } catch (err) {
     const msg = vssProblem(err)
     if (msg) return sendError(res, 502, msg)

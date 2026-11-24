@@ -135,3 +135,68 @@ describe('time and place', () => {
     expect(svc.vssGps('')).toEqual([null, null])
   })
 })
+
+describe('a month of Driver conduct: two weeks back, a day at a time (2026-11-24)', () => {
+  const DAY = 86_400_000
+  const searches = () => vss.calls.filter((c) => c.path.endsWith('findRecords.action'))
+  const lookups = () => vss.calls.filter((c) => c.path.endsWith('getAlarmByIds.action'))
+  const many = (n: number) => Array.from({ length: n }, (_, i) => file(`M${i}`, 4, 1, `https://vss.controltech-ea.com:9988/m${i}`))
+
+  it('reaches back 14 days, not 7', async () => {
+    const since = Date.now() - 13 * DAY
+    await svc.getAlarms(ORG, null, new Date(since).toISOString())
+    expect(searches()[0].body.beginTime).toBe(svc.vssTime(Math.floor(since / 600_000) * 600_000))
+    vss.calls = []; svc.resetDashcamState(0)
+    await svc.getAlarms(ORG, null, new Date(Date.now() - 30 * DAY).toISOString())
+    const begin = Date.parse(String(searches()[0].body.beginTime).replace(' ', 'T') + '+03:00')
+    expect(Date.now() - begin).toBeLessThanOrEqual(14 * DAY + 3_600_000 + 600_000)
+    expect(Date.now() - begin).toBeGreaterThan(13 * DAY)
+  })
+
+  it('with until, searches that window only, a day at most', async () => {
+    const since = Math.floor((Date.now() - 10 * DAY) / 600_000) * 600_000
+    const a = await svc.getAlarms(ORG, null, new Date(since).toISOString(), new Date(since + DAY).toISOString())
+    expect(searches()[0].body).toMatchObject({ beginTime: svc.vssTime(since), endTime: svc.vssTime(since + DAY) })
+    expect(a.to).toBe(svc.vssTime(since + DAY))
+    vss.calls = []; svc.resetDashcamState(0)
+    await svc.getAlarms(ORG, null, new Date(since).toISOString(), new Date(since + 5 * DAY).toISOString())
+    expect(searches()[0].body.endTime).toBe(svc.vssTime(since + 26 * 3_600_000))
+  })
+
+  it('a day window looks up the type of every alarm; the open-ended one keeps to 300', async () => {
+    vss.respond = (path, body) => (path.endsWith('findRecords.action') ? { dataList: many(900) }
+      : (body.guidList as string[]).map((g) => ({ guid: g, alarmtype: 214, createtime: '2026-11-20 10:00:00', AlarmGps: '34.38,-0.82' })))
+    const since = Math.floor((Date.now() - 5 * DAY) / 600_000) * 600_000
+    const day = await svc.getAlarms(ORG, null, new Date(since).toISOString(), new Date(since + DAY).toISOString())
+    expect(lookups()).toHaveLength(9)
+    expect(day.untyped).toBeUndefined()
+    expect(day.incidents.every((i) => i.code === 214)).toBe(true)
+    vss.calls = []; svc.resetDashcamState(0)
+    const open = await svc.getAlarms(ORG, null, new Date(since).toISOString())
+    expect(lookups()).toHaveLength(3)
+    expect(open.untyped).toBe(600)
+  })
+
+  it('says how many alarms were left without a type when VSS stops answering lookups', async () => {
+    let n = 0
+    vss.respond = (path, body) => {
+      if (path.endsWith('findRecords.action')) return { dataList: many(500) }
+      if (++n > 2) throw new VssError('Requests too frequent', VSS_TOO_FREQUENT)
+      return (body.guidList as string[]).map((g) => ({ guid: g, alarmtype: 214, createtime: '2026-11-20 10:00:00' }))
+    }
+    const since = Math.floor((Date.now() - 3 * DAY) / 600_000) * 600_000
+    const a = await svc.getAlarms(ORG, null, new Date(since).toISOString(), new Date(since + DAY).toISOString())
+    expect(a.untyped).toBe(300)
+  })
+
+  it('a settled day is served from memory for hours; today is read again after 90 s', async () => {
+    const since = Math.floor((Date.now() - 4 * DAY) / 600_000) * 600_000
+    const args = [ORG, null, new Date(since).toISOString(), new Date(since + DAY).toISOString()] as const
+    await svc.getAlarms(...args)
+    vi.useFakeTimers({ now: Date.now() + 2 * 3_600_000, toFake: ['Date'] })
+    try {
+      await svc.getAlarms(...args)
+      expect(searches()).toHaveLength(1)
+    } finally { vi.useRealTimers() }
+  })
+})
