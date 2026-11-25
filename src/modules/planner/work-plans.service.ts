@@ -37,6 +37,7 @@ import { createHash } from 'node:crypto'
 import { asDaySeries, EDGE_READING_COUNT, type BalanceDrain, type BalanceFilling } from '../fuel/fuel-balance.js'
 import { AFTER_GAP_METER_MS, AFTER_GAP_REACH_MS, BEFORE_FALLBACK_MS, BEFORE_REACH_MS, BEFORE_TEN_MS, FIRST_TEN_MS, machineShiftUse, measureSpan, refillLookback, shiftWindows, type MachineShiftUse, type ShiftWindow, type WindowEdges } from './fuel-shifts.js'
 import { reportDb } from '../../lib/report-db.js'
+import { applyKept, keepRows, KEEP_DAYS_PER_PASS, type KeptBefore } from './fuel-befores.js'
 import { addDays, buildPlanSubmissions, type PlanSubmissions } from './plan-submissions.js'
 
 const FACTORY_OF_ORG: Record<string, string> = Object.fromEntries(
@@ -517,13 +518,87 @@ export async function factoryFuelShiftsFor(
   const hit = shiftsCache.get(key)
   if (!hit || Date.now() - hit.at >= SHIFTS_CACHE_MS) {
     const now = new Date()
-    const out = readShifts(windows, now, refillLookback(windows, fuel.issues)).then(machines => ({ factory: fuel.factory, machines }))
+    const out = Promise.all([readShifts(windows, now, refillLookback(windows, fuel.issues)), readKept(fuel.factory, windows)])
+      .then(([machines, kept]) => ({ factory: fuel.factory, machines: applyKept(machines, kept) }))
     shiftsCache.set(key, { at: Date.now(), out })
     out.catch(() => shiftsCache.delete(key))
     for (const [k, v] of shiftsCache) if (Date.now() - v.at >= SHIFTS_CACHE_MS) shiftsCache.delete(k)
   }
   const out = await shiftsCache.get(key)!.out
   return { factory: out.factory, from, to, machines: out.machines, fetchedAt: new Date().toISOString() }
+}
+
+/** A missing table: the fuel-befores migration not applied yet. */
+const missingTable = (err: unknown) => {
+  const e = err as { code?: unknown; meta?: { code?: unknown }; message?: unknown } | null
+  return /P2021|42P01/.test(`${e?.code} ${e?.meta?.code}`) || /does not exist/.test(String(e?.message ?? ''))
+}
+
+/** The kept Fuel befores (fuel-befores) of each window's first line; none when the table is not there yet. */
+async function readKept(factory: string, windows: ShiftWindow[]): Promise<Map<string, KeptBefore>> {
+  const ids = [...new Set(windows.flatMap(w => (w.lineIds[0] ? [`${factory}|${w.lineIds[0]}`] : [])))]
+  if (!ids.length) return new Map()
+  try {
+    const rows = await reportDb().factorySuiteFuelBefore.findMany({ where: { id: { in: ids } } })
+    return new Map(rows.map(r => [r.lineId, { ...r, beforeBy: r.beforeBy === 'refill' ? 'refill' as const : r.beforeBy ? 'work' as const : null }]))
+  } catch (err) {
+    if (missingTable(err)) return new Map()
+    throw err
+  }
+}
+
+let keepTableMissing = false
+
+/**
+ * Keep the Fuel before of past days' plan lines (fuel-befores): up to
+ * KEEP_DAYS_PER_PASS days a pass, oldest first, of the days with a plan line
+ * not kept yet or changed since it was. Each day is read with the day before
+ * it, as the Fuel page reads a range, so a first shift's refill lookback sees
+ * the night before. `more` when days were left for the next pass. Null when
+ * FactorySuite is not configured or the table is not there yet.
+ */
+export async function keepFuelBefores(now = new Date()): Promise<{ days: string[]; rows: number; more: boolean } | null> {
+  if (!client().isConfigured) return null
+  const today = eatToday(now.getTime())
+  const report = { days: [] as string[], rows: 0, more: false }
+  for (const [factory, orgCode] of Object.entries(MACHINE_FACTORY_TO_ORG)) {
+    const org = await prisma.organisation.findUnique({ where: { code: orgCode }, select: { id: true } })
+    if (!org) continue
+    let days: Array<{ day: string }>
+    try {
+      days = await prisma.$queryRaw<Array<{ day: string }>>`
+        SELECT DISTINCT i.day FROM factorysuite_work_plan_items i
+          LEFT JOIN factorysuite_fuel_befores k ON k.id = i.id
+         WHERE i.factory_code = ${factory} AND i.day < ${today}
+           AND (k.id IS NULL OR k.kept_at < greatest(i.edited_at, i.status_changed_at))
+         ORDER BY i.day LIMIT ${KEEP_DAYS_PER_PASS + 1}`
+    } catch (err) {
+      if (!missingTable(err)) throw err
+      if (!keepTableMissing) logger.info('Fuel before: factorysuite_fuel_befores is not there yet; nothing kept')
+      keepTableMissing = true
+      return null
+    }
+    keepTableMissing = false
+    if (days.length > KEEP_DAYS_PER_PASS) report.more = true
+    for (const { day } of days.slice(0, KEEP_DAYS_PER_PASS)) {
+      const fuel = await factoryFuelFor(org.id, addDays(day, -1), day)
+      if (fuel.factory === null) continue
+      const windows = shiftWindows(fuel)
+      const [machines, items] = await Promise.all([
+        readShifts(windows, now, refillLookback(windows, fuel.issues)),
+        prisma.factorySuiteWorkPlanItem.findMany({ where: { factoryCode: factory, day }, select: { lineId: true, day: true, machine: true } }),
+      ])
+      const { rows } = keepRows(factory, org.id, day, today, [...fuel.lines, ...items], windows, machines, now)
+      if (!rows.length) continue
+      const keptAt = new Date()
+      await prisma.$transaction(rows.map(r => prisma.factorySuiteFuelBefore.upsert({
+        where: { id: r.id }, create: { ...r, keptAt }, update: { ...r, keptAt },
+      })))
+      report.days.push(day)
+      report.rows += rows.length
+    }
+  }
+  return report
 }
 
 async function readShifts(

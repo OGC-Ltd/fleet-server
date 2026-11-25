@@ -331,6 +331,7 @@ model Organisation {
   fsBreakdowns         FactorySuiteBreakdown[]
   fsRequisitions       FactorySuiteRequisition[]
   fsWorkPlanItems      FactorySuiteWorkPlanItem[]
+  fsFuelBefores        FactorySuiteFuelBefore[]
   fsParts              FactorySuitePart[]
   fuelTheftFollowUps   FuelTheftFollowUp[]
   driverConductCases   DriverConductCase[]
@@ -4069,4 +4070,36 @@ model FactorySuiteWorkPlanItem {
   @@index([organisationId, day])
   @@index([factoryCode, day])
   @@map("factorysuite_work_plan_items")
+}
+
+/// A plan line's Fuel before, kept once its shift settled
+/// (planner/fuel-befores.ts): the tank over the ten minutes before the shift's
+/// work began, or before a refill that came first. The Fuel page shows this
+/// over a fresh reading for a past day.
+model FactorySuiteFuelBefore {
+  /// "<factory>|<FactorySuite line id>", as FactorySuiteWorkPlanItem's id.
+  id             String    @id
+  organisationId String    @map("organisation_id")
+  factoryCode    String    @map("factory_code")
+  /// YYYY-MM-DD, the plan's day.
+  day            String
+  machine        String
+  lineId         String    @map("line_id")
+  vehicleId      String?   @map("vehicle_id")
+  /// The shift window the figure was read for; null for a line with none.
+  windowStart    DateTime? @map("window_start")
+  windowEnd      DateTime? @map("window_end")
+  beforeL        Float?    @map("before_l")
+  beforeAt       DateTime? @map("before_at")
+  /// 'work' or 'refill': what beforeAt is.
+  beforeBy       String?   @map("before_by")
+  /// Set when the ten minutes held no reading and the last ones before were used.
+  beforeReadAt   DateTime? @map("before_read_at")
+  keptAt         DateTime  @default(now()) @map("kept_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  @@index([organisationId, day])
+  @@index([factoryCode, day])
+  @@map("factorysuite_fuel_befores")
 }
