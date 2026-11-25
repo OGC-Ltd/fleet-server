@@ -7,8 +7,9 @@
  * organisation with dashcams: cameras offline for a while upload late, and an
  * alarm VSS gave no type yesterday takes it today. Re-capturing is safe.
  *
- * Its searches go through the server's own VSS queue (one search at a time,
- * 10 s apart), at night, so the Alarms page is not held up by day.
+ * Runs in the vss-worker process (src/vss-worker.ts) beside the 5-minute sync
+ * (lib/queues/vss-sync), sharing its VSS queue (one search at a time, 10 s
+ * apart). Each captured day is cached for the Alarms page as well.
  *
  * DASHCAM_CAPTURE: 'apply' (default) or 'off'. Until the migration has made
  * the tables, each cycle logs that and writes nothing.

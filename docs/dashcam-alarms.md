@@ -61,3 +61,42 @@ These were found against production on 23 Oct 2026. The same rules run in
 State (caches, pacing, file keys) is in memory in one process:
 - **After a restart,** clip links listed before it answer 404 until the dashboard re-reads the alarms, which it does every 2 minutes.
 - **With two instances,** each would pace VSS on its own.
+
+## Storage: the vss-worker
+
+The `vss-worker` container (`src/vss-worker.ts`) is the only process that searches VSS on a schedule. It runs two queues:
+
+- **`vss-sync`**: every 5 minutes (`VSS_SYNC_CRON`), today's alarms for every organisation with cameras, one organisation at a time. In the first hour of a fleet day it captures yesterday as well.
+- **`dashcam-capture`**: each night, the last 3 days again, for late uploads and late alarm types. This queue used to run in the API server.
+- **`vss-backfill`**: once when the worker starts, then hourly (`VSS_BACKFILL_CRON`). It captures every past day in the last `VSS_BACKFILL_DAYS` (13) that has no `dashcam_capture_days` row or one marked partial.
+  - Oldest days go first, because VSS drops them soonest.
+  - It captures one organisation-day at a time, 15 s apart.
+  - If VSS answers "too frequent", the run stops and the next one carries on where it left off.
+  - `npm run dashcam:backfill` is now only needed for days older than 13.
+
+The report worker only handles reports; the dashcam work runs in the vss-worker alone.
+
+Each captured day is written to two places:
+
+- **`dashcam_alarms` and `dashcam_capture_days`**: the alarm details, kept for good. Clips and photos are not stored here.
+- **Redis cache db**: one gzipped key per organisation per day, `vss:alarms:v1:<orgId>:<day>`, kept `VSS_CACHE_DAYS` (30) days. It holds the whole answer, clip and photo links included.
+- **Link keys** (`vss:file:v1:<k>`, 15 days): let the API stream a clip that the worker listed.
+
+`getAlarms` serves the Alarms page and every report from these sources, in order:
+
+1. The cache.
+2. The database, for a captured day the cache no longer holds. Clips and photos are missing for these days.
+3. Live VSS (`searchAlarms`), only for days that neither holds and VSS still has.
+
+Today's cached copy counts as stale after 15 minutes, which means the worker has stopped. In that case VSS is asked directly. Without `REDIS_URL`, `getAlarms` is the live search, as it was before the worker.
+
+Run **one** vss-worker only. VSS allows one search every 10 s per account, and that pacing is held inside one process. The worker and the server share the VSS session file in the `fleet-cache` volume, and a process whose token is refused takes the other's saved token before it logs in again (VSS error 10082 limits logins).
+
+`VSS_SYNC=off` stops all three queues in the worker.
+
+**Rollout:** install the new `docker-compose.prod.yml` and `deploy/box/fleet-deploy` on the box *before* this code deploys. If they are missing, the server no longer runs the nightly capture and no worker starts. Pages keep working on live VSS, but nothing is captured.
+
+```
+sudo install -o root -g root -m 644 docker-compose.prod.yml /etc/fleet/compose/docker-compose.prod.yml
+sudo install -o root -g root -m 755 deploy/box/fleet-deploy /usr/local/sbin/fleet-deploy
+```

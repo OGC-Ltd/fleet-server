@@ -16,7 +16,7 @@
  */
 // Everything below is imported only when telemetry is on, so the health check
 // and the other `node` runs that share NODE_OPTIONS load nothing extra.
-const APP_ENTRIES = /(?:^|[\\/])(?:index|report-worker)\.(?:js|ts)$/
+const APP_ENTRIES = /(?:^|[\\/])(?:index|report-worker|vss-worker)\.(?:js|ts)$/
 
 function wanted(): boolean {
   if (!process.env.OTEL_EXPORTER_OTLP_ENDPOINT) return false

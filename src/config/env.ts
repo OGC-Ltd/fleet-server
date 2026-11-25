@@ -603,6 +603,21 @@ const schema = z.object({
   // How many past fleet days each night captures again (late uploads, alarms typed late).
   DASHCAM_CAPTURE_DAYS: z.coerce.number().int().min(1).max(13).optional().default(3),
 
+  // The vss-worker (src/vss-worker.ts, lib/queues/vss-sync.ts): every
+  // organisation's dashcam day from VSS, one organisation at a time, into
+  // dashcam_alarms and the Redis day cache the Alarms page and reports read.
+  // It also runs the nightly capture above. 'off' stops both in that process.
+  VSS_SYNC: z.enum(['apply', 'off']).optional().default('apply'),
+  VSS_SYNC_CRON: z.string().optional().default('*/5 * * * *'),
+  // How long a captured day stays in the Redis cache after its last capture.
+  VSS_CACHE_DAYS: z.coerce.number().int().min(1).max(60).optional().default(30),
+  // The vss-worker's back-fill (lib/queues/vss-backfill.ts): past fleet days
+  // never captured (worker down, VSS busy) or captured partially, captured
+  // again while VSS still holds them. Runs at start, then on this cron.
+  VSS_BACKFILL_CRON: z.string().optional().default('15 * * * *'),
+  // How far back it looks: VSS keeps about two weeks, so 13 days at most.
+  VSS_BACKFILL_DAYS: z.coerce.number().int().min(1).max(13).optional().default(13),
+
   // Pump price for costing the fuel ledger (analytics/fuel-cost). NOTHING in
   // the schema records what fuel cost — a filling stores litres, not money —
   // so cost is always litres × a price supplied here, and the endpoint echoes

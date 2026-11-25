@@ -29,7 +29,6 @@ import { startParkedFallVerdicts } from './lib/queues/parked-falls.js'
 import { startFuelRateDigest } from './lib/queues/fuel-rate-digest.js'
 import { startTripBuild } from './lib/queues/trips.js'
 import { startWialonRegistrySync } from './lib/queues/wialon-registry.js'
-import { startDashcamCapture } from './lib/queues/dashcam-capture.js'
 import { startOutboundWorker } from './lib/queues/outbound.js'
 import { disconnectRedis } from './lib/redis.js'
 import { closeReportPool } from './lib/offload/report-jobs.js'
@@ -170,8 +169,9 @@ async function main() {
   // Units added, renamed or deleted in Wialon → vehicles rows, every 30 minutes.
   // Replaces running `npm run sync:<fleet> -- --apply` by hand — see lib/queues/wialon-registry.
   const wialonRegistry = jobs ? await startWialonRegistrySync() : notStarted
-  // Dashcam alarms from VSS into our own tables each night (numbers only) — see lib/queues/dashcam-capture.
-  const dashcamCapture = jobs ? await startDashcamCapture() : notStarted
+  // Dashcam alarms from VSS (every 5 minutes, and the nightly re-capture) run in
+  // their own process, the vss-worker (src/vss-worker.ts), not here: VSS allows
+  // one search every 10 s for the whole account, paced inside one process.
   // Mail and durable notifications, off the request thread. Unlike the three
   // above this one is NOT conditional on Redis in its effect: with no
   // REDIS_URL the publishers send inline exactly as they did before, so a
@@ -192,7 +192,6 @@ async function main() {
     await fuelRateDigest.stop().catch((err) => logger.warn({ err }, 'Fuel rate digest shutdown failed'))
     await tripBuild.stop().catch((err) => logger.warn({ err }, 'Trip build shutdown failed'))
     await wialonRegistry.stop().catch((err) => logger.warn({ err }, 'Wialon registry sync shutdown failed'))
-    await dashcamCapture.stop().catch((err) => logger.warn({ err }, 'Dashcam capture shutdown failed'))
     await closeReportPool().catch((err) => logger.warn({ err }, 'Report pool shutdown failed'))
     // Before disconnectRedis below, so in-flight mail is finished rather than
     // having its connection pulled out from under it.

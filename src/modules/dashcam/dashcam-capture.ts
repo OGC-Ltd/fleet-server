@@ -8,40 +8,24 @@
  * per day (`dashcam_capture_days`) saying the day was captured and what it held.
  * No clips or photos: those stay in VSS.
  *
- * A day is read through getAlarms' one-day window (dashcam.service, #144), so
+ * A day is read through searchAlarms' one-day window (dashcam.service, #144), so
  * every alarm's type is looked up. Capturing a day again is safe: alarms
  * already held are not written twice, and one held without a type takes the
  * type when VSS gives it.
  *
- * Writes only; reads nothing VSS does not already serve to the Alarms page.
+ * Each capture also caches the whole day, media links included, in Redis for
+ * VSS_CACHE_DAYS (dashcam-store), which is what getAlarms serves. Only the
+ * vss-worker process captures (src/vss-worker.ts).
  */
 
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
-import { getAlarms, cameraCount, type DashcamIncident } from './dashcam.service.js'
+import { searchAlarms, cameraCount, type DashcamIncident } from './dashcam.service.js'
+import { readDays, storeDay } from './dashcam-store.js'
+import { dayWindow, fleetDayOf } from './fleet-day.js'
 
-const DAY = 86_400_000
-/** Nairobi is UTC+3 all year: a fleet day starts 21:00 UTC the evening before. */
-const EAT = 3 * 3_600_000
-
-/** A fleet day's [start, end) in ms, from "YYYY-MM-DD" (Nairobi). */
-export function dayWindow(day: string): { from: number; to: number } {
-  const from = Date.parse(`${day}T00:00:00Z`) - EAT
-  return { from, to: from + DAY }
-}
-
-/** The fleet day (Nairobi) a time falls on. */
-export function fleetDayOf(ms: number): string {
-  return new Date(ms + EAT).toISOString().slice(0, 10)
-}
-
-/** The `n` fleet days before today's, oldest first (today itself is never complete). */
-export function lastDays(n: number, now = Date.now()): string[] {
-  const today = fleetDayOf(now)
-  const out: string[] = []
-  for (let i = n; i >= 1; i--) out.push(fleetDayOf(dayWindow(today).from - i * DAY + 12 * 3_600_000))
-  return out
-}
+// Kept exported from here: the back-fill script and the tests import them from this module.
+export { dayWindow, fleetDayOf, lastDays } from './fleet-day.js'
 
 let tablesReady: boolean | null = null
 /** Whether the migration has run. Until it has, capturing does nothing (deploy before migrate is safe). */
@@ -95,13 +79,21 @@ export async function captureDay(orgId: string, day: string, { apply = true, now
   const { from, to } = dayWindow(day)
   if (from >= now) return { ...base, skipped: 'future' }
 
-  const answer = await getAlarms(orgId, null, new Date(from).toISOString(), new Date(Math.min(to, now)).toISOString())
+  const answer = await searchAlarms(orgId, null, new Date(from).toISOString(), new Date(Math.min(to, now)).toISOString())
   if (!answer.cameras) return { ...base, skipped: 'no-cameras' }
   // Only the day's own alarms (VSS times, a minute or two either side of midnight, can stray)
   const list = answer.incidents.filter((i) => i.occurredAt && fleetDayOf(Date.parse(i.occurredAt)) === day)
   const untyped = list.filter((i) => !i.code).length
   const out: DayCapture = { ...base, cameras: answer.cameras, alarms: list.length, untyped, partial: Boolean(answer.partial) }
   if (!apply) return out
+
+  // The cache the Alarms page and the reports read (vss-worker): the whole day, clips and photos included.
+  // Merged with what it held: a capture VSS cut short (partial) must not drop alarms an earlier one had.
+  const prev = (await readDays(orgId, [day], now)).get(day)
+  const ids = new Set(list.map((i) => i.id))
+  const incidents = [...list, ...(prev?.incidents.filter((i) => !ids.has(i.id)) ?? [])]
+    .sort((x, y) => String(y.occurredAt).localeCompare(String(x.occurredAt)))
+  await storeDay(orgId, day, { cameras: answer.cameras, incidents, partial: out.partial, through: Math.min(to, now), cachedAt: now })
 
   const at = new Date(now)
   const rows = list.map((i) => rowOf(orgId, i, at))
@@ -140,4 +132,18 @@ export async function organisationsWithCameras(): Promise<Array<{ id: string; co
     }
   }
   return out
+}
+
+/**
+ * Of these fleet days, the ones still to capture for an organisation: never
+ * captured, or captured while VSS cut the search short (partial).
+ */
+export async function missedDays(orgId: string, days: string[]): Promise<string[]> {
+  if (!days.length) return []
+  const held = await prisma.dashcamCaptureDay.findMany({
+    where: { organisationId: orgId, day: { in: days } },
+    select: { day: true, partial: true },
+  })
+  const done = new Set(held.filter((h) => !h.partial).map((h) => h.day))
+  return days.filter((d) => !done.has(d))
 }

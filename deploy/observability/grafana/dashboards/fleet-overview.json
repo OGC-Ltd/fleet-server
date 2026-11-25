@@ -1214,7 +1214,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "{service_name=~\"fleet-server|fleet-report-worker\"} | severity_text=~\"(?i)warn|error|fatal\"",
+          "expr": "{service_name=~\"fleet-server|fleet-report-worker|fleet-vss-worker\"} | severity_text=~\"(?i)warn|error|fatal\"",
           "queryType": "range"
         }
       ]

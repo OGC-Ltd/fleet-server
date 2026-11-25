@@ -394,8 +394,8 @@ jobs:
           # The runner's dist/, not a build on the box (see the upload step in
           # the build job for why). Checked first: --delete into the directory
           # pm2 runs from must never be fed an empty or partial artifact.
-          [ -f dist-built/src/index.js ] && [ -f dist-built/src/report-worker.js ] || {
-            echo "::error::the dist artifact has no src/index.js or src/report-worker.js; refusing to ship it"
+          [ -f dist-built/src/index.js ] && [ -f dist-built/src/report-worker.js ] && [ -f dist-built/src/vss-worker.js ] || {
+            echo "::error::the dist artifact has no src/index.js, src/report-worker.js or src/vss-worker.js; refusing to ship it"
             exit 1
           }
 
