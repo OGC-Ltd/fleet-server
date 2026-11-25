@@ -13,11 +13,11 @@ const ORG = '/api/v1/organisations/org-1'
 /** A tiny app: one report route drawn through the pool, and the job routes. */
 function appFor(userId = 'user-1') {
   const app = express()
-  app.use((req, _res, next) => { (req as Request & { user: unknown }).user = { id: userId }; next() })
+  app.use((req, _res, next) => { (req as unknown as { user: unknown }).user = { id: userId }; next() })
   const r = express.Router({ mergeParams: true })
   r.get('/reports/slow.pdf', (req, res, next) => sendReport(req, res, next, async (run) => {
     const ms = Number(req.query['ms'] ?? 10)
-    const bytes = await (globalThis as { __pool: CpuPool }).__pool.run('test.spin', { ms, fail: req.query['fail'] as string | undefined }, run)
+    const bytes = await (globalThis as unknown as { __pool: CpuPool }).__pool.run('test.spin', { ms, fail: req.query['fail'] as string | undefined }, run)
     return { bytes: Buffer.from(bytes), name: 'Slow report.pdf', type: 'application/pdf' }
   }))
   r.get('/reports/jobs/:jobId', getReportJob)
