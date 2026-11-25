@@ -32,6 +32,7 @@ import { startWialonRegistrySync } from './lib/queues/wialon-registry.js'
 import { startDashcamCapture } from './lib/queues/dashcam-capture.js'
 import { startOutboundWorker } from './lib/queues/outbound.js'
 import { disconnectRedis } from './lib/redis.js'
+import { closeReportPool } from './lib/offload/report-jobs.js'
 import { flushAllMovementWindows } from './lib/notifications/movement-window.js'
 import { staticRoutePairs } from './providers/raifactorysuite/raifactorysuite.simulator.js'
 import { ensureAllOrganisationsHaveCatalogueRoles } from './modules/roles/role.catalogue.js'
@@ -192,6 +193,7 @@ async function main() {
     await tripBuild.stop().catch((err) => logger.warn({ err }, 'Trip build shutdown failed'))
     await wialonRegistry.stop().catch((err) => logger.warn({ err }, 'Wialon registry sync shutdown failed'))
     await dashcamCapture.stop().catch((err) => logger.warn({ err }, 'Dashcam capture shutdown failed'))
+    await closeReportPool().catch((err) => logger.warn({ err }, 'Report pool shutdown failed'))
     // Before disconnectRedis below, so in-flight mail is finished rather than
     // having its connection pulled out from under it.
     await outbound.stop().catch((err) => logger.warn({ err }, 'Outbound worker shutdown failed'))

@@ -107,7 +107,9 @@ export function createApp() {
   // would change key order/whitespace and invalidate the signature.
   // Reports the page makes and the server draws: a week of a family's geofence
   // visits runs past the usual limit. The parser below skips a body already read.
-  app.use(/^\/api\/v1\/organisations\/[^/]+\/reports\/(?:dormant-assets|geofences|tat-fuel|speed|deliveries|document)\.pdf$/, express.json({ limit: '8mb' }))
+  // Kept as raw bytes: the JSON parse and the schema check of up to 8 MB run on
+  // the worker thread that draws the PDF (lib/offload), not on the event loop.
+  app.use(/^\/api\/v1\/organisations\/[^/]+\/reports\/(?:dormant-assets|geofences|tat-fuel|speed|deliveries|document)\.pdf$/, express.raw({ type: 'application/json', limit: '8mb' }))
   // A delivery sheet, base64 (Planner): up to 2 MB of workbook.
   app.use(/^\/api\/v1\/organisations\/[^/]+\/planner\/sheets(?:\/preview)?$/, express.json({ limit: '3mb' }))
   // A fleet list Excel, base64, kept in S3 as uploaded (fleet-list): up to 5 MB of file.

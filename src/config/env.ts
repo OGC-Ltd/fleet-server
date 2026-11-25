@@ -631,6 +631,21 @@ const schema = z.object({
   // Connections the report reads hold, apart from the live pool (lib/report-db),
   // so a wave of reports queues on its own and never starves telemetry ingest.
   REPORT_DB_POOL_MAX: z.coerce.number().int().min(1).max(20).optional().default(4),
+  // Report PDFs are drawn on worker threads (lib/offload), never on the event
+  // loop: 'off' draws them in-process as before. Threads default to one per
+  // spare core, at most 2 (1 on the 2-vCPU box). Beyond the threads, QUEUE_MAX
+  // wait; one more is answered 503 + Retry-After. A drawing past TIMEOUT_MS is
+  // stopped (its thread is terminated); a thread's heap is capped at THREAD_MB.
+  REPORT_OFFLOAD: z.enum(['on', 'off']).optional().default('on'),
+  REPORT_RENDER_THREADS: z.coerce.number().int().min(1).max(8).optional(),
+  REPORT_RENDER_QUEUE_MAX: z.coerce.number().int().min(0).max(500).optional().default(16),
+  REPORT_RENDER_TIMEOUT_MS: z.coerce.number().int().min(1_000).optional().default(120_000),
+  REPORT_RENDER_THREAD_MB: z.coerce.number().int().min(64).max(4096).optional().default(768),
+  // The database-heavy report routes (movements, end of shift, probe, …):
+  // so many at once, so many waiting, and how long one may wait for a turn.
+  REPORT_DATA_CONCURRENCY: z.coerce.number().int().min(1).max(64).optional().default(6),
+  REPORT_DATA_QUEUE_MAX: z.coerce.number().int().min(0).max(1000).optional().default(64),
+  REPORT_DATA_WAIT_MS: z.coerce.number().int().min(1_000).optional().default(90_000),
   // The live pool (lib/prisma). The worker process runs with a small one.
   DB_POOL_MAX: z.coerce.number().int().min(1).max(50).optional().default(14),
   // Finished fleet days of a unit's readings, shared by every Fuel Report

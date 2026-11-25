@@ -36,8 +36,8 @@ const LAST_FIX_LOOKBACK_MS = 7 * 24 * 3_600_000
 
 /** A change in distance to MORL smaller than this is not a direction. */
 const DIRECTION_MIN_KM = 1
-/** Moving: this fast or faster. A moving unit's location is printed green. */
-export const MOVING_KMH = 5
+// In its own module so the PDF drawing, on a worker thread, need not load this one.
+export { MOVING_KMH }
 /** Reverse lookups for places not yet cached: Nominatim answers one a second. */
 const MAX_PLACE_LOOKUPS = 15
 const PLACE_LOOKUP_WAIT_MS = 15_000
@@ -108,6 +108,7 @@ export const BY_NAME_ORGS = new Set(['MENENGAI'])
 
 /** A vehicle type as a report's heading: TRUCK → Trucks; UNSPECIFIED → Other. */
 import { typeHeading } from './vehicle-kind.js'
+import { MOVING_KMH } from './movement-report.constants.js'
 export { typeHeading }
 
 /** A unit that is not reporting: no position in the window, or its last one from before it. */

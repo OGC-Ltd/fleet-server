@@ -64,6 +64,8 @@ const fmtDay = (day: string) =>
  */
 export async function generateReportPdf(
   orgId: string, kind: PdfReportKind, days: number, vehicleIds: Set<string> | null = null,
+  /** Draws the collected data; the API passes one that runs on a worker thread (lib/offload). */
+  render: (data: ReportData) => Promise<Buffer> = renderReportPdf,
 ): Promise<{ buffer: Buffer; filename: string }> {
   const org = await prisma.organisation.findUnique({ where: { id: orgId }, select: { name: true, code: true } })
   const orgName = org?.name ?? 'Fleet'
@@ -89,7 +91,7 @@ export async function generateReportPdf(
 
   data.orgName = orgName
   data.orgRegion = orgRegion
-  const buffer = await renderReportPdf(data)
+  const buffer = await render(data)
   const kindName = kind.charAt(0).toUpperCase() + kind.slice(1)
   return { buffer, filename: `${short}-${kindName}-Report.pdf` }
 }
