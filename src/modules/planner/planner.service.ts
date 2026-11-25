@@ -30,6 +30,7 @@ import type { PlannedStop } from './itinerary.js'
 import { cachedPlace, reverseGeocode } from '../../lib/geocode.js'
 import { geocodeAddress } from './address-geocode.js'
 import type { SheetProblem } from './sheet.js'
+import { KEYED_SOURCE, groupList, planList } from './delivery-list.js'
 
 /**
  * Itinerary stops Wialon exported with a written address and no point
@@ -329,8 +330,8 @@ export async function saveSheet(orgId: string, userId: string | null, body: Save
     }
 
     // The plan: the same plate's sheet that day is replaced, outcomes kept
-    const sameDay = await tx.deliveryPlan.findMany({ where: { organisationId: orgId, planDate: day }, select: { id: true, plate: true } })
-    const prior = sameDay.find((p) => plateKey(p.plate) === plateKey(plate)) ?? null
+    const sameDay = await tx.deliveryPlan.findMany({ where: { organisationId: orgId, planDate: day }, select: { id: true, plate: true, source: true, list: true } })
+    const prior = sheetReplaces(sameDay, plate)
     const kept = prior
       ? await tx.deliveryPlanStop.findMany({ where: { planId: prior.id }, select: { customerId: true, invoiceNo: true, outcome: true, remarks: true, outcomeBy: true, outcomeAt: true } })
       : []
@@ -370,6 +371,19 @@ export async function saveSheet(orgId: string, userId: string | null, body: Save
 const num = (d: unknown) => (d == null ? null : Number(d))
 
 /** A plan's itinerary columns; a sales sheet sets them back to empty. */
+/**
+ * The plan of that day a sheet for this plate replaces: its earlier sheet or
+ * itinerary, else the plan keyed in on Deliveries for the sheet's own report.
+ * A plan keyed on the other report stays (operator, 2026-11-25): a Van Sales
+ * itinerary never takes the place of the unit's Finished Goods stops.
+ */
+export function sheetReplaces<P extends { plate: string, source: string, list: string | null }>(sameDay: P[], plate: string): P | null {
+  const mine = sameDay.filter((p) => plateKey(p.plate) === plateKey(plate))
+  return mine.find((p) => p.source !== KEYED_SOURCE)
+    ?? mine.find((p) => planList(p) === groupList(plate))
+    ?? null
+}
+
 export function routeColumns(sheet: Pick<DeliverySheet, 'route'>) {
   const r = sheet.route
   return {
