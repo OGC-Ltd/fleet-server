@@ -4095,6 +4095,24 @@ model FactorySuiteFuelBefore {
   beforeBy       String?   @map("before_by")
   /// Set when the ten minutes held no reading and the last ones before were used.
   beforeReadAt   DateTime? @map("before_read_at")
+  /// The shift's fuel (planner/shift-fuel.ts), from kept version 2.
+  endL           Float?    @map("end_l")
+  endAt          DateTime? @map("end_at")
+  endGap         Boolean   @default(false) @map("end_gap")
+  hours          Float?
+  km             Float?
+  /// Litres the pump issued in the shift (each fuelling on the shift it happened in).
+  issuedL        Float?    @map("issued_l")
+  /// Those fuellings: [{ issueId, siv, litres, at, probeFilledL }].
+  shiftFuellings Json?     @map("shift_fuellings")
+  probeFilledL   Float?    @map("probe_filled_l")
+  shiftStartL    Float?    @map("shift_start_l")
+  shiftStartBy   String?   @map("shift_start_by")
+  consumedL      Float?    @map("consumed_l")
+  consumedWhy    String?   @map("consumed_why")
+  probeUsedL     Float?    @map("probe_used_l")
+  /// fuel-befores KEEP_VERSION when kept: a row below it is read again.
+  keptVersion    Int       @default(1) @map("kept_version")
   keptAt         DateTime  @default(now()) @map("kept_at")
 
   organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
