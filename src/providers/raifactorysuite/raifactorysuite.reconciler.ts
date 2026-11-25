@@ -40,6 +40,8 @@ import { handleWeighment } from '../../modules/weighments/weighment.ingest.js'
 import { FACTORIES } from '../../modules/webhooks/factory-map.js'
 import { runWorkshopSync } from '../../modules/repairs/factorysuite-workshop.runner.js'
 import { runWorkPlanWatch } from '../../modules/planner/work-plan-watch.js'
+import { keepFuelBefores } from '../../modules/planner/work-plans.service.js'
+import { KEEP_INTERVAL_MS } from '../../modules/planner/fuel-befores.js'
 import { fleetDayKey } from '../../lib/provider-time.js'
 import { prisma } from '../../lib/prisma.js'
 import { requestMachineRegisterSync, syncMachineRegister, takeMachineRegisterRequest } from './raifactorysuite.machine-sync.js'
@@ -142,6 +144,9 @@ class RaiFactorySuiteReconciler {
 
   /** When the machine register last synced successfully; 0 = not this process. */
   private machinesSyncedAt = 0
+  /** Fuel before keeping (planner/fuel-befores): its last pass, and whether days were left. */
+  private fuelKeptAt = 0
+  private fuelKeepMore = false
 
   get isConfigured(): boolean {
     return this.client.isConfigured
@@ -302,6 +307,21 @@ class RaiFactorySuiteReconciler {
       this.planWatchFailures++
       if (this.planWatchFailures <= 3) logger.error({ err, what: 'work plans' }, 'RaiFactorySuite reconcile failed')
       else logger.debug({ err, what: 'work plans', planWatchFailures: this.planWatchFailures }, 'RaiFactorySuite reconcile still failing')
+    }
+
+    // Fuel before of past days' plan lines, kept (planner/fuel-befores): every
+    // pass while earlier days are still to fill, then hourly. Its own failures
+    // only log; the next hourly pass tries again.
+    if (this.fuelKeepMore || Date.now() - this.fuelKeptAt >= KEEP_INTERVAL_MS) {
+      this.fuelKeptAt = Date.now()
+      try {
+        const k = await keepFuelBefores()
+        this.fuelKeepMore = k?.more ?? false
+        if (k?.days.length) logger.info({ days: k.days, rows: k.rows, more: k.more }, 'Fuel before kept')
+      } catch (err) {
+        this.fuelKeepMore = false
+        logger.warn({ err }, 'Fuel before keep failed')
+      }
     }
 
     if (failed) {

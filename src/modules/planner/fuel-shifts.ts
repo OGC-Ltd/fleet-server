@@ -143,6 +143,8 @@ export interface ShiftUse {
   beforeAt: string | null
   beforeBy: 'work' | 'refill' | null
   beforeReadAt: string | null
+  /** Fuel before came from the stored figure (fuel-befores), not this read. */
+  beforeKept?: boolean
   /** The plan lines in this stretch (several when lines overlap). */
   lineIds: string[]
   /** When `endL` was read: the window's end, now, or the tracker's first reading after a gap (`endGap`). */
