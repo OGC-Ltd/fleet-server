@@ -182,8 +182,13 @@ describe('Fuel before: ten minutes before the work or its refill (operator 2026-
       { machine: 'EX-21', startedAt: '2026-11-20 05:40:00', at: null },   // before shift 1 (06:00 EAT)
       { machine: 'EX-21', startedAt: '2026-11-20T17:30:00', at: null },   // between the shifts
     ])
-    expect(look.get(s1!.key)).toEqual({ from: new Date('2026-11-19T15:00:00Z'), pumpAt: new Date('2026-11-20T02:40:00Z') })
+    expect(look.get(s1!.key)).toEqual({ from: new Date('2026-11-19T21:00:00Z'), pumpAt: new Date('2026-11-20T02:40:00Z') })
     expect(look.get(s2!.key)).toEqual({ from: new Date('2026-11-20T12:00:00Z'), pumpAt: new Date('2026-11-20T14:30:00Z') })
+  })
+
+  it("never reaches back past the shift's own midnight (EX-25, 24 Nov: refilled 19:50 the evening before)", () => {
+    const look = refillLookback([s1!], [{ machine: 'EX-21', startedAt: '2026-11-19 19:50:00', at: null }])
+    expect(look.get(s1!.key)?.pumpAt).toBeNull()
   })
 
   it('reads the middle of the ten minutes before, and says whether a refill set the time', () => {

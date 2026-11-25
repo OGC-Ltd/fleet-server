@@ -44,13 +44,15 @@ export const FIRST_TEN_MS = 10 * 60_000
  * was done and before issued happened"): the tank over the ten minutes before
  * the shift's work began, or before a refill that came first, whichever is
  * earlier. A refill counts when it came after the machine's previous shift
- * ended (and no more than BEFORE_REACH_MS before this one), so the second
- * shift of a day reads the tank before its own refill, not the first's.
+ * ended, on the shift's own fleet day and no more than BEFORE_REACH_MS before
+ * it, so the second shift of a day reads the tank before its own refill, not
+ * the first's, and a first shift never reads back past midnight.
  */
 export const BEFORE_TEN_MS = 10 * 60_000
 export const BEFORE_REACH_MS = 12 * 3_600_000
 /** A tracker that is quiet while parked may send nothing in those ten minutes: then its last readings this far back. */
 export const BEFORE_FALLBACK_MS = 2 * 3_600_000
+const EAT_MS = 3 * 3_600_000
 
 /**
  * A shift that ended while its tracker was silent (operator 2026-11-23, EX-17:
@@ -278,7 +280,10 @@ export function refillLookback(
   const prevEnd = new Map<string, number>()
   for (const w of [...windows].sort((a, b) => a.start.getTime() - b.start.getTime())) {
     const k = foldName(w.machine)
-    const from = Math.max(w.start.getTime() - BEFORE_REACH_MS, prevEnd.get(k) ?? -Infinity)
+    // Not before the shift's own fleet day (00:00 EAT): a refill the evening
+    // before belongs to that day (EX-25, 24 Nov: 19:50 on the 23rd, then idle).
+    const dayStart = Date.parse(`${new Date(w.start.getTime() + EAT_MS).toISOString().slice(0, 10)}T00:00:00+03:00`)
+    const from = Math.max(w.start.getTime() - BEFORE_REACH_MS, dayStart, prevEnd.get(k) ?? -Infinity)
     const first = (pumps.get(k) ?? []).filter(t => t >= from && t < w.end.getTime()).sort((a, b) => a - b)[0]
     out.set(w.key, { from: new Date(from), pumpAt: first != null ? new Date(first) : null })
     prevEnd.set(k, Math.max(prevEnd.get(k) ?? -Infinity, w.end.getTime()))
