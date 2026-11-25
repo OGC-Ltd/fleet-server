@@ -103,7 +103,7 @@ router.post('/alarms/:alarmId/feedback', ...guard, async (req, res, next) => {
  */
 router.get('/file', ...guard, async (req, res, next) => {
   const k = typeof req.query['k'] === 'string' ? req.query['k'] : ''
-  const url = /^[a-f0-9]{40}$/.test(k) ? fileFor(req.params['orgId'] as string, k) : null
+  const url = /^[a-f0-9]{40}$/.test(k) ? await fileFor(req.params['orgId'] as string, k) : null
   if (!url) return sendError(res, 404, 'This clip link has expired. Reload the alarms.')
   const range = typeof req.headers.range === 'string' && /^bytes=\d*-\d*(,\d*-\d*)*$/.test(req.headers.range) ? req.headers.range : undefined
   try {

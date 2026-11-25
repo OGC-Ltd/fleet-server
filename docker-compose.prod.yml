@@ -12,7 +12,7 @@
 # Secrets come from FLEET_ENV_FILE (default /etc/fleet/server.env, root 600).
 #
 # Profiles follow the rollout:
-#   (none)    phase 1-2: server + report-worker; the host's nginx proxies to
+#   (none)    phase 1-2: server + report-worker + vss-worker; the host's nginx proxies to
 #             127.0.0.1:${SERVER_HOST_PORT}
 #   web       phase 3:   + web, published on 127.0.0.1:8081 by adding
 #             -f docker-compose.phase3.yml
@@ -93,6 +93,19 @@ services:
     mem_limit: 1024m
     cpus: 1.0
     pids_limit: 256
+
+  vss-worker:
+    <<: *app
+    # Dashcam alarms from VSS for every organisation, every 5 minutes, into
+    # dashcam_alarms and the Redis day cache the Alarms page reads
+    # (src/vss-worker.ts). ONE only: VSS paces searches per account, in-process.
+    # Holds a day's alarms at a time and the alarm-type lookups (~50k ids).
+    command: ["node", "--max-old-space-size=256", "dist/src/vss-worker.js"]
+    # No HTTP port; the image's /health check would mark it unhealthy forever.
+    healthcheck: { disable: true }
+    mem_limit: 384m
+    cpus: 0.5
+    pids_limit: 128
 
   migrate:
     <<: *hardening

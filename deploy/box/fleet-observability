@@ -13,7 +13,7 @@
 #                                            (/etc/fleet/observability.env; takes effect when their
 #                                            containers are next created: the next deploy, or `app-restart`)
 #   sudo fleet-observability app-off         remove that file again
-#   sudo fleet-observability app-restart     recreate server + report-worker now, same image (API gap of ~20 s)
+#   sudo fleet-observability app-restart     recreate server + report-worker + vss-worker now, same image (API gap of ~20 s)
 #
 # Not in /etc/fleet/server.env: fleet-deploy re-renders that file from SSM on
 # every deploy (/etc/fleet/secrets-from-ssm), which would drop the setting.
@@ -214,7 +214,7 @@ app_off() {
 
 obs_on() { [ -f "$OBS_ENV" ] && grep -q '^OTEL_EXPORTER_OTLP_ENDPOINT=' "$OBS_ENV"; }
 
-# Recreates server + report-worker on the image already deployed, so they read
+# Recreates server + report-worker + vss-worker on the image already deployed, so they read
 # their env files again. Not `fleet-deploy up <same sha>`: that answers
 # "already running" and recreates nothing.
 app_restart() {
@@ -224,9 +224,9 @@ app_restart() {
   acct=$(aws sts get-caller-identity --query Account --output text)
   img="${acct}.dkr.ecr.${REGION}.amazonaws.com/ghala:fleet-server-${sha}"
   docker image inspect "$img" >/dev/null 2>&1 || die "image $img is not on the box"
-  say "recreating server + report-worker on ${sha:0:7}"
+  say "recreating server + report-worker + vss-worker on ${sha:0:7}"
   FLEET_SERVER_IMAGE="$img" FLEET_ENV_FILE=/etc/fleet/server.env SERVER_HOST_PORT=3000 \
-    docker compose -f "$FLEET_COMPOSE" -p fleet up -d --no-deps --force-recreate server report-worker
+    docker compose -f "$FLEET_COMPOSE" -p fleet up -d --no-deps --force-recreate server report-worker vss-worker
   for i in $(seq 1 60); do
     if curl -fsS -o /dev/null http://127.0.0.1:3000/health; then
       say "server healthy after ~$((i * 2)) s"

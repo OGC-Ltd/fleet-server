@@ -94,7 +94,7 @@ describe('GET /api/v1/vss/file — streaming', () => {
   const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(20)])
   beforeEach(() => {
     up.calls = []; up.answers = []
-    vi.mocked(svc.fileFor).mockImplementation((org: string, k: string) => (org === TEST_ORG_ID && k === K ? 'https://vss.example/f' : null))
+    vi.mocked(svc.fileFor).mockImplementation(async (org: string, k: string) => (org === TEST_ORG_ID && k === K ? 'https://vss.example/f' : null))
   })
 
   it('a snapshot comes back as an image, whatever VSS labels it', async () => {

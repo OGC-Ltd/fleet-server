@@ -12,7 +12,7 @@ const dash = vi.hoisted(() => ({
   fail: new Set<string>(),
 }))
 vi.mock('../../src/modules/dashcam/dashcam.service.js', () => ({
-  getAlarms: vi.fn(async (orgId: string, _scope: unknown, since?: string, until?: string) => {
+  searchAlarms: vi.fn(async (orgId: string, _scope: unknown, since?: string, until?: string) => {
     dash.calls.push([orgId, since, until])
     if (dash.fail.has(orgId)) throw Object.assign(new Error('Requests too frequent'), { status: 10129 })
     return dash.answer

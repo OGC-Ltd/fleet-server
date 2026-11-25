@@ -25,7 +25,7 @@ datasources:
         spanStartTimeShift: -5m
         spanEndTimeShift: 5m
         customQuery: true
-        query: '{service_name=~"fleet-server|fleet-report-worker"} | trace_id="$${__trace.traceId}"'
+        query: '{service_name=~"fleet-server|fleet-report-worker|fleet-vss-worker"} | trace_id="$${__trace.traceId}"'
 
   # A log line with a trace_id links to that trace in Jaeger.
   - name: Loki

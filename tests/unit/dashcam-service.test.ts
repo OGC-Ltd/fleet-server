@@ -90,8 +90,8 @@ describe('alarms', () => {
   it('a private link opens its file only for the organisation it was listed for', async () => {
     const a = await svc.getAlarms(ORG, null, '2026-10-23T00:00:00Z')
     const k = new URL(a.incidents[0].videos[0].url, 'http://x').searchParams.get('k')!
-    expect(svc.fileFor(ORG, k)).toContain('token=SECRET1')
-    expect(svc.fileFor('org_other', k)).toBeNull()
+    expect(await svc.fileFor(ORG, k)).toContain('token=SECRET1')
+    expect(await svc.fileFor('org_other', k)).toBeNull()
   })
 
   it('dashboards opening together share one VSS search, and a repeat is served from memory', async () => {

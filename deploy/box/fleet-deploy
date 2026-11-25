@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fleet-deploy: phase 2 onward of docs/containerization-plan.md.
 #
-# Runs fleet-server and report-worker from one ECR image as compose project
+# Runs fleet-server, report-worker and vss-worker from one ECR image as compose project
 # `fleet`, published on 127.0.0.1:3000, the port the host's nginx already
 # proxies to. So the cutover changes no nginx config, and going back to pm2
 # changes none either.
@@ -44,7 +44,7 @@ if [ "${FLEET_DEPLOY_REHEARSAL:-}" = 1 ]; then
   SERVICES="server"
 else
   PROJECT=fleet; ENV_FILE=/etc/fleet/server.env; PORT=3000; STATE=/etc/fleet/deployed
-  SERVICES="server report-worker"
+  SERVICES="server report-worker vss-worker"
 fi
 
 die() { echo "fleet-deploy: $*" >&2; exit 1; }
@@ -123,11 +123,16 @@ wait_healthy() {
   done
   [ "$st" = healthy ] || { echo "server is $st"; return 1; }
   curl -fsS -m 5 -o /dev/null "http://127.0.0.1:${PORT}/health" || { echo "/health does not answer on :${PORT}"; return 1; }
-  [[ " $SERVICES " == *" report-worker "* ]] || return 0
-  rc1=$(docker inspect -f '{{.RestartCount}} {{.State.Running}}' "${PROJECT}-report-worker-1" 2>/dev/null || echo "x false")
+  local w workers=""
+  for w in report-worker vss-worker; do [[ " $SERVICES " == *" $w "* ]] && workers="$workers $w"; done
+  [ -n "$workers" ] || return 0
+  declare -A before
+  for w in $workers; do before[$w]=$(docker inspect -f '{{.RestartCount}} {{.State.Running}}' "${PROJECT}-${w}-1" 2>/dev/null || echo "x false"); done
   sleep 10
-  rc2=$(docker inspect -f '{{.RestartCount}} {{.State.Running}}' "${PROJECT}-report-worker-1" 2>/dev/null || echo "x false")
-  [ "$rc1" = "$rc2" ] && [ "${rc2#* }" = true ] || { echo "report-worker is not staying up ($rc1 -> $rc2)"; return 1; }
+  for w in $workers; do
+    rc2=$(docker inspect -f '{{.RestartCount}} {{.State.Running}}' "${PROJECT}-${w}-1" 2>/dev/null || echo "x false")
+    [ "${before[$w]}" = "$rc2" ] && [ "${rc2#* }" = true ] || { echo "$w is not staying up (${before[$w]} -> $rc2)"; return 1; }
+  done
   return 0
 }
 
@@ -382,7 +387,7 @@ case "${1:-}" in
     fi
     say "pm2 .env <- the values the containers run with"
     /usr/local/sbin/fleet-secrets pm2-env || die "could not bring pm2's .env up to date: containers left running"
-    compose stop -t 30 server report-worker
+    compose stop -t 30 server report-worker vss-worker
     say "copying .cache out of the volume"
     copy_cache_out || { echo "fleet-deploy: .cache copy failed; starting pm2 anyway (the volume still holds everything)" >&2; }
     pm2_back
