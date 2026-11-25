@@ -46,6 +46,7 @@ import deliveriesRoutes from './modules/deliveries/deliveries.routes.js'
 import * as dashboard from './modules/dashboard/dashboard.service.js'
 import { notificationsOrgRouter } from './modules/notifications/notifications.router.js'
 import * as notificationsCtrl from './modules/notifications/notifications.controller.js'
+import * as gateLogCtrl from './modules/gate-log/gate-log.controller.js'
 import { authenticate, requireOrgAccess } from './middleware/auth.js'
 import { simNow, SIM_SCALE } from './providers/raifactorysuite/raifactorysuite.simulator.js'
 import { getRoadPathAsync } from './lib/road-routes.js'
@@ -334,6 +335,8 @@ export function createApp() {
   // Org-wide dashboard SSE stream + push subscription management
   app.get(`${orgBase}/live`, authenticate, requireOrgAccess, requirePermission('notification:read'), notificationsCtrl.dashboardStream)
   app.use(`${orgBase}/notifications`, notificationsOrgRouter)
+  // The Gate log: sign-outs and returns only, on its own right (Ops Room Operator, 2026-11-25)
+  app.get(`${orgBase}/gate-log`, authenticate, requireOrgAccess, requirePermission('gate_log:read'), gateLogCtrl.gateLog)
   // Menengai's units flagged now by the server's stop watch (Alerts page)
   app.get(`${orgBase}/stop-watch`, authenticate, requireOrgAccess, requirePermission('notification:read'), stopWatchCtrl.current)
   // Menengai's listed units idle 1 h 30 min of working time, yard and depots included (Alerts page, corner badge)

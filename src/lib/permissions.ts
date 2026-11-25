@@ -119,6 +119,10 @@ export const PERMISSION_CATALOGUE = {
   'driver:export':         'Download driver reports',
 
   'weighbridge:read':      'View weighbridge records',
+  // The Gate log (operator, 2026-11-25): sign-outs and returns at the gate,
+  // the Ops Room Operator's page. A read of feed events the live feed already
+  // carries; held by that role and Admin (and through access:full).
+  'gate_log:read':         'View the Gate log: sign-outs and returns',
   'weighbridge:create':    'Record a weighbridge entry',
   'weighbridge:update':    'Amend a weighbridge entry',
   'weighbridge:export':    'Download weighbridge records',
@@ -410,6 +414,10 @@ const ROLE_BASE: RoleDefinition[] = [
       // Lifted out of ORG_EVERYTHING — see the note there. This role and the
       // platform administrator are the only two that hand out a triage.
       'repair:assign',
+      // The Gate log (operator, 2026-11-25: admins see the page; the pop-ups
+      // stay the Ops Room Operator's, who has no live feed). Named here rather
+      // than in ORG_EVERYTHING so heads of section and managers do not get it.
+      'gate_log:read',
       'security_case:read', 'security_case:update',
       'fuel_theft:triage',
       'fuel_audit:read',
@@ -587,6 +595,31 @@ const ROLE_BASE: RoleDefinition[] = [
   },
 
   {
+    slug: 'ops_room_operator', name: 'Ops Room Operator', platform: false, vehicleScopable: false,
+    description: 'The Gate log (sign-outs and returns) and the weighbridges, view only; no map, live feed, alerts, reports or administration.',
+    /*
+     * 2026-11-25, the operator: a person in the ops room sees the gate's
+     * sign-outs and returns, and the weighbridges where the organisation has
+     * them, and nothing else; view only.
+     *
+     * NO `notification:read`, on purpose: that right opens the live feed and
+     * its stream (every event, unfiltered). The gate's events come through
+     * their own route (modules/gate-log) on `gate_log:read`, which can only
+     * answer with sign-outs and returns. No `map:read`, `alerts:read`,
+     * `report:*`, `analytics:*`, `user:*` (beyond what every role carries),
+     * and no right to act on anything.
+     *
+     * `vehicle:read` and `telemetry:read` for the weighbridge screen alone, as
+     * on the Operator: it turns a ticket's plate into a unit we track.
+     */
+    permissions: [
+      'gate_log:read',
+      'weighbridge:read',
+      'vehicle:read', 'telemetry:read',
+    ],
+  },
+
+  {
     slug: 'technician', name: 'Technician', platform: false, vehicleScopable: false,
     description: 'Units flagged for repair: the live map, units and in transit for those units only; Maintenance probes, malfunctions and repairs; the Workshop ControlTech queue.',
     /*
@@ -714,6 +747,7 @@ export const ASSIGNABLE_ROLE_SLUGS: string[] = [
   'supervisor',
   'operator',
   'technician',
+  'ops_room_operator',
 ]
 
 export const VEHICLE_SCOPABLE_ROLE_SLUGS: string[] =
