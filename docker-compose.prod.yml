@@ -50,6 +50,9 @@ x-app: &app
     # Survives restarts in the volume, so a deploy does not log in to VSS again
     # (VSS rate-limits logins: error 10082).
     VSS_SESSION_FILE: /app/.cache/vss-session.json
+    # One report-drawing thread's heap (lib/offload): an oversized report fails
+    # on its own rather than starving the API of the box's memory.
+    REPORT_RENDER_THREAD_MB: "512"
   volumes:
     - fleet-cache:/app/.cache
   tmpfs:
@@ -71,18 +74,23 @@ services:
       # Loopback only. Keep it through phase 4 as well: deploy.yml's health
       # check and fleet-deploy's wait_healthy both curl 127.0.0.1:3000/health.
       - "127.0.0.1:${SERVER_HOST_PORT:-3001}:3000"
-    # Uses about 1 GB today under pm2. Swap stays allowed (Docker's default,
-    # 2x the limit): under pm2 it can swap, and a hard cut would OOM-kill it.
-    mem_limit: 1536m
+    # Uses about 1.1 GB. Swap stays allowed (Docker's default, 2x the limit):
+    # a hard cut would OOM-kill it. 2048m since 26 Nov 2026: report PDFs are
+    # drawn on a worker thread (lib/offload) whose heap is outside the 1024 MB
+    # above, capped at REPORT_RENDER_THREAD_MB; the largest drawing took ~450 MB.
+    # The box has 3.8 GB, so the report worker's limit came down to make room.
+    mem_limit: 2048m
     cpus: 1.5
     pids_limit: 256
 
   report-worker:
     <<: *app
-    command: ["node", "--max-old-space-size=1536", "dist/src/report-worker.js"]
+    # Peaks near 460 MB (a PDF through the queue) and sits at 260-375 MB, so
+    # 1024m with a 768 MB heap leaves room; it was 1800m/1536 (26 Nov 2026).
+    command: ["node", "--max-old-space-size=768", "dist/src/report-worker.js"]
     # No HTTP port; the image's /health check would mark it unhealthy forever.
     healthcheck: { disable: true }
-    mem_limit: 1800m
+    mem_limit: 1024m
     cpus: 1.0
     pids_limit: 256
 
