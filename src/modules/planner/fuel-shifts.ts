@@ -40,6 +40,19 @@ const MIN_KM = 1
  */
 export const FIRST_TEN_MS = 10 * 60_000
 /**
+ * Fuel before a shift (operator 2026-11-25: "we take 10 minutes before fuel
+ * was done and before issued happened"): the tank over the ten minutes before
+ * the shift's work began, or before a refill that came first, whichever is
+ * earlier. A refill counts when it came after the machine's previous shift
+ * ended (and no more than BEFORE_REACH_MS before this one), so the second
+ * shift of a day reads the tank before its own refill, not the first's.
+ */
+export const BEFORE_TEN_MS = 10 * 60_000
+export const BEFORE_REACH_MS = 12 * 3_600_000
+/** A tracker that is quiet while parked may send nothing in those ten minutes: then its last readings this far back. */
+export const BEFORE_FALLBACK_MS = 2 * 3_600_000
+
+/**
  * A shift that ended while its tracker was silent (operator 2026-11-23, EX-17:
  * nothing from 19:30 to 22:30 EAT with the engine on, its shift ending at
  * 22:00): when the last tank reading in the window is more than END_GAP_MS
@@ -74,6 +87,17 @@ export interface WindowEdges {
   firstTen?: number[]
   /** When the engine came on for the shift's work; null when the tracker gives no ignition. */
   workAt?: Date | null
+  /**
+   * The tank before the shift (BEFORE_TEN_MS): every level in the ten minutes
+   * before `beforeAt`, else the last few within BEFORE_FALLBACK_MS, the latest
+   * read at `beforeReadAt`. `beforeAt` is the work's start, or a refill's when
+   * one came first (`beforeBy`).
+   */
+  beforeTen?: number[]
+  beforeLast?: number[]
+  beforeAt?: Date | null
+  beforeReadAt?: Date | null
+  beforeBy?: 'work' | 'refill' | null
   /** The last tank reading's time in the window, and the first readings after it ended (END_GAP_MS). */
   lastAt?: Date | null
   after?: number[]
@@ -107,6 +131,18 @@ export interface ShiftUse {
   firstTenL: number | null
   firstTenAt: string | null
   firstTenFrom: 'engine' | 'shift' | null
+  /**
+   * The Fuel page's Fuel before (BEFORE_TEN_MS): the tank over the ten minutes
+   * before `beforeAt`, the shift's work starting or a refill before it
+   * (`beforeBy`). `beforeReadAt` is set when those minutes held no reading and
+   * the last ones before them were used.
+   */
+  beforeL: number | null
+  beforeAt: string | null
+  beforeBy: 'work' | 'refill' | null
+  beforeReadAt: string | null
+  /** The plan lines in this stretch (several when lines overlap). */
+  lineIds: string[]
   /** When `endL` was read: the window's end, now, or the tracker's first reading after a gap (`endGap`). */
   endAt: string | null
   endGap: boolean
@@ -202,6 +238,54 @@ function firstTen(w: ShiftWindow, edges: WindowEdges): Pick<ShiftUse, 'firstTenL
   return { firstTenL, firstTenAt: (at ?? w.start).toISOString(), firstTenFrom: at ? 'engine' : 'shift' }
 }
 
+/** The tank before the shift's work or its refill (BEFORE_TEN_MS). */
+function beforeWork(edges: WindowEdges): Pick<ShiftUse, 'beforeL' | 'beforeAt' | 'beforeBy' | 'beforeReadAt'> {
+  const at = edges.beforeAt ?? null
+  const ten = middleL(edges.beforeTen ?? [])
+  const last = ten == null ? middleL(edges.beforeLast ?? []) : null
+  const beforeL = ten ?? last
+  if (beforeL == null || !at) return { beforeL: null, beforeAt: null, beforeBy: null, beforeReadAt: null }
+  return {
+    beforeL, beforeAt: at.toISOString(), beforeBy: edges.beforeBy ?? 'work',
+    beforeReadAt: ten == null && edges.beforeReadAt ? edges.beforeReadAt.toISOString() : null,
+  }
+}
+
+/** A pump time: FactorySuite's local wall clock (EAT) unless it carries a zone. */
+function pumpMs(v: string | null): number | null {
+  if (!v) return null
+  const t = Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(v) ? v : `${v.replace(' ', 'T')}+03:00`)
+  return Number.isFinite(t) ? t : null
+}
+
+/**
+ * Where each window looks for a refill before it, and the pump's first issue
+ * there: from the machine's previous window's end (no further back than
+ * BEFORE_REACH_MS) up to the window's end. The read keeps the pump's time only
+ * when it came before the work began.
+ */
+export function refillLookback(
+  windows: ShiftWindow[], issues: Array<{ machine: string; startedAt: string | null; at?: string | null }>,
+): Map<string, { from: Date; pumpAt: Date | null }> {
+  const pumps = new Map<string, number[]>()
+  for (const i of issues) {
+    const t = pumpMs(i.startedAt) ?? pumpMs(i.at ?? null)
+    if (t == null) continue
+    const k = foldName(i.machine)
+    pumps.set(k, [...(pumps.get(k) ?? []), t])
+  }
+  const out = new Map<string, { from: Date; pumpAt: Date | null }>()
+  const prevEnd = new Map<string, number>()
+  for (const w of [...windows].sort((a, b) => a.start.getTime() - b.start.getTime())) {
+    const k = foldName(w.machine)
+    const from = Math.max(w.start.getTime() - BEFORE_REACH_MS, prevEnd.get(k) ?? -Infinity)
+    const first = (pumps.get(k) ?? []).filter(t => t >= from && t < w.end.getTime()).sort((a, b) => a - b)[0]
+    out.set(w.key, { from: new Date(from), pumpAt: first != null ? new Date(first) : null })
+    prevEnd.set(k, Math.max(prevEnd.get(k) ?? -Infinity, w.end.getTime()))
+  }
+  return out
+}
+
 /**
  * The shift has ended, its last tank reading came more than END_GAP_MS before
  * the end, and the tracker sent readings after it (within AFTER_GAP_REACH_MS).
@@ -218,8 +302,8 @@ export function shiftUse(
   w: ShiftWindow, edges: WindowEdges | null, fillings: BalanceFilling[], drains: BalanceDrain[], now: Date,
 ): ShiftUse {
   const span = measureSpan(w, now)
-  const base = { start: w.start.toISOString(), end: w.end.toISOString(), open: w.end.getTime() > now.getTime(), ahead: span == null }
-  if (!span || !edges) return { ...base, usedL: null, startL: null, firstTenL: null, firstTenAt: null, firstTenFrom: null, endL: null, endAt: null, endGap: false, filledL: 0, theftL: 0, hours: null, km: null }
+  const base = { start: w.start.toISOString(), end: w.end.toISOString(), open: w.end.getTime() > now.getTime(), ahead: span == null, lineIds: w.lineIds }
+  if (!span || !edges) return { ...base, usedL: null, startL: null, firstTenL: null, firstTenAt: null, firstTenFrom: null, beforeL: null, beforeAt: null, beforeBy: null, beforeReadAt: null, endL: null, endAt: null, endGap: false, filledL: 0, theftL: 0, hours: null, km: null }
   // Ended in a tracker gap: the end from the first readings after it.
   const gap = endedInGap(w, edges, span.to)
   const endAt = gap ? edges.afterAt! : span.to
@@ -243,7 +327,7 @@ export function shiftUse(
   const worked = (hours ?? 0) >= MIN_HOURS || (km ?? 0) >= MIN_KM
   const usedL = bal.consumedL === 0 && (bal.unrecordedL ?? 0) > 0 && worked ? null : bal.consumedL
   return {
-    ...base, usedL, startL: bal.startL, ...firstTen(w, edges), endL: bal.endL, endAt: endAt.toISOString(), endGap: gap, filledL: bal.filledL, theftL: bal.theftL,
+    ...base, usedL, startL: bal.startL, ...firstTen(w, edges), ...beforeWork(edges), endL: bal.endL, endAt: endAt.toISOString(), endGap: gap, filledL: bal.filledL, theftL: bal.theftL,
     hours: hours == null ? null : r2(hours), km: km == null ? null : r1(km),
   }
 }
