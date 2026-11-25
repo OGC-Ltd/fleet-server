@@ -39,6 +39,15 @@ describe('the Gate log route', () => {
     expect(events.map((e) => e.alertType)).toEqual(['DISPATCH', 'SALE_RETURN'])
   })
 
+  it('gives the next cursor whenever the page had lines, even a short one, and none at the end', async () => {
+    reader.items = [item('DISPATCH', '2026-11-25T08:00:00Z'), item('MOVEMENT_ENTRY', '2026-11-25T07:00:00Z')]
+    const body = (await call({ limit: '200' })).body as { data?: { nextBefore: string | null }; nextBefore?: string | null }
+    expect((body.data ?? body).nextBefore).toBe('2026-11-25T07:00:00Z')
+    reader.items = []
+    const end = (await call()).body as { data?: { nextBefore: string | null }; nextBefore?: string | null }
+    expect((end.data ?? end).nextBefore).toBeNull()
+  })
+
   it('keeps the caller’s vehicle scope, checks the day and caps the page', async () => {
     const scope = new Set(['v1'])
     await call({ limit: '5000' }, { vehicleIds: scope })

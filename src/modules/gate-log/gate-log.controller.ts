@@ -57,10 +57,17 @@ export async function gateLog(req: Request, res: Response) {
     })
     // Belt and braces: whatever the reader returns, only the gate's own types leave this route.
     const items = page.items.filter((i) => (GATE_LOG_ALERT_TYPES as readonly string[]).includes(String(i.alertType ?? '')))
+    // The next page's cursor whenever this one had anything. Not "only when the
+    // page came back full": the reader merges a unit's crossings within five
+    // minutes into one line, so a page of 200 rows can come back shorter and
+    // would wrongly read as the end of the day. The caller stops at an empty page.
+    // The oldest line's time is safe to page from: a merged line carries its
+    // FIRST crossing's time (notifications/movement-window).
+    const oldest = page.items.length > 0 ? page.items[page.items.length - 1]!.ts : null
     return sendSuccess(res, {
       events:     items,
       count:      items.length,
-      nextBefore: items.length > 0 && page.items.length >= parsedLimit ? items[items.length - 1]!.ts : null,
+      nextBefore: oldest,
     })
   } catch (err) {
     logger.error({ err, orgId }, 'Failed to list the gate log')
