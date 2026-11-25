@@ -22,6 +22,8 @@ const prisma = {
   vehicle: { findMany: vi.fn(async () => [
     { id: 'v1', registrationPlate: 'KDA 258J', name: 'KDA 258J', model: null, tankCapacityLitres: 140 },
     { id: 'v2', registrationPlate: 'KCX 001A', name: 'MENENGAI - KCX 001A', model: 'MITSUBISHI FH 517', tankCapacityLitres: null },
+    // Its own standard (2026-11-25) wins over the sheet's 4.7 for its plate
+    { id: 'v3', registrationPlate: 'KDA 258J ', name: 'KDA 258J B', model: null, tankCapacityLitres: null, standardKmPerL: 2.5 },
   ]) },
   operatorIncident: { findMany: vi.fn(async () => [
     { id: 'i1', organisationId: 'o', kind: 'other', other: 'Unauthorized Passengers', at: new Date(T0 + 3_600_000), vehicleId: 'v1', plate: 'KDA 258J', driver: '', location: '', status: 'Online', details: '2 people', loggedBy: 'Ann', loggedAt: new Date(T0), sharedAt: new Date(T0 + 7_200_000), updatedAt: new Date(T0) },
@@ -33,7 +35,7 @@ const getAlarms = vi.fn()
 vi.mock('../../src/modules/dashcam/dashcam.service.js', () => ({ getAlarms }))
 
 const { rangeBounds, fuelConsumptionRate, alarmDistribution, alarmKind, unauthorizedPassengers } = await import('../../src/modules/reports/range-reports.service.js')
-const { targetFor } = await import('../../src/modules/reports/fuel-target-rates.js')
+const { targetFor, unitTarget } = await import('../../src/modules/reports/fuel-target-rates.js')
 
 beforeEach(() => { queries.length = 0 })
 
@@ -58,6 +60,12 @@ describe('target rates', () => {
     expect(targetFor('KCX 001A', 'MANUAL')).toBe(null)
     expect(targetFor('KCX 001A', null)).toBe(null)
   })
+  it('a unit’s own standard comes before the sheet (operator, 2026-11-25)', () => {
+    expect(unitTarget(2.5)).toEqual({ kmPerL: 2.5, words: '2.50', source: 'vehicle' })
+    expect(unitTarget(null)).toBe(null)
+    expect(unitTarget(0)).toBe(null)
+    expect(unitTarget(Number.NaN)).toBe(null)
+  })
 })
 
 describe('fuel consumption rate', () => {
@@ -70,7 +78,8 @@ describe('fuel consumption rate', () => {
     expect(kda.belowTarget).toBe(false)
     // no probe: no figures, and says why, rather than 0 L
     expect(kcx).toMatchObject({ distanceSource: null, startL: null, consumedL: null, kmPerL: null, note: 'No fuel probe', target: { kmPerL: 5.8 } })
-    expect(out.totals).toMatchObject({ units: 2, measured: 1, consumedL: 9.4 })
+    expect(out.rows.find((r) => r.vehicleId === 'v3')!.target).toEqual({ kmPerL: 2.5, words: '2.50', source: 'vehicle' })
+    expect(out.totals).toMatchObject({ units: 3, measured: 1, consumedL: 9.4 })
     expect(queries.filter((q) => q.includes('LAG(')).length).toBe(2)
   })
   it('keeps a finished day, so a second run reads only the database edges', async () => {

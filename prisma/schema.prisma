@@ -856,6 +856,13 @@ model Vehicle {
   /// unit never stands without its number.
   ratedConsumptionUnit      String?           @map("rated_consumption_unit")
   fuelSensorFitted          Boolean?          @map("fuel_sensor_fitted")
+  /// The unit's standard consumption in kilometres per litre, as the
+  /// operator's fuel log states it for this unit (Menengai's "proposed
+  /// consumption figure", 2026-11-25). The Fuel Consumption Rate report's
+  /// target where set. Its own column on purpose: the Fuel page's expected
+  /// rates (`ratedConsumption`) and the Logbook (`fuelEfficiencyKmpl`) do not
+  /// read it.
+  standardKmPerL            Float?            @map("standard_km_per_l")
   machineSyncedAt           DateTime?         @map("machine_synced_at")
 
   createdAt DateTime @default(now()) @map("created_at")

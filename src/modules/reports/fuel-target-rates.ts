@@ -44,6 +44,16 @@ const norm = (s: string | null | undefined) => String(s ?? '').toUpperCase().rep
 const BY_PLATE = new Map(Object.entries(VEHICLE_RATES).map(([p, r]) => [norm(p).replace(/ /g, ''), r]))
 const MODELS = Object.entries(MODEL_RATES).sort((a, b) => b[0].length - a[0].length)
 
+/**
+ * A unit's own standard (vehicles.standard_km_per_l, from the operator's fuel
+ * log, 2026-11-25), as a target. It comes before the sheet's rates: a figure
+ * for this very unit is the one it is held against. Null where none is set.
+ */
+export function unitTarget(standardKmPerL: number | null | undefined): FuelTarget | null {
+  if (standardKmPerL == null || !Number.isFinite(standardKmPerL) || standardKmPerL <= 0) return null
+  return { kmPerL: standardKmPerL, words: standardKmPerL.toFixed(2), source: 'vehicle' }
+}
+
 export function targetFor(plate: string, modelOrName: string | null | undefined): FuelTarget | null {
   const rate = BY_PLATE.get(norm(plate).replace(/ /g, ''))
   if (rate != null) return { kmPerL: rate, words: rate.toFixed(2), source: 'vehicle' }

@@ -23,7 +23,7 @@ import { BadRequestError } from '../../core/errors/errors.js'
 import { balanceFrom, edgeLevelL, EDGE_READING_COUNT, reportableConsumptionL } from '../fuel/fuel-balance.js'
 import { getAlarms } from '../dashcam/dashcam.service.js'
 import { toIncident, type LoggedIncident } from './driver-conduct.service.js'
-import { targetFor, type FuelTarget } from './fuel-target-rates.js'
+import { targetFor, unitTarget, type FuelTarget } from './fuel-target-rates.js'
 
 const DAY_MS = 86_400_000
 
@@ -200,7 +200,7 @@ export async function fuelConsumptionRate(orgId: string, scope: Set<string> | nu
   const { from, to, days } = rangeBounds(fromDay, toDay, FUEL_RATE_MAX_DAYS)
   const vehicles = await prisma.vehicle.findMany({
     where: { organisationId: orgId, isActive: true, ...(scope ? { id: { in: [...scope] } } : {}) },
-    select: { id: true, registrationPlate: true, name: true, model: true, tankCapacityLitres: true },
+    select: { id: true, registrationPlate: true, name: true, model: true, tankCapacityLitres: true, standardKmPerL: true },
     orderBy: { registrationPlate: 'asc' },
   })
   const ids = vehicles.map((v) => v.id)
@@ -234,7 +234,8 @@ export async function fuelConsumptionRate(orgId: string, scope: Set<string> | nu
     })
     const consumedL = reportableConsumptionL(bal, distanceKm)
     const kmPerL = consumedL != null && consumedL > 0 && distanceKm >= 1 ? Math.round((distanceKm / consumedL) * 100) / 100 : null
-    const target = targetFor(v.registrationPlate, v.model ?? v.name)
+    // The unit's own standard first (operator, 2026-11-25: Menengai's per-unit standard consumption), else the old sheet
+    const target = unitTarget(v.standardKmPerL) ?? targetFor(v.registrationPlate, v.model ?? v.name)
     const note = bal.startL == null
       ? (v.tankCapacityLitres == null ? 'No fuel probe' : 'No fuel readings')
       : consumedL == null ? 'Tank rose without a recorded refill'
