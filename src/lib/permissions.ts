@@ -121,7 +121,7 @@ export const PERMISSION_CATALOGUE = {
   'weighbridge:read':      'View weighbridge records',
   // The Gate log (operator, 2026-11-25): sign-outs and returns at the gate,
   // the Ops Room Operator's page. A read of feed events the live feed already
-  // carries; held by that role only (and through access:full).
+  // carries; held by that role and Admin (and through access:full).
   'gate_log:read':         'View the Gate log: sign-outs and returns',
   'weighbridge:create':    'Record a weighbridge entry',
   'weighbridge:update':    'Amend a weighbridge entry',
@@ -414,6 +414,10 @@ const ROLE_BASE: RoleDefinition[] = [
       // Lifted out of ORG_EVERYTHING — see the note there. This role and the
       // platform administrator are the only two that hand out a triage.
       'repair:assign',
+      // The Gate log (operator, 2026-11-25: admins see the page; the pop-ups
+      // stay the Ops Room Operator's, who has no live feed). Named here rather
+      // than in ORG_EVERYTHING so heads of section and managers do not get it.
+      'gate_log:read',
       'security_case:read', 'security_case:update',
       'fuel_theft:triage',
       'fuel_audit:read',

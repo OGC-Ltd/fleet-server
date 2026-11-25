@@ -80,7 +80,8 @@ describe('the Ops Room Operator role', () => {
     expect(acting).toEqual([])
   })
 
-  it('no other role was given the Gate log', () => {
-    expect(ROLE_DEFINITIONS.filter((r) => r.permissions.includes('gate_log:read')).map((r) => r.slug)).toEqual(['ops_room_operator'])
+  it('only Admin was given the Gate log besides it, and Admin keeps the live feed (so no pop-ups)', () => {
+    expect(ROLE_DEFINITIONS.filter((r) => r.permissions.includes('gate_log:read')).map((r) => r.slug).sort()).toEqual(['admin', 'ops_room_operator'])
+    expect(ROLE_DEFINITIONS.find((r) => r.slug === 'admin')!.permissions).toContain('notification:read')
   })
 })
