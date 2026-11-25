@@ -70,6 +70,27 @@ export interface WeighmentDto {
   sincePreviousMs: number | null
 }
 
+/**
+ * Token, plate or driver — the three things somebody standing at a bridge has
+ * in their hand. Matched on the normalised plate as well as the written one so
+ * a search typed without the space still finds the lorry.
+ */
+export function matchesSearch(row: Pick<WeighmentRow, 'tokenNumber' | 'vehicleNo' | 'vehiclePlate' | 'driverName'>, q: string): boolean {
+  const needle = q.trim().toUpperCase()
+  if (!needle) return true
+  const plateNeedle = needle.replace(/[^A-Z0-9]/g, '')
+  return row.tokenNumber.toString().includes(needle) ||
+    row.vehicleNo.toUpperCase().includes(needle) ||
+    (plateNeedle.length > 0 && row.vehiclePlate.includes(plateNeedle)) ||
+    row.driverName.toUpperCase().includes(needle)
+}
+
+/**
+ * The figures above the grid. They follow the search (operator, 2026-11-25:
+ * filtering by unit or driver should update the stats), so a search for one
+ * lorry or one driver reads as that unit's day; they never follow the bridge
+ * picked, so picking a bridge leaves them on every bridge.
+ */
 export interface WeighmentDayStats {
   /** Tickets raised in the day, every bridge. A ticket is the unit here, not a
    *  trip over a scale: a delivery is weighed twice and a transfer four times,
@@ -213,13 +234,18 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
     })
   }
 
+  // ── the search, before the figures ────────────────────────────────────────
+  // The stats and the bridge cards describe what was searched for, every
+  // bridge; the sequence above stays the lorry's whole day.
+  const searched = q.q ? all.filter(r => matchesSearch(r, q.q!)) : all
+
   // ── the day's stats, every bridge ─────────────────────────────────────────
   let heaviest: WeighmentRow | null = null
   let lightest: WeighmentRow | null = null
   let totalNetKg = 0
   const trucks: KindTotal = { tickets: 0, netKg: 0 }
   const tractors: KindTotal = { tickets: 0, netKg: 0 }
-  for (const row of all) {
+  for (const row of searched) {
     const kind = isTractorTicket(row) ? tractors : trucks
     kind.tickets += 1
     const net = row.netWeightKg
@@ -237,8 +263,8 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
     : null)
 
   const stats: WeighmentDayStats = {
-    weighments:     all.length,
-    uniqueVehicles: byVehicle.size,
+    weighments:     searched.length,
+    uniqueVehicles: new Set(searched.map(r => r.vehiclePlate)).size,
     heaviestNetKg:  heaviest?.netWeightKg ?? null,
     heaviest:       ticket(heaviest),
     lightestNetKg:  lightest?.netWeightKg ?? null,
@@ -276,7 +302,7 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
   const counts = new Map<number, ReturnType<typeof blank>>()
   const names  = new Map<number, string>()
   for (const c of orgCentres) { counts.set(c.code, blank()); names.set(c.code, c.name) }
-  for (const row of all) {
+  for (const row of searched) {
     const c = counts.get(row.centerCode) ?? blank()
     const kind = isTractorTicket(row) ? c.tractors : c.trucks
     c.count += 1
@@ -293,7 +319,7 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
   const factoryCode = [...names.entries()].find(([, n]) => /FACTORY/i.test(n))?.[0]
   const factory = factoryCode != null ? counts.get(factoryCode) : undefined
   if (factory) {
-    for (const row of all) {
+    for (const row of searched) {
       if (row.category !== 'CANE_TRANSFER' || row.centerCode === factoryCode || row.factoryNetWeightKg == null) continue
       const kind = isTractorTicket(row) ? factory.tractors : factory.trucks
       kind.tickets += 1
@@ -308,21 +334,8 @@ export async function getWeighmentDay(organisationId: string, q: WeighmentQuery)
     .sort((a, b) => a.code - b.code)
 
   // ── narrow to what the grid is showing ────────────────────────────────────
-  let rows = all
+  let rows = searched
   if (q.centre != null) rows = rows.filter(r => r.centerCode === q.centre)
-  if (q.q) {
-    // Token, plate or driver — the three things somebody standing at a bridge
-    // has in their hand. Matched on the normalised plate as well as the
-    // written one so a search typed without the space still finds the lorry.
-    const needle = q.q.trim().toUpperCase()
-    const plateNeedle = needle.replace(/[^A-Z0-9]/g, '')
-    rows = rows.filter(r =>
-      r.tokenNumber.toString().includes(needle) ||
-      r.vehicleNo.toUpperCase().includes(needle) ||
-      (plateNeedle.length > 0 && r.vehiclePlate.includes(plateNeedle)) ||
-      r.driverName.toUpperCase().includes(needle),
-    )
-  }
 
   // Newest first for the grid — the reverse of the order the sequence needed.
   const dto = rows
