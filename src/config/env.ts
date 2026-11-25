@@ -602,6 +602,13 @@ const schema = z.object({
   DASHCAM_CAPTURE_CRON: z.string().optional().default('30 22 * * *'),
   // How many past fleet days each night captures again (late uploads, alarms typed late).
   DASHCAM_CAPTURE_DAYS: z.coerce.number().int().min(1).max(13).optional().default(3),
+  // Driver Conduct built a fleet day at a time (modules/reports/driver-conduct-days),
+  // in the report worker. 'off' leaves the Reports page reading every day live.
+  DRIVER_CONDUCT_DAYS: z.enum(['apply', 'off']).optional().default('apply'),
+  // 23:30 UTC = 02:30 EAT, an hour after the dashcam capture has saved the night's alarms.
+  DRIVER_CONDUCT_DAYS_CRON: z.string().optional().default('30 23 * * *'),
+  // How many of the last days each night builds again (late notifications).
+  DRIVER_CONDUCT_DAYS_REBUILD: z.coerce.number().int().min(1).max(14).optional().default(3),
 
   // Pump price for costing the fuel ledger (analytics/fuel-cost). NOTHING in
   // the schema records what fuel cost — a filling stores litres, not money —

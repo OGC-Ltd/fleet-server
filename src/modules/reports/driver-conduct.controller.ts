@@ -1,6 +1,8 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as service from './driver-conduct.service.js'
+import { readConductDays, MAX_DAYS, daysBetween } from './driver-conduct-days.js'
+import { ValidationError } from '../../core/errors/errors.js'
 import type { FoundCase, StoredCase, CaseAction, IncidentBody } from './driver-conduct.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -76,5 +78,18 @@ export const importIncidents: RequestHandler = async (req, res, next) => {
   try {
     const { entries } = req.body as { entries: IncidentBody[] }
     sendSuccess(res, await service.importIncidents(p(req, 'orgId'), entries))
+  } catch (err) { next(err) }
+}
+
+/**
+ * GET …/driver-conduct/days?from&to — the fleet days built in advance
+ * (driver-conduct-days): one row per vehicle per day, each incident by its
+ * time. A day not in `days` is not built, and the page reads it live.
+ */
+export const listDays: RequestHandler = async (req, res, next) => {
+  try {
+    const { from, to } = req.query as { from: string; to: string }
+    if (to < from || daysBetween(from, to).length > MAX_DAYS + 1) throw new ValidationError({ to: [`From the first day to the last, ${MAX_DAYS + 1} days at most`] })
+    sendSuccess(res, await readConductDays(p(req, 'orgId'), from, to, req.authz?.vehicleIds ?? null))
   } catch (err) { next(err) }
 }

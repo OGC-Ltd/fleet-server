@@ -28,7 +28,7 @@ import * as ctrl from './report.controller.js'
 import * as conduct from './driver-conduct.controller.js'
 import * as ranged from './range-reports.controller.js'
 import {
-  foundCasesSchema, importCasesSchema, caseActionSchema, listCasesQuerySchema,
+  foundCasesSchema, importCasesSchema, caseActionSchema, listCasesQuerySchema, conductDaysQuerySchema,
   incidentSchema, importIncidentsSchema, incidentSharedSchema, dayRangeQuerySchema, unitDistanceBodySchema, odometerAtBodySchema,
 } from './driver-conduct.schema.js'
 
@@ -89,6 +89,8 @@ router.post('/summaries/refresh/:periodId', requirePermission('report:create'), 
 // the follow-up.
 const conductRead = requirePermission('analytics:read')
 router.get('/driver-conduct/cases', conductRead, validateQuery(listCasesQuerySchema), conduct.listCases)
+// The days built in advance, for a month's report in one request (driver-conduct-days)
+router.get('/driver-conduct/days', conductRead, validateQuery(conductDaysQuerySchema), conduct.listDays)
 router.get('/driver-conduct/cases/pending-count', conductRead, conduct.pendingCount)
 router.post('/driver-conduct/cases/found', conductRead, validateBody(foundCasesSchema), conduct.mergeFound)
 router.post('/driver-conduct/cases/import', conductRead, validateBody(importCasesSchema), conduct.importCases)

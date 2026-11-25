@@ -15,10 +15,13 @@ const { connectDB, disconnectDB } = await import('./lib/prisma.js')
 const { disconnectRedis } = await import('./lib/redis.js')
 const { closeReportQueues } = await import('./lib/queues/usage-review.js')
 const { startReportWorker } = await import('./modules/usage-review/usage-review.worker.js')
+const { startDriverConductDays } = await import('./lib/queues/driver-conduct-days.js')
 const { flushTelemetry } = await import('./lib/tracing.js')
 
 await connectDB()
 const worker = await startReportWorker()
+// Driver Conduct a fleet day at a time, each night, off the API (lib/queues/driver-conduct-days)
+const conductDays = await startDriverConductDays()
 
 let stopping = false
 async function shutdown(signal: string) {
@@ -26,6 +29,7 @@ async function shutdown(signal: string) {
   stopping = true
   logger.info({ signal }, 'Report worker stopping')
   await worker.stop().catch((err) => logger.warn({ err }, 'Report worker shutdown failed'))
+  await conductDays.stop().catch((err) => logger.warn({ err }, 'Driver conduct days shutdown failed'))
   await closeReportQueues().catch(() => {})
   await disconnectRedis().catch(() => {})
   await disconnectDB().catch(() => {})

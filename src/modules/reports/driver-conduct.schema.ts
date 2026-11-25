@@ -50,6 +50,9 @@ export type CaseAction = z.infer<typeof caseActionSchema>
 
 export const listCasesQuerySchema = z.object({ from: day.optional(), to: day.optional() })
 
+/** GET …/driver-conduct/days: the built days from `from` to `to`, both included. */
+export const conductDaysQuerySchema = z.object({ from: day, to: day })
+
 export const OPERATOR_KINDS = ['phone', 'seatbelt', 'covered', 'other'] as const
 
 /** An incident an operator logged (lib/operatorLog clean). */

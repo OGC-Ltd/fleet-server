@@ -339,6 +339,8 @@ model Organisation {
   dashcamAlarmFeedback DashcamAlarmFeedback[]
   dashcamAlarms        DashcamAlarm[]
   dashcamCaptureDays   DashcamCaptureDay[]
+  driverConductDays    DriverConductDay[]
+  driverConductBuilt   DriverConductBuiltDay[]
   alertDecisions       AlertDecision[]
   vehicleInsights      VehicleInsight[]
   plannerCustomers     PlannerCustomer[]
@@ -4120,4 +4122,51 @@ model FactorySuiteFuelBefore {
   @@index([organisationId, day])
   @@index([factoryCode, day])
   @@map("factorysuite_fuel_befores")
+}
+
+/// One vehicle's Driver Conduct for one fleet day: its harsh driving and
+/// dashcam alarms, each by the time it happened, built each night from our own
+/// tables (notifications, dashcam_alarms) so a month's report adds days up
+/// instead of reading VSS a day at a time (operator, 2026-11-25). A month's
+/// days are cleared on the 5th of the next month.
+model DriverConductDay {
+  organisationId String   @map("organisation_id")
+  /// Fleet day, YYYY-MM-DD (Nairobi).
+  day            String
+  /// The vehicle's id, or "plate:<KEY>" for a dashcam alarm with no vehicle paired.
+  vehicleKey     String   @map("vehicle_key")
+  vehicleId      String?  @map("vehicle_id")
+  plate          String   @default("")
+  accel          Int      @default(0)
+  brake          Int      @default(0)
+  seatbelt       Int      @default(0)
+  phone          Int      @default(0)
+  covered        Int      @default(0)
+  /// Epoch ms of each incident by kind: { accel: [], brake: [], seatbelt: [], phone: [], covered: [] }.
+  times          Json
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@id([organisationId, day, vehicleKey])
+  @@map("driver_conduct_days")
+}
+
+/// An organisation's fleet day whose Driver Conduct is built (rows above, none when nothing happened).
+model DriverConductBuiltDay {
+  organisationId String    @map("organisation_id")
+  day            String
+  builtAt        DateTime  @default(now()) @map("built_at")
+  /// The day's dashcam capture was there and whole: its seatbelt, phone and camera covered are complete.
+  captured       Boolean   @default(false)
+  /// When that capture was made: a newer capture builds the day again.
+  captureAt      DateTime? @map("capture_at")
+  /// Alarms VSS gave no type for: not counted.
+  untyped        Int       @default(0)
+  harsh          Int       @default(0)
+  alarms         Int       @default(0)
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@id([organisationId, day])
+  @@map("driver_conduct_built_days")
 }
