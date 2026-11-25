@@ -4,6 +4,7 @@ import { requirePermission } from '../../middleware/authorize.js'
 import { validateQuery } from '../../middleware/validate.js'
 import { weighmentQuerySchema, weighmentAnalyticsQuerySchema } from './weighment.schema.js'
 import * as ctrl from './weighment.controller.js'
+import { recentWeighings } from './weighment.recent.js'
 
 const router = Router({ mergeParams: true })
 
@@ -21,6 +22,9 @@ router.get('/', requirePermission('weighbridge:read'), validateQuery(weighmentQu
 // swallowed as a parameter. There is no such route today; this is where one
 // would go, and the ordering is the cheap half of not being bitten by it.
 router.get('/bridges', requirePermission('weighbridge:read'), ctrl.listBridges)
+
+// Today's weighings, one line each, for the Ops Room Operator's pop-ups (2026-11-25).
+router.get('/recent', requirePermission('weighbridge:read'), recentWeighings)
 
 // The window view, for the analytics screen's weighbridge card. Same
 // permission as the grid — it is the grid's own tickets, summed, and an
