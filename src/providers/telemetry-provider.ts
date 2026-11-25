@@ -127,6 +127,15 @@ export interface VehicleTelemetryFrame {
      * ping for a probe that has been faulty for weeks would bury the feed.
      */
     fuelProbeFault?:     boolean
+    /**
+     * Why, in the tracker account's own words where it labels the value
+     * ("Lost Contact with Tubes Error - Needs Replacement", "Fuel Contamination
+     * Error - Needs Tank Flashing"), else a plain description; with the raw
+     * value the probe sent. Only with `fuelProbeFault` true (operator,
+     * 2026-11-25: the tracker's message is the probe's status).
+     */
+    fuelProbeFaultReason?: string | null
+    fuelProbeRaw?:         number | null
 
     /**
      * The unit's on-board recorder, when it has one.
