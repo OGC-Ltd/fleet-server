@@ -207,6 +207,52 @@ describe('the day s stats describe every bridge, not the one on screen', () => {
   })
 })
 
+describe('the stats follow a search for a unit or a driver', () => {
+  const day = () => [
+    ticket({ netWeightKg: 20000, vehicleNo: 'KDL 182X', vehiclePlate: 'KDL182X', driverName: 'JOHN ODHIAMBO' }),
+    ticket({ netWeightKg: 26000, vehicleNo: 'KDL 182X', vehiclePlate: 'KDL182X', driverName: 'JOHN ODHIAMBO', centerCode: 102, centerName: 'OPAPO' }),
+    ticket({ netWeightKg: 30000, vehicleNo: 'KCB 101A', vehiclePlate: 'KCB101A', driverName: 'PETER OTIENO' }),
+    ticket({ netWeightKg: 6000,  vehicleNo: 'KTCC 849B', vehiclePlate: 'KTCC849B', driverName: 'TAISHON OBONYO' }),
+  ]
+
+  it("reads as that unit's day when a plate is searched, spaces or none", async () => {
+    vi.mocked(findDay).mockResolvedValue(day() as never)
+
+    const res = await getWeighmentDay(ORG, { day: DAY, q: 'kdl182x' })
+
+    expect(res.stats.weighments).toBe(2)
+    expect(res.stats.uniqueVehicles).toBe(1)
+    expect(res.stats.totalNetKg).toBe(46000)
+    expect(res.stats.heaviest?.vehicleNo).toBe('KDL 182X')
+    expect(res.stats.lightestNetKg).toBe(20000)
+    expect(res.stats.trucks).toEqual({ tickets: 2, netKg: 46000 })
+    expect(res.stats.tractors).toEqual({ tickets: 0, netKg: 0 })
+    // The bridge cards follow it too, and every bridge keeps its card
+    expect(res.centres.find(c => c.name === 'FACTORY')).toMatchObject({ count: 1, netKg: 20000 })
+    expect(res.centres.find(c => c.name === 'OPAPO')).toMatchObject({ count: 1, netKg: 26000 })
+    expect(res.centres).toHaveLength(4)
+    expect(res.total).toBe(4)
+  })
+
+  it('narrows to a driver, and a picked bridge still leaves the figures on every bridge', async () => {
+    vi.mocked(findDay).mockResolvedValue(day() as never)
+
+    const res = await getWeighmentDay(ORG, { day: DAY, q: 'odhiambo', centre: 102 })
+
+    expect(res.rows).toHaveLength(1)
+    expect(res.stats.weighments).toBe(2)
+    expect(res.stats.totalNetKg).toBe(46000)
+  })
+
+  it("keeps the lorry's place in its whole day, not in the search", async () => {
+    vi.mocked(findDay).mockResolvedValue(day() as never)
+
+    const res = await getWeighmentDay(ORG, { day: DAY, q: 'KDL 182X', centre: 102 })
+
+    expect(res.rows[0]).toMatchObject({ seq: 2, vehicleTickets: 2 })
+  })
+})
+
 describe('an organisation with no weighbridges at all', () => {
   it('offers no centre tabs, rather than four bridges that were never its own', async () => {
     // The tab exists on every fleet in the platform; the bridges belong to one.
@@ -356,8 +402,9 @@ describe('search', () => {
     expect(byToken.rows.map(r => r.token)).toEqual(['1000893693'])
     expect(byPlate.rows.map(r => r.vehicleNo)).toEqual(['KTCC 849B'])
     expect(byDriver.rows.map(r => r.vehicleNo)).toEqual(['KTCC 784D'])
-    // The stats still describe the day, not the search.
-    expect(byToken.stats.weighments).toBe(2)
+    // The stats follow the search (operator, 2026-11-25); the day is still counted
+    expect(byToken.stats.weighments).toBe(1)
+    expect(byToken.total).toBe(2)
   })
 })
 
