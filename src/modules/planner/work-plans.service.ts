@@ -35,7 +35,7 @@ import { buildFactoryOperators, type FactoryOperators } from './factory-operator
 import { meterRefill, refillFigures, refillSpan, refillWindows, type MachineRefill, type MachineRefills, type RefillWindow } from './fuel-refills.js'
 import { createHash } from 'node:crypto'
 import { asDaySeries, EDGE_READING_COUNT, type BalanceDrain, type BalanceFilling } from '../fuel/fuel-balance.js'
-import { AFTER_GAP_METER_MS, AFTER_GAP_REACH_MS, FIRST_TEN_MS, machineShiftUse, measureSpan, shiftWindows, type MachineShiftUse, type ShiftWindow, type WindowEdges } from './fuel-shifts.js'
+import { AFTER_GAP_METER_MS, AFTER_GAP_REACH_MS, BEFORE_FALLBACK_MS, BEFORE_REACH_MS, BEFORE_TEN_MS, FIRST_TEN_MS, machineShiftUse, measureSpan, refillLookback, shiftWindows, type MachineShiftUse, type ShiftWindow, type WindowEdges } from './fuel-shifts.js'
 import { reportDb } from '../../lib/report-db.js'
 import { addDays, buildPlanSubmissions, type PlanSubmissions } from './plan-submissions.js'
 
@@ -517,7 +517,7 @@ export async function factoryFuelShiftsFor(
   const hit = shiftsCache.get(key)
   if (!hit || Date.now() - hit.at >= SHIFTS_CACHE_MS) {
     const now = new Date()
-    const out = readShifts(windows, now).then(machines => ({ factory: fuel.factory, machines }))
+    const out = readShifts(windows, now, refillLookback(windows, fuel.issues)).then(machines => ({ factory: fuel.factory, machines }))
     shiftsCache.set(key, { at: Date.now(), out })
     out.catch(() => shiftsCache.delete(key))
     for (const [k, v] of shiftsCache) if (Date.now() - v.at >= SHIFTS_CACHE_MS) shiftsCache.delete(k)
@@ -526,11 +526,17 @@ export async function factoryFuelShiftsFor(
   return { factory: out.factory, from, to, machines: out.machines, fetchedAt: new Date().toISOString() }
 }
 
-async function readShifts(windows: ShiftWindow[], now: Date): Promise<MachineShiftUse[]> {
+async function readShifts(
+  windows: ShiftWindow[], now: Date, lookback: Map<string, { from: Date; pumpAt: Date | null }>,
+): Promise<MachineShiftUse[]> {
   const asked = windows
     .map(w => ({ w, span: w.vehicleId ? measureSpan(w, now) : null }))
     .filter((x): x is { w: ShiftWindow; span: { from: Date; to: Date } } => x.span != null)
-  const edges = await readShiftEdges(asked.map(({ w, span }) => ({ key: w.key, vehicleId: w.vehicleId!, ...span })))
+  const edges = await readShiftEdges(asked.map(({ w, span }) => ({
+    key: w.key, vehicleId: w.vehicleId!, ...span,
+    lookFrom: lookback.get(w.key)?.from ?? new Date(w.start.getTime() - BEFORE_REACH_MS),
+    pumpAt: lookback.get(w.key)?.pumpAt ?? null,
+  })))
   const ids = [...new Set(asked.map(x => x.w.vehicleId!))]
   const ledger = new Map<string, { fillings: BalanceFilling[]; drains: BalanceDrain[] }>()
   if (ids.length) {
@@ -561,21 +567,36 @@ async function readShifts(windows: ShiftWindow[], now: Date): Promise<MachineShi
  * tank, and the first and last engine-hours and odometer readings. Index seeks
  * on (vehicle_id, captured_at), a handful a window.
  */
-async function readShiftEdges(windows: Array<{ key: string; vehicleId: string; from: Date; to: Date }>): Promise<Map<string, WindowEdges>> {
+async function readShiftEdges(
+  windows: Array<{ key: string; vehicleId: string; from: Date; to: Date; lookFrom: Date; pumpAt: Date | null }>,
+): Promise<Map<string, WindowEdges>> {
   const out = new Map<string, WindowEdges>()
   if (!windows.length) return out
   const rows = await reportDb().$queryRaw<Array<{
     k: string; first: number[] | null; last: number[] | null; ten: number[] | null; work_at: Date | null
+    before_at: Date | null; before_by: string | null; before_ten: number[] | null; before_last: number[] | null; before_read_at: Date | null
     last_at: Date | null; after: number[] | null; after_at: Date | null; h_after: number | null; o_after: number | null
     h0: number | null; h1: number | null; o0: number | null; o1: number | null
   }>>`
     WITH w AS (
       SELECT * FROM unnest(${windows.map(w => w.key)}::text[], ${windows.map(w => w.vehicleId)}::text[],
-                           ${windows.map(w => w.from)}::timestamptz[], ${windows.map(w => w.to)}::timestamptz[]) AS w(k, vid, st, en))
+                           ${windows.map(w => w.from)}::timestamptz[], ${windows.map(w => w.to)}::timestamptz[],
+                           ${windows.map(w => w.lookFrom)}::timestamptz[], ${windows.map(w => w.pumpAt)}::timestamptz[]) AS w(k, vid, st, en, lf, pa))
     SELECT w.k,
       (SELECT array_agg(x.f) FROM (SELECT t.fuel_level_ml AS f FROM vehicle_telemetries t
          WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.fuel_level_ml >= 1000
          ORDER BY t.captured_at ASC LIMIT ${EDGE_READING_COUNT}) x) AS first,
+      b.at AS before_at, b.by AS before_by,
+      (SELECT array_agg(t.fuel_level_ml) FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= b.at - ${BEFORE_TEN_MS / 1000} * interval '1 second'
+           AND t.captured_at < b.at AND t.fuel_level_ml >= 1000) AS before_ten,
+      (SELECT array_agg(x.f) FROM (SELECT t.fuel_level_ml AS f FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= b.at - ${BEFORE_FALLBACK_MS / 1000} * interval '1 second'
+           AND t.captured_at < b.at AND t.fuel_level_ml >= 1000
+         ORDER BY t.captured_at DESC LIMIT 3) x) AS before_last,
+      (SELECT max(t.captured_at) FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= b.at - ${BEFORE_FALLBACK_MS / 1000} * interval '1 second'
+           AND t.captured_at < b.at AND t.fuel_level_ml >= 1000) AS before_read_at,
       (SELECT array_agg(x.f) FROM (SELECT t.fuel_level_ml AS f FROM vehicle_telemetries t
          WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.fuel_level_ml >= 1000
          ORDER BY t.captured_at DESC LIMIT ${EDGE_READING_COUNT}) x) AS last,
@@ -635,11 +656,26 @@ async function readShiftEdges(windows: Array<{ key: string; vehicleId: string; f
           (SELECT min(t.captured_at) FROM vehicle_telemetries t
             WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st AND t.captured_at < w.en AND t.engine_on AND t.ignition_known)
         ) AS eng
-      ) e ON true`
+      ) e ON true
+      -- Fuel before (fuel-shifts BEFORE_TEN_MS): the earlier of the work
+      -- beginning and a refill before it since the previous shift, the pump's
+      -- (FactorySuite) or the probe's (a fill not ruled something else).
+      LEFT JOIN LATERAL (
+        SELECT r.at, CASE WHEN r.at < coalesce(e.eng, w.st) THEN 'refill' ELSE 'work' END AS by
+          FROM (SELECT least(
+                  coalesce(e.eng, w.st),
+                  CASE WHEN w.pa >= w.lf AND w.pa < coalesce(e.eng, w.st) THEN w.pa END,
+                  (SELECT min(f.filled_at) FROM fuel_fillings f
+                    WHERE f.vehicle_id = w.vid AND f.filled_at >= w.lf AND f.filled_at < coalesce(e.eng, w.st)
+                      AND f.verdict IN ('REFILL', 'PENDING'))
+                ) AS at) r
+      ) b ON true`
   for (const r of rows) {
     out.set(r.k, {
       first: (r.first ?? []).map(Number), last: (r.last ?? []).map(Number), firstTen: (r.ten ?? []).map(Number),
       workAt: r.work_at,
+      beforeAt: r.before_at, beforeBy: r.before_by === 'refill' ? 'refill' : r.before_at ? 'work' : null,
+      beforeTen: (r.before_ten ?? []).map(Number), beforeLast: (r.before_last ?? []).map(Number), beforeReadAt: r.before_read_at,
       hoursFirst: r.h0, hoursLast: r.h1, kmFirst: r.o0, kmLast: r.o1,
       lastAt: r.last_at, after: (r.after ?? []).map(Number), afterAt: r.after_at, hoursAfter: r.h_after, kmAfter: r.o_after,
     })

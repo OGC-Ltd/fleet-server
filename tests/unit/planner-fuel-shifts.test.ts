@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { endedInGap, machineShiftUse, measureSpan, middleL, shiftUse, shiftWindows, type WindowEdges } from '../../src/modules/planner/fuel-shifts.js'
+import { endedInGap, machineShiftUse, measureSpan, middleL, refillLookback, shiftUse, shiftWindows, type WindowEdges } from '../../src/modules/planner/fuel-shifts.js'
 import type { FactoryFuel, FuelPlanLine } from '../../src/modules/planner/factory-fuel.js'
 import type { BalanceFilling } from '../../src/modules/fuel/fuel-balance.js'
 
@@ -170,5 +170,40 @@ describe('a shift that ended while the tracker was silent', () => {
 
   it('does not look past a shift still running', () => {
     expect(endedInGap(w2!, gapped, new Date('2026-11-23T17:00:00Z'))).toBe(false)
+  })
+})
+
+describe('Fuel before: ten minutes before the work or its refill (operator 2026-11-25)', () => {
+  const [s1, s2] = shiftWindows(fuel([line(), shift2]))
+  const later = new Date('2026-11-21T02:00:00Z')
+
+  it("looks for the second shift's refill only after the first shift ended", () => {
+    const look = refillLookback([s1!, s2!], [
+      { machine: 'EX-21', startedAt: '2026-11-20 05:40:00', at: null },   // before shift 1 (06:00 EAT)
+      { machine: 'EX-21', startedAt: '2026-11-20T17:30:00', at: null },   // between the shifts
+    ])
+    expect(look.get(s1!.key)).toEqual({ from: new Date('2026-11-19T21:00:00Z'), pumpAt: new Date('2026-11-20T02:40:00Z') })
+    expect(look.get(s2!.key)).toEqual({ from: new Date('2026-11-20T12:00:00Z'), pumpAt: new Date('2026-11-20T14:30:00Z') })
+  })
+
+  it("never reaches back past the shift's own midnight (EX-25, 24 Nov: refilled 19:50 the evening before)", () => {
+    const look = refillLookback([s1!], [{ machine: 'EX-21', startedAt: '2026-11-19 19:50:00', at: null }])
+    expect(look.get(s1!.key)?.pumpAt).toBeNull()
+  })
+
+  it('reads the middle of the ten minutes before, and says whether a refill set the time', () => {
+    const u = shiftUse(s2!, { ...edges(250, 180, 1, 9), beforeAt: new Date('2026-11-20T14:30:00Z'), beforeBy: 'refill', beforeTen: [60_100, 60_500, 61_000] }, [], [], later)
+    expect(u).toMatchObject({ beforeL: 60.5, beforeAt: '2026-11-20T14:30:00.000Z', beforeBy: 'refill', beforeReadAt: null, lineIds: ['l2'] })
+  })
+
+  it('falls back to the last readings before, with when, when the ten minutes are empty', () => {
+    const u = shiftUse(s1!, { ...edges(75, 60, 1, 9), beforeAt: new Date('2026-11-20T03:00:00Z'), beforeBy: 'work', beforeTen: [],
+      beforeLast: [75_000, 74_800, 75_200], beforeReadAt: new Date('2026-11-20T02:05:00Z') }, [], [], later)
+    expect(u).toMatchObject({ beforeL: 75, beforeBy: 'work', beforeReadAt: '2026-11-20T02:05:00.000Z' })
+  })
+
+  it('gives nothing with no reading at all', () => {
+    const u = shiftUse(s1!, { ...edges(75, 60, 1, 9), beforeAt: new Date('2026-11-20T03:00:00Z'), beforeTen: [], beforeLast: [] }, [], [], later)
+    expect(u.beforeL).toBeNull()
   })
 })
