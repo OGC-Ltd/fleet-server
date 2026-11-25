@@ -30,6 +30,19 @@ import { fuelBalance, type BalanceDrain, type BalanceFilling, type BalanceReadin
 import type { FactoryFuel, FuelMachine } from './factory-fuel.js'
 import { lineWindow } from './factory-supervisors.js'
 import { foldName } from './work-plan-match.js'
+import { middleL } from './fuel-shifts.js'
+
+/**
+ * Probe filled (operator 2026-11-26: "the amount of fuel filled into the tank
+ * and measured 10 minutes after refill either into work or not"): the tank
+ * over the TANK_TEN_MS after the nozzle came out less the tank over the
+ * TANK_TEN_MS before it went in, each the middle reading of its stretch
+ * (fuel-shifts middleL), whether the engine ran or not. With no reading in a
+ * stretch, the TANK_FALLBACK_COUNT readings nearest it within TANK_REACH_MS.
+ */
+export const TANK_TEN_MS = 10 * 60_000
+export const TANK_REACH_MS = 30 * 60_000
+export const TANK_FALLBACK_COUNT = 3
 
 /** How far from a fuelling a tracker fix still gives the meter then. */
 export const METER_REACH_MS = 2 * 3_600_000
@@ -75,6 +88,20 @@ export interface ShiftUse {
   engineHours: number | null
 }
 
+/** The tank either side of a fuelling, by our probe, and the litres it rose (Probe filled). */
+export interface RefillTank {
+  beforeL: number | null
+  /** The start of the stretch read: 10 min before the nozzle, or the earliest fallback reading. */
+  beforeAt: string | null
+  afterL: number | null
+  /** The end of the stretch read: 10 min after the nozzle, or the latest fallback reading. */
+  afterAt: string | null
+  /** Set when a stretch held no reading and the nearest ones were used. */
+  fallback: boolean
+  /** afterL less beforeL; null without both, or below zero. */
+  filledL: number | null
+}
+
 export interface MachineRefill {
   issueId: string
   machine: string
@@ -86,6 +113,8 @@ export interface MachineRefill {
   meterNow?: MeterAt | null
   /** Null when the fuelling has no plan shift, and in the meters-only read except on each machine's latest fuelling. */
   shift: ShiftUse | null
+  /** The tank either side of the fuelling (Probe filled); null when the machine is not tracked or has no pump times. */
+  tank?: RefillTank | null
 }
 
 /**
@@ -154,8 +183,41 @@ export interface MeterRow {
   after: number | null
 }
 
+/**
+ * The tank either side of a fuelling (TANK_TEN_MS): `readings` are the unit's
+ * tank readings around it, in any order. Null with no pump times.
+ */
+export function refillTank(w: Pick<RefillWindow, 'fuelStart' | 'fuelEnd'>, readings: Array<{ t: number; fuelMl: number | null }>): RefillTank | null {
+  if (!w.fuelStart || !w.fuelEnd) return null
+  const st = w.fuelStart.getTime()
+  const en = Math.max(w.fuelEnd.getTime(), st)
+  const tank = readings.filter(r => r.fuelMl != null && Number.isFinite(r.fuelMl) && r.fuelMl >= 1000).sort((a, b) => a.t - b.t)
+  let fallback = false
+  let before = tank.filter(r => r.t >= st - TANK_TEN_MS && r.t < st)
+  let beforeAt = before.length ? st - TANK_TEN_MS : null
+  if (!before.length) {
+    before = tank.filter(r => r.t >= st - TANK_REACH_MS && r.t < st).slice(-TANK_FALLBACK_COUNT)
+    if (before.length) { fallback = true; beforeAt = before[0]!.t }
+  }
+  let after = tank.filter(r => r.t > en && r.t <= en + TANK_TEN_MS)
+  let afterAt = after.length ? en + TANK_TEN_MS : null
+  if (!after.length) {
+    after = tank.filter(r => r.t > en && r.t <= en + TANK_REACH_MS).slice(0, TANK_FALLBACK_COUNT)
+    if (after.length) { fallback = true; afterAt = after.at(-1)!.t }
+  }
+  const beforeL = middleL(before.map(r => r.fuelMl!))
+  const afterL = middleL(after.map(r => r.fuelMl!))
+  const rise = beforeL != null && afterL != null ? Math.round((afterL - beforeL) * 100) / 100 : null
+  return {
+    beforeL, beforeAt: beforeAt != null ? iso(beforeAt) : null,
+    afterL, afterAt: afterAt != null ? iso(afterAt) : null,
+    fallback,
+    filledL: rise != null && rise >= 0 ? rise : null,
+  }
+}
+
 /** A refill with the meters only (no shift), for the Fuel page's table. */
-export function meterRefill(w: RefillWindow, row: MeterRow | null): MachineRefill {
+export function meterRefill(w: RefillWindow, row: MeterRow | null, tankReadings: Array<{ t: number; fuelMl: number | null }> | null = null): MachineRefill {
   const at = (value: number | null, t: Date | null): MeterAt | null =>
     value != null && Number.isFinite(value) && t ? { value: r1(value), at: t.toISOString(), unit: w.km ? 'km' : 'h' } : null
   return {
@@ -165,6 +227,7 @@ export function meterRefill(w: RefillWindow, row: MeterRow | null): MachineRefil
     meterBefore: row ? at(row.before, row.beforeAt) : null,
     meterAfter: row ? at(row.after, row.afterAt) : null,
     shift: null,
+    tank: w.vehicleId && tankReadings ? refillTank(w, tankReadings) : null,
   }
 }
 
@@ -235,5 +298,6 @@ export function refillFigures(
     }
   }
 
-  return { issueId: w.issueId, machine: w.machine, tracked: readings != null && readings.length > 0, meterBefore, meterAfter, shift }
+  const tank = readings ? refillTank(w, readings) : null
+  return { issueId: w.issueId, machine: w.machine, tracked: readings != null && readings.length > 0, meterBefore, meterAfter, shift, tank }
 }

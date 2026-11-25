@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { applyKept, keepRows, KEEP_SETTLE_MS } from '../../src/modules/planner/fuel-befores.js'
+import { applyKept, keepRows, KEEP_SETTLE_MS, KEEP_VERSION } from '../../src/modules/planner/fuel-befores.js'
 import type { MachineShiftUse, ShiftUse, ShiftWindow } from '../../src/modules/planner/fuel-shifts.js'
 
 const F = 'MUFINDI PAPER MILLS'
@@ -66,5 +66,30 @@ describe('Fuel before kept', () => {
     const out = applyKept(measured, kept)[0]!.windows
     expect(out[0]!.beforeL).toBe(75)
     expect(out[0]!.beforeKept).toBeUndefined()
+  })
+})
+
+describe('Shift fuel kept (version 2)', () => {
+  const fueled = [{ ...measured[0]!, windows: measured[0]!.windows.map((u, i) => ({
+    ...u, endL: i ? 40 : 60.5, hours: i ? 6 : 7, issuedL: i ? 0 : 100, fuellings: i ? [] : [{ issueId: 'a', siv: 'SIV-1', litres: 100, at: '2026-11-24T05:00:00.000Z', probeFilledL: 98.5 }],
+    probeFilledL: i ? null : 98.5, shiftStartL: u.beforeL, shiftStartAt: u.beforeAt, shiftStartBy: 'before' as const,
+    consumedL: i ? 20.5 : 114.5, consumedWhy: null, runUnit: 'h' as const, run: i ? 6 : 7, rate: 30, probeUsedL: i ? 180 : 210,
+  })) }]
+
+  it('keeps each line with its shift fuel at the current version', () => {
+    const { rows } = keepRows(F, 'org', '2026-11-24', '2026-11-25', lines, [w1, w2], fueled, at('2026-11-25T01:00:00Z'))
+    expect(rows.map(r => [r.lineId, r.issuedL, r.probeFilledL, r.consumedL, r.probeUsedL, r.endL, r.keptVersion])).toEqual([
+      ['l1', 100, 98.5, 114.5, 210, 60.5, KEEP_VERSION], ['l2', 0, null, 20.5, 180, 40, KEEP_VERSION],
+    ])
+    expect(rows[0]!.shiftFuellings).toHaveLength(1)
+  })
+
+  it('lays a version 2 row over the read, and only the Fuel before of a version 1 row', () => {
+    const { rows } = keepRows(F, 'org', '2026-11-24', '2026-11-25', lines, [w1, w2], fueled, at('2026-11-25T01:00:00Z'))
+    const live = [{ ...fueled[0]!, windows: fueled[0]!.windows.map(u => ({ ...u, consumedL: 1, issuedL: 999 })) }]
+    const [m2] = applyKept(live, new Map(rows.map(r => [r.lineId, r])))
+    expect(m2!.windows.map(u => [u.consumedL, u.issuedL])).toEqual([[114.5, 100], [20.5, 0]])
+    const [m1] = applyKept(live, new Map(rows.map(r => [r.lineId, { ...r, keptVersion: 1, beforeL: 70 }])))
+    expect(m1!.windows.map(u => [u.beforeL, u.consumedL, u.issuedL])).toEqual([[70, 1, 999], [70, 1, 999]])
   })
 })

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  METER_REACH_MS, hourRated, meterRefill, refillFigures, refillSpan, refillWindows, wallClock, type RefillReading, type RefillWindow,
+  METER_REACH_MS, hourRated, meterRefill, refillFigures, refillTank, refillSpan, refillWindows, wallClock, type RefillReading, type RefillWindow,
 } from '../../src/modules/planner/fuel-refills.js'
 import type { FactoryFuel, FuelIssue, FuelPlanLine } from '../../src/modules/planner/factory-fuel.js'
 
@@ -176,11 +176,46 @@ describe('meterRefill', () => {
       meterBefore: { value: 4214.1, at: '2026-11-19T05:30:00.000Z', unit: 'h' },
       meterAfter: { value: 4214.1, at: '2026-11-19T06:10:00.000Z', unit: 'h' },
       shift: null,
+      tank: null,
     })
   })
   it('an untracked machine, or one the query found nothing for, has no meters', () => {
     expect(meterRefill({ ...w, vehicleId: null }, null)).toMatchObject({ tracked: false, meterBefore: null, meterAfter: null })
     expect(meterRefill(w, { beforeAt: null, before: null, afterAt: new Date('2026-11-19T06:10:00Z'), after: 4214.1 }))
       .toMatchObject({ tracked: true, meterBefore: null, meterAfter: { value: 4214.1 } })
+  })
+})
+
+describe('refillTank (Probe filled)', () => {
+  // EX-17 on 19 Nov: nozzle 08:31-08:44 EAT (05:31-05:44Z), 77 L before, ~642 L after.
+  const st = new Date('2026-11-19T05:31:00Z'), en = new Date('2026-11-19T05:44:00Z')
+  const t = (hhmm: string) => Date.parse(`2026-11-19T${hhmm}:00Z`)
+  const r = (hhmm: string, l: number) => ({ t: t(hhmm), fuelMl: l * 1000 })
+
+  it('is the middle of the 10 min after less the middle of the 10 min before, engine on or not', () => {
+    const tank = refillTank({ fuelStart: st, fuelEnd: en }, [
+      r('05:15', 90), r('05:22', 77.2), r('05:25', 77), r('05:28', 76.8), r('05:40', 400),
+      r('05:46', 640), r('05:50', 642), r('05:53', 641.9), r('06:10', 600),
+    ])
+    expect(tank).toEqual({ beforeL: 77, beforeAt: '2026-11-19T05:21:00.000Z', afterL: 641.9, afterAt: '2026-11-19T05:54:00.000Z', fallback: false, filledL: 564.9 })
+  })
+
+  it('falls back to the nearest readings within 30 min when a stretch is empty', () => {
+    const tank = refillTank({ fuelStart: st, fuelEnd: en }, [r('05:05', 80), r('05:10', 78), r('05:15', 77), r('06:00', 641), r('06:05', 640)])
+    expect(tank).toMatchObject({ beforeL: 78, afterL: 640.5, fallback: true, filledL: 562.5, beforeAt: '2026-11-19T05:05:00.000Z', afterAt: '2026-11-19T06:05:00.000Z' })
+  })
+
+  it('has no figure without readings either side, a fall, or no pump times', () => {
+    expect(refillTank({ fuelStart: st, fuelEnd: en }, [r('05:25', 77)])).toMatchObject({ beforeL: 77, afterL: null, filledL: null })
+    expect(refillTank({ fuelStart: st, fuelEnd: en }, [r('05:25', 77), r('05:50', 70)])?.filledL).toBeNull()
+    expect(refillTank({ fuelStart: null, fuelEnd: null }, [r('05:25', 77)])).toBeNull()
+  })
+
+  it('rides on the table read and on the panel read', () => {
+    const w: RefillWindow = { issueId: 'i', machine: 'EX-17', vehicleId: 'v', km: false, fuelStart: st, fuelEnd: en, shift: null }
+    expect(meterRefill(w, null, [r('05:25', 77), r('05:50', 642)]).tank?.filledL).toBe(565)
+    expect(meterRefill({ ...w, vehicleId: null }, null, [r('05:25', 77)]).tank).toBeNull()
+    const readings = [r('05:25', 77), r('05:50', 642)].map(x => ({ ...x, lat: null, lng: null, speedKmh: 0, engineHours: null, odometerKm: null }))
+    expect(refillFigures(w, readings, [], [], new Date('2026-11-20T00:00:00Z')).tank?.filledL).toBe(565)
   })
 })

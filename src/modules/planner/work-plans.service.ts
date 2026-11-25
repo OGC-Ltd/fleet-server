@@ -37,7 +37,10 @@ import { createHash } from 'node:crypto'
 import { asDaySeries, EDGE_READING_COUNT, type BalanceDrain, type BalanceFilling } from '../fuel/fuel-balance.js'
 import { AFTER_GAP_METER_MS, AFTER_GAP_REACH_MS, BEFORE_FALLBACK_MS, BEFORE_REACH_MS, BEFORE_TEN_MS, FIRST_TEN_MS, machineShiftUse, measureSpan, refillLookback, shiftWindows, type MachineShiftUse, type ShiftWindow, type WindowEdges } from './fuel-shifts.js'
 import { reportDb } from '../../lib/report-db.js'
-import { applyKept, keepRows, KEEP_DAYS_PER_PASS, type KeptBefore } from './fuel-befores.js'
+import { applyKept, keepRows, KEEP_DAYS_PER_PASS, KEEP_VERSION, type KeptBefore } from './fuel-befores.js'
+import { withShiftFuel, type ShiftFuelling } from './shift-fuel.js'
+import type { RefillTank } from './fuel-refills.js'
+import { Prisma } from '../../../generated/prisma/client.js'
 import { addDays, buildPlanSubmissions, type PlanSubmissions } from './plan-submissions.js'
 
 const FACTORY_OF_ORG: Record<string, string> = Object.fromEntries(
@@ -385,12 +388,14 @@ function withMeterNow(windows: RefillWindow[]) {
 async function readRefillMeters(windows: RefillWindow[]): Promise<MachineRefill[]> {
   const asked = windows.filter(w => w.vehicleId && w.fuelStart && w.fuelEnd)
   if (!asked.length) return windows.map(w => meterRefill(w, null))
-  const rows = await reportDb().$queryRaw<Array<{ k: string; before_at: Date | null; before: number | null; after_at: Date | null; after: number | null }>>`
+  const rows = await reportDb().$queryRaw<Array<{ k: string; before_at: Date | null; before: number | null; after_at: Date | null; after: number | null
+    tank_t: number[] | null; tank_ml: number[] | null }>>`
     WITH w AS (
       SELECT * FROM unnest(${asked.map(w => w.issueId)}::text[], ${asked.map(w => w.vehicleId!)}::text[],
                            ${asked.map(w => w.fuelStart!)}::timestamptz[], ${asked.map(w => w.fuelEnd!)}::timestamptz[],
                            ${asked.map(w => w.km)}::boolean[]) AS w(k, vid, st, en, km))
-    SELECT w.k, b.captured_at AS before_at, b.meter AS before, a.captured_at AS after_at, a.meter AS after
+    SELECT w.k, b.captured_at AS before_at, b.meter AS before, a.captured_at AS after_at, a.meter AS after,
+           f.tank_t, f.tank_ml
       FROM w
       LEFT JOIN LATERAL (
         SELECT t.captured_at, (CASE WHEN w.km THEN t.odometer_m / 1000.0 ELSE t.engine_hours_meter END)::float8 AS meter
@@ -403,9 +408,20 @@ async function readRefillMeters(windows: RefillWindow[]): Promise<MachineRefill[
           FROM vehicle_telemetries t
          WHERE t.vehicle_id = w.vid AND t.captured_at >= w.en AND t.captured_at <= w.en + interval '2 hours'
            AND (CASE WHEN w.km THEN t.odometer_m ELSE t.engine_hours_meter END) IS NOT NULL
-         ORDER BY t.captured_at ASC LIMIT 1) a ON true`
-  const byKey = new Map(rows.map(r => [r.k, { beforeAt: r.before_at, before: r.before, afterAt: r.after_at, after: r.after }]))
-  return windows.map(w => meterRefill(w, byKey.get(w.issueId) ?? null))
+         ORDER BY t.captured_at ASC LIMIT 1) a ON true
+      -- The tank either side, for Probe filled (fuel-refills refillTank): every
+      -- reading from 30 min before the nozzle went in to 30 min after it came out.
+      LEFT JOIN LATERAL (
+        SELECT array_agg((extract(epoch FROM t.captured_at) * 1000)::float8 ORDER BY t.captured_at) AS tank_t,
+               array_agg(t.fuel_level_ml::float8 ORDER BY t.captured_at) AS tank_ml
+          FROM vehicle_telemetries t
+         WHERE t.vehicle_id = w.vid AND t.captured_at >= w.st - interval '30 minutes' AND t.captured_at <= w.en + interval '30 minutes'
+           AND t.fuel_level_ml IS NOT NULL) f ON true`
+  const byKey = new Map(rows.map(r => [r.k, {
+    meters: { beforeAt: r.before_at, before: r.before, afterAt: r.after_at, after: r.after },
+    tank: (r.tank_t ?? []).map((t, i) => ({ t, fuelMl: r.tank_ml?.[i] ?? null })),
+  }]))
+  return windows.map(w => meterRefill(w, byKey.get(w.issueId)?.meters ?? null, byKey.get(w.issueId)?.tank ?? null))
 }
 
 /**
@@ -518,14 +534,26 @@ export async function factoryFuelShiftsFor(
   const hit = shiftsCache.get(key)
   if (!hit || Date.now() - hit.at >= SHIFTS_CACHE_MS) {
     const now = new Date()
-    const out = Promise.all([readShifts(windows, now, refillLookback(windows, fuel.issues)), readKept(fuel.factory, windows)])
-      .then(([machines, kept]) => ({ factory: fuel.factory, machines: applyKept(machines, kept) }))
+    const out = Promise.all([readShifts(windows, now, refillLookback(windows, fuel.issues)), readKept(fuel.factory, windows), readRefillTanks(fuel, scope)])
+      // Each shift's issued, probe filled, consumed and probe used (shift-fuel), then the kept figures over a settled day's.
+      .then(([machines, kept, tanks]) => ({ factory: fuel.factory, machines: applyKept(withShiftFuel(machines, fuel, tanks), kept) }))
     shiftsCache.set(key, { at: Date.now(), out })
     out.catch(() => shiftsCache.delete(key))
     for (const [k, v] of shiftsCache) if (Date.now() - v.at >= SHIFTS_CACHE_MS) shiftsCache.delete(k)
   }
   const out = await shiftsCache.get(key)!.out
   return { factory: out.factory, from, to, machines: out.machines, fetchedAt: new Date().toISOString() }
+}
+
+/**
+ * The tank either side of every fuelling in `fuel` (fuel-refills refillTank),
+ * by issue id, for each shift's Probe filled: the table's meters read, one
+ * query. A unit outside `scope` is not read.
+ */
+async function readRefillTanks(fuel: FactoryFuel, scope: ReadonlySet<string> | null): Promise<Map<string, RefillTank | null>> {
+  const windows = refillWindows(fuel, null).windows.map(w => (w.vehicleId && scope && !scope.has(w.vehicleId) ? { ...w, vehicleId: null } : w))
+  const refills = await readRefillMeters(windows)
+  return new Map(refills.map(r => [r.issueId, r.tank ?? null]))
 }
 
 /** A missing table: the fuel-befores migration not applied yet. */
@@ -540,7 +568,10 @@ async function readKept(factory: string, windows: ShiftWindow[]): Promise<Map<st
   if (!ids.length) return new Map()
   try {
     const rows = await reportDb().factorySuiteFuelBefore.findMany({ where: { id: { in: ids } } })
-    return new Map(rows.map(r => [r.lineId, { ...r, beforeBy: r.beforeBy === 'refill' ? 'refill' as const : r.beforeBy ? 'work' as const : null }]))
+    return new Map(rows.map(r => [r.lineId, {
+      ...r, beforeBy: r.beforeBy === 'refill' ? 'refill' as const : r.beforeBy ? 'work' as const : null,
+      shiftFuellings: Array.isArray(r.shiftFuellings) ? r.shiftFuellings as unknown as ShiftFuelling[] : null,
+    }]))
   } catch (err) {
     if (missingTable(err)) return new Map()
     throw err
@@ -570,7 +601,7 @@ export async function keepFuelBefores(now = new Date()): Promise<{ days: string[
         SELECT DISTINCT i.day FROM factorysuite_work_plan_items i
           LEFT JOIN factorysuite_fuel_befores k ON k.id = i.id
          WHERE i.factory_code = ${factory} AND i.day < ${today}
-           AND (k.id IS NULL OR k.kept_at < greatest(i.edited_at, i.status_changed_at))
+           AND (k.id IS NULL OR k.kept_at < greatest(i.edited_at, i.status_changed_at) OR k.kept_version < ${KEEP_VERSION})
          ORDER BY i.day LIMIT ${KEEP_DAYS_PER_PASS + 1}`
     } catch (err) {
       if (!missingTable(err)) throw err
@@ -584,16 +615,19 @@ export async function keepFuelBefores(now = new Date()): Promise<{ days: string[
       const fuel = await factoryFuelFor(org.id, addDays(day, -1), day)
       if (fuel.factory === null) continue
       const windows = shiftWindows(fuel)
-      const [machines, items] = await Promise.all([
+      const [measured, items, tanks] = await Promise.all([
         readShifts(windows, now, refillLookback(windows, fuel.issues)),
         prisma.factorySuiteWorkPlanItem.findMany({ where: { factoryCode: factory, day }, select: { lineId: true, day: true, machine: true } }),
+        readRefillTanks(fuel, null),
       ])
+      const machines = withShiftFuel(measured, fuel, tanks)
       const { rows } = keepRows(factory, org.id, day, today, [...fuel.lines, ...items], windows, machines, now)
       if (!rows.length) continue
       const keptAt = new Date()
-      await prisma.$transaction(rows.map(r => prisma.factorySuiteFuelBefore.upsert({
-        where: { id: r.id }, create: { ...r, keptAt }, update: { ...r, keptAt },
-      })))
+      await prisma.$transaction(rows.map(r => {
+        const data = { ...r, shiftFuellings: r.shiftFuellings ? r.shiftFuellings as unknown as Prisma.InputJsonValue : Prisma.DbNull, keptAt }
+        return prisma.factorySuiteFuelBefore.upsert({ where: { id: r.id }, create: data, update: data })
+      }))
       report.days.push(day)
       report.rows += rows.length
     }
