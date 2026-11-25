@@ -42,6 +42,7 @@ import { withShiftFuel, type ShiftFuelling } from './shift-fuel.js'
 import type { RefillTank } from './fuel-refills.js'
 import { Prisma } from '../../../generated/prisma/client.js'
 import { addDays, buildPlanSubmissions, type PlanSubmissions } from './plan-submissions.js'
+import { issueChunks, issueReadFrom, keptIssues, mergeIssues, ISSUE_ROW_LIMIT } from './fuel-issues.js'
 
 const FACTORY_OF_ORG: Record<string, string> = Object.fromEntries(
   Object.entries(MACHINE_FACTORY_TO_ORG).map(([factory, org]) => [org, factory]),
@@ -232,7 +233,10 @@ export async function factoryFuelFor(orgId: string, from: string, to: string): P
       // Operators and Supervisors all read these lines.
       client().listWorkPlans(from, to, factory).then(collapsePlans),
       soft(client().listFuelRequests(from, to, factory), 'fuel requests'),
-      soft(client().listFuelIssues(from, to, factory), 'fuel issues'),
+      // The pump's fuellings, live, with the kept ones (planner/fuel-issues)
+      // under them: a day's issued fuel stands when FactorySuite does not answer.
+      Promise.all([soft(client().listFuelIssues(from, to, factory), 'fuel issues'), keptIssuesFor(factory, from, to)])
+        .then(([live, kept]) => mergeIssues(live, kept)),
       client().listMachines(),
       prisma.vehicle.findMany({
         where: { organisationId: orgId, equipmentReference: { not: null } },
@@ -821,4 +825,105 @@ async function readLineRuns(windows: Array<{ key: string; vehicleId: string; sta
     })
   }
   return runs
+}
+
+/** The kept issues of `from`..`to` that FactorySuite still listed when last read; none when the table is not there yet. */
+async function keptIssuesFor(factory: string, from: string, to: string): Promise<RaiFactorySuiteFuelIssueRow[]> {
+  try {
+    const rows = await reportDb().factorySuiteFuelIssue.findMany({
+      where: { factoryCode: factory, day: { gte: from, lte: to }, goneAt: null },
+      select: { row: true },
+    })
+    return rows.map(r => r.row as unknown as RaiFactorySuiteFuelIssueRow)
+  } catch (err) {
+    if (missingTable(err)) return []
+    logger.warn({ err, factory, from, to }, 'Kept fuel issues unavailable for the Fuel page')
+    return []
+  }
+}
+
+const issueKeepFirst = new Set<string>()
+let issueTableMissing = false
+let issueKeepRunning: Promise<IssueKeepReport | null> | null = null
+let issueKeepAgain = false
+let issueKeepTimer: NodeJS.Timeout | null = null
+
+export interface IssueKeepReport { reads: number; kept: number; gone: number; days: string[] }
+
+/**
+ * Keep FactorySuite's pump fuellings (planner/fuel-issues): read the last few
+ * days (on the first pass, back to the last kept day) and upsert every issue;
+ * mark gone the kept issues of a fully read day that the read no longer lists.
+ * Null when FactorySuite is not configured or the table is not there yet.
+ * Throws when a read fails, so the caller logs it; the next pass tries again.
+ */
+export function keepFuelIssues(now = new Date()): Promise<IssueKeepReport | null> {
+  if (issueKeepRunning) { issueKeepAgain = true; return issueKeepRunning }
+  issueKeepRunning = keepFuelIssuesPass(now).finally(() => {
+    issueKeepRunning = null
+    if (issueKeepAgain) {
+      issueKeepAgain = false
+      void keepFuelIssues().catch(err => logger.warn({ err }, 'Fuel issue keep: follow-up pass failed'))
+    }
+  })
+  return issueKeepRunning
+}
+
+/** A fuel.issue.* webhook: a keep pass in a moment (events come in bursts). */
+export function requestFuelIssueKeep(event: string) {
+  if (issueKeepTimer) return
+  issueKeepTimer = setTimeout(() => {
+    issueKeepTimer = null
+    void keepFuelIssues().then(r => {
+      if (r?.kept || r?.gone) logger.info({ event, ...r }, 'Fuel issues kept')
+    }).catch(err => logger.warn({ err, event }, 'Fuel issue keep: webhook pass failed'))
+  }, 3_000)
+  issueKeepTimer.unref?.()
+}
+
+async function keepFuelIssuesPass(now: Date): Promise<IssueKeepReport | null> {
+  if (!client().isConfigured) return null
+  const today = eatToday(now.getTime())
+  const report: IssueKeepReport = { reads: 0, kept: 0, gone: 0, days: [] }
+  for (const [factory, orgCode] of Object.entries(MACHINE_FACTORY_TO_ORG)) {
+    const org = await prisma.organisation.findUnique({ where: { code: orgCode }, select: { id: true } })
+    if (!org) continue
+    let last: { day: string } | null
+    try {
+      last = await prisma.factorySuiteFuelIssue.findFirst({ where: { factoryCode: factory }, orderBy: { day: 'desc' }, select: { day: true } })
+    } catch (err) {
+      if (!missingTable(err)) throw err
+      if (!issueTableMissing) logger.info('Fuel issues: factorysuite_fuel_issues is not there yet; nothing kept')
+      issueTableMissing = true
+      return null
+    }
+    issueTableMissing = false
+    const from = issueReadFrom(today, last?.day ?? null, !issueKeepFirst.has(factory))
+    for (const chunk of issueChunks(from, today)) {
+      // One day past the chunk, so today is in the read whether the feed's
+      // `to` is inclusive or not; only the chunk's own days are kept.
+      const read = await client().listFuelIssues(chunk.from, addDays(chunk.to, 1), factory)
+      report.reads++
+      const rows = keptIssues(factory, org.id, read).filter(r => r.day >= chunk.from && r.day <= chunk.to)
+      const seenAt = new Date()
+      const writes = rows.map(r => {
+        const data = { ...r, row: r.row as object, lastSeenAt: seenAt, goneAt: null }
+        return prisma.factorySuiteFuelIssue.upsert({ where: { id: r.id }, create: data, update: data })
+      })
+      // A read at the row limit may be cut short: it marks nothing gone.
+      const gone = read.length < ISSUE_ROW_LIMIT
+        ? prisma.factorySuiteFuelIssue.updateMany({
+            where: { factoryCode: factory, day: { gte: chunk.from, lte: chunk.to }, goneAt: null, id: { notIn: rows.map(r => r.id) } },
+            data: { goneAt: seenAt },
+          })
+        : null
+      const done = await prisma.$transaction([...writes, ...(gone ? [gone] : [])])
+      report.kept += rows.length
+      report.gone += gone ? (done[done.length - 1] as { count: number }).count : 0
+      report.days.push(...rows.map(r => r.day))
+    }
+    issueKeepFirst.add(factory)
+  }
+  report.days = [...new Set(report.days)].sort()
+  return report
 }

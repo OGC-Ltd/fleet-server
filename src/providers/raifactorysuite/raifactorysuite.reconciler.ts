@@ -40,7 +40,7 @@ import { handleWeighment } from '../../modules/weighments/weighment.ingest.js'
 import { FACTORIES } from '../../modules/webhooks/factory-map.js'
 import { runWorkshopSync } from '../../modules/repairs/factorysuite-workshop.runner.js'
 import { runWorkPlanWatch } from '../../modules/planner/work-plan-watch.js'
-import { keepFuelBefores } from '../../modules/planner/work-plans.service.js'
+import { keepFuelBefores, keepFuelIssues } from '../../modules/planner/work-plans.service.js'
 import { KEEP_INTERVAL_MS } from '../../modules/planner/fuel-befores.js'
 import { fleetDayKey } from '../../lib/provider-time.js'
 import { prisma } from '../../lib/prisma.js'
@@ -324,6 +324,18 @@ class RaiFactorySuiteReconciler {
       }
     }
 
+    // The pump's fuellings, kept (planner/fuel-issues): the last few days
+    // every pass, so a day's issued fuel is on record within minutes. Its own
+    // failures only log; the next pass reads the same days again.
+    let issuesKept: number | undefined
+    try {
+      const k = await keepFuelIssues()
+      issuesKept = k?.kept
+      if (k?.gone) logger.info({ gone: k.gone, days: k.days }, 'Fuel issues no longer listed by FactorySuite')
+    } catch (err) {
+      logger.warn({ err }, 'Fuel issue keep failed')
+    }
+
     if (failed) {
       this.consecutiveFailures++
     } else {
@@ -338,7 +350,7 @@ class RaiFactorySuiteReconciler {
       {
         durationMs: Date.now() - t0, alertsCreated, dispatchesSeen, salesSeen, weighmentsSeen, machinesWritten,
         jobCards: workshop?.cards, workshopMoves: workshop ? workshop.created + workshop.adopted + workshop.moved + workshop.voided : undefined,
-        planChanges, primed: this.primed,
+        planChanges, issuesKept, primed: this.primed,
       },
       'RaiFactorySuite reconcile complete',
     )

@@ -5,7 +5,7 @@ import { ingestAlerts, type RaiFactorySuiteAlert } from './raifactorysuite-alert
 import { handleDispatch, handleMovement, handleSale } from './raifactorysuite-events.service.js'
 import { handleWeighment } from '../weighments/weighment.ingest.js'
 import { ingestWialonNotifications } from './wialon-notifications.service.js'
-import { workPlansChanged } from '../planner/work-plans.service.js'
+import { requestFuelIssueKeep, workPlansChanged } from '../planner/work-plans.service.js'
 import { isWorkPlanEvent, requestWorkPlanWatch } from '../planner/work-plan-watch.js'
 import { isWorkshopEvent, requestWorkshopSync } from '../repairs/factorysuite-workshop.runner.js'
 import { webhookSourceOf } from '../../middleware/webhookAuth.js'
@@ -114,6 +114,8 @@ export async function providerWebhook(req: Request, res: Response, next: NextFun
         if (keys) logger.info({ event: kind, keys }, 'Work plan event: first of its kind since start')
         afterReply.push(async () => { workPlanOrgs += await workPlansChanged(kind, item) })
         requestWorkPlanWatch(kind)
+        // A pump fuelling: keep it now (planner/fuel-issues), not at the next pass.
+        if (kind.startsWith('fuel.issue.')) requestFuelIssueKeep(kind)
         workPlans++
         continue
       }

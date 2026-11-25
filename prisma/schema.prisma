@@ -332,6 +332,7 @@ model Organisation {
   fsRequisitions       FactorySuiteRequisition[]
   fsWorkPlanItems      FactorySuiteWorkPlanItem[]
   fsFuelBefores        FactorySuiteFuelBefore[]
+  fsFuelIssues         FactorySuiteFuelIssue[]
   fsParts              FactorySuitePart[]
   fuelTheftFollowUps   FuelTheftFollowUp[]
   driverConductCases   DriverConductCase[]
@@ -4120,4 +4121,39 @@ model FactorySuiteFuelBefore {
   @@index([organisationId, day])
   @@index([factoryCode, day])
   @@map("factorysuite_fuel_befores")
+}
+
+/// A pump fuelling FactorySuite issued (GET /fuel/issues), kept as read
+/// (planner/fuel-issues.ts) so a day's issued fuel stays on record. Upserted on
+/// every read of its day; `goneAt` is set when FactorySuite stops listing it.
+model FactorySuiteFuelIssue {
+  /// "<factory>|<FactorySuite issue id>"
+  id             String    @id
+  organisationId String    @map("organisation_id")
+  factoryCode    String    @map("factory_code")
+  issueId        String    @map("issue_id")
+  /// YYYY-MM-DD, FactorySuite's issueDate.
+  day            String
+  machine        String
+  requestId      String?   @map("request_id")
+  siv            String?
+  /// Litres the pump issued.
+  litres         Float?
+  /// FactorySuite's offsetless local wall clock, as read.
+  fuelingStart   String?   @map("fueling_start")
+  fuelingEnd     String?   @map("fueling_end")
+  completed      Boolean?
+  /// The row as FactorySuite returned it.
+  row            Json
+  firstSeenAt    DateTime  @default(now()) @map("first_seen_at")
+  lastSeenAt     DateTime  @default(now()) @map("last_seen_at")
+  /// When a read of its day no longer listed it; null while it is listed.
+  goneAt         DateTime? @map("gone_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+
+  @@unique([factoryCode, issueId])
+  @@index([organisationId, day])
+  @@index([factoryCode, day])
+  @@map("factorysuite_fuel_issues")
 }
