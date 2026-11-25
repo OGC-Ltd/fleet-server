@@ -77,7 +77,8 @@ describe('screen access named on 2026-10-26', () => {
     for (const role of ROLE_DEFINITIONS) {
       const permissions = new Set(role.permissions)
       if (role.platform && role.slug === 'super_admin') continue
-      if (permissions.has('telemetry:read') && !['operator', 'technician'].includes(role.slug)) {
+      // The Ops Room Operator (2026-11-25) reads units for the weighbridge screen alone, as the operator does: no logbook by design
+      if (permissions.has('telemetry:read') && !['operator', 'technician', 'ops_room_operator'].includes(role.slug)) {
         expect(permissions.has('logbook:read'), `${role.slug} logbook`).toBe(true)
       }
       if (permissions.has('fuel_filling:read') && role.slug !== 'operator') {

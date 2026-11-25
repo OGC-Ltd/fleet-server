@@ -591,6 +591,31 @@ const ROLE_BASE: RoleDefinition[] = [
   },
 
   {
+    slug: 'ops_room_operator', name: 'Ops Room Operator', platform: false, vehicleScopable: false,
+    description: 'The Gate log (sign-outs and returns) and the weighbridges, view only; no map, live feed, alerts, reports or administration.',
+    /*
+     * 2026-11-25, the operator: a person in the ops room sees the gate's
+     * sign-outs and returns, and the weighbridges where the organisation has
+     * them, and nothing else; view only.
+     *
+     * NO `notification:read`, on purpose: that right opens the live feed and
+     * its stream (every event, unfiltered). The gate's events come through
+     * their own route (modules/gate-log) on `gate_log:read`, which can only
+     * answer with sign-outs and returns. No `map:read`, `alerts:read`,
+     * `report:*`, `analytics:*`, `user:*` (beyond what every role carries),
+     * and no right to act on anything.
+     *
+     * `vehicle:read` and `telemetry:read` for the weighbridge screen alone, as
+     * on the Operator: it turns a ticket's plate into a unit we track.
+     */
+    permissions: [
+      'gate_log:read',
+      'weighbridge:read',
+      'vehicle:read', 'telemetry:read',
+    ],
+  },
+
+  {
     slug: 'technician', name: 'Technician', platform: false, vehicleScopable: false,
     description: 'Units flagged for repair: the live map, units and in transit for those units only; Maintenance probes, malfunctions and repairs; the Workshop ControlTech queue.',
     /*
@@ -718,6 +743,7 @@ export const ASSIGNABLE_ROLE_SLUGS: string[] = [
   'supervisor',
   'operator',
   'technician',
+  'ops_room_operator',
 ]
 
 export const VEHICLE_SCOPABLE_ROLE_SLUGS: string[] =
