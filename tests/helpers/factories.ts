@@ -107,6 +107,7 @@ export function makeVehicle(overrides: Partial<Vehicle> = {}): Vehicle {
     ratedConsumption: null,
     ratedConsumptionBasis: null,
     fuelSensorFitted: null,
+    standardKmPerL: null,
     machineSyncedAt: null,
     createdAt: now(),
     updatedAt: now(),
