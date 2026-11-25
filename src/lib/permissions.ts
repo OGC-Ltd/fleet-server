@@ -119,6 +119,10 @@ export const PERMISSION_CATALOGUE = {
   'driver:export':         'Download driver reports',
 
   'weighbridge:read':      'View weighbridge records',
+  // The Gate log (operator, 2026-11-25): sign-outs and returns at the gate,
+  // the Ops Room Operator's page. A read of feed events the live feed already
+  // carries; held by that role only (and through access:full).
+  'gate_log:read':         'View the Gate log: sign-outs and returns',
   'weighbridge:create':    'Record a weighbridge entry',
   'weighbridge:update':    'Amend a weighbridge entry',
   'weighbridge:export':    'Download weighbridge records',
