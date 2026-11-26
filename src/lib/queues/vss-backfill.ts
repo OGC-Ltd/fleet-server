@@ -4,12 +4,15 @@
  * inside VSS's two weeks) that has no dashcam_capture_days row, or one marked
  * partial, is captured again into dashcam_alarms and the Redis day cache.
  *
- * Runs once when the worker starts, then on VSS_BACKFILL_CRON (hourly). The
- * oldest days go first: VSS drops them soonest. One organisation-day at a
- * time, BACKFILL_GAP_MS apart, through the worker's own VSS search queue, so
- * the 5-minute sync of today keeps its turn. A "too frequent" answer ends the
- * run; the next one carries on where it stopped. Replaces running
- * `npm run dashcam:backfill` by hand.
+ * Runs once when the worker starts, then on VSS_BACKFILL_CRON (hourly). Each
+ * organisation has its own lane, VSS_ORG_CONCURRENCY lanes at once
+ * (modules/dashcam/org-lanes), each taking its days oldest first: VSS drops
+ * them soonest. The searches still take turns, 10 s apart for the whole VSS
+ * account (VSS refuses anything faster), and the 5-minute sync of today takes
+ * its turn among them. A "too frequent" answer rests every lane until VSS
+ * listens again (its 90 s backoff), then the same day is tried again, up to
+ * MAX_RESTS rests a run; past that the next run carries on where it stopped.
+ * Replaces running `npm run dashcam:backfill` by hand.
  */
 
 import { Queue, type Job } from 'bullmq'
@@ -17,21 +20,28 @@ import { TracedWorker as Worker } from '../tracing.js'
 import { getQueueRedis } from '../redis.js'
 import { env } from '../../config/env.js'
 import { logger } from '../logger.js'
-import { VssError, VSS_TOO_FREQUENT, VSS_LOGIN_LIMITED } from '../../providers/vss/index.js'
+import { VssError, VSS_TOO_FREQUENT, VSS_LOGIN_LIMITED, vssRestMs } from '../../providers/vss/index.js'
 import { captureDay, dashcamTablesReady, missedDays, organisationsWithCameras } from '../../modules/dashcam/dashcam-capture.js'
 import { lastDays } from '../../modules/dashcam/fleet-day.js'
+import { inLanes } from '../../modules/dashcam/org-lanes.js'
 
 export const VSS_BACKFILL_QUEUE = 'vss-backfill'
 const BACKFILL_JOB = 'vss-backfill:missed'
 const STARTUP_JOB = 'vss-backfill:startup'
-let BACKFILL_GAP_MS = 15_000
+let BACKFILL_GAP_MS = 0
+/** Waited beyond VSS's own backoff before asking again. */
+let REST_PAD_MS = 5_000
+/** Rests a run may take before leaving the rest to the next run. */
+const MAX_RESTS = 8
 
 export interface VssBackfillRun {
   window: string[]
   captured: Array<{ org: string; day: string; alarms: number; added: number; partial: boolean }>
   failed: Array<{ org: string; day: string; error: string }>
-  /** Still missing when the run ended (VSS asked us to slow down). */
+  /** Still missing when the run ended (VSS kept asking us to slow down). */
   left: number
+  /** Times the run waited for VSS to listen again. */
+  rests: number
   skipped?: 'no-tables'
   ms: number
 }
@@ -40,49 +50,77 @@ export interface VssBackfillRun {
 export async function runVssBackfill(now = Date.now()): Promise<VssBackfillRun> {
   const startedAt = Date.now()
   const window = lastDays(env.VSS_BACKFILL_DAYS, now)
-  const run: VssBackfillRun = { window, captured: [], failed: [], left: 0, ms: 0 }
+  const run: VssBackfillRun = { window, captured: [], failed: [], left: 0, rests: 0, ms: 0 }
   if (!(await dashcamTablesReady())) {
     run.skipped = 'no-tables'
     logger.warn('VSS back-fill: dashcam tables not there yet (migration not run) — nothing captured')
     return run
   }
 
-  // Every organisation's missed days, oldest first across organisations.
-  const todo: Array<{ id: string; code: string; day: string }> = []
+  // Each organisation's missed days (lastDays is oldest first).
+  const lanes: Array<{ id: string; code: string; days: string[] }> = []
   for (const o of await organisationsWithCameras()) {
-    for (const day of await missedDays(o.id, window)) todo.push({ ...o, day })
+    const days = await missedDays(o.id, window)
+    if (days.length) lanes.push({ ...o, days })
   }
-  todo.sort((a, b) => a.day.localeCompare(b.day) || a.code.localeCompare(b.code))
-  if (!todo.length) {
+  const total = lanes.reduce((s, l) => s + l.days.length, 0)
+  if (!total) {
     run.ms = Date.now() - startedAt
     logger.info({ window: [window[0], window.at(-1)] }, 'VSS back-fill: nothing missed')
     return run
   }
-  logger.info({ missed: todo.length, oldest: todo[0]!.day }, 'VSS back-fill: capturing missed days')
+  logger.info({
+    missed: total, orgs: lanes.length, lanes: Math.min(lanes.length, env.VSS_ORG_CONCURRENCY),
+    oldest: lanes.map((l) => l.days[0]!).sort()[0],
+  }, 'VSS back-fill: capturing missed days')
 
-  for (let i = 0; i < todo.length; i++) {
-    const t = todo[i]!
-    if (i > 0 && BACKFILL_GAP_MS) await new Promise((r) => setTimeout(r, BACKFILL_GAP_MS))
-    try {
-      const r = await captureDay(t.id, t.day, { now: Date.now() })
-      run.captured.push({ org: t.code, day: t.day, alarms: r.alarms, added: r.added, partial: r.partial })
-    } catch (err) {
-      run.failed.push({ org: t.code, day: t.day, error: err instanceof Error ? err.message : String(err) })
-      if (err instanceof VssError && (err.status === VSS_TOO_FREQUENT || err.status === VSS_LOGIN_LIMITED)) {
-        run.left = todo.length - i       // VSS wants a rest: the next run carries on
-        logger.warn({ err, org: t.code, day: t.day, left: run.left }, 'VSS back-fill: VSS asked us to slow down — rest left to the next run')
-        break
-      }
-      logger.warn({ err, org: t.code, day: t.day }, 'VSS back-fill: day not captured — tried again next run')
-    }
+  // VSS asked us to slow down: every lane waits for the same rest, then carries on.
+  let resting: Promise<void> | null = null
+  let givenUp = false
+  const rest = (): Promise<void> => {
+    resting ??= (async () => {
+      run.rests++
+      const ms = vssRestMs() + REST_PAD_MS
+      logger.warn({ rest: run.rests, ms }, 'VSS back-fill: VSS asked us to slow down — resting, then carrying on')
+      await new Promise((r) => setTimeout(r, ms))
+    })().finally(() => { resting = null })
+    return resting
   }
+
+  await inLanes(lanes, env.VSS_ORG_CONCURRENCY, async (lane) => {
+    for (let i = 0; i < lane.days.length; i++) {
+      const day = lane.days[i]!
+      if (givenUp) { run.left += lane.days.length - i; return }
+      if (resting) await resting
+      if (i > 0 && BACKFILL_GAP_MS) await new Promise((r) => setTimeout(r, BACKFILL_GAP_MS))
+      try {
+        const r = await captureDay(lane.id, day, { now: Date.now() })
+        run.captured.push({ org: lane.code, day, alarms: r.alarms, added: r.added, partial: r.partial })
+      } catch (err) {
+        if (err instanceof VssError && (err.status === VSS_TOO_FREQUENT || err.status === VSS_LOGIN_LIMITED)) {
+          if (!givenUp && run.rests < MAX_RESTS) {
+            await rest()
+            i--                      // the same day again
+            continue
+          }
+          if (!givenUp) logger.warn({ org: lane.code, day, rests: run.rests }, 'VSS back-fill: VSS still refusing — rest left to the next run')
+          givenUp = true
+          run.failed.push({ org: lane.code, day, error: err.message })
+          run.left += lane.days.length - i
+          return
+        }
+        run.failed.push({ org: lane.code, day, error: err instanceof Error ? err.message : String(err) })
+        logger.warn({ err, org: lane.code, day }, 'VSS back-fill: day not captured — tried again next run')
+      }
+    }
+  })
   run.ms = Date.now() - startedAt
   logger.info({
     captured: run.captured.length,
     alarms: run.captured.reduce((s, c) => s + c.alarms, 0),
     added: run.captured.reduce((s, c) => s + c.added, 0),
     partial: run.captured.filter((c) => c.partial).length,
-    failed: run.failed.length, left: run.left, ms: run.ms,
+    failed: run.failed.length, left: run.left, rests: run.rests, ms: run.ms,
   }, 'VSS back-fill run complete')
   return run
 }
@@ -142,5 +180,5 @@ export async function startVssBackfill(): Promise<VssBackfillHandle> {
   }
 }
 
-/** For tests: no wait between days. */
-export function setBackfillGap(ms: number): void { BACKFILL_GAP_MS = ms }
+/** For tests, or to space one lane's days out. */
+export function setBackfillGap(ms: number, restPadMs = REST_PAD_MS): void { BACKFILL_GAP_MS = ms; REST_PAD_MS = restPadMs }

@@ -617,6 +617,13 @@ const schema = z.object({
   VSS_BACKFILL_CRON: z.string().optional().default('15 * * * *'),
   // How far back it looks: VSS keeps about two weeks, so 13 days at most.
   VSS_BACKFILL_DAYS: z.coerce.number().int().min(1).max(13).optional().default(13),
+  // Organisations the sync and back-fill work on at once. Their VSS searches
+  // still take turns (one every 10 s per account); lookups and writes overlap.
+  VSS_ORG_CONCURRENCY: z.coerce.number().int().min(1).max(16).optional().default(7),
+  // Gap between two VSS alarm searches (§3.24), for the whole account. Seen
+  // 2026-11-26: 10 s holds for a while, then VSS answers "too frequent" when
+  // searches run back to back for minutes; widen it here if refusals persist.
+  VSS_SEARCH_GAP_MS: z.coerce.number().int().min(2_000).max(120_000).optional().default(10_000),
 
   // Pump price for costing the fuel ledger (analytics/fuel-cost). NOTHING in
   // the schema records what fuel cost — a filling stores litres, not money —

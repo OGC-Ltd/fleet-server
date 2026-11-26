@@ -113,6 +113,11 @@ export function vssBusy(): boolean {
   return Date.now() < busyUntil
 }
 
+/** How long until we ask VSS again after it asked us to slow down (0 when it has not). */
+export function vssRestMs(): number {
+  return Math.max(0, busyUntil - Date.now())
+}
+
 export class VssError extends Error {
   constructor(message: string, readonly status: number | null = null) { super(message) }
 }

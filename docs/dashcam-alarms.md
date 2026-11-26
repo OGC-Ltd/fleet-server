@@ -70,8 +70,10 @@ The `vss-worker` container (`src/vss-worker.ts`) is the only process that search
 - **`dashcam-capture`**: each night, the last 3 days again, for late uploads and late alarm types. This queue used to run in the API server.
 - **`vss-backfill`**: once when the worker starts, then hourly (`VSS_BACKFILL_CRON`). It captures every past day in the last `VSS_BACKFILL_DAYS` (13) that has no `dashcam_capture_days` row or one marked partial.
   - Oldest days go first, because VSS drops them soonest.
-  - It captures one organisation-day at a time, 15 s apart.
-  - If VSS answers "too frequent", the run stops and the next one carries on where it left off.
+  - Each organisation has its own lane, and `VSS_ORG_CONCURRENCY` (7) lanes run at once. The 5-minute sync works the same way.
+  - Lanes overlap their alarm-type lookups, database writes and caching. Their searches still take turns, one every 10 s for the whole VSS account, because VSS refuses anything faster.
+  - If VSS answers "too frequent", every lane waits out VSS's 90 s rest and then tries the same day again, up to 8 rests a run. After that, the next run carries on where it left off.
+  - `VSS_SEARCH_GAP_MS` (10 s) sets the spacing between searches. On 26 Nov VSS refused searches running back to back at 10 s after a minute or two, so widen it if rests keep happening.
   - `npm run dashcam:backfill` is now only needed for days older than 13.
 
 The report worker only handles reports; the dashcam work runs in the vss-worker alone.
