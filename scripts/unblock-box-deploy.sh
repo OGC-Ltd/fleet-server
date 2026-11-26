@@ -25,11 +25,11 @@
 # Host and key come from the environment, because neither belongs in a file
 # that is committed:
 #
-#     BOX_HOST=13.247.178.217 BOX_KEY=../keys/ustawi.pem ./scripts/unblock-box-deploy.sh
+#     BOX_HOST=13.244.125.1 BOX_KEY=../keys/ustawi.pem ./scripts/unblock-box-deploy.sh
 #
 set -euo pipefail
 
-BOX_HOST="${BOX_HOST:-13.247.178.217}"
+BOX_HOST="${BOX_HOST:-13.244.125.1}"
 BOX_USER="${BOX_USER:-ubuntu}"
 BOX_KEY="${BOX_KEY:-../keys/ustawi.pem}"
 BOX_DIR="${BOX_DIR:-/home/ubuntu/prod/fleet-server}"

@@ -4,7 +4,7 @@ Status (2026-11-16): **phases 0–4 and SSM are wired and rehearsed on the box; 
 See section 8 for what was tested and what was found. Docker and the firewall are
 already set up on the box. See [server-hardening.md](server-hardening.md).
 
-The goal is to run everything on the production box (`13.247.178.217`) as
+The goal is to run everything on the production box (`13.244.125.1`) as
 containers, built and scanned by CI and deployed as images. Security is the
 first requirement. The second is that the live site never goes down for more
 than a few seconds.
