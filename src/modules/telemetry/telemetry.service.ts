@@ -19,6 +19,8 @@ import { tripGeometry } from '../../lib/dispatch-trip.js'
 import { fleetDayStart, fleetDayKey, fleetDayBounds as sharedFleetDayBounds } from '../../lib/provider-time.js'
 import { prisma } from '../../lib/prisma.js'
 import { overspeedLimitFor } from '../../lib/derived-alerts.js'
+import { isGeneratorUnit } from '../../lib/generator.js'
+import { env } from '../../config/env.js'
 import { warmSpeedPolicy, speedPolicyFor, vehicleSpeedLimitFor } from '../../lib/speed-policy.js'
 
 /** Fleet-local midnight as an ISO string, so it compares against `departedAt`
@@ -260,7 +262,9 @@ export async function getVehicleDaySeries(vehicleId: string, orgId: string, q: D
   await warmSpeedPolicy(orgId)
   let lim: number[] | undefined
   const v = await db.vehicle.findUnique({ where: { id: vehicleId }, select: { vehicleType: true, registrationPlate: true } })
-  if (speedPolicyFor(orgId) || vehicleSpeedLimitFor(v?.registrationPlate) != null) {
+  // A generator has no limit at all (lib/generator), so none per reading either.
+  if (!isGeneratorUnit(v?.registrationPlate, v?.vehicleType)
+      && (speedPolicyFor(orgId) || vehicleSpeedLimitFor(v?.registrationPlate) != null)) {
     const type = v?.vehicleType ?? null
     const plate = v?.registrationPlate ?? null
     // Each position asked once. A parked unit reports the same (5-dp) spot
@@ -273,7 +277,8 @@ export async function getVehicleDaySeries(vehicleId: string, orgId: string, q: D
       const key = `${lat},${lng}`
       let kmh = byPlace.get(key)
       if (kmh === undefined) {
-        kmh = overspeedLimitFor(type, { orgId, lat, lng }, plate)
+        // Never null here: generators were turned away above.
+        kmh = overspeedLimitFor(type, { orgId, lat, lng }, plate) ?? env.OVERSPEED_LIMIT_KMH
         byPlace.set(key, kmh)
       }
       return kmh

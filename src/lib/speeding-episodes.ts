@@ -185,6 +185,8 @@ export function noteSpeedFrame(frame: VehicleTelemetryFrame, ctx: EpisodeContext
   // evidence of slowing). The stale sweep is what closes an episode that stops
   // receiving usable frames.
   if (speed == null || !Number.isFinite(speed)) return null
+  // A generator has no limit (lib/generator): never an episode.
+  if (limit == null) return null
 
   if (speed > limit) {
     if (!ep) {

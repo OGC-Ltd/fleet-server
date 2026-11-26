@@ -23,6 +23,7 @@ import { logger } from '../../lib/logger.js'
 import { prisma } from '../../lib/prisma.js'
 import { reportDb } from '../../lib/report-db.js'
 import { overspeedLimitFor } from '../../lib/derived-alerts.js'
+import { isGeneratorUnit } from '../../lib/generator.js'
 import { fleetDayBounds } from '../../lib/provider-time.js'
 import { speedPolicyFor, vehicleSpeedLimitFor, warmSpeedPolicy, type SpeedPolicy } from '../../lib/speed-policy.js'
 import { WialonClient } from '../../providers/wialon/wialon.client.js'
@@ -198,7 +199,9 @@ async function buildReport(orgId: string, day: string, allowed: Set<string> | nu
     where: { organisationId: orgId, isActive: true },
     select: { id: true, name: true, registrationPlate: true, vehicleType: true, deviceId: true },
   })
-  const units = vehicles.filter(v => !allowed || allowed.has(v.id))
+  // Generators have no speed and no limit (lib/generator): never on this report.
+  const units = vehicles.filter(v => (!allowed || allowed.has(v.id))
+    && !isGeneratorUnit(v.registrationPlate ?? v.name, v.vehicleType))
   const fastest = new Map((await reportDb().$queryRaw<Array<{ vehicle_id: string; fastest: number | null }>>`
       SELECT vehicle_id, max(speed_kmh) AS fastest
         FROM vehicle_telemetries
@@ -221,7 +224,7 @@ async function buildReport(orgId: string, day: string, allowed: Set<string> | nu
     const wialonId = wialonIdOf(u.deviceId)
     const limitKmh = limitFor(
       u.vehicleType, policy, wialonId == null ? null : limits.get(wialonId) ?? null,
-      overspeedLimitFor(u.vehicleType), vehicleSpeedLimitFor(u.registrationPlate),
+      overspeedLimitFor(u.vehicleType) ?? env.OVERSPEED_LIMIT_KMH, vehicleSpeedLimitFor(u.registrationPlate),
     )
     const seen = fastest.get(u.id)
     // No rows of ours says nothing about Wialon, so it is read there all the same.

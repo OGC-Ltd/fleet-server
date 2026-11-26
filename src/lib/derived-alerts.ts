@@ -37,6 +37,7 @@
 import { env } from '../config/env.js'
 import type { VehicleTelemetryFrame } from '../providers/telemetry-provider.js'
 import { vehicleSpeedLimitFor, zoneLimitAt } from './speed-policy.js'
+import { isGeneratorUnit } from './generator.js'
 
 /** What the derivation needs to know about the vehicle behind a frame. */
 export interface DerivationContext {
@@ -79,14 +80,17 @@ export interface LimitPlace {
 }
 
 /**
- * The limit that applies to one vehicle.
+ * The limit that applies to one vehicle, or `null` for one with no speed at all.
  *
- * A configured per-unit limit takes precedence. Otherwise, an org policy
+ * A generator has none (lib/generator): `null` means it is never judged on
+ * speed, whatever its tracker reports. Otherwise a configured per-unit limit
+ * takes precedence. Otherwise, an org policy
  * (lib/speed-policy — Kasulu: LMVs 60 in the factory and 100 on roads, every
  * other unit 40 and 80) is judged by type and location; all other units use
  * the per-type or fleet limit.
  */
-export function overspeedLimitFor(vehicleType: string | null, at?: LimitPlace, registrationPlate?: string | null): number {
+export function overspeedLimitFor(vehicleType: string | null, at?: LimitPlace, registrationPlate?: string | null): number | null {
+  if (isGeneratorUnit(registrationPlate, vehicleType)) return null
   const vehicleLimit = vehicleSpeedLimitFor(registrationPlate)
   if (vehicleLimit != null) return vehicleLimit
   const zone = at ? zoneLimitAt(at.orgId, vehicleType, at.lat, at.lng) : null
@@ -134,7 +138,7 @@ export function deriveAlertFlags(
       ctx.orgId ? { orgId: ctx.orgId, lat: frame.lat, lng: frame.lng } : undefined,
       ctx.registrationPlate,
     )
-    if ((speed as number) > limit) {
+    if (limit != null && (speed as number) > limit) {
       const n = (overCount.get(ctx.vehicleId) ?? 0) + 1
       overCount.set(ctx.vehicleId, n)
       if (n >= env.OVERSPEED_MIN_FRAMES) out.overspeeding = true

@@ -24,6 +24,7 @@ import { parseProviderTimeOr } from '../../lib/provider-time.js'
 import { wialonDeviceId } from '../../providers/wialon/wialon.adapter.js'
 import { resolveEstatePlaces } from '../../lib/zone-presence.js'
 import type { WialonNotificationInput } from './webhooks.schema.js'
+import { isGeneratorUnit } from '../../lib/generator.js'
 
 /**
  * Org of last resort, for a notification whose unit we cannot identify.
@@ -63,6 +64,11 @@ function severityOf(name: string): 'info' | 'warning' | 'critical' {
 function isFuelLossRule(name: string): boolean {
   const n = name.toLowerCase()
   return /\b(drain|siphon|siphoning|stolen)\b/.test(n) || (/fuel/.test(n) && /\b(theft|loss|drop|tamper)\b/.test(n))
+}
+
+/** A rule about speed: "Overspeed 80", "Speeding", "Speed limit". */
+function isSpeedRule(name: string): boolean {
+  return /speed/i.test(name)
 }
 
 /** "42 L" / "42.5 L" — trailing zeroes on a whole number read as false precision. */
@@ -111,6 +117,13 @@ export async function ingestWialonNotifications(
       else if (matches.length > 1) {
         logger.warn({ plate: n.unit.trim() }, 'Wialon notification names a plate held by more than one org — not linking it to a vehicle')
       }
+    }
+
+    // A generator has no speed and no limit (lib/generator), so a Wialon speed
+    // rule firing on one is its tracker's drift, not an event: dropped.
+    if (isSpeedRule(n.notification) && isGeneratorUnit(vehicle?.registrationPlate ?? n.unit ?? null)) {
+      out.skipped++
+      continue
     }
 
     // The vehicle's own org, falling back only when we could not identify it.

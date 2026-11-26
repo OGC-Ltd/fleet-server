@@ -148,7 +148,7 @@ describe('Kasulu speed limits', () => {
       at(3, 90, NATIONAL),   at(4, 95, NATIONAL),    // under 100 on the road
       at(5, 105, NATIONAL),  at(6, 110, NATIONAL),   // over 100
     ]
-    const ev = deriveSpeeding(points, (p) => overspeedLimitFor('SALOON', { orgId: KASULU, lat: p.lat, lng: p.lng }))
+    const ev = deriveSpeeding(points, (p) => overspeedLimitFor('SALOON', { orgId: KASULU, lat: p.lat, lng: p.lng }) ?? 80)
     expect(ev.map(e => [e.t, e.endT, e.detail])).toEqual([
       [1, 2, 'peak 72 km/h, limit 60 km/h'],
       [5, 6, 'peak 110 km/h, limit 100 km/h'],

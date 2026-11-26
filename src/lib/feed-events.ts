@@ -126,7 +126,11 @@ export function deriveFeedEvents(orgId: string, p: FeedSource): void {
   }
 
   // ── alert-flag rising edges ────────────────────────────────────────────
-  if (p.flags.overspeeding && !st.overspeeding && now - st.lastOverspeedFeedAt > OVERSPEED_FEED_COOLDOWN_MS) {
+  // A generator has no limit (lib/generator) and so no overspeed line.
+  const limitKmh = p.flags.overspeeding
+    ? overspeedLimitFor(p.vehicleType ?? null, { orgId, lat: p.lat, lng: p.lng }, p.plate)
+    : null
+  if (p.flags.overspeeding && limitKmh != null && !st.overspeeding && now - st.lastOverspeedFeedAt > OVERSPEED_FEED_COOLDOWN_MS) {
     st.lastOverspeedFeedAt = now
     items.push({
       type: 'warning',
@@ -138,7 +142,7 @@ export function deriveFeedEvents(orgId: string, p: FeedSource): void {
       // figure someone would dispute the alert with.
       text: `ALERT: ${who} was recorded at ${Math.round(p.speedKmh ?? 0)} km/h`
           + `${to ? ` en route to ${to}` : ''}. `
-          + `The speed limit is ${overspeedLimitFor(p.vehicleType ?? null, { orgId, lat: p.lat, lng: p.lng }, p.plate)} km/h.`,
+          + `The speed limit is ${limitKmh} km/h.`,
     })
   }
   if (p.flags.fuelInconsistency && !st.fuelInconsistency) {

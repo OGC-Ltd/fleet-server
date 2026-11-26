@@ -25,6 +25,7 @@
 
 import { prisma } from '../../lib/prisma.js'
 import { overspeedLimitFor } from '../../lib/derived-alerts.js'
+import { isGeneratorUnit } from '../../lib/generator.js'
 import { warmSpeedPolicy, speedPolicyFor, vehicleSpeedLimitFor } from '../../lib/speed-policy.js'
 import type { PlaybackPoint } from './telemetry.repository.js'
 import { STATIONARY_KMH } from '../../lib/simplify-path.js'
@@ -91,8 +92,11 @@ export const SPEEDING_KMH = 80
  * playback is per-vehicle, so the type is in hand. The constant stays as the
  * fallback for a replay of a unit whose type is unknown.
  */
-export const playbackLimitFor = (vehicleType: string | null, registrationPlate?: string | null): number =>
-  overspeedLimitFor(vehicleType, undefined, registrationPlate) || SPEEDING_KMH
+export const playbackLimitFor = (vehicleType: string | null, registrationPlate?: string | null): number | null => {
+  const limit = overspeedLimitFor(vehicleType, undefined, registrationPlate)
+  // null: a generator, which has no limit (lib/generator) and no speeding events.
+  return limit === null ? null : limit || SPEEDING_KMH
+}
 
 /**
  * A speeding run has to last this long to be reported.
@@ -350,10 +354,12 @@ export async function buildPlaybackEvents(
   const orgId = vehicle?.organisationId ?? null
   if (orgId) await warmSpeedPolicy(orgId)
   // Per fix where the org's limit depends on place, else one number.
-  const limitKmh = orgId && (speedPolicyFor(orgId) || vehicleSpeedLimitFor(plate) != null)
-    ? (p: PlaybackPoint) => overspeedLimitFor(type, { orgId, lat: p.lat, lng: p.lng }, plate)
-    : playbackLimitFor(type, plate)
-  const all = [...logged, ...deriveStops(points), ...deriveSpeeding(points, limitKmh)]
+  // None for a generator, which has no limit (lib/generator): no speeding runs.
+  const limitKmh = isGeneratorUnit(plate, type) ? null
+    : orgId && (speedPolicyFor(orgId) || vehicleSpeedLimitFor(plate) != null)
+      ? (p: PlaybackPoint) => overspeedLimitFor(type, { orgId, lat: p.lat, lng: p.lng }, plate) ?? SPEEDING_KMH
+      : playbackLimitFor(type, plate) ?? SPEEDING_KMH
+  const all = [...logged, ...deriveStops(points), ...(limitKmh == null ? [] : deriveSpeeding(points, limitKmh))]
 
   const truncatedEvents = all.length > MAX_EVENTS
   const kept = truncatedEvents
