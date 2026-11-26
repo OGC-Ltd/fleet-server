@@ -165,6 +165,33 @@ async function rangeKm(vehicleIds: string[], days: string[], now: number) {
   return { total, sources }
 }
 
+/** Probe fault episodes the report heeds: the tracker's own fault code, and the probe gone silent. */
+export const PROBE_FAULT_KINDS = ['fuel_probe_fault', 'fuel_probe_dead']
+
+/**
+ * Each unit's probe fault during [from, to), in words ("Lost Contact with Tubes Error - Needs
+ * Replacement"), from sensor_fault_episodes: an episode that began before `to` and had not recovered
+ * by `from`. The latest-begun one where there are several. Units without one are absent.
+ */
+export async function probeFaultsIn(vehicleIds: string[], from: Date, to: Date): Promise<Map<string, string>> {
+  if (!vehicleIds.length) return new Map()
+  const eps = await prisma.sensorFaultEpisode.findMany({
+    where: {
+      vehicleId: { in: vehicleIds }, kind: { in: PROBE_FAULT_KINDS }, startedAt: { lt: to },
+      OR: [{ recoveredAt: null }, { recoveredAt: { gte: from } }],
+    },
+    select: { vehicleId: true, detail: true, startedAt: true },
+    orderBy: { startedAt: 'asc' },
+  })
+  const out = new Map<string, string>()
+  for (const e of eps) out.set(e.vehicleId, probeFaultText(e.detail))
+  return out
+}
+
+/** "Fuel probe: Lost Contact …" → "Lost Contact …"; an empty detail reads as a plain fault. Pure. */
+export const probeFaultText = (detail: string | null | undefined) =>
+  String(detail ?? '').replace(/^\s*fuel probe:\s*/i, '').trim() || 'fuel probe fault'
+
 /** The tank at the start and end of the range: the middle of the first and last 7 readings. */
 async function edgeLevels(vehicleIds: string[], from: Date, to: Date) {
   if (!vehicleIds.length) return new Map<string, { first: number[]; last: number[] }>()
@@ -204,7 +231,7 @@ export async function fuelConsumptionRate(orgId: string, scope: Set<string> | nu
     orderBy: { registrationPlate: 'asc' },
   })
   const ids = vehicles.map((v) => v.id)
-  const [{ total: km, sources }, edges, fillings, drains] = await Promise.all([
+  const [{ total: km, sources }, edges, fillings, drains, faults] = await Promise.all([
     rangeKm(ids, days, now),
     edgeLevels(ids, from, to),
     reportDb().fuelFilling.findMany({
@@ -215,6 +242,7 @@ export async function fuelConsumptionRate(orgId: string, scope: Set<string> | nu
       where: { vehicleId: { in: ids }, beganAt: { gte: from, lt: to } },
       select: { vehicleId: true, beganAt: true, verdict: true, drainCause: true, cleanDropMl: true, measuredDropMl: true, stolenMl: true, finalFuelLevelMl: true, reviewStatus: true, dismissedAt: true },
     }),
+    probeFaultsIn(ids, from, to),
   ])
   const group = <T extends { vehicleId: string }>(xs: T[]) => {
     const m = new Map<string, T[]>()
@@ -236,7 +264,11 @@ export async function fuelConsumptionRate(orgId: string, scope: Set<string> | nu
     const kmPerL = consumedL != null && consumedL > 0 && distanceKm >= 1 ? Math.round((distanceKm / consumedL) * 100) / 100 : null
     // The unit's own standard first (operator, 2026-11-25: Menengai's per-unit standard consumption), else the old sheet
     const target = unitTarget(v.standardKmPerL) ?? targetFor(v.registrationPlate, v.model ?? v.name)
-    const note = bal.startL == null
+    // A probe the tracker (or the dead-probe sweep) recorded as faulty during the range: its fuel
+    // figures cannot be believed, whatever they come to (operator, 2026-11-25)
+    const fault = faults.get(v.id)
+    const note = fault ? `PROBE ISSUE: ${fault}`
+      : bal.startL == null
       ? (v.tankCapacityLitres == null ? 'No fuel probe' : 'No fuel readings')
       : consumedL == null ? 'Tank rose without a recorded refill'
       : distanceKm < 1 ? 'Did not move' : ''

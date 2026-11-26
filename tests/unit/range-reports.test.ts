@@ -19,6 +19,8 @@ const pool = {
 }
 vi.mock('../../src/lib/report-db.js', () => ({ reportDb: () => pool }))
 const prisma = {
+  // Probe fault episodes (2026-11-25): KCX 001A's tracker reported lost tubes during the range
+  sensorFaultEpisode: { findMany: vi.fn(async () => [{ vehicleId: 'v2', detail: 'Fuel probe: Lost Contact with Tubes Error - Needs Replacement', startedAt: new Date(0) }]) },
   vehicle: { findMany: vi.fn(async () => [
     { id: 'v1', registrationPlate: 'KDA 258J', name: 'KDA 258J', model: null, tankCapacityLitres: 140 },
     { id: 'v2', registrationPlate: 'KCX 001A', name: 'MENENGAI - KCX 001A', model: 'MITSUBISHI FH 517', tankCapacityLitres: null },
@@ -77,7 +79,9 @@ describe('fuel consumption rate', () => {
     expect(kda.kmPerL).toBeCloseTo(6.83, 2)
     expect(kda.belowTarget).toBe(false)
     // no probe: no figures, and says why, rather than 0 L
-    expect(kcx).toMatchObject({ distanceSource: null, startL: null, consumedL: null, kmPerL: null, note: 'No fuel probe', target: { kmPerL: 5.8 } })
+    // no readings, but the tracker recorded why: the probe's fault is the comment
+    expect(kcx).toMatchObject({ distanceSource: null, startL: null, consumedL: null, kmPerL: null, note: 'PROBE ISSUE: Lost Contact with Tubes Error - Needs Replacement', target: { kmPerL: 5.8 } })
+    expect(prisma.sensorFaultEpisode.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ kind: { in: ['fuel_probe_fault', 'fuel_probe_dead'] } }) }))
     expect(out.rows.find((r) => r.vehicleId === 'v3')!.target).toEqual({ kmPerL: 2.5, words: '2.50', source: 'vehicle' })
     expect(out.totals).toMatchObject({ units: 3, measured: 1, consumedL: 9.4 })
     expect(queries.filter((q) => q.includes('LAG(')).length).toBe(2)

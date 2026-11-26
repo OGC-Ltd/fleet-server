@@ -910,6 +910,7 @@ export async function findFleetSnapshot(orgId: string) {
     odometer_km: number | null; engine_hours: number | null; maintenance: unknown; phase: string | null
     last_moved_at: Date | null
     fuel_probe_fault: boolean | null
+    fuel_probe_fault_reason: string | null
     camera_fitted: boolean | null
     camera_stream_url: string | null
     camera_recording: boolean | null
@@ -937,6 +938,7 @@ export async function findFleetSnapshot(orgId: string) {
         -- outside its calibrated range. Written by the Wialon adapter into
         -- the flags blob; absent (SQL NULL) for every other provider.
         (r.payload->'flags'->>'fuelProbeFault')::boolean AS fuel_probe_fault,
+        r.payload->'flags'->>'fuelProbeFaultReason' AS fuel_probe_fault_reason,
         -- Newest ping with actual movement — powers the "stationary for …"
         -- readout on parked vehicles (same index walk, newest-first, stops at
         -- the first moving row).
@@ -1121,6 +1123,8 @@ export async function findFleetSnapshot(orgId: string) {
         // which leave fuelLevelMl null, and only one of which is a job for
         // the workshop.
         fuelProbeFault: ping?.fuel_probe_fault ?? false,
+        // The tracker's reason, while it reports a fault (operator, 2026-11-25)
+        fuelProbeFaultReason: ping?.fuel_probe_fault ? ping?.fuel_probe_fault_reason ?? null : null,
         // Already reported for a fuel probe repair (fuel/probe-hold). Nothing
         // is held back for it; the card and the alerts say it was reported.
         probeHold: onHold.has(v.id),

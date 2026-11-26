@@ -28,6 +28,31 @@ import { eventBus } from '../../lib/event-bus.js'
 import { markSilent, clearSilent } from '../../lib/sensor-faults.js'
 import { getProbeReport } from '../fuel/probe-report.service.js'
 
+/**
+ * The tracker's own word on the fuel probe (operator, 2026-11-25: "the tracker's message is more
+ * important"): a BLE probe sends a fault code where a level should be (4095 short circuit / water /
+ * dirt, 6500 lost contact with tubes, 7000 contamination), and the Wialon adapter carries it as
+ * flags.fuelProbeFault with the account's own label. Opened while the unit's latest frame carries it;
+ * closed only once the unit reads a real level again with no fault, never merely because the flag is
+ * absent: after a restart the adapter does not know of a fault until the probe's next message, and an
+ * absent flag then is "not yet known", not "repaired".
+ */
+export const TRACKER_PROBE_KIND = 'fuel_probe_fault'
+
+interface SnapshotProbe { vehicleId: string; fuelProbeFault?: boolean; fuelProbeFaultReason?: string | null; fuelLevelMl?: number | null }
+
+/** Which units the tracker says have a faulty probe now, and which read a real level with no fault. Pure. */
+export function trackerProbeStates(snapshot: SnapshotProbe[]) {
+  const faulty = new Map<string, string | null>()
+  const reading = new Set<string>()
+  for (const v of snapshot) {
+    if (!v?.vehicleId) continue
+    if (v.fuelProbeFault) faulty.set(v.vehicleId, v.fuelProbeFaultReason ?? null)
+    else if (v.fuelLevelMl != null) reading.add(v.vehicleId)
+  }
+  return { faulty, reading }
+}
+
 /** Silent for longer than this and the tracker is not merely between fixes. */
 const SILENT_AFTER_MS = 60 * 60_000
 
@@ -170,13 +195,39 @@ export async function sweepSensorFaults(orgId: string, now = new Date()): Promis
     }
   }
 
+  // The tracker's probe faults (TRACKER_PROBE_KIND). The cached snapshot, as the probe report above:
+  // a failed read leaves the tracker's episodes as they are rather than closing them.
+  let tracker: ReturnType<typeof trackerProbeStates> | null = null
+  try {
+    // Loaded here, not at the top: the telemetry service pulls in most of the server, and every
+    // importer of this sweep would load it all (a test that imports the sweep without the alert
+    // settings failed on it, 2026-11-25).
+    const { getFleetSnapshot } = await import('./telemetry.service.js')
+    tracker = trackerProbeStates(((await getFleetSnapshot(orgId)) ?? []) as SnapshotProbe[])
+  } catch (err) {
+    logger.warn({ err, orgId }, 'Sensor fault sweep: snapshot unavailable, tracker probe faults left as they are')
+  }
+  if (tracker) {
+    for (const [vehicleId, reason] of tracker.faulty) {
+      want(
+        vehicleId, TRACKER_PROBE_KIND, now, 'warning',
+        `Fuel probe: ${reason ?? 'reporting a fault'}`,
+        { reason, source: 'tracker' },
+      )
+    }
+  }
+
   // Anything open that the report no longer shows has recovered. Only episodes
   // this sweep OWNS are closed here: a frame-driven kind is closed by the
   // poller, which sees the recovery a whole cycle sooner.
   let closed = 0
   const sweepKinds = new Set<string>([...Object.values(CHANNEL_KINDS), 'signal_lost', 'fuel_probe_dead'])
   for (const [k, e] of openByKey) {
-    if (wanted.has(k) || !sweepKinds.has(e.kind)) continue
+    if (wanted.has(k)) continue
+    // A tracker probe fault closes only on a real level read with no fault (see TRACKER_PROBE_KIND)
+    if (e.kind === TRACKER_PROBE_KIND) {
+      if (!tracker?.reading.has(e.vehicleId)) continue
+    } else if (!sweepKinds.has(e.kind)) continue
     closed++
     eventBus.publish('sensorFault:close', {
       orgId, vehicleId: e.vehicleId, kind: e.kind, recoveredAt: now,

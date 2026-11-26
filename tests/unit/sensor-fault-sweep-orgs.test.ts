@@ -11,6 +11,8 @@ vi.mock('../../src/lib/prisma.js')
 vi.mock('../../src/lib/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }))
 vi.mock('../../src/lib/event-bus.js', () => ({ eventBus: { publish: vi.fn(), subscribe: vi.fn() } }))
 vi.mock('../../src/modules/fuel/probe-report.service.js', () => ({ getProbeReport: vi.fn() }))
+// The tracker's probe faults read the fleet snapshot (2026-11-25); none here
+vi.mock('../../src/modules/telemetry/telemetry.service.js', () => ({ getFleetSnapshot: vi.fn(async () => []) }))
 
 import { prismaMock } from '../helpers/prisma.mock.js'
 import { env } from '../../src/config/env.js'

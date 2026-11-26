@@ -455,6 +455,8 @@ export class WialonLiveAdapter implements TelemetryProvider {
       engineHours:    this.lastEngineHours.get(unitId) ?? null,
       ignitionOn:     this.lastIgnition.get(unitId) ?? null,
       fuelProbeFault: this.lastProbeFault.has(unitId),
+      fuelProbeFaultReason: probeFaultWords(this.lastProbeFault.get(unitId)),
+      fuelProbeRaw:         this.lastProbeFault.get(unitId)?.raw ?? null,
       camera:         this.lastCamera.get(unitId) ?? null,
     }
   }
@@ -467,7 +469,20 @@ interface Carried {
   engineHours:    number | null
   ignitionOn:     boolean | null
   fuelProbeFault: boolean
+  /** The tracker's reason and raw value, while `fuelProbeFault`; see probeFaultWords. */
+  fuelProbeFaultReason: string | null
+  fuelProbeRaw:         number | null
   camera:         CameraState | null
+}
+
+/**
+ * A probe fault in words for the record: the account's own label where it has one, else what the
+ * value means on the line ("Reading 4095, above its calibrated range of 3980"). Null without a fault.
+ */
+export function probeFaultWords(f: { raw: number; calibratedMax: number; reason: string | null } | undefined): string | null {
+  if (!f) return null
+  if (f.reason && f.reason.trim()) return f.reason.trim()
+  return `Reading ${f.raw}, above its calibrated range of ${f.calibratedMax}`
 }
 
 /** A message's accelerometer axes in g, with the raw values they were read from. */
@@ -510,7 +525,7 @@ function toFrame(
   const capturedAt = new Date((p.t ?? NaN) * 1000)
   if (Number.isNaN(capturedAt.getTime())) return null
 
-  const { fuelLevelMl, odometerKm, engineHours, ignitionOn, fuelProbeFault, camera } = c
+  const { fuelLevelMl, odometerKm, engineHours, ignitionOn, fuelProbeFault, fuelProbeFaultReason, fuelProbeRaw, camera } = c
   const speedKmh = p.s ?? null
 
   return {
@@ -582,6 +597,8 @@ function toFrame(
       highEngineTemp:      false,
       lowOil:              false,
       fuelProbeFault,
+      // Only with a fault: the 1,4xx healthy units carry nothing extra
+      ...(fuelProbeFault ? { fuelProbeFaultReason, fuelProbeRaw } : {}),
       // Omitted entirely rather than set to a false-y object on the 1,495 units
       // with no recorder — see the field's note in telemetry-provider.
       ...(camera?.hasCamera
