@@ -1,6 +1,6 @@
 # Automated deploy (GitHub Actions)
 
-`.github/workflows/deploy.yml` replaces the hand-run ssh ritual. A push to
+`.github/workflows/build-test-deploy.yml` replaces the hand-run ssh ritual. A push to
 `main` compiles the commit and runs the unit tests on a clean runner, then —
 only if that passes — pushes it into the box's working tree, builds there and
 restarts pm2. `dash` has an equivalent workflow of its own.

@@ -770,7 +770,7 @@ CROWDSEC_API_KEY
 ### 6.2 The Pipeline
 
 ```yaml
-# .github/workflows/deploy.yml
+# .github/workflows/build-test-deploy.yml
 
 name: CI/CD — Build, Test, Deploy
 
@@ -1111,7 +1111,7 @@ Docker & Traefik
   [ ] HTTPS working at api.yourdomain.com/health
 
 CI/CD
-  [ ] .github/workflows/deploy.yml committed
+  [ ] .github/workflows/build-test-deploy.yml committed
   [ ] Push to main triggers test → build → deploy
   [ ] Health check step passes after deploy
 ```

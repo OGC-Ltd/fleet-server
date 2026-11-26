@@ -45,7 +45,7 @@ sudo install -o root -g root -m 755 deploy/box/fleet-deploy deploy/box/fleet-edg
 3. Smoke-test it directly over an SSH tunnel to `127.0.0.1:3002` (`ssh -L 3002:127.0.0.1:3002`).
 4. `sudo fleet-parallel weight 10`. Leave it for a day or more. Check `status`, `docker logs fleet-parallel-server-1`, and users' reports.
 5. Raise it in steps: 25, then 50, then 90.
-6. Each push to main moves the container to the same commit as pm2 (deploy.yml, "keep the parallel container on this commit"). If that fails, the deploy still succeeds with a warning.
+6. Each push to main moves the container to the same commit as pm2 (build-test-deploy.yml, "keep the parallel container on this commit"). If that fails, the deploy still succeeds with a warning.
 7. **The cutover**, when you decide: `sudo fleet-parallel down`, then `sudo fleet-deploy cutover <sha>`. Cutover refuses while the parallel container runs.
 
 ## Getting out

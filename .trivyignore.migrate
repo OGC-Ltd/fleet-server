@@ -1,8 +1,8 @@
-# Accepted findings for the MIGRATE image only (images.yml scans it with
+# Accepted findings for the MIGRATE image only (build-push-images.yml scans it with
 # --ignorefile .trivyignore.migrate). The runtime image is scanned with no
 # exceptions.
 #
 # Empty since the Prisma 7.10.1 upgrade (2026-11-17), which brought the fixed
 # mysql2 3.24.4, deepmerge-ts 8.0.2, fast-uri 3.1.9 and source-map-js 1.2.2
-# that the ten 7.8.0 exceptions were waiting for. Keep the file: images.yml
+# that the ten 7.8.0 exceptions were waiting for. Keep the file: build-push-images.yml
 # mounts it. Any new entry needs a reason and an `exp:` date.
