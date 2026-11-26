@@ -50,7 +50,7 @@ RUN npm pkg delete devDependencies.prisma devDependencies.typescript \
  && ! npm ls --omit=dev --omit=peer --all 2>&1 | grep -iE "extraneous|missing|invalid"
 
 FROM ${NODE_IMAGE} AS base
-# APT_REFRESH changes every CI run (images.yml passes run id + attempt), so
+# APT_REFRESH changes every CI run (build-push-images.yml passes run id + attempt), so
 # this layer is never reused from the build cache: each image gets the Debian
 # fixes published by the time it is built. Without it the cached layer kept
 # the packages of the first build, and once Trivy found a fixable HIGH every

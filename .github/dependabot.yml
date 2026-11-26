@@ -1,4 +1,4 @@
-# Update PRs for npm and GitHub Actions. Merging one to main DEPLOYS (deploy.yml),
+# Update PRs for npm and GitHub Actions. Merging one to main DEPLOYS (build-test-deploy.yml),
 # so they are grouped to keep the count down, and each is reviewed like any PR.
 #
 # Not covered: the Docker base images. The Dockerfile takes them from an ARG

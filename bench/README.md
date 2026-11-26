@@ -144,6 +144,57 @@ synthetic one, so production should save more, not less — unmeasured. The
 replay on connect is still full (~320 KB each). Next lever: more instances
 (Redis pub/sub).
 
+## Heavy reports — 2026-11-26, local, stubbed DB
+
+`heavy-reports.mjs` posts one large report PDF (the rows a page sends to be
+drawn on the letterhead) and asks `/health` every 10 ms while it is drawn;
+`server.mts --loop-port 3101` reports the server's own event-loop delay over
+the run. Windows, Node v24.19.0. On this machine an idle `/health` answers in
+~17 ms and the idle loop delay reads ~15.6 ms: that is Windows' timer
+granularity, the floor of every number below.
+
+```bash
+node --import tsx bench/server.mts --loop-port 3101    # terminal 1
+node bench/heavy-reports.mjs [--case geofences-60k] [--parallel 3]
+```
+
+Before (drawn on the event loop): every request waits for the whole drawing.
+
+| Report | Input | Body | Drawing | `/health` max | Loop max |
+|---|---|---|---|---|---|
+| geofences.pdf | 5,000 visits | 0.6 MB | 1.3 s | 1,225 ms | 1,241 ms |
+| geofences.pdf | 20,000 visits | 2.5 MB | 5.2 s | 5,164 ms | 5,176 ms |
+| geofences.pdf | 60,000 visits (schema max) | 7.3 MB | 11.5 s | 11,425 ms | 11,434 ms |
+| tat-fuel.pdf | 5,000 trips | 1.5 MB | 1.8 s | 1,779 ms | 1,803 ms |
+| deliveries.pdf | 600 vehicles × 12 stops | 0.7 MB | 0.9 s | 831 ms | 853 ms |
+| document.pdf | 4 tables × 2,500 rows | 1.7 MB | 2.1 s | 2,024 ms | 2,044 ms |
+| document.pdf | 8 tables × 5,000 rows | 6.7 MB | 8.7 s | 8,700 ms | 8,707 ms |
+
+Of the 60,000-visit report's 11.5 s, 56 ms is `JSON.parse`, 56 ms the zod
+check and ~9.5 s pdfkit; a structured clone of the parsed body would cost
+another ~160 ms, which is why the raw bytes go to the thread instead.
+
+After (`lib/offload`: parse, check and drawing on a worker thread), the
+process pinned to 2 cores with `REPORT_RENDER_THREADS=1`, as on the
+2-vCPU box:
+
+| Report | Input | Drawing | `/health` p50 / p99 / max | Loop p99 / max |
+|---|---|---|---|---|
+| geofences.pdf | 5,000 visits | 1.9 s | 17 / 19 / 19 ms | 16.9 / 18.7 ms |
+| geofences.pdf | 20,000 visits | 3.6 s | 17 / 18 / 28 ms | 16.6 / 18.7 ms |
+| geofences.pdf | 60,000 visits | 10.4 s | 17 / 21 / 64 ms | 18.4 / 49.6 ms |
+| tat-fuel.pdf | 5,000 trips | 1.8 s | 17 / 17 / 17 ms | 16.7 / 17.2 ms |
+| deliveries.pdf | 600 × 12 | 0.9 s | 17 / 27 / 27 ms | 22.6 / 30.8 ms |
+| document.pdf | 4 × 2,500 | 2.0 s | 17 / 17 / 17 ms | 16.1 / 16.6 ms |
+| document.pdf | 8 × 5,000 | 9.0 s | 17 / 18 / 36 ms | 16.5 / 27.4 ms |
+| geofences.pdf ×3 at once | 20,000 visits each | 11.5 s (queued, one thread) | 17 / 18 / 61 ms | 16.5 / 31.1 ms |
+| document.pdf ×3 at once | 4 × 2,500 each | 6.7 s | 17 / 18 / 39 ms | 16.5 / 31.1 ms |
+
+The PDFs are byte-for-byte the same size as before. Peak RSS over the run:
+953 MB before, 924 MB after (the drawing's ~450 MB moved from the API heap to
+the thread's; one thread on the box means one such drawing at a time, where
+before several could pile up in the API heap together).
+
 ## What is NOT measured here, and why
 
 - **Database query cost.** Needs a real Postgres with representative data. The
@@ -171,6 +222,7 @@ under it.
 | `load.mjs` | the generator — closed-loop, keep-alive, percentile reporting, SSE mode |
 | `server.mts` | the real `createApp()`, no background workers, stubbed DB |
 | `stub-prisma.mjs` | a Prisma client that answers in shapes Postgres could produce |
+| `heavy-reports.mjs` | one heavy report PDF at a time (or `--parallel N`) against `/health` and the loop delay |
 
 `load.mjs` has no dependencies on purpose: pointing it at a real host one day
 should not mean installing a tool on that host.

@@ -603,6 +603,28 @@ const schema = z.object({
   // How many past fleet days each night captures again (late uploads, alarms typed late).
   DASHCAM_CAPTURE_DAYS: z.coerce.number().int().min(1).max(13).optional().default(3),
 
+  // The vss-worker (src/vss-worker.ts, lib/queues/vss-sync.ts): every
+  // organisation's dashcam day from VSS, one organisation at a time, into
+  // dashcam_alarms and the Redis day cache the Alarms page and reports read.
+  // It also runs the nightly capture above. 'off' stops both in that process.
+  VSS_SYNC: z.enum(['apply', 'off']).optional().default('apply'),
+  VSS_SYNC_CRON: z.string().optional().default('*/5 * * * *'),
+  // How long a captured day stays in the Redis cache after its last capture.
+  VSS_CACHE_DAYS: z.coerce.number().int().min(1).max(60).optional().default(30),
+  // The vss-worker's back-fill (lib/queues/vss-backfill.ts): past fleet days
+  // never captured (worker down, VSS busy) or captured partially, captured
+  // again while VSS still holds them. Runs at start, then on this cron.
+  VSS_BACKFILL_CRON: z.string().optional().default('15 * * * *'),
+  // How far back it looks: VSS keeps about two weeks, so 13 days at most.
+  VSS_BACKFILL_DAYS: z.coerce.number().int().min(1).max(13).optional().default(13),
+  // Organisations the sync and back-fill work on at once. Their VSS searches
+  // still take turns (one every 10 s per account); lookups and writes overlap.
+  VSS_ORG_CONCURRENCY: z.coerce.number().int().min(1).max(16).optional().default(7),
+  // Gap between two VSS alarm searches (§3.24), for the whole account. Seen
+  // 2026-11-26: 10 s holds for a while, then VSS answers "too frequent" when
+  // searches run back to back for minutes; widen it here if refusals persist.
+  VSS_SEARCH_GAP_MS: z.coerce.number().int().min(2_000).max(120_000).optional().default(10_000),
+
   // Pump price for costing the fuel ledger (analytics/fuel-cost). NOTHING in
   // the schema records what fuel cost — a filling stores litres, not money —
   // so cost is always litres × a price supplied here, and the endpoint echoes
@@ -631,6 +653,21 @@ const schema = z.object({
   // Connections the report reads hold, apart from the live pool (lib/report-db),
   // so a wave of reports queues on its own and never starves telemetry ingest.
   REPORT_DB_POOL_MAX: z.coerce.number().int().min(1).max(20).optional().default(4),
+  // Report PDFs are drawn on worker threads (lib/offload), never on the event
+  // loop: 'off' draws them in-process as before. Threads default to one per
+  // spare core, at most 2 (1 on the 2-vCPU box). Beyond the threads, QUEUE_MAX
+  // wait; one more is answered 503 + Retry-After. A drawing past TIMEOUT_MS is
+  // stopped (its thread is terminated); a thread's heap is capped at THREAD_MB.
+  REPORT_OFFLOAD: z.enum(['on', 'off']).optional().default('on'),
+  REPORT_RENDER_THREADS: z.coerce.number().int().min(1).max(8).optional(),
+  REPORT_RENDER_QUEUE_MAX: z.coerce.number().int().min(0).max(500).optional().default(16),
+  REPORT_RENDER_TIMEOUT_MS: z.coerce.number().int().min(1_000).optional().default(120_000),
+  REPORT_RENDER_THREAD_MB: z.coerce.number().int().min(64).max(4096).optional().default(768),
+  // The database-heavy report routes (movements, end of shift, probe, …):
+  // so many at once, so many waiting, and how long one may wait for a turn.
+  REPORT_DATA_CONCURRENCY: z.coerce.number().int().min(1).max(64).optional().default(6),
+  REPORT_DATA_QUEUE_MAX: z.coerce.number().int().min(0).max(1000).optional().default(64),
+  REPORT_DATA_WAIT_MS: z.coerce.number().int().min(1_000).optional().default(90_000),
   // The live pool (lib/prisma). The worker process runs with a small one.
   DB_POOL_MAX: z.coerce.number().int().min(1).max(50).optional().default(14),
   // Finished fleet days of a unit's readings, shared by every Fuel Report

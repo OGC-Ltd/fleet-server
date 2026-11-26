@@ -61,3 +61,46 @@ These were found against production on 23 Oct 2026. The same rules run in
 State (caches, pacing, file keys) is in memory in one process:
 - **After a restart,** clip links listed before it answer 404 until the dashboard re-reads the alarms, which it does every 2 minutes.
 - **With two instances,** each would pace VSS on its own.
+
+## Storage: the vss-worker
+
+The `vss-worker` container (`src/vss-worker.ts`) is the only process that searches VSS on a schedule. It runs two queues:
+
+- **`vss-sync`**: every 5 minutes (`VSS_SYNC_CRON`), today's alarms for every organisation with cameras, one organisation at a time. In the first hour of a fleet day it captures yesterday as well.
+- **`dashcam-capture`**: each night, the last 3 days again, for late uploads and late alarm types. This queue used to run in the API server.
+- **`vss-backfill`**: once when the worker starts, then hourly (`VSS_BACKFILL_CRON`). It captures every past day in the last `VSS_BACKFILL_DAYS` (13) that has no `dashcam_capture_days` row or one marked partial.
+  - Oldest days go first, because VSS drops them soonest.
+  - Each organisation has its own lane, and `VSS_ORG_CONCURRENCY` (7) lanes run at once. The 5-minute sync works the same way.
+  - Lanes overlap their alarm-type lookups, database writes and caching. Their searches still take turns, one every 10 s for the whole VSS account, because VSS refuses anything faster.
+  - If VSS answers "too frequent", every lane waits out VSS's 90 s rest and then tries the same day again, up to 8 rests a run. After that, the next run carries on where it left off.
+  - `VSS_SEARCH_GAP_MS` (10 s) sets the spacing between searches. On 26 Nov VSS refused searches running back to back at 10 s after a minute or two, so widen it if rests keep happening.
+  - `npm run dashcam:backfill` is now only needed for days older than 13.
+
+The report worker only handles reports; the dashcam work runs in the vss-worker alone.
+
+Each captured day is written to two places:
+
+- **`dashcam_alarms` and `dashcam_capture_days`**: the alarm details, kept for good. Clips and photos are not stored here.
+- **Redis cache db**: one gzipped key per organisation per day, `vss:alarms:v1:<orgId>:<day>`, kept `VSS_CACHE_DAYS` (30) days. It holds the whole answer, clip and photo links included.
+- **Link keys** (`vss:file:v1:<k>`, 15 days): let the API stream a clip that the worker listed.
+
+`getAlarms` serves the Alarms page and every report. It **never asks VSS**; only the vss-worker does. It reads in this order:
+
+1. The cache.
+2. On a miss, the database, for a day the worker captured. Clips and photos are missing for these days. The database's answer is written into the cache with `SET NX`, so it never replaces the worker's copy that has clips. The worker's next capture of that day merges the clips back in.
+3. A day neither holds is left out and the answer is marked `partial`. The back-fill captures that day.
+
+- **Camera counts:** the end-of-shift report and the Alarms tab's `GET /vss/cameras` use `pairedCameraCount`, read from `vss:cameras:v1:<org>`. The worker refreshes that key on every sync, so neither asks VSS for its device list. Only live video (`modules/camera`, the stream when a camera is opened) still talks to VSS.
+- **Stale today:** today's copy older than 15 minutes, meaning the worker has stopped, is still served but marked `stale`.
+- **Without `REDIS_URL`** (local dev), `getAlarms` is the live search.
+
+Run **one** vss-worker only. VSS allows one search every 10 s per account, and that pacing is held inside one process. The worker and the server share the VSS session file in the `fleet-cache` volume, and a process whose token is refused takes the other's saved token before it logs in again (VSS error 10082 limits logins).
+
+`VSS_SYNC=off` stops all three queues in the worker.
+
+**Rollout:** install the new `docker-compose.prod.yml` and `deploy/box/fleet-deploy` on the box *before* this code deploys. If they are missing, the server no longer runs the nightly capture and no worker starts. Pages keep working on live VSS, but nothing is captured.
+
+```
+sudo install -o root -g root -m 644 docker-compose.prod.yml /etc/fleet/compose/docker-compose.prod.yml
+sudo install -o root -g root -m 755 deploy/box/fleet-deploy /usr/local/sbin/fleet-deploy
+```

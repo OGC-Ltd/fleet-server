@@ -22,14 +22,14 @@
 # runs in one of two modes, and this workflow asks it which before touching it:
 #   pm2         the git push + build + pm2 restart below, unchanged
 #   containers  `sudo fleet-deploy up <sha>`: pulls this commit's image from
-#               ECR (images.yml pushes it; the box waits for it), starts it and
+#               ECR (build-push-images.yml pushes it; the box waits for it), starts it and
 #               rolls back to the previous image by itself if /health fails
 # Anything else (both serving, or neither) stops the run: that is for a person.
 #
 # NOT automated on purpose: `prisma migrate deploy`. A schema change against the
 # shared RDS instance is not something to trigger from a merge — run it by hand.
 
-name: build and deploy
+name: build, test and deploy
 
 on:
   push:
@@ -46,10 +46,10 @@ on:
     # RDS CA bundle), so they must deploy. In pm2 mode the scope step skips
     # the restart when a push changes nothing else.
     paths-ignore:
-      - '.github/workflows/deploy.yml'
+      - '.github/workflows/build-test-deploy.yml'
       - 'docs/**'
       - '**/*.md'
-      - '.github/workflows/images.yml'
+      - '.github/workflows/build-push-images.yml'
       - 'docker-compose*.yml'
       - 'deploy/edge/**'
       - 'deploy/box/**'
@@ -304,7 +304,7 @@ jobs:
           set -euo pipefail
           want=$(mktemp)
           {
-            for f in docker-compose.prod.yml docker-compose.phase3.yml docker-compose.edgecheck.yml docker-compose.preview.yml docker-compose.parallel.yml; do
+            for f in docker-compose.prod.yml docker-compose.web-loopback.yml docker-compose.edge-check.yml docker-compose.preview.yml docker-compose.parallel.yml; do
               echo "$(sha256sum < "$f" | cut -c1-64) /etc/fleet/compose/$f $f"
             done
             for f in $(git ls-files deploy/edge); do
@@ -394,8 +394,8 @@ jobs:
           # The runner's dist/, not a build on the box (see the upload step in
           # the build job for why). Checked first: --delete into the directory
           # pm2 runs from must never be fed an empty or partial artifact.
-          [ -f dist-built/src/index.js ] && [ -f dist-built/src/report-worker.js ] || {
-            echo "::error::the dist artifact has no src/index.js or src/report-worker.js; refusing to ship it"
+          [ -f dist-built/src/index.js ] && [ -f dist-built/src/report-worker.js ] && [ -f dist-built/src/vss-worker.js ] || {
+            echo "::error::the dist artifact has no src/index.js, src/report-worker.js or src/vss-worker.js; refusing to ship it"
             exit 1
           }
 

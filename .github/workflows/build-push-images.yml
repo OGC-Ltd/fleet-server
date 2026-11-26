@@ -1,5 +1,5 @@
 # Phase 0 of docs/containerization-plan.md: build, scan and publish images.
-# Deploys nothing: the box still runs pm2 through deploy.yml until phase 2.
+# Deploys nothing: the box still runs pm2 through build-test-deploy.yml until phase 2.
 #
 # Each commit on main gives two images in Amazon ECR (af-south-1, private,
 # immutable tags, scanned on push):
@@ -12,7 +12,7 @@
 # can only push to these repositories. No AWS keys are stored in GitHub.
 # Until that secret exists, the run builds, tests and scans, then skips the
 # push with a notice. Setup: the "Fleet ECR Setup" runbook.
-name: images
+name: build and push images
 
 on:
   push:
@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
 
 # One run per COMMIT, never cancelled. In container mode every commit's deploy
-# (deploy.yml -> fleet-deploy up <sha>) waits for that commit's own image. A
+# (build-test-deploy.yml -> fleet-deploy up <sha>) waits for that commit's own image. A
 # per-branch group with cancel-in-progress let a later push (even docs only)
 # cancel the earlier build: that commit's deploy then waited 20 min for an
 # image that never came and failed, and a docs-only follow-up deploys nothing,

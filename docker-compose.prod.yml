@@ -12,10 +12,10 @@
 # Secrets come from FLEET_ENV_FILE (default /etc/fleet/server.env, root 600).
 #
 # Profiles follow the rollout:
-#   (none)    phase 1-2: server + report-worker; the host's nginx proxies to
+#   (none)    phase 1-2: server + report-worker + vss-worker; the host's nginx proxies to
 #             127.0.0.1:${SERVER_HOST_PORT}
 #   web       phase 3:   + web, published on 127.0.0.1:8081 by adding
-#             -f docker-compose.phase3.yml
+#             -f docker-compose.web-loopback.yml
 #   edge      phase 4:   + edge (owns host 80/443) + certbot; host nginx stopped
 #   migrate   one-off:   docker compose run --rm migrate
 #
@@ -50,6 +50,9 @@ x-app: &app
     # Survives restarts in the volume, so a deploy does not log in to VSS again
     # (VSS rate-limits logins: error 10082).
     VSS_SESSION_FILE: /app/.cache/vss-session.json
+    # One report-drawing thread's heap (lib/offload): an oversized report fails
+    # on its own rather than starving the API of the box's memory.
+    REPORT_RENDER_THREAD_MB: "512"
   volumes:
     - fleet-cache:/app/.cache
   tmpfs:
@@ -68,23 +71,41 @@ services:
     # limit for buffers and native memory. Change both numbers together.
     command: ["node", "--max-old-space-size=1024", "dist/src/index.js"]
     ports:
-      # Loopback only. Keep it through phase 4 as well: deploy.yml's health
+      # Loopback only. Keep it through phase 4 as well: build-test-deploy.yml's health
       # check and fleet-deploy's wait_healthy both curl 127.0.0.1:3000/health.
       - "127.0.0.1:${SERVER_HOST_PORT:-3001}:3000"
-    # Uses about 1 GB today under pm2. Swap stays allowed (Docker's default,
-    # 2x the limit): under pm2 it can swap, and a hard cut would OOM-kill it.
-    mem_limit: 1536m
+    # Uses about 1.1 GB. Swap stays allowed (Docker's default, 2x the limit):
+    # a hard cut would OOM-kill it. 2048m since 26 Nov 2026: report PDFs are
+    # drawn on a worker thread (lib/offload) whose heap is outside the 1024 MB
+    # above, capped at REPORT_RENDER_THREAD_MB; the largest drawing took ~450 MB.
+    # The box has 3.8 GB, so the report worker's limit came down to make room.
+    mem_limit: 2048m
     cpus: 1.5
     pids_limit: 256
 
   report-worker:
     <<: *app
-    command: ["node", "--max-old-space-size=1536", "dist/src/report-worker.js"]
+    # Peaks near 460 MB (a PDF through the queue) and sits at 260-375 MB, so
+    # 1024m with a 768 MB heap leaves room; it was 1800m/1536 (26 Nov 2026).
+    command: ["node", "--max-old-space-size=768", "dist/src/report-worker.js"]
     # No HTTP port; the image's /health check would mark it unhealthy forever.
     healthcheck: { disable: true }
-    mem_limit: 1800m
+    mem_limit: 1024m
     cpus: 1.0
     pids_limit: 256
+
+  vss-worker:
+    <<: *app
+    # Dashcam alarms from VSS for every organisation, every 5 minutes, into
+    # dashcam_alarms and the Redis day cache the Alarms page reads
+    # (src/vss-worker.ts). ONE only: VSS paces searches per account, in-process.
+    # Holds a day's alarms at a time and the alarm-type lookups (~50k ids).
+    command: ["node", "--max-old-space-size=256", "dist/src/vss-worker.js"]
+    # No HTTP port; the image's /health check would mark it unhealthy forever.
+    healthcheck: { disable: true }
+    mem_limit: 384m
+    cpus: 0.5
+    pids_limit: 128
 
   migrate:
     <<: *hardening
@@ -108,7 +129,7 @@ services:
     # Same reason as `migrate`: unset fails at pull time, not for every service.
     image: ${RAITRACK_IMAGE:-raitrack-image-not-set}
     # No ports here: phase 3 adds 127.0.0.1:8081 through
-    # docker-compose.phase3.yml, because an internal network cannot publish.
+    # docker-compose.web-loopback.yml, because an internal network cannot publish.
     tmpfs:
       - /tmp:size=32m,mode=1777
     mem_limit: 64m

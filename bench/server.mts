@@ -44,6 +44,8 @@ const port = Number(process.env['BENCH_PORT'] ?? 3100)
 // DOES construct a client fails loudly instead of quietly finding a tunnel.
 process.env['DATABASE_URL'] ??= 'postgresql://bench:bench@127.0.0.1:1/bench'
 process.env['DIRECT_URL']   ??= process.env['DATABASE_URL']
+// A checkout without a .env (a fresh worktree) still boots: a throwaway secret.
+process.env['JWT_SECRET']   ??= 'bench-only-secret-never-used-off-loopback-000'
 process.env['NODE_ENV']       = 'development'
 process.env['PORT']           = String(port)
 
@@ -156,6 +158,26 @@ if (fleet > 0) {
       + `cpu ${pctCpu.toFixed(0)}%  rss ${(process.memoryUsage().rss / 1048576).toFixed(0)}MB\n`)
     h.reset()
   }, 5000).unref()
+}
+
+// --loop-port P: a second loopback port answering the event-loop delay since
+// the last reset (GET /loop, GET /loop?reset=1), for bench/heavy-reports.mjs.
+// On its own server so reading it never queues behind the app's middleware.
+{
+  const loopPort = Number(argVal('--loop-port') ?? 0)
+  if (loopPort > 0) {
+    const { monitorEventLoopDelay } = await import('node:perf_hooks')
+    const { createServer } = await import('node:http')
+    const h = monitorEventLoopDelay({ resolution: 5 })
+    h.enable()
+    createServer((req, res) => {
+      const ms = (n: number) => +(n / 1e6).toFixed(1)
+      const body = JSON.stringify({ p50: ms(h.percentile(50)), p99: ms(h.percentile(99)), max: ms(h.max), count: h.count })
+      if (req.url?.includes('reset=1')) h.reset()
+      res.setHeader('Content-Type', 'application/json')
+      res.end(body)
+    }).listen(loopPort, '127.0.0.1')
+  }
 }
 
 const shutdown = () => { server.close(() => process.exit(0)) }

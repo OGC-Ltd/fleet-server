@@ -3,6 +3,11 @@ import { sendSuccess } from '../../core/response/response.js'
 import { registerSseClient, emitHeartbeat } from '../../lib/sse.js'
 import { listPings, getVehicleTrack, getVehiclePlayback, getVehicleDaySeries, getLatestPing, getFleetSnapshot, getActiveAlerts, getAlertHistoryCounts, getMaintenanceHistory, getVehicleServiceHistory, getVehicleGarageVisits } from './telemetry.service.js'
 import type { TelemetryListQuery, TrackQuery, PlaybackQuery, DaySeriesQuery } from './telemetry.schema.js'
+import { vehicleExistsInOrg } from './telemetry.repository.js'
+import { cachedDay, keepDay, settled } from './day-series-cache.js'
+import { hasVoltages } from './day-voltage-fill.js'
+import { fleetDayBounds } from '../../lib/provider-time.js'
+import { NotFoundError } from '../../core/errors/errors.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -49,13 +54,56 @@ export const getVehiclePlaybackHandler: RequestHandler = async (req, res, next) 
   } catch (err) { next(err) }
 }
 
+/** The body sendSuccess would write, around a day's JSON as kept. */
+export const dayBody = (json: string) => `{"statusCode":200,"status":"success","data":${json}}`
+
+/**
+ * One unit's fleet day of readings.
+ *
+ * A finished day comes from the shared day cache (day-series-cache), which the
+ * Fuel Report already fills. The report screens read every unit's day, one
+ * request each, and each browser tab keeps only its own copy. On 26 Nov 2026,
+ * one login with eight company tabs open sent 7,239 of these requests in
+ * 30 minutes, up to 111 a second. Each one was a database query, then Prisma
+ * decoding and JSON. That held the API's main thread near 100% while the
+ * burst lasted. Now a settled day is read from the database once, and every
+ * later read is the kept JSON sent as it is.
+ *
+ * Not kept by this route:
+ *   · a day with `since` (only today's tail is asked for that way);
+ *   · a truncated day, since the next read might not be;
+ *   · a day with no supply voltages. The Fuel Report fills those from Wialon
+ *     before it keeps them (day-voltage-fill), and a copy kept here first
+ *     would skip that.
+ */
 export const getVehicleDaySeriesHandler: RequestHandler = async (req, res, next) => {
   try {
-    const data = await getVehicleDaySeries(
-      p(req, 'vehicleId'), p(req, 'orgId'), req.query as unknown as DaySeriesQuery,
-    )
+    const vehicleId = p(req, 'vehicleId')
+    const orgId = p(req, 'orgId')
+    const q = req.query as unknown as DaySeriesQuery
+    const end = q.day != null && q.since == null ? fleetDayBounds(q.day)?.to.getTime() : undefined
+    const finished = end != null && settled(end)
+
+    if (finished) {
+      const kept = await cachedDay(vehicleId, q.day!)
+      if (kept) {
+        // The cache is keyed by unit, not organisation: the path org is still checked.
+        if (!(await vehicleExistsInOrg(vehicleId, orgId))) throw new NotFoundError('Vehicle')
+        res.set('Cache-Control', 'private, max-age=86400')
+        res.type('application/json').send(dayBody(kept))
+        return
+      }
+    }
+
+    const data = await getVehicleDaySeries(vehicleId, orgId, q)
     // A finished day never changes, so the browser may keep it; today's grows.
     res.set('Cache-Control', data.complete ? 'private, max-age=86400' : 'no-store')
+    if (finished && data.complete && !data.truncated && hasVoltages(data)) {
+      const json = JSON.stringify(data)
+      void keepDay(vehicleId, q.day!, json)
+      res.type('application/json').send(dayBody(json))
+      return
+    }
     sendSuccess(res, data)
   } catch (err) { next(err) }
 }

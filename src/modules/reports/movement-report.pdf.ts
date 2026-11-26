@@ -15,7 +15,8 @@
 import PDFDocument from 'pdfkit'
 import { MM, SIDE, sheetOf, C, F, DASH, num, drawLetterhead, ReportWriter, type Cell, type Col } from '../../lib/pdf/letterhead.js'
 import { haversineM } from '../../lib/geofence.js'
-import { MOVING_KMH, type MovementReport, type MovementRow, type MovementState } from './movement-report.service.js'
+import type { MovementReport, MovementRow, MovementState } from './movement-report.service.js'
+import { MOVING_KMH } from './movement-report.constants.js'
 
 const TZ = 'Africa/Nairobi'
 const parts = (ms: number) => Object.fromEntries(new Intl.DateTimeFormat('en-GB', {

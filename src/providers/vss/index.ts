@@ -113,6 +113,11 @@ export function vssBusy(): boolean {
   return Date.now() < busyUntil
 }
 
+/** How long until we ask VSS again after it asked us to slow down (0 when it has not). */
+export function vssRestMs(): number {
+  return Math.max(0, busyUntil - Date.now())
+}
+
 export class VssError extends Error {
   constructor(message: string, readonly status: number | null = null) { super(message) }
 }
@@ -222,6 +227,9 @@ async function login(): Promise<string> {
 
 /** One login at a time: a burst of camera opens shares the same new token. */
 function freshToken(): Promise<string> {
+  // A token the other process saved (the server and the vss-worker share the file)
+  const saved = readSession()
+  if (saved) { session = saved; return Promise.resolve(saved.token) }
   loggingIn ??= login().finally(() => { loggingIn = null })
   return loggingIn
 }
@@ -234,6 +242,10 @@ async function call<T>(path: string, body: Record<string, unknown>): Promise<{ d
     const res = await post<T>(path, { ...body, token })
     if (res.status === OK) return { data: res.data, token }
     if ((res.status === NOT_LOGGED_IN || res.status === TOKEN_ERROR) && attempt === 0) {
+      // The server and the vss-worker share the session file: if the other one
+      // has logged in since, use its token rather than log in again (10082).
+      const saved = readSession()
+      if (saved && saved.token !== token) { session = saved; continue }
       session = null
       saveSession(null)
       continue

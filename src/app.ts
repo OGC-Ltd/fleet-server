@@ -107,7 +107,9 @@ export function createApp() {
   // would change key order/whitespace and invalidate the signature.
   // Reports the page makes and the server draws: a week of a family's geofence
   // visits runs past the usual limit. The parser below skips a body already read.
-  app.use(/^\/api\/v1\/organisations\/[^/]+\/reports\/(?:dormant-assets|geofences|tat-fuel|speed|deliveries|document)\.pdf$/, express.json({ limit: '8mb' }))
+  // Kept as raw bytes: the JSON parse and the schema check of up to 8 MB run on
+  // the worker thread that draws the PDF (lib/offload), not on the event loop.
+  app.use(/^\/api\/v1\/organisations\/[^/]+\/reports\/(?:dormant-assets|geofences|tat-fuel|speed|deliveries|document)\.pdf$/, express.raw({ type: 'application/json', limit: '8mb' }))
   // A delivery sheet, base64 (Planner): up to 2 MB of workbook.
   app.use(/^\/api\/v1\/organisations\/[^/]+\/planner\/sheets(?:\/preview)?$/, express.json({ limit: '3mb' }))
   // A fleet list Excel, base64, kept in S3 as uploaded (fleet-list): up to 5 MB of file.
@@ -337,6 +339,7 @@ export function createApp() {
   app.use(`${orgBase}/notifications`, notificationsOrgRouter)
   // The Gate log: sign-outs and returns only, on its own right (Ops Room Operator, 2026-11-25)
   app.get(`${orgBase}/gate-log`, authenticate, requireOrgAccess, requirePermission('gate_log:read'), gateLogCtrl.gateLog)
+  app.post(`${orgBase}/gate-log/:eventId/acknowledgement`, authenticate, requireOrgAccess, requirePermission('gate_log:acknowledge'), gateLogCtrl.acknowledge)
   // Menengai's units flagged now by the server's stop watch (Alerts page)
   app.get(`${orgBase}/stop-watch`, authenticate, requireOrgAccess, requirePermission('notification:read'), stopWatchCtrl.current)
   // Menengai's listed units idle 1 h 30 min of working time, yard and depots included (Alerts page, corner badge)

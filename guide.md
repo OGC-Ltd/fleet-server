@@ -6,7 +6,7 @@ still starts but every Prisma query fails with `ECONNREFUSED` (e.g. the
 `warm-cache sweep failed` log at startup).
 
 - **RDS endpoint:** `fleet-store.cnim02awiv5t.af-south-1.rds.amazonaws.com:5432`
-- **Jump host:** `ubuntu@13.247.178.217` *(reached by IP — the af-south-1 box's
+- **Jump host:** `ubuntu@13.244.125.1` *(reached by IP — the af-south-1 box's
   `ec2-13-247-178-217.af-south-1.compute.amazonaws.com` name is fine too, but if
   the instance restarts without an Elastic IP the address changes)*
 - **Key:** `keys/ustawi.pem` in the `production` checkout (NOT `logistics.pem`,
@@ -27,7 +27,7 @@ still starts but every Prisma query fails with `ECONNREFUSED` (e.g. the
 >
 > ```bash
 > grep -m1 '^DATABASE_URL=' .env | sed -E 's#.*://[^:]+:([^@]+)@.*#\1#' | tr -d '"' | sha256sum | cut -c1-8
-> ssh -i <key> ubuntu@13.247.178.217 "grep -m1 '^DIRECT_URL=' ~/prod/fleet-server/.env | sed -E 's#.*://[^:]+:([^@]+)@.*#\1#' | tr -d \"'\\\"\" | sha256sum | cut -c1-8"
+> ssh -i <key> ubuntu@13.244.125.1 "grep -m1 '^DIRECT_URL=' ~/prod/fleet-server/.env | sed -E 's#.*://[^:]+:([^@]+)@.*#\1#' | tr -d \"'\\\"\" | sha256sum | cut -c1-8"
 > ```
 >
 > They differed when this was last checked (2026-09-15). The box's `.env` is
@@ -56,7 +56,7 @@ Test-NetConnection -ComputerName localhost -Port 15432 -InformationLevel Quiet
 Get-Process ssh -ErrorAction SilentlyContinue
 
 # Is the jump host reachable? (should print "ok")
-ssh -i "C:\Users\HOD\Desktop\production\keys\ustawi.pem" -o BatchMode=yes -o ConnectTimeout=10 ubuntu@13.247.178.217 "echo ok"
+ssh -i "C:\Users\HOD\Desktop\production\keys\ustawi.pem" -o BatchMode=yes -o ConnectTimeout=10 ubuntu@13.244.125.1 "echo ok"
 ```
 
 ### Linux / Ubuntu
@@ -70,7 +70,7 @@ nc -z localhost 15432 && echo "tunnel up" || echo "tunnel DOWN"
 pgrep -af "ssh.*15432"
 
 # Is the jump host reachable? (should print "ok")
-ssh -i ~/production/keys/ustawi.pem -o BatchMode=yes -o ConnectTimeout=10 ubuntu@13.247.178.217 "echo ok"
+ssh -i ~/production/keys/ustawi.pem -o BatchMode=yes -o ConnectTimeout=10 ubuntu@13.244.125.1 "echo ok"
 ```
 
 **Interpreting the jump-host test:**
@@ -93,7 +93,7 @@ Foreground (keeps a terminal window busy; Ctrl+C to stop):
 ssh -i "C:\Users\HOD\Desktop\production\keys\ustawi.pem" -N `
   -L 15432:fleet-store.cnim02awiv5t.af-south-1.rds.amazonaws.com:5432 `
   -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes `
-  ubuntu@13.247.178.217
+  ubuntu@13.244.125.1
 ```
 
 Background (hidden window):
@@ -103,7 +103,7 @@ Start-Process ssh -WindowStyle Hidden -ArgumentList `
   '-i', 'C:\Users\HOD\Desktop\production\keys\ustawi.pem', '-N', `
   '-L', '15432:fleet-store.cnim02awiv5t.af-south-1.rds.amazonaws.com:5432', `
   '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes', `
-  'ubuntu@13.247.178.217'
+  'ubuntu@13.244.125.1'
 ```
 
 To stop a background tunnel: `Get-Process ssh | Stop-Process`
@@ -116,7 +116,7 @@ Foreground:
 ssh -i ~/production/keys/ustawi.pem -N \
   -L 15432:fleet-store.cnim02awiv5t.af-south-1.rds.amazonaws.com:5432 \
   -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes \
-  ubuntu@13.247.178.217
+  ubuntu@13.244.125.1
 ```
 
 Background (`-f` forks after auth):
@@ -125,7 +125,7 @@ Background (`-f` forks after auth):
 ssh -i ~/production/keys/ustawi.pem -f -N \
   -L 15432:fleet-store.cnim02awiv5t.af-south-1.rds.amazonaws.com:5432 \
   -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes \
-  ubuntu@13.247.178.217
+  ubuntu@13.244.125.1
 ```
 
 To stop a background tunnel: `pkill -f "ssh.*15432"`

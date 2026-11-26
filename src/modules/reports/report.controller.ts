@@ -4,17 +4,18 @@ import { BadRequestError } from '../../core/errors/errors.js'
 import * as service from './report.service.js'
 import { generateReportPdf, PDF_REPORT_KINDS, type PdfReportKind } from './report-pdf.service.js'
 import { loadEndOfShift, orgHeading } from './end-of-shift.data.js'
-import { renderEndOfShiftPdf, renderShiftDoc, endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
-import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementEventsQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, ReportDocBody, TankersReportBody, TatFuelReportQuery, ProbeReportQuery, RecoveryReportQuery, DormantPdfBody, GeofencePdfBody, TatFuelPdfBody, SpeedPdfBody, DeliveriesPdfBody } from './report.schema.js'
+import { endOfShiftDoc, reportNumber, endOfShiftFileName, type ShiftDoc } from './end-of-shift.pdf.js'
+import type { CreatePeriodDto, CreateEngineSessionDto, ListPeriodQuery, ListEngineSessionQuery, ListSummaryQuery, MovementReportQuery, MovementEventsQuery, MovementPdfBody, EndOfShiftQuery, EndOfShiftBody, ShiftDocBody, TankersReportBody, TatFuelReportQuery, ProbeReportQuery, RecoveryReportQuery } from './report.schema.js'
 import { getMovementReport, editedMovementReport, type MovementReport } from './movement-report.service.js'
 import { getMovementEvents } from './movement-events.service.js'
 import { getTankersReport } from './tankers-report.service.js'
 import { getTatFuelReport } from './tat-fuel-report.service.js'
 import { getSpeedReport } from './speed-report.service.js'
 import { getProbeReport } from './probe-disconnection.service.js'
-import { renderMovementReportsPdf, movementFileName, movementReportsFileName } from './movement-report.pdf.js'
-import { renderDormantPdf, renderGeofencePdf, renderTatFuelPdf, renderSpeedPdf, renderDeliveriesPdf, dormantFileName, geofenceFileName, tatFileName, speedFileName, deliveriesFileName } from './template-report.pdf.js'
+import { movementFileName, movementReportsFileName } from './movement-report.pdf.js'
 import { getRecoveryVehicleReport } from './recovery-report.service.js'
+import { reportPool, sendReport, type ReportFile } from '../../lib/offload/report-jobs.js'
+import type { PostedReport } from '../../lib/offload/cpu-tasks.js'
 import { recoveryReportFileName, renderRecoveryReportPdf } from './recovery-report.pdf.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
@@ -74,20 +75,22 @@ export const refreshSummaries: RequestHandler = async (req, res, next) => {
 // ── Branded PDF reports ───────────────────────────────────────────────────────
 
 export const downloadPdfReport: RequestHandler = async (req, res, next) => {
-  try {
-    const kind = p(req, 'kind') as PdfReportKind
-    if (!PDF_REPORT_KINDS.includes(kind)) {
-      throw new BadRequestError(`Unknown report kind '${kind}' — expected one of: ${PDF_REPORT_KINDS.join(', ')}`)
-    }
-    // Trailing window; clamped to the same 366-day ceiling the history API uses.
-    const days = Math.min(366, Math.max(1, Number(req.query.days) || 30))
-    const { buffer, filename } = await generateReportPdf(p(req, 'orgId'), kind, days, req.authz?.vehicleIds ?? null)
-    res.setHeader('Content-Type', 'application/pdf')
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
-    res.setHeader('Content-Length', String(buffer.length))
-    res.send(buffer)
-  } catch (err) { next(err) }
+  const kind = p(req, 'kind') as PdfReportKind
+  if (!PDF_REPORT_KINDS.includes(kind)) {
+    return next(new BadRequestError(`Unknown report kind '${kind}' — expected one of: ${PDF_REPORT_KINDS.join(', ')}`))
+  }
+  // Trailing window; clamped to the same 366-day ceiling the history API uses.
+  const days = Math.min(366, Math.max(1, Number(req.query.days) || 30))
+  await sendReport(req, res, next, async (run) => {
+    const { buffer, filename } = await generateReportPdf(p(req, 'orgId'), kind, days, req.authz?.vehicleIds ?? null,
+      async (data) => asBuffer(await reportPool().run('pdf.branded', { data }, run)))
+    return pdfFile(buffer, filename)
+  })
 }
+
+/** Bytes back from a worker thread, as a Buffer over the same memory. */
+const asBuffer = (u: Uint8Array) => Buffer.from(u.buffer, u.byteOffset, u.byteLength)
+const pdfFile = (bytes: Buffer, name: string): ReportFile => ({ bytes, name, type: 'application/pdf' })
 
 // ── End-of-shift report ───────────────────────────────────────────────────────
 
@@ -105,23 +108,13 @@ async function endOfShiftFor(req: Parameters<RequestHandler>[0], now: number, q:
   return { org, report }
 }
 
-function sendShiftPdf(res: Parameters<RequestHandler>[1], buffer: Buffer, orgName: string, now: number) {
-  res.setHeader('Content-Type', 'application/pdf')
-  res.setHeader('Content-Disposition', `attachment; filename="${endOfShiftFileName(orgName, now)}"`)
-  res.setHeader('Content-Length', String(buffer.length))
-  res.setHeader('Cache-Control', 'no-store')
-  res.send(buffer)
-}
-
 /** Today from midnight Nairobi up to now, or the period asked for, for this organisation, as a PDF. */
-export const downloadEndOfShift: RequestHandler = async (req, res, next) => {
-  try {
-    const now = Date.now()
-    const { org, report } = await endOfShiftFor(req, now)
-    const buffer = await renderEndOfShiftPdf(report, { orgName: org.name, reportNo: reportNumber(org.short, now), generatedAt: now })
-    sendShiftPdf(res, buffer, org.name, now)
-  } catch (err) { next(err) }
-}
+export const downloadEndOfShift: RequestHandler = (req, res, next) => sendReport(req, res, next, async (run) => {
+  const now = Date.now()
+  const { org, report } = await endOfShiftFor(req, now)
+  const pdf = await reportPool().run('pdf.endOfShift', { report, orgName: org.name, reportNo: reportNumber(org.short, now), generatedAt: now }, run)
+  return pdfFile(asBuffer(pdf), endOfShiftFileName(org.name, now))
+})
 
 /** GET /organisations/:orgId/reports/end-of-shift?from&to — the report as the document the PDF is drawn from. */
 export const getEndOfShiftDoc: RequestHandler = async (req, res, next) => {
@@ -147,18 +140,17 @@ export const getEndOfShiftDocFor: RequestHandler = async (req, res, next) => {
  * operator edited it on the Reports page, drawn as the PDF. The report number
  * and the footer's "made" time are the server's, from now.
  */
-export const downloadEditedEndOfShift: RequestHandler = async (req, res, next) => {
-  try {
-    const now = Date.now()
-    const org = await orgHeading(p(req, 'orgId'))
-    const body = req.body as ShiftDocBody
-    const made = endOfShiftDoc.made(org.name, body.date, now)
-    const doc: ShiftDoc = { ...body, reportNo: reportNumber(org.short, now), footer: made }
-    // A category's report is named for it: "… Menengai Tankers 2026-11-02 …"
-    const category = body.meta.find((m) => m.label === 'Category')?.value
-    sendShiftPdf(res, await renderShiftDoc(doc, { landscape: turned(req) }), category ? `${org.name} ${category}` : org.name, now)
-  } catch (err) { next(err) }
-}
+export const downloadEditedEndOfShift: RequestHandler = (req, res, next) => sendReport(req, res, next, async (run) => {
+  const now = Date.now()
+  const org = await orgHeading(p(req, 'orgId'))
+  const body = req.body as ShiftDocBody
+  const made = endOfShiftDoc.made(org.name, body.date, now)
+  const doc: ShiftDoc = { ...body, reportNo: reportNumber(org.short, now), footer: made }
+  // A category's report is named for it: "… Menengai Tankers 2026-11-02 …"
+  const category = body.meta.find((m) => m.label === 'Category')?.value
+  const pdf = await reportPool().run('pdf.shiftDoc', { doc, landscape: turned(req) }, run)
+  return pdfFile(asBuffer(pdf), endOfShiftFileName(category ? `${org.name} ${category}` : org.name, now))
+})
 
 /** `?landscape=1`: the pages turned on their side (the JPEG's Landscape, 4 Nov 2026). */
 const turned = (req: Parameters<RequestHandler>[0]) => req.query.landscape === '1'
@@ -172,13 +164,11 @@ const movementWindow = (q: MovementReportQuery) => (q.from != null && q.to != nu
  * away from it over the window. A permission-scoped caller gets only the
  * units they may see.
  */
-export const downloadMovementReport: RequestHandler = async (req, res, next) => {
-  try {
-    const q = req.query as unknown as MovementReportQuery
-    const report = await getMovementReport(p(req, 'orgId'), movementWindow(q), req.authz?.vehicleIds ?? null)
-    await sendMovementPdf(res, [report])
-  } catch (err) { next(err) }
-}
+export const downloadMovementReport: RequestHandler = (req, res, next) => sendReport(req, res, next, async (run) => {
+  const q = req.query as unknown as MovementReportQuery
+  const report = await getMovementReport(p(req, 'orgId'), movementWindow(q), req.authz?.vehicleIds ?? null)
+  return movementPdf([report], false, run)
+})
 
 /**
  * GET /organisations/:orgId/reports/movements?hours=N | ?from&to — the same
@@ -241,15 +231,13 @@ export const getSpeedReportData: RequestHandler = async (req, res, next) => {
  * database, the overview is counted from the rows sent, and the PDF names the
  * signed-in user as its editor.
  */
-export const downloadEditedMovementReport: RequestHandler = async (req, res, next) => {
-  try {
-    const by = req.user?.fullName || req.user?.email || 'Unknown user'
-    const body = req.body as MovementPdfBody
-    const asked = 'reports' in body ? body.reports : [body]
-    const reports = await Promise.all(asked.map(r => editedMovementReport(p(req, 'orgId'), r, by)))
-    await sendMovementPdf(res, reports, turned(req))
-  } catch (err) { next(err) }
-}
+export const downloadEditedMovementReport: RequestHandler = (req, res, next) => sendReport(req, res, next, async (run) => {
+  const by = req.user?.fullName || req.user?.email || 'Unknown user'
+  const body = req.body as MovementPdfBody
+  const asked = 'reports' in body ? body.reports : [body]
+  const reports = await Promise.all(asked.map(r => editedMovementReport(p(req, 'orgId'), r, by)))
+  return movementPdf(reports, turned(req), run)
+})
 
 /** A PDF, under its name, as the browser should save it. */
 function sendPdf(res: Parameters<RequestHandler>[1], buffer: Buffer, name: string) {
@@ -260,41 +248,40 @@ function sendPdf(res: Parameters<RequestHandler>[1], buffer: Buffer, name: strin
   res.send(buffer)
 }
 
-/** POST /organisations/:orgId/reports/document.pdf — any report as edited on its page, drawn from the sheet. */
-export const downloadReportDoc: RequestHandler = async (req, res, next) => {
-  try {
-    const { filename, ...doc } = req.body as ReportDocBody
-    sendPdf(res, await renderShiftDoc(doc, { landscape: turned(req) }), `${filename}.pdf`)
-  } catch (err) { next(err) }
+/**
+ * POST /organisations/:orgId/reports/{document,dormant-assets,geofences,tat-fuel,speed,deliveries}.pdf —
+ * the rows the page made (any report as edited on its page, for document.pdf),
+ * drawn on the letterhead. The body arrives as raw bytes (app.ts): the JSON
+ * parse, the schema check and the drawing all happen on a worker thread
+ * (lib/offload/cpu-tasks), and a body the schema refuses is a 400 as before.
+ * TAT and Fuel is landscape unless upright is asked for (`?landscape=0`): its
+ * 14 columns were made for a wide page; the others are upright unless `?landscape=1`.
+ */
+const postedPdf = (report: PostedReport): RequestHandler => (req, res, next) => sendReport(req, res, next, async (run) => {
+  const body = rawBody(req)
+  const orgCode = report === 'document' ? '' : (await orgHeading(p(req, 'orgId'))).short
+  const landscape = report === 'tat-fuel' ? req.query.landscape !== '0' : turned(req)
+  const out = await reportPool().run('pdf.posted', { report, body, orgCode, landscape }, run)
+  return pdfFile(asBuffer(out.pdf), out.name)
+})
+
+/** The request's bytes, in memory the worker thread may own. */
+function rawBody(req: Parameters<RequestHandler>[0]): Uint8Array {
+  const b: unknown = req.body
+  if (Buffer.isBuffer(b)) {
+    // A small Buffer shares Node's pool with others: moving that memory would detach them.
+    return b.byteOffset === 0 && b.byteLength === b.buffer.byteLength ? new Uint8Array(b.buffer, 0, b.byteLength) : new Uint8Array(b)
+  }
+  if (b && typeof b === 'object') return new TextEncoder().encode(JSON.stringify(b))
+  throw new BadRequestError('Send the report as a JSON body (Content-Type: application/json)')
 }
 
-/** POST /organisations/:orgId/reports/dormant-assets.pdf — the page's rows, drawn on the letterhead. */
-export const downloadDormantPdf: RequestHandler = async (req, res, next) => {
-  try {
-    const body = req.body as DormantPdfBody
-    const { short } = await orgHeading(p(req, 'orgId'))
-    sendPdf(res, await renderDormantPdf(body, { orgCode: short, landscape: turned(req) }), dormantFileName(body))
-  } catch (err) { next(err) }
-}
-
-/** POST /organisations/:orgId/reports/geofences.pdf — the page's rows, drawn on the letterhead. */
-export const downloadGeofencePdf: RequestHandler = async (req, res, next) => {
-  try {
-    const body = req.body as GeofencePdfBody
-    const { short } = await orgHeading(p(req, 'orgId'))
-    sendPdf(res, await renderGeofencePdf(body, { orgCode: short, landscape: turned(req) }), geofenceFileName(body))
-  } catch (err) { next(err) }
-}
-
-/** POST /organisations/:orgId/reports/tat-fuel.pdf — the page's rows, drawn on the letterhead. */
-export const downloadTatFuelPdf: RequestHandler = async (req, res, next) => {
-  try {
-    const body = req.body as TatFuelPdfBody
-    const { short } = await orgHeading(p(req, 'orgId'))
-    // Landscape unless upright is asked for (`?landscape=0`): its 14 columns were made for a wide page
-    sendPdf(res, await renderTatFuelPdf(body, { orgCode: short, landscape: req.query.landscape !== '0' }), tatFileName(body))
-  } catch (err) { next(err) }
-}
+export const downloadReportDoc = postedPdf('document')
+export const downloadDormantPdf = postedPdf('dormant-assets')
+export const downloadGeofencePdf = postedPdf('geofences')
+export const downloadTatFuelPdf = postedPdf('tat-fuel')
+export const downloadSpeedPdf = postedPdf('speed')
+export const downloadDeliveriesPdf = postedPdf('deliveries')
 
 /** GET /organisations/:orgId/reports/probe-disconnections?from&to — each time a unit's fuel probe was disconnected. */
 export const getProbeReportData: RequestHandler = async (req, res, next) => {
@@ -321,31 +308,9 @@ export const downloadRecoveryReport: RequestHandler = async (req, res, next) => 
   } catch (err) { next(err) }
 }
 
-/** POST /organisations/:orgId/reports/speed.pdf — the page's rows, drawn on the letterhead. */
-export const downloadSpeedPdf: RequestHandler = async (req, res, next) => {
-  try {
-    const body = req.body as SpeedPdfBody
-    const { short } = await orgHeading(p(req, 'orgId'))
-    sendPdf(res, await renderSpeedPdf(body, { orgCode: short, landscape: turned(req) }), speedFileName(body))
-  } catch (err) { next(err) }
-}
-
-/** POST /organisations/:orgId/reports/deliveries.pdf — the page's rows, drawn on the letterhead. */
-export const downloadDeliveriesPdf: RequestHandler = async (req, res, next) => {
-  try {
-    const body = req.body as DeliveriesPdfBody
-    const { short } = await orgHeading(p(req, 'orgId'))
-    sendPdf(res, await renderDeliveriesPdf(body, { orgCode: short, landscape: turned(req) }), deliveriesFileName(body))
-  } catch (err) { next(err) }
-}
-
-/** One report, or a window a day over a range of days, as one PDF. */
-async function sendMovementPdf(res: Parameters<RequestHandler>[1], reports: MovementReport[], landscape = false) {
-  const buffer = await renderMovementReportsPdf(reports, { landscape })
+/** One report, or a window a day over a range of days, as one PDF, drawn on a worker thread. */
+async function movementPdf(reports: MovementReport[], landscape: boolean, run: { signal: AbortSignal; onStart: () => void }): Promise<ReportFile> {
+  const pdf = await reportPool().run('pdf.movements', { reports, landscape }, run)
   const name = reports.length === 1 ? movementFileName(reports[0]!) : movementReportsFileName(reports)
-  res.setHeader('Content-Type', 'application/pdf')
-  res.setHeader('Content-Disposition',
-    `attachment; filename="${name.replace(/[^\x20-\x7e]|"/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`)
-  res.setHeader('Content-Length', String(buffer.length))
-  res.send(buffer)
+  return pdfFile(asBuffer(pdf), name)
 }

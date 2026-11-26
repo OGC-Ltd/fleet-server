@@ -64,7 +64,7 @@ Two more rules:
      ```
 
 5. **Code under test.** CI only builds images; it never deploys to the clone.
-   - From the operator PC, push the commit under test into the clone's checkout, and build it the way `deploy.yml` does: `npm install`, `prisma generate`, `npm run build`, then `git rev-parse HEAD > dist/.built-commit`. The pm2 fallback is then that commit.
+   - From the operator PC, push the commit under test into the clone's checkout, and build it the way `build-test-deploy.yml` does: `npm install`, `prisma generate`, `npm run build`, then `git rev-parse HEAD > dist/.built-commit`. The pm2 fallback is then that commit.
    - Install the box scripts and the compose files from that commit, as each file's "Install" note says. `fleet-fallback` is new.
    - Note that commit's image tag, `<sha>`.
 

@@ -71,7 +71,10 @@ class ScrubbingSpanExporter implements SpanExporter {
 }
 
 function serviceName(): string {
-  return /report-worker\.(?:js|ts)$/.test(process.argv[1] ?? '') ? 'fleet-report-worker' : 'fleet-server'
+  const entry = process.argv[1] ?? ''
+  if (/report-worker\.(?:js|ts)$/.test(entry)) return 'fleet-report-worker'
+  if (/vss-worker\.(?:js|ts)$/.test(entry)) return 'fleet-vss-worker'
+  return 'fleet-server'
 }
 
 export function startTelemetry(): NodeSDK {

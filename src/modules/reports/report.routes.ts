@@ -13,20 +13,16 @@ import {
   movementReportQuerySchema,
   movementEventsQuerySchema,
   movementPdfBodySchema,
-  dormantPdfBodySchema,
-  geofencePdfBodySchema,
-  tatFuelPdfBodySchema,
-  speedPdfBodySchema,
   probeReportQuerySchema,
-  deliveriesPdfBodySchema,
   tankersReportBodySchema, tatFuelReportQuerySchema,
   endOfShiftQuerySchema,
   endOfShiftBodySchema,
-  shiftDocSchema, reportDocSchema,
+  shiftDocSchema,
 } from './report.schema.js'
 import * as ctrl from './report.controller.js'
 import * as conduct from './driver-conduct.controller.js'
 import * as ranged from './range-reports.controller.js'
+import { reportGate, getReportJob, getReportJobFile } from '../../lib/offload/report-jobs.js'
 import {
   foundCasesSchema, importCasesSchema, caseActionSchema, listCasesQuerySchema,
   incidentSchema, importIncidentsSchema, incidentSharedSchema, dayRangeQuerySchema, unitDistanceBodySchema, odometerAtBodySchema,
@@ -51,35 +47,37 @@ router.get('/summaries', requirePermission('report:read'), validateQuery(listSum
 // Where every unit is now and which way it is going relative to MORL, as a PDF
 // or as data for the Reports page's Movements table, and the PDF of that
 // table as the operator edited it. Positions, so telemetry:read.
-router.get('/reports/movements.pdf', requirePermission('telemetry:read'), validateQuery(movementReportQuerySchema), ctrl.downloadMovementReport)
-router.get('/reports/movements/events', requirePermission('telemetry:read'), validateQuery(movementEventsQuerySchema), ctrl.getMovementEventsData)
-router.get('/reports/movements', requirePermission('telemetry:read'), validateQuery(movementReportQuerySchema), ctrl.getMovementReportData)
+router.get('/reports/movements.pdf', requirePermission('telemetry:read'), validateQuery(movementReportQuerySchema), reportGate, ctrl.downloadMovementReport)
+router.get('/reports/movements/events', requirePermission('telemetry:read'), validateQuery(movementEventsQuerySchema), reportGate, ctrl.getMovementEventsData)
+router.get('/reports/movements', requirePermission('telemetry:read'), validateQuery(movementReportQuerySchema), reportGate, ctrl.getMovementReportData)
 router.post('/reports/movements.pdf', requirePermission('telemetry:read'), validateBody(movementPdfBodySchema), ctrl.downloadEditedMovementReport)
 // Menengai's tankers on the road from the Mombasa depot to MORL, 4 hours at a time
-router.post('/reports/tankers', requirePermission('telemetry:read'), validateBody(tankersReportBodySchema), ctrl.getTankersReportData)
+router.post('/reports/tankers', requirePermission('telemetry:read'), validateBody(tankersReportBodySchema), reportGate, ctrl.getTankersReportData)
 // Each trip signed back in on a fleet day, its fuel and its distance (Sukari's daily sheet)
-router.get('/reports/tat-fuel', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), ctrl.getTatFuelReportData)
-router.get('/reports/speed', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), ctrl.getSpeedReportData)
-router.get('/reports/probe-disconnections', requirePermission('telemetry:read'), validateQuery(probeReportQuerySchema), ctrl.getProbeReportData)
+router.get('/reports/tat-fuel', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), reportGate, ctrl.getTatFuelReportData)
+router.get('/reports/speed', requirePermission('telemetry:read'), validateQuery(tatFuelReportQuerySchema), reportGate, ctrl.getSpeedReportData)
+router.get('/reports/probe-disconnections', requirePermission('telemetry:read'), validateQuery(probeReportQuerySchema), reportGate, ctrl.getProbeReportData)
 // Worked out here, not in the page (v47): fleet days from and to, inclusive.
-router.get('/reports/fuel-consumption-rate', requirePermission('telemetry:read'), validateQuery(dayRangeQuerySchema), ranged.fuelConsumptionRate)
-router.post('/reports/unit-distance', requirePermission('telemetry:read'), validateBody(unitDistanceBodySchema), ranged.unitDistance)
-router.post('/reports/odometer-at', requirePermission('telemetry:read'), validateBody(odometerAtBodySchema), ranged.odometerAt)
+router.get('/reports/fuel-consumption-rate', requirePermission('telemetry:read'), validateQuery(dayRangeQuerySchema), reportGate, ranged.fuelConsumptionRate)
+router.post('/reports/unit-distance', requirePermission('telemetry:read'), validateBody(unitDistanceBodySchema), reportGate, ranged.unitDistance)
+router.post('/reports/odometer-at', requirePermission('telemetry:read'), validateBody(odometerAtBodySchema), reportGate, ranged.odometerAt)
 router.get('/reports/alarm-distribution', requirePermission('vehicle:read'), validateQuery(dayRangeQuerySchema), ranged.alarmDistribution)
 router.get('/reports/unauthorized-passengers', requirePermission('telemetry:read'), validateQuery(dayRangeQuerySchema), ranged.unauthorizedPassengers)
-router.get('/reports/recovery', requirePermission('telemetry:read'), validateQuery(recoveryReportQuerySchema), ctrl.getRecoveryReport)
-router.get('/reports/recovery.pdf', requirePermission('telemetry:read'), validateQuery(recoveryReportQuerySchema), ctrl.downloadRecoveryReport)
+router.get('/reports/recovery', requirePermission('telemetry:read'), validateQuery(recoveryReportQuerySchema), reportGate, ctrl.getRecoveryReport)
+router.get('/reports/recovery.pdf', requirePermission('telemetry:read'), validateQuery(recoveryReportQuerySchema), reportGate, ctrl.downloadRecoveryReport)
 // The rows the page made, for one organisation or several together, drawn on the letterhead.
 // User-read users need this renderer for the group-scoped Login Activity report;
 // telemetry-read report users retain access to their existing editable reports.
 // Weighbridge-read users draw the Weighbridges Tickets, Coverage and Analytics PDFs
 // (18 Nov 2026); Finance Manager holds that and neither of the other two.
-router.post('/reports/document.pdf', requireAnyPermission(['telemetry:read', 'user:read', 'weighbridge:read']), validateBody(reportDocSchema), ctrl.downloadReportDoc)
-router.post('/reports/dormant-assets.pdf', requirePermission('telemetry:read'), validateBody(dormantPdfBodySchema), ctrl.downloadDormantPdf)
-router.post('/reports/geofences.pdf', requirePermission('telemetry:read'), validateBody(geofencePdfBodySchema), ctrl.downloadGeofencePdf)
-router.post('/reports/tat-fuel.pdf', requirePermission('telemetry:read'), validateBody(tatFuelPdfBodySchema), ctrl.downloadTatFuelPdf)
-router.post('/reports/speed.pdf', requirePermission('telemetry:read'), validateBody(speedPdfBodySchema), ctrl.downloadSpeedPdf)
-router.post('/reports/deliveries.pdf', requirePermission('telemetry:read'), validateBody(deliveriesPdfBodySchema), ctrl.downloadDeliveriesPdf)
+// Their bodies are checked against report.schema on the worker thread that draws them
+// (lib/offload/cpu-tasks), so validateBody is not in front of them.
+router.post('/reports/document.pdf', requireAnyPermission(['telemetry:read', 'user:read', 'weighbridge:read']), ctrl.downloadReportDoc)
+router.post('/reports/dormant-assets.pdf', requirePermission('telemetry:read'), ctrl.downloadDormantPdf)
+router.post('/reports/geofences.pdf', requirePermission('telemetry:read'), ctrl.downloadGeofencePdf)
+router.post('/reports/tat-fuel.pdf', requirePermission('telemetry:read'), ctrl.downloadTatFuelPdf)
+router.post('/reports/speed.pdf', requirePermission('telemetry:read'), ctrl.downloadSpeedPdf)
+router.post('/reports/deliveries.pdf', requirePermission('telemetry:read'), ctrl.downloadDeliveriesPdf)
 router.post('/summaries/refresh/:periodId', requirePermission('report:create'), ctrl.refreshSummaries)
 
 // Driver conduct follow-up: the cases a report run finds and what was done on
@@ -127,6 +125,7 @@ router.get(
   requirePermission('weighbridge:read'),
   requirePermission('analytics:read'),
   validateQuery(endOfShiftQuerySchema),
+  reportGate,
   ctrl.downloadEndOfShift,
 )
 // The same report as a document the Reports page shows and lets the operator
@@ -136,6 +135,7 @@ router.get(
   requirePermission('weighbridge:read'),
   requirePermission('analytics:read'),
   validateQuery(endOfShiftQuerySchema),
+  reportGate,
   ctrl.getEndOfShiftDoc,
 )
 // The same, for one category of the fleet (Menengai's fleet list)
@@ -144,6 +144,7 @@ router.post(
   requirePermission('weighbridge:read'),
   requirePermission('analytics:read'),
   validateBody(endOfShiftBodySchema),
+  reportGate,
   ctrl.getEndOfShiftDocFor,
 )
 router.post(
@@ -157,7 +158,14 @@ router.post(
 router.get(
   '/reports/pdf/:kind',
   requirePermission((req) => PDF_PERMISSION[String(req.params['kind'])] ?? 'report:export'),
+  reportGate,
   ctrl.downloadPdfReport,
 )
+
+// A report asked for with `Prefer: respond-async` (lib/offload/report-jobs):
+// where it is, and the file once it is drawn. Only the user who asked, in
+// the same organisation, can read them; no permission beyond that is needed.
+router.get('/reports/jobs/:jobId', getReportJob)
+router.get('/reports/jobs/:jobId/file', getReportJobFile)
 
 export default router

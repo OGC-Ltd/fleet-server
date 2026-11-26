@@ -6,7 +6,7 @@ on the box or changing any port.
 
 | | |
 | --- | --- |
-| Box | `ubuntu@13.247.178.217` (af-south-1, Cape Town), key `keys/ustawi.pem` |
+| Box | `ubuntu@13.244.125.1` (af-south-1, Cape Town), key `keys/ustawi.pem` |
 | OS | Ubuntu 26.04.1 LTS (`resolute`), kernel 7.0.0-1011-aws, t3.medium (2 vCPU, 3.8 GB) |
 | Private IP | `172.31.11.141` in the VPC's `172.31.0.0/16` |
 | Done | 2026-11-03 |

@@ -21,8 +21,12 @@
  *  · Evidence links carry a VSS token, so the browser only ever gets
  *    /api/v1/vss/file?k=…; the real link stays in this process.
  *
- * State is in memory: one process. A restart forgets the caches and the file
- * keys; the dashboard re-reads the alarms (and gets new keys) within 2 min.
+ * Since the vss-worker (src/vss-worker.ts): only that process talks to VSS
+ * for alarms. It captures every organisation's day every 5 minutes into
+ * Redis (30 days) and dashcam_alarms (dashcam-capture, dashcam-store), and
+ * getAlarms serves from there, cache first, then the database (written back
+ * into the cache), never VSS. searchAlarms, the live search, is the worker's.
+ * File keys are kept in Redis too, so the API streams links the worker listed.
  */
 
 import crypto from 'node:crypto'
@@ -35,6 +39,9 @@ import {
 } from '../../providers/vss/index.js'
 import { matchDevice, devicePrefix } from './vss-match.js'
 import { vssEvent, vssCategory, type Category } from './vss-events.js'
+import { isRedisConfigured } from '../../lib/redis.js'
+import { readDays, dbDays, storeDay, readCameras, rememberFile, storedFile } from './dashcam-store.js'
+import { DAY, dayWindow, daysBetween, fleetDayOf } from './fleet-day.js'
 
 // ── tuning ──────────────────────────────────────────────────────────────────
 
@@ -49,7 +56,7 @@ const WINDOW_DETAIL_CALLS = 20
 /** A day window that ended this long ago no longer changes: its answer is kept longer. */
 const SETTLED_MS      = 3_600_000
 const SETTLED_TTL_MS  = 6 * 3_600_000
-let SEARCH_GAP_MS     = 10_000      // between two §3.24 searches (tests shorten it)
+let SEARCH_GAP_MS     = env.VSS_SEARCH_GAP_MS   // between two §3.24 searches, for the whole account (tests shorten it)
 const SEARCH_PAGE     = 2_000       // files per search page
 const SEARCH_PAGES    = 5
 const DETAIL_CHUNK    = 100         // alarm ids per §3.25 lookup
@@ -335,6 +342,7 @@ function fileLink(orgId: string, url: string, download = false): string {
   const k = crypto.createHash('sha1').update(url).digest('hex')
   if (!files.has(k)) {
     files.set(k, { url, orgId, at: Date.now() })
+    rememberFile(k, orgId, url)
     if (files.size > FILES_MAX) {
       const cut = Date.now() - FILES_TTL_MS
       for (const [key, f] of files) if (f.at < cut || files.size > FILES_MAX) files.delete(key)
@@ -344,10 +352,12 @@ function fileLink(orgId: string, url: string, download = false): string {
 }
 
 /** The VSS address behind a private link — only for the organisation it was listed for. */
-export function fileFor(orgId: string, k: string): string | null {
+export async function fileFor(orgId: string, k: string): Promise<string | null> {
   const f = files.get(k)
-  if (!f || f.orgId !== orgId || Date.now() - f.at > FILES_TTL_MS) return null
-  return f.url
+  if (f && f.orgId === orgId && Date.now() - f.at <= FILES_TTL_MS) return f.url
+  // Listed by another process (the vss-worker)
+  const stored = await storedFile(k)
+  return stored && stored.orgId === orgId ? stored.url : null
 }
 
 // ── the alarms answer ───────────────────────────────────────────────────────
@@ -356,12 +366,13 @@ const answers = new Map<string, { at: number; value: AlarmsAnswer }>()
 const inflight = new Map<string, Promise<AlarmsAnswer>>()
 
 /**
- * The organisation's dashcam alarms with evidence since `since`, newest first;
- * with `until`, over that window only, one day at most (a month's Driver
- * conduct reads a day at a time, operator 2026-11-24), every alarm's type
- * looked up.
+ * LIVE from VSS: the organisation's dashcam alarms with evidence since
+ * `since`, newest first; with `until`, over that window only, one day at most
+ * (a month's Driver conduct reads a day at a time, operator 2026-11-24),
+ * every alarm's type looked up. The vss-worker's capture calls this; pages
+ * and reports call getAlarms.
  */
-export async function getAlarms(orgId: string, scope: Set<string> | null, since: string | undefined, until?: string): Promise<AlarmsAnswer> {
+export async function searchAlarms(orgId: string, scope: Set<string> | null, since: string | undefined, until?: string): Promise<AlarmsAnswer> {
   const now = Date.now()
   let sinceMs = since ? Date.parse(since) : NaN
   if (!Number.isFinite(sinceMs)) sinceMs = now - 86_400_000
@@ -432,6 +443,92 @@ export async function getAlarms(orgId: string, scope: Set<string> | null, since:
   })()
   inflight.set(key, job)
   try { return await job } finally { inflight.delete(key) }
+}
+
+// ── what pages and reports read ─────────────────────────────────────────────
+
+/**
+ * How many of these vehicles have a camera, for pages and reports: from the
+ * list the vss-worker refreshes each sync, never VSS's device list. 0 until
+ * the worker has written it. Without Redis (local dev) it is cameraCount, live.
+ */
+export async function pairedCameraCount(orgId: string, scope: Set<string> | null): Promise<number> {
+  if (!isRedisConfigured()) return cameraCount(orgId, scope)
+  const paired = await readCameras(orgId)
+  if (!paired) return 0
+  return scope ? paired.filter((v) => scope.has(v)).length : paired.length
+}
+
+/** Today's cached day older than this means the worker has stopped: the answer says it may be stale. */
+const TODAY_STALE_MS = 15 * 60_000
+
+/**
+ * The organisation's dashcam alarms since `since` (to `until`, or now),
+ * newest first, for the Alarms page and every report. NEVER asks VSS: only the
+ * vss-worker does (src/vss-worker.ts). Read through:
+ *
+ *   1. the Redis day cache (clips and photos included), 30 days;
+ *   2. on a miss, dashcam_alarms for a day the worker captured (numbers, no
+ *      media), and that answer is written into the cache for the next reader;
+ *   3. a day neither holds is left out, and the answer is marked partial:
+ *      the worker's back-fill captures it.
+ *
+ * Today's copy older than 15 minutes (the worker stopped) is still served,
+ * marked stale. Without Redis (local dev) it is searchAlarms, live VSS.
+ */
+export async function getAlarms(orgId: string, scope: Set<string> | null, since: string | undefined, until?: string): Promise<AlarmsAnswer> {
+  if (!isRedisConfigured()) return searchAlarms(orgId, scope, since, until)
+  const now = Date.now()
+  let sinceMs = since ? Date.parse(since) : NaN
+  if (!Number.isFinite(sinceMs)) sinceMs = now - DAY
+  sinceMs = Math.max(sinceMs, now - env.VSS_CACHE_DAYS * DAY)
+  const askedUntil = until ? Date.parse(until) : NaN
+  const untilMs = Number.isFinite(askedUntil) ? Math.max(sinceMs, Math.min(askedUntil, now)) : now
+  const from = vssTime(sinceMs), to = vssTime(untilMs)
+
+  const paired = await readCameras(orgId)
+  const countCameras = (held: number) => paired ? (scope ? paired.filter((v) => scope.has(v)).length : paired.length) : (scope ? 0 : held)
+  if (untilMs <= sinceMs) return { incidents: [], cameras: countCameras(0), from, to }
+
+  const days = daysBetween(sinceMs, untilMs)
+  const today = fleetDayOf(now)
+  const cached = await readDays(orgId, days, now)
+  const fromDb = await dbDays(orgId, days.filter((d) => !cached.has(d)))
+  const heldCameras = Math.max(0, ...[...cached.values()].map((v) => v.cameras))
+
+  // Read through: what the database answered goes into the cache, where nothing is held yet.
+  for (const [d, v] of fromDb) {
+    void storeDay(orgId, d, {
+      cameras: paired?.length ?? heldCameras, incidents: v.incidents, partial: v.partial,
+      through: Math.min(dayWindow(d).to, v.capturedAt), cachedAt: v.capturedAt, source: 'db',
+    }, { onlyIfAbsent: true })
+  }
+
+  const seen = new Set<string>()
+  const incidents: DashcamIncident[] = []
+  const take = (i: DashcamIncident) => {
+    if (seen.has(i.id) || !i.occurredAt) return
+    if (scope && !scope.has(i.vehicleId)) return
+    const t = Date.parse(i.occurredAt)
+    if (!(t >= sinceMs && t <= untilMs)) return
+    seen.add(i.id)
+    incidents.push(i)
+  }
+  for (const v of cached.values()) v.incidents.forEach(take)
+  for (const v of fromDb.values()) v.incidents.forEach(take)
+  incidents.sort((x, y) => String(y.occurredAt).localeCompare(String(x.occurredAt)))
+
+  const missing = days.filter((d) => !cached.has(d) && !fromDb.has(d))
+  const todayAt = cached.get(today)?.cachedAt ?? fromDb.get(today)?.capturedAt
+  const stale = days.includes(today) && (todayAt === undefined || now - todayAt > TODAY_STALE_MS)
+  const partial = missing.length > 0 || [...cached.values()].some((v) => v.partial) || [...fromDb.values()].some((v) => v.partial)
+  const untyped = incidents.filter((i) => !i.code).length
+  return {
+    incidents, cameras: countCameras(heldCameras), from, to,
+    ...(partial ? { partial: true } : {}),
+    ...(stale ? { stale: true } : {}),
+    ...(untyped ? { untyped } : {}),
+  }
 }
 
 /** For tests: forget everything held in memory, and optionally shorten the search gap. */

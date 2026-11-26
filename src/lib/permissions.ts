@@ -123,6 +123,9 @@ export const PERMISSION_CATALOGUE = {
   // the Ops Room Operator's page. A read of feed events the live feed already
   // carries; held by that role and Admin (and through access:full).
   'gate_log:read':         'View the Gate log: sign-outs and returns',
+  // Its one action (operator, 2026-11-26): say a sign-out truly left or a
+  // return truly came in, or that it did not. The same two roles.
+  'gate_log:acknowledge':  'Acknowledge a Gate log event: it left, or it came in',
   'weighbridge:create':    'Record a weighbridge entry',
   'weighbridge:update':    'Amend a weighbridge entry',
   'weighbridge:export':    'Download weighbridge records',
@@ -417,7 +420,7 @@ const ROLE_BASE: RoleDefinition[] = [
       // The Gate log (operator, 2026-11-25: admins see the page; the pop-ups
       // stay the Ops Room Operator's, who has no live feed). Named here rather
       // than in ORG_EVERYTHING so heads of section and managers do not get it.
-      'gate_log:read',
+      'gate_log:read', 'gate_log:acknowledge',
       'security_case:read', 'security_case:update',
       'fuel_theft:triage',
       'fuel_audit:read',
@@ -596,7 +599,7 @@ const ROLE_BASE: RoleDefinition[] = [
 
   {
     slug: 'ops_room_operator', name: 'Ops Room Operator', platform: false, vehicleScopable: false,
-    description: 'The Gate log (sign-outs and returns) and the weighbridges, view only; no map, live feed, alerts, reports or administration.',
+    description: 'The Gate log (sign-outs and returns, which it acknowledges) and the weighbridges; no map, live feed, alerts, reports or administration.',
     /*
      * 2026-11-25, the operator: a person in the ops room sees the gate's
      * sign-outs and returns, and the weighbridges where the organisation has
@@ -606,14 +609,17 @@ const ROLE_BASE: RoleDefinition[] = [
      * its stream (every event, unfiltered). The gate's events come through
      * their own route (modules/gate-log) on `gate_log:read`, which can only
      * answer with sign-outs and returns. No `map:read`, `alerts:read`,
-     * `report:*`, `analytics:*`, `user:*` (beyond what every role carries),
-     * and no right to act on anything.
+     * `report:*`, `analytics:*`, `user:*` (beyond what every role carries).
+     *
+     * One right to act, and only on the gate (2026-11-26, the operator: "a
+     * decision section for them to either acknowledge it truly left or got
+     * into the premises"): `gate_log:acknowledge`. Nothing else it can change.
      *
      * `vehicle:read` and `telemetry:read` for the weighbridge screen alone, as
      * on the Operator: it turns a ticket's plate into a unit we track.
      */
     permissions: [
-      'gate_log:read',
+      'gate_log:read', 'gate_log:acknowledge',
       'weighbridge:read',
       'vehicle:read', 'telemetry:read',
     ],

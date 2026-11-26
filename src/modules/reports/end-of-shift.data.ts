@@ -26,7 +26,7 @@ import { feedSourcesFor, feedGrantsFor } from '../../lib/authz/subject.js'
 import { getFleetSnapshot } from '../telemetry/telemetry.service.js'
 import { findAllFillings, findAllThefts } from '../fuel/fuel.repository.js'
 import { speedingSummary } from '../incidents/incidents.service.js'
-import { cameraCount, getAlarms } from '../dashcam/dashcam.service.js'
+import { pairedCameraCount, getAlarms } from '../dashcam/dashcam.service.js'
 import { getWeighmentDay } from '../weighments/weighment.service.js'
 import { getWeighbridges } from '../weighments/weighbridge.service.js'
 import {
@@ -233,7 +233,7 @@ async function usageOf(units: ShiftUnit[], from: number, to: number): Promise<Sh
 }
 
 async function alarmsOf(orgId: string, scope: Set<string> | null, from: number): Promise<ShiftAlarm[] | null> {
-  const cams = await cameraCount(orgId, scope).catch(() => 0)
+  const cams = await pairedCameraCount(orgId, scope).catch(() => 0)
   if (!cams) return null
   const answer = await getAlarms(orgId, scope, new Date(from).toISOString())
   return answer.incidents.map((a) => ({ code: a.code, label: a.label, occurredAt: a.occurredAt, vehicleId: a.vehicleId, plate: a.plate }))

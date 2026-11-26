@@ -14,7 +14,7 @@
 #
 # Install (root-owned):
 #   sudo install -o root -g root -m 755 deploy/box/fleet-edge /usr/local/sbin/fleet-edge
-#   sudo install -o root -g root -m 644 docker-compose.edgecheck.yml /etc/fleet/compose/
+#   sudo install -o root -g root -m 644 docker-compose.edge-check.yml /etc/fleet/compose/
 #   sudo cp -r deploy/edge /etc/fleet/compose/deploy/   (root-owned, read-only to others)
 #
 # The host's nginx and certbot stay installed, stopped and disabled, as the
@@ -35,7 +35,7 @@ PERMS='chgrp -R 101 /etc/letsencrypt/live /etc/letsencrypt/archive && chmod -R g
 die() { echo "fleet-edge: $*" >&2; exit 1; }
 say() { echo "--- $*"; }
 [ "$(id -u)" = 0 ] || die "run as root (sudo)"
-for f in docker-compose.prod.yml docker-compose.phase3.yml deploy/edge/nginx.conf; do
+for f in docker-compose.prod.yml docker-compose.web-loopback.yml deploy/edge/nginx.conf; do
   [ -f "$COMPOSE_DIR/$f" ] || die "missing $COMPOSE_DIR/$f"
 done
 
@@ -49,7 +49,7 @@ compose() {   # project, compose args...
   local p=$1; shift
   FLEET_SERVER_IMAGE="${SERVER_IMAGE:-${REPO}:fleet-server-none}" RAITRACK_IMAGE="${WEB_IMAGE:-${REPO}:raitrack-none}" \
   FLEET_ENV_FILE="${ENV_FILE:-/etc/fleet/server.env}" SERVER_HOST_PORT="${SERVER_PORT:-3000}" WEB_HOST_PORT=8081 \
-    docker compose -f "$COMPOSE_DIR/docker-compose.prod.yml" -f "$COMPOSE_DIR/docker-compose.phase3.yml" ${EXTRA:-} \
+    docker compose -f "$COMPOSE_DIR/docker-compose.prod.yml" -f "$COMPOSE_DIR/docker-compose.web-loopback.yml" ${EXTRA:-} \
       -p "$p" --profile edge "$@"
 }
 
@@ -139,7 +139,7 @@ case "${1:-}" in
     [ "$(mode)" = host ] || die "the check compares against host nginx, which is not the only one serving (mode $(mode))"
 
     export SERVER_IMAGE="${REPO}:fleet-server-${ssha}" WEB_IMAGE="${REPO}:raitrack-${wsha}"
-    export ENV_FILE=$S SERVER_PORT=3011 EXTRA="-f $COMPOSE_DIR/docker-compose.edgecheck.yml"
+    export ENV_FILE=$S SERVER_PORT=3011 EXTRA="-f $COMPOSE_DIR/docker-compose.edge-check.yml"
     P=fleet-edgecheck
     pull "$SERVER_IMAGE"; pull "$WEB_IMAGE"
     trap 'compose "$P" down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
