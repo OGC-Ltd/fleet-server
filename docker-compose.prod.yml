@@ -15,7 +15,7 @@
 #   (none)    phase 1-2: server + report-worker + vss-worker; the host's nginx proxies to
 #             127.0.0.1:${SERVER_HOST_PORT}
 #   web       phase 3:   + web, published on 127.0.0.1:8081 by adding
-#             -f docker-compose.phase3.yml
+#             -f docker-compose.web-loopback.yml
 #   edge      phase 4:   + edge (owns host 80/443) + certbot; host nginx stopped
 #   migrate   one-off:   docker compose run --rm migrate
 #
@@ -71,7 +71,7 @@ services:
     # limit for buffers and native memory. Change both numbers together.
     command: ["node", "--max-old-space-size=1024", "dist/src/index.js"]
     ports:
-      # Loopback only. Keep it through phase 4 as well: deploy.yml's health
+      # Loopback only. Keep it through phase 4 as well: build-test-deploy.yml's health
       # check and fleet-deploy's wait_healthy both curl 127.0.0.1:3000/health.
       - "127.0.0.1:${SERVER_HOST_PORT:-3001}:3000"
     # Uses about 1.1 GB. Swap stays allowed (Docker's default, 2x the limit):
@@ -129,7 +129,7 @@ services:
     # Same reason as `migrate`: unset fails at pull time, not for every service.
     image: ${RAITRACK_IMAGE:-raitrack-image-not-set}
     # No ports here: phase 3 adds 127.0.0.1:8081 through
-    # docker-compose.phase3.yml, because an internal network cannot publish.
+    # docker-compose.web-loopback.yml, because an internal network cannot publish.
     tmpfs:
       - /tmp:size=32m,mode=1777
     mem_limit: 64m

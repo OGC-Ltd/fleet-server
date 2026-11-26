@@ -184,16 +184,16 @@ That leaves about 7 GiB free during the rollout, with the old pm2 setup still in
   - It re-checks all of the above, plus 3 GiB free, before every start.
   - It pulls from ECR with the instance role (a login that lasts minutes, then logout), and runs compose project `fleet-shadow` on `127.0.0.1:3001`.
   - Commands: `sudo fleet-shadow up <sha>` / `status` / `down`.
-- **`deploy.yml` ignores** pushes that change only CI, docs, compose, `deploy/edge` or `deploy/box` files, so container work no longer restarts the live server.
+- **`build-test-deploy.yml` ignores** pushes that change only CI, docs, compose, `deploy/edge` or `deploy/box` files, so container work no longer restarts the live server.
 - **Pre-cutover fixes (2026-11-16):**
-  - **Image files deploy.** `Dockerfile`, `.dockerignore`, `.trivyignore*` and `deploy/certs/**` trigger `deploy.yml` again, because in container mode they are what ships. In pm2 mode a scope step skips the git push and the restart when a push changes nothing else.
+  - **Image files deploy.** `Dockerfile`, `.dockerignore`, `.trivyignore*` and `deploy/certs/**` trigger `build-test-deploy.yml` again, because in container mode they are what ships. In pm2 mode a scope step skips the git push and the restart when a push changes nothing else.
   - **Drift warning.** Each deploy compares the box's installed compose files, edge config and box scripts with the commit, and warns on any difference. They are still installed by hand.
-  - **One image build per commit, never cancelled** (`images.yml` concurrency is keyed by sha). Before, a quick second push cancelled the first commit's build, and that commit's container deploy failed after its 20-minute wait.
+  - **One image build per commit, never cancelled** (`build-push-images.yml` concurrency is keyed by sha). Before, a quick second push cancelled the first commit's build, and that commit's container deploy failed after its 20-minute wait.
   - **Server heap ceiling set** with `--max-old-space-size=1024` in compose. Without it, node sizes the heap from the 1536m container limit (~384 MB), not from the host's 3.8 GB (~950 MB under pm2).
   - **Base image pinned by digest, and Debian refreshed each run.** The `APT_REFRESH` build-arg changes every CI run, as raitrack's `APK_REFRESH` does, so the cached `apt-get upgrade` layer can no longer freeze security fixes.
 - **The pm2 fallback, made dependable (2026-11-16).** Until the phase 4 cleanup, pm2 is the way back from containers. These keep it working:
   - **One writer, enforced by the database.** A server with `POLL_ENABLED` takes a Postgres advisory lock at boot (`src/lib/leader-lock.ts`, `LEADER_LOCK_ENABLED` / `LEADER_LOCK_WAIT_S`). A second server, such as pm2 started beside the containers, waits 90 s for the lock and then exits before starting anything. It logs who holds the lock. If the lock's connection drops, the holder shuts down and its restart takes the lock again. CI's boot test checks the lock on a real Postgres.
-  - **The fallback is built at the live commit.** In container mode, `deploy.yml` also pushes and builds the pm2 checkout, without starting pm2, and writes `dist/.built-commit`.
+  - **The fallback is built at the live commit.** In container mode, `build-test-deploy.yml` also pushes and builds the pm2 checkout, without starting pm2, and writes `dist/.built-commit`.
     - If that fails, the deploy warns but does not fail.
     - `fleet-deploy back-to-pm2` refuses when the fallback's commit is not the containers' commit, unless given `--accept-stale`.
     - **Schema rule while pm2 is the fallback:** migrations only add (new tables, nullable or defaulted columns). No renames and no drops until after the phase 4 cleanup, so even a stale fallback still matches the database.
@@ -225,7 +225,7 @@ That leaves about 7 GiB free during the rollout, with the old pm2 setup still in
   - `up <sha>` / `rollback`: refuses unless the box is in container mode. If `/health` or the worker fails, it goes back to the previous image by itself. Keeps two images.
   - `back-to-pm2`: stops the containers, copies the reports made since then back to `.cache`, and starts pm2.
   - **pm2 and the containers never serve together.** `mode` reports `BOTH` if they ever do, and CI refuses to deploy.
-- **CI (fleet-server `deploy.yml`)** asks `fleet-deploy mode` first. In `pm2` mode it runs today's git-push deploy. In `containers` mode it runs `fleet-deploy up <sha>`, which waits up to 20 min for images.yml to push the image.
+- **CI (fleet-server `build-test-deploy.yml`)** asks `fleet-deploy mode` first. In `pm2` mode it runs today's git-push deploy. In `containers` mode it runs `fleet-deploy up <sha>`, which waits up to 20 min for build-push-images.yml to push the image.
 - **`deploy/box/fleet-web`** runs the site image as project `fleet-web` on `127.0.0.1:8081`.
   - `check <sha>` compares the image's files and answers with what host nginx serves today.
   - `up <sha>` starts or replaces the container.
@@ -233,7 +233,7 @@ That leaves about 7 GiB free during the rollout, with the old pm2 setup still in
   - `back` puts the static version back.
 - **CI (new-ui `deploy.yml`)** still publishes the files to `~/prod/dash/build`, which is the way back. After `switch`, it also runs `fleet-web up <sha>`.
 - **`deploy/box/fleet-edge`** handles phase 4: the `edge` and `certbot` containers in project `fleet`, beside `server` and `web` (`fleet-web` now uses project `fleet` too, so the edge can reach both on their networks).
-  - `check <server-sha> <web-sha>`: runs a throwaway project (`fleet-edgecheck`, `docker-compose.edgecheck.yml`) with the edge on `127.0.0.1:18080/18443`, in front of the shadow's harmless server and the site image. It compares the edge with host nginx: HTTP and HTTPS answers, HTTP/2, TLS 1.2 and 1.3, the certificate fingerprint, the redirect, the API, SSE auth, webhooks, cache headers and the ACME path. It also checks the edge runs as uid 101 with no capabilities, a read-only root file system and nofile 65535.
+  - `check <server-sha> <web-sha>`: runs a throwaway project (`fleet-edgecheck`, `docker-compose.edge-check.yml`) with the edge on `127.0.0.1:18080/18443`, in front of the shadow's harmless server and the site image. It compares the edge with host nginx: HTTP and HTTPS answers, HTTP/2, TLS 1.2 and 1.3, the certificate fingerprint, the redirect, the API, SSE auth, webhooks, cache headers and the ACME path. It also checks the edge runs as uid 101 with no capabilities, a read-only root file system and nofile 65535.
   - `certbot-dry-run`: a staging renewal from the certbot container, on a copy of `/etc/letsencrypt`.
   - `switch`: needs phases 2 and 3 first. It copies the certificates into the `certs` volume, without the host's renewal hooks and with keys readable by group 101. It then stops host nginx, starts `edge` and `certbot`, and checks the site commit, HTTPS on HTTP/2, the API and the redirect. If a check fails, it stops the edge and starts host nginx again. On success, host nginx and `certbot.timer` are disabled, so a reboot cannot start both.
   - `back`: copies any renewed certificates back to `/etc/letsencrypt` and starts host nginx and its timer again.
@@ -341,9 +341,9 @@ The containers' 127.0.0.1 port publishing becomes unnecessary here, since only t
 **Files**
 - fleet-server:
   - `Dockerfile` (deps → build → migrate / runtime) and `.dockerignore`
-  - `docker-compose.prod.yml` and `docker-compose.phase3.yml`
+  - `docker-compose.prod.yml` and `docker-compose.web-loopback.yml`
   - `deploy/edge/` (nginx.conf, conf.d, fleet/locations.conf)
-  - `.github/workflows/images.yml`
+  - `.github/workflows/build-push-images.yml`
   - `VSS_SESSION_FILE` setting
   - `xlsx` moved into `dependencies` and upgraded to 0.20.3
   - dev compose on PostGIS

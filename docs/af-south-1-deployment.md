@@ -46,7 +46,7 @@ reason. Presents as a 403 that reads like a config error.
 
 **node is nvm-only and absent from the non-login PATH.** Any non-interactive
 `ssh <box> <command>` must `. "$HOME/.nvm/nvm.sh"` first, or node, npm and pm2
-are all "command not found". `deploy.yml` handles this by exporting the nvm bin
+are all "command not found". `build-test-deploy.yml` handles this by exporting the nvm bin
 directory explicitly; that path is version-pinned, so it has to move whenever
 the box's node does.
 
@@ -132,7 +132,7 @@ the referrer restriction in the Google Cloud console, not the key.
 
 ### CI
 
-`deploy.yml` takes the host from repository secrets, so pointing it at this box
+`build-test-deploy.yml` takes the host from repository secrets, so pointing it at this box
 is a **secrets change, not a code change**:
 
 | Secret | Set to |

@@ -166,7 +166,7 @@ docs/                 design notes and runbooks (see Further docs)
 ## Deployment
 
 **Every push to `main` deploys to production** via
-`.github/workflows/deploy.yml`:
+`.github/workflows/build-test-deploy.yml`:
 
 1. compiles and runs the unit tests on a clean runner;
 2. pushes the commit into the box's checkout at `~/prod/fleet-server` (the box

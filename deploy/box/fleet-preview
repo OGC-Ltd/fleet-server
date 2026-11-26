@@ -57,7 +57,7 @@ MIN_FREE_GIB=3
 
 die() { echo "fleet-preview: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die "run as root (sudo)"
-for f in docker-compose.prod.yml docker-compose.phase3.yml docker-compose.preview.yml deploy/edge/preview/fleet.conf; do
+for f in docker-compose.prod.yml docker-compose.web-loopback.yml docker-compose.preview.yml deploy/edge/preview/fleet.conf; do
   [ -f "$COMPOSE_DIR/$f" ] || die "missing $COMPOSE_DIR/$f"
 done
 
@@ -71,7 +71,7 @@ bind_addr() { [ -n "$(allowed)" ] && echo 0.0.0.0 || echo 127.0.0.1; }
 compose() {
   FLEET_SERVER_IMAGE="${SERVER_IMAGE:-${REPO}:fleet-server-none}" RAITRACK_IMAGE="${WEB_IMAGE:-${REPO}:raitrack-none}" \
   FLEET_ENV_FILE="$ENV_FILE" SERVER_HOST_PORT=4001 WEB_HOST_PORT=8081 PREVIEW_ADDR="$(bind_addr)" \
-    docker compose -f "$COMPOSE_DIR/docker-compose.prod.yml" -f "$COMPOSE_DIR/docker-compose.phase3.yml" \
+    docker compose -f "$COMPOSE_DIR/docker-compose.prod.yml" -f "$COMPOSE_DIR/docker-compose.web-loopback.yml" \
       -f "$COMPOSE_DIR/docker-compose.preview.yml" -p "$PROJECT" --profile edge "$@"
 }
 quiet() { local out; out=$("$@" 2>&1) || { printf '%s\n' "$out" | tail -15 >&2; return 1; }; }

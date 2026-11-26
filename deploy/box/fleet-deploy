@@ -201,7 +201,7 @@ edge_serving() {
   [ -f /etc/fleet/edge.on ] || [ -n "$(docker ps -q --filter label=com.docker.compose.project=fleet --filter label=com.docker.compose.service=edge)" ]
 }
 
-# The commit the pm2 checkout was last BUILT at (deploy.yml writes it after
+# The commit the pm2 checkout was last BUILT at (build-test-deploy.yml writes it after
 # `npm run build`, also in container mode, where pm2 is not started).
 fallback_commit() { cat "$LIVE_DIR/dist/.built-commit" 2>/dev/null || echo unknown; }
 

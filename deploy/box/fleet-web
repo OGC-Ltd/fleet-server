@@ -15,7 +15,7 @@
 #
 # Install (root-owned):
 #   sudo install -o root -g root -m 755 deploy/box/fleet-web /usr/local/sbin/fleet-web
-#   sudo install -o root -g root -m 644 docker-compose.phase3.yml /etc/fleet/compose/docker-compose.phase3.yml
+#   sudo install -o root -g root -m 644 docker-compose.web-loopback.yml /etc/fleet/compose/docker-compose.web-loopback.yml
 #
 # ~/prod/dash/build stays in place as the way back until phase 4.
 set -Eeuo pipefail
@@ -44,7 +44,7 @@ REPO="${REGISTRY}/ghala"
 # no env file to read.
 compose() {
   FLEET_SERVER_IMAGE=unused FLEET_ENV_FILE=/dev/null RAITRACK_IMAGE="${IMAGE:-${REPO}:raitrack-none}" WEB_HOST_PORT="$PORT" \
-    docker compose -f "$COMPOSE_DIR/docker-compose.prod.yml" -f "$COMPOSE_DIR/docker-compose.phase3.yml" \
+    docker compose -f "$COMPOSE_DIR/docker-compose.prod.yml" -f "$COMPOSE_DIR/docker-compose.web-loopback.yml" \
       -p "$PROJECT" --profile web "$@"
 }
 
