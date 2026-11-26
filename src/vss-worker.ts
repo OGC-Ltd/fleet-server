@@ -22,7 +22,7 @@
  * Set before anything reads the environment, which is why the rest is imported after.
  */
 
-process.env['DB_POOL_MAX'] ??= '3'
+process.env['DB_POOL_MAX'] ??= '4'
 
 const { logger } = await import('./lib/logger.js')
 const { env } = await import('./config/env.js')

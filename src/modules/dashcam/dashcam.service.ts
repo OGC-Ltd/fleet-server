@@ -56,7 +56,7 @@ const WINDOW_DETAIL_CALLS = 20
 /** A day window that ended this long ago no longer changes: its answer is kept longer. */
 const SETTLED_MS      = 3_600_000
 const SETTLED_TTL_MS  = 6 * 3_600_000
-let SEARCH_GAP_MS     = 10_000      // between two §3.24 searches (tests shorten it)
+let SEARCH_GAP_MS     = env.VSS_SEARCH_GAP_MS   // between two §3.24 searches, for the whole account (tests shorten it)
 const SEARCH_PAGE     = 2_000       // files per search page
 const SEARCH_PAGES    = 5
 const DETAIL_CHUNK    = 100         // alarm ids per §3.25 lookup

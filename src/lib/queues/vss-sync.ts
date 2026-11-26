@@ -4,9 +4,9 @@
  * vss-worker process (src/vss-worker.ts), a BullMQ repeatable like the nightly
  * capture beside it.
  *
- * One organisation at a time, through the process's own VSS search queue (one
- * search every 10 s for the whole account): with seven organisations a cycle
- * is a minute or two. In the first hour of a fleet day the day before is
+ * Each organisation in its own lane, VSS_ORG_CONCURRENCY at once
+ * (modules/dashcam/org-lanes): the type lookups and writes overlap, while the
+ * searches still take turns, one every 10 s for the whole VSS account. In the first hour of a fleet day the day before is
  * captured too, so its last minutes are not left to the nightly re-capture.
  * A cycle still running when the next tick comes skips that tick.
  *
@@ -20,6 +20,7 @@ import { env } from '../../config/env.js'
 import { logger } from '../logger.js'
 import { captureDay, dashcamTablesReady, organisationsWithCameras, type DayCapture } from '../../modules/dashcam/dashcam-capture.js'
 import { dayWindow, fleetDayOf } from '../../modules/dashcam/fleet-day.js'
+import { inLanes } from '../../modules/dashcam/org-lanes.js'
 
 export const VSS_SYNC_QUEUE = 'vss-sync'
 const SYNC_JOB = 'vss-sync:today'
@@ -50,8 +51,9 @@ export async function runVssSync(now = Date.now()): Promise<VssSyncCycle> {
     logger.warn('VSS sync: dashcam tables not there yet (migration not run) — nothing captured')
     return cycle
   }
-  for (const o of await organisationsWithCameras()) {
-    const entry: VssSyncCycle['orgs'][number] = { org: o.code, days: [] }
+  const orgs = await organisationsWithCameras()
+  const entries = orgs.map((o) => ({ o, entry: { org: o.code, days: [] } as VssSyncCycle['orgs'][number] }))
+  await inLanes(entries, env.VSS_ORG_CONCURRENCY, async ({ o, entry }) => {
     for (const day of days) {
       try {
         const { orgId: _o, ...r } = await captureDay(o.id, day, { now: Date.now() })
@@ -62,8 +64,8 @@ export async function runVssSync(now = Date.now()): Promise<VssSyncCycle> {
         logger.warn({ err, org: o.code, day }, 'VSS sync: day not captured — tried again next tick')
       }
     }
-    cycle.orgs.push(entry)
-  }
+  })
+  cycle.orgs = entries.map((e) => e.entry)
   cycle.ms = Date.now() - startedAt
   logger.info({
     days,
