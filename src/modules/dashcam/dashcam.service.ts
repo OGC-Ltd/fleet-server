@@ -21,11 +21,11 @@
  *  · Evidence links carry a VSS token, so the browser only ever gets
  *    /api/v1/vss/file?k=…; the real link stays in this process.
  *
- * Since the vss-worker (src/vss-worker.ts): only that process searches VSS
- * on a schedule. It captures every organisation's day every 5 minutes into
+ * Since the vss-worker (src/vss-worker.ts): only that process talks to VSS
+ * for alarms. It captures every organisation's day every 5 minutes into
  * Redis (30 days) and dashcam_alarms (dashcam-capture, dashcam-store), and
- * getAlarms serves from there. searchAlarms, the live search, is what the
- * worker calls, and what getAlarms falls back to for a day nothing holds yet.
+ * getAlarms serves from there, cache first, then the database (written back
+ * into the cache), never VSS. searchAlarms, the live search, is the worker's.
  * File keys are kept in Redis too, so the API streams links the worker listed.
  */
 
@@ -40,7 +40,7 @@ import {
 import { matchDevice, devicePrefix } from './vss-match.js'
 import { vssEvent, vssCategory, type Category } from './vss-events.js'
 import { isRedisConfigured } from '../../lib/redis.js'
-import { readDays, dbDays, rememberFile, storedFile } from './dashcam-store.js'
+import { readDays, dbDays, storeDay, readCameras, rememberFile, storedFile } from './dashcam-store.js'
 import { DAY, dayWindow, daysBetween, fleetDayOf } from './fleet-day.js'
 
 // ── tuning ──────────────────────────────────────────────────────────────────
@@ -447,23 +447,34 @@ export async function searchAlarms(orgId: string, scope: Set<string> | null, sin
 
 // ── what pages and reports read ─────────────────────────────────────────────
 
-/** Today's cached day older than this means the worker has stopped: VSS is asked instead. */
-const TODAY_STALE_MS = 15 * 60_000
-
-async function camerasFor(orgId: string, scope: Set<string> | null, fallback: number): Promise<number> {
-  try { return await cameraCount(orgId, scope) } catch { return fallback }
+/**
+ * How many of these vehicles have a camera, for pages and reports: from the
+ * list the vss-worker refreshes each sync, never VSS's device list. 0 until
+ * the worker has written it. Without Redis (local dev) it is cameraCount, live.
+ */
+export async function pairedCameraCount(orgId: string, scope: Set<string> | null): Promise<number> {
+  if (!isRedisConfigured()) return cameraCount(orgId, scope)
+  const paired = await readCameras(orgId)
+  if (!paired) return 0
+  return scope ? paired.filter((v) => scope.has(v)).length : paired.length
 }
+
+/** Today's cached day older than this means the worker has stopped: the answer says it may be stale. */
+const TODAY_STALE_MS = 15 * 60_000
 
 /**
  * The organisation's dashcam alarms since `since` (to `until`, or now),
- * newest first, as the Alarms page and the reports want them. Same answer as
- * searchAlarms, served from what the vss-worker captured:
+ * newest first, for the Alarms page and every report. NEVER asks VSS: only the
+ * vss-worker does (src/vss-worker.ts). Read through:
  *
  *   1. the Redis day cache (clips and photos included), 30 days;
- *   2. dashcam_alarms for a captured day the cache no longer holds (numbers, no media);
- *   3. live VSS, only for days neither holds and VSS still has (two weeks).
+ *   2. on a miss, dashcam_alarms for a day the worker captured (numbers, no
+ *      media), and that answer is written into the cache for the next reader;
+ *   3. a day neither holds is left out, and the answer is marked partial:
+ *      the worker's back-fill captures it.
  *
- * Without Redis it is searchAlarms, as before the worker.
+ * Today's copy older than 15 minutes (the worker stopped) is still served,
+ * marked stale. Without Redis (local dev) it is searchAlarms, live VSS.
  */
 export async function getAlarms(orgId: string, scope: Set<string> | null, since: string | undefined, until?: string): Promise<AlarmsAnswer> {
   if (!isRedisConfigured()) return searchAlarms(orgId, scope, since, until)
@@ -474,35 +485,25 @@ export async function getAlarms(orgId: string, scope: Set<string> | null, since:
   const askedUntil = until ? Date.parse(until) : NaN
   const untilMs = Number.isFinite(askedUntil) ? Math.max(sinceMs, Math.min(askedUntil, now)) : now
   const from = vssTime(sinceMs), to = vssTime(untilMs)
-  if (untilMs <= sinceMs) return { incidents: [], cameras: await camerasFor(orgId, scope, 0), from, to }
+
+  const paired = await readCameras(orgId)
+  const countCameras = (held: number) => paired ? (scope ? paired.filter((v) => scope.has(v)).length : paired.length) : (scope ? 0 : held)
+  if (untilMs <= sinceMs) return { incidents: [], cameras: countCameras(0), from, to }
 
   const days = daysBetween(sinceMs, untilMs)
   const today = fleetDayOf(now)
   const cached = await readDays(orgId, days, now)
-  for (const [d, v] of cached) if (d === today && now - v.cachedAt > TODAY_STALE_MS) cached.delete(d)
+  const fromDb = await dbDays(orgId, days.filter((d) => !cached.has(d)))
+  const heldCameras = Math.max(0, ...[...cached.values()].map((v) => v.cameras))
 
-  // Today is never read from the database: it is only as fresh as the cache it missed.
-  const fromDb = await dbDays(orgId, days.filter((d) => !cached.has(d) && d !== today))
-  const liveFloor = now - MAX_DAYS * DAY
-  const liveDays = days.filter((d) => !cached.has(d) && !fromDb.has(d) && dayWindow(d).to > liveFloor)
-
-  let live: AlarmsAnswer | null = null
-  let liveError: unknown = null
-  if (liveDays.length) {
-    const lf = Math.max(sinceMs, dayWindow(liveDays[0]!).from)
-    const lt = Math.min(untilMs, dayWindow(liveDays.at(-1)!).to)
-    try {
-      // One search over the missing stretch: a window of a day at most, or since `lf` to now.
-      live = await searchAlarms(orgId, scope, new Date(lf).toISOString(), lt - lf <= WINDOW_MAX_MS ? new Date(lt).toISOString() : undefined)
-    } catch (err) {
-      liveError = err
-      logger.warn({ err, orgId, days: liveDays }, 'dashcam: days not captured yet and VSS did not answer')
-    }
+  // Read through: what the database answered goes into the cache, where nothing is held yet.
+  for (const [d, v] of fromDb) {
+    void storeDay(orgId, d, {
+      cameras: paired?.length ?? heldCameras, incidents: v.incidents, partial: v.partial,
+      through: Math.min(dayWindow(d).to, v.capturedAt), cachedAt: v.capturedAt, source: 'db',
+    }, { onlyIfAbsent: true })
   }
-  // Nothing held and VSS refused: the same error the page met before the worker.
-  if (liveError && cached.size === 0 && fromDb.size === 0) throw liveError
 
-  const liveSet = new Set(liveDays)
   const seen = new Set<string>()
   const incidents: DashcamIncident[] = []
   const take = (i: DashcamIncident) => {
@@ -514,18 +515,18 @@ export async function getAlarms(orgId: string, scope: Set<string> | null, since:
     incidents.push(i)
   }
   for (const v of cached.values()) v.incidents.forEach(take)
-  for (const list of fromDb.values()) list.forEach(take)
-  if (live) for (const i of live.incidents) if (i.occurredAt && liveSet.has(fleetDayOf(Date.parse(i.occurredAt)))) take(i)
+  for (const v of fromDb.values()) v.incidents.forEach(take)
   incidents.sort((x, y) => String(y.occurredAt).localeCompare(String(x.occurredAt)))
 
-  const heldCameras = Math.max(0, ...[...cached.values()].map((v) => v.cameras))
-  const cameras = live ? live.cameras : scope || !cached.size ? await camerasFor(orgId, scope, heldCameras) : heldCameras
-  const partial = [...cached.values()].some((v) => v.partial) || Boolean(live?.partial) || Boolean(liveError)
+  const missing = days.filter((d) => !cached.has(d) && !fromDb.has(d))
+  const todayAt = cached.get(today)?.cachedAt ?? fromDb.get(today)?.capturedAt
+  const stale = days.includes(today) && (todayAt === undefined || now - todayAt > TODAY_STALE_MS)
+  const partial = missing.length > 0 || [...cached.values()].some((v) => v.partial) || [...fromDb.values()].some((v) => v.partial)
   const untyped = incidents.filter((i) => !i.code).length
   return {
-    incidents, cameras, from, to,
+    incidents, cameras: countCameras(heldCameras), from, to,
     ...(partial ? { partial: true } : {}),
-    ...(liveError || live?.stale ? { stale: true } : {}),
+    ...(stale ? { stale: true } : {}),
     ...(untyped ? { untyped } : {}),
   }
 }

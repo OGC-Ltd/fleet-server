@@ -21,6 +21,8 @@ import { logger } from '../logger.js'
 import { captureDay, dashcamTablesReady, organisationsWithCameras, type DayCapture } from '../../modules/dashcam/dashcam-capture.js'
 import { dayWindow, fleetDayOf } from '../../modules/dashcam/fleet-day.js'
 import { inLanes } from '../../modules/dashcam/org-lanes.js'
+import { orgDevices } from '../../modules/dashcam/dashcam.service.js'
+import { storeCameras } from '../../modules/dashcam/dashcam-store.js'
 
 export const VSS_SYNC_QUEUE = 'vss-sync'
 const SYNC_JOB = 'vss-sync:today'
@@ -54,6 +56,12 @@ export async function runVssSync(now = Date.now()): Promise<VssSyncCycle> {
   const orgs = await organisationsWithCameras()
   const entries = orgs.map((o) => ({ o, entry: { org: o.code, days: [] } as VssSyncCycle['orgs'][number] }))
   await inLanes(entries, env.VSS_ORG_CONCURRENCY, async ({ o, entry }) => {
+    // Which vehicles have a camera, for readers that must not ask VSS (getAlarms)
+    try {
+      await storeCameras(o.id, [...(await orgDevices(o.id, null)).values()].map((d) => d.vehicleId))
+    } catch (err) {
+      logger.warn({ err, org: o.code }, 'VSS sync: camera list not refreshed')
+    }
     for (const day of days) {
       try {
         const { orgId: _o, ...r } = await captureDay(o.id, day, { now: Date.now() })

@@ -84,13 +84,15 @@ Each captured day is written to two places:
 - **Redis cache db**: one gzipped key per organisation per day, `vss:alarms:v1:<orgId>:<day>`, kept `VSS_CACHE_DAYS` (30) days. It holds the whole answer, clip and photo links included.
 - **Link keys** (`vss:file:v1:<k>`, 15 days): let the API stream a clip that the worker listed.
 
-`getAlarms` serves the Alarms page and every report from these sources, in order:
+`getAlarms` serves the Alarms page and every report. It **never asks VSS**; only the vss-worker does. It reads in this order:
 
 1. The cache.
-2. The database, for a captured day the cache no longer holds. Clips and photos are missing for these days.
-3. Live VSS (`searchAlarms`), only for days that neither holds and VSS still has.
+2. On a miss, the database, for a day the worker captured. Clips and photos are missing for these days. The database's answer is written into the cache with `SET NX`, so it never replaces the worker's copy that has clips. The worker's next capture of that day merges the clips back in.
+3. A day neither holds is left out and the answer is marked `partial`. The back-fill captures that day.
 
-Today's cached copy counts as stale after 15 minutes, which means the worker has stopped. In that case VSS is asked directly. Without `REDIS_URL`, `getAlarms` is the live search, as it was before the worker.
+- **Camera counts:** the end-of-shift report and the Alarms tab's `GET /vss/cameras` use `pairedCameraCount`, read from `vss:cameras:v1:<org>`. The worker refreshes that key on every sync, so neither asks VSS for its device list. Only live video (`modules/camera`, the stream when a camera is opened) still talks to VSS.
+- **Stale today:** today's copy older than 15 minutes, meaning the worker has stopped, is still served but marked `stale`.
+- **Without `REDIS_URL`** (local dev), `getAlarms` is the live search.
 
 Run **one** vss-worker only. VSS allows one search every 10 s per account, and that pacing is held inside one process. The worker and the server share the VSS session file in the `fleet-cache` volume, and a process whose token is refused takes the other's saved token before it logs in again (VSS error 10082 limits logins).
 

@@ -21,7 +21,7 @@ import { sendSuccess, sendError } from '../../core/response/response.js'
 import { BadRequestError, ForbiddenError } from '../../core/errors/errors.js'
 import { logger } from '../../lib/logger.js'
 import { fetchVssFile, VssError, VSS_TOO_FREQUENT, VSS_LOGIN_LIMITED } from '../../providers/vss/index.js'
-import { cameraCount, getAlarms, fileFor } from './dashcam.service.js'
+import { pairedCameraCount, getAlarms, fileFor } from './dashcam.service.js'
 import { ALARM_ID, feedbackBodySchema, feedbackFor, addFeedback } from './dashcam-feedback.js'
 
 const orgFromQuery: RequestHandler = (req, _res, next) => {
@@ -47,7 +47,7 @@ const router = Router()
 
 router.get('/cameras', ...guard, noStore, async (req, res, next) => {
   try {
-    const cameras = await cameraCount(req.params['orgId'] as string, req.authz?.vehicleIds ?? null)
+    const cameras = await pairedCameraCount(req.params['orgId'] as string, req.authz?.vehicleIds ?? null)
     sendSuccess(res, { cameras })
   } catch (err) {
     // The count only decides whether the tab shows: VSS being down is "0".

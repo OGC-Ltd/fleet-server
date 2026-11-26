@@ -28,7 +28,7 @@ vi.mock('../../src/providers/vss/index.js', async (orig) => {
   }
 })
 vi.mock('../../src/modules/dashcam/dashcam.service.js', () => ({
-  cameraCount: vi.fn(async () => 3),
+  pairedCameraCount: vi.fn(async () => 3),
   getAlarms: vi.fn(async () => ({ incidents: [], cameras: 3, from: 'a', to: 'b' })),
   fileFor: vi.fn(() => null),
 }))
@@ -46,7 +46,7 @@ describe('GET /api/v1/vss/cameras', () => {
     const res = await request(app).get(`/api/v1/vss/cameras?org=${TEST_ORG_ID}`)
     expect(res.status).toBe(200)
     expect(res.body.data).toEqual({ cameras: 3 })
-    expect(vi.mocked(svc.cameraCount).mock.calls[0][0]).toBe(TEST_ORG_ID)
+    expect(vi.mocked(svc.pairedCameraCount).mock.calls[0][0]).toBe(TEST_ORG_ID)
   })
   it('refuses another organisation', async () => {
     const res = await request(app).get('/api/v1/vss/cameras?org=org_someone_else')
@@ -62,7 +62,7 @@ describe('GET /api/v1/vss/cameras', () => {
   it('passes the caller’s vehicle scope on', async () => {
     setTestSubject({ vehicleScope: ['veh_1'] })
     await request(app).get(`/api/v1/vss/cameras?org=${TEST_ORG_ID}`)
-    expect([...(vi.mocked(svc.cameraCount).mock.calls.at(-1)![1] ?? [])]).toEqual(['veh_1'])
+    expect([...(vi.mocked(svc.pairedCameraCount).mock.calls.at(-1)![1] ?? [])]).toEqual(['veh_1'])
   })
 })
 
