@@ -185,10 +185,73 @@ export function spotAt(lat: number, lng: number, plans: SitePlan[], fences: Site
   if (open) return { site: open.name, area: null, from: 'site-plan' }
 
   // 3. The organisation's own geofences, smallest first.
-  const fence = fences
-    .filter(s => s.fence && fenceHa(s) <= MAX_NAMING_FENCE_HA && inFence(lat, lng, s.fence))
-    .sort((a, b) => fenceHa(a) - fenceHa(b))[0]
+  const fence = fencesAt(lat, lng, fences).find(s => inFence(lat, lng, s.fence!))
   return fence ? { site: fence.name, area: null, from: 'geofence' } : null
+}
+
+// ── Finding the fences around a point ───────────────────────────────────────
+//
+// Every fix of a Logbook is tested against the organisation's geofences. On
+// 26 Nov 2026 a 3-month review of one Menengai unit had 241,009 distinct fixes
+// and the organisation 3,106 fences. Testing each fix against every fence was
+// ~750 million tests, 145 s with the event loop held throughout. The report
+// worker could not renew its job's lock, so the queue ran the build again. Its
+// heartbeat lapsed too, so the API built the same review a third time.
+//
+// So the fences that can name a place are indexed once per list: each fence's
+// area and bounding box are worked out once, and every fence is filed under
+// each CELL_DEG square its box touches, smallest fence first. A point is then
+// tested only against the fences of its own square, a handful at most.
+
+/** About 2.2 km; a naming fence (≤ MAX_NAMING_FENCE_HA, ~4.5 km across) touches a few. */
+const CELL_DEG = 0.02
+const M_PER_DEG = 111_320
+
+interface FenceIndex { cells: Map<string, Site[]> }
+const indexCache = new WeakMap<Site[], FenceIndex>()
+const cellOf = (lat: number, lng: number) => `${Math.floor(lat / CELL_DEG)},${Math.floor(lng / CELL_DEG)}`
+
+/** [minLng, minLat, maxLng, maxLat] of a fence that can name a place; null for any other. */
+function fenceBox(f: NonNullable<Site['fence']>): [number, number, number, number] | null {
+  if (f.type === 'CIRCLE') {
+    const dLat = f.radiusM / M_PER_DEG
+    const dLng = f.radiusM / (M_PER_DEG * Math.max(0.01, Math.cos(f.centerLat * Math.PI / 180)))
+    return [f.centerLng - dLng, f.centerLat - dLat, f.centerLng + dLng, f.centerLat + dLat]
+  }
+  if (f.type !== 'POLYGON' || !f.polygonCoords.length) return null
+  const b: [number, number, number, number] = [Infinity, Infinity, -Infinity, -Infinity]
+  for (const [x, y] of f.polygonCoords) { b[0] = Math.min(b[0], x); b[1] = Math.min(b[1], y); b[2] = Math.max(b[2], x); b[3] = Math.max(b[3], y) }
+  return b
+}
+
+function fenceIndex(fences: Site[]): FenceIndex {
+  let ix = indexCache.get(fences)
+  if (ix) return ix
+  // Smallest first, as spotAt picks; a stable sort keeps the list's own order between equals.
+  const naming = fences
+    .filter(s => s.fence && fenceHa(s) <= MAX_NAMING_FENCE_HA)
+    .sort((a, b) => fenceHa(a) - fenceHa(b))
+  const cells = new Map<string, Site[]>()
+  for (const s of naming) {
+    const b = fenceBox(s.fence!)
+    if (!b || !b.every(Number.isFinite)) continue
+    for (let y = Math.floor(b[1] / CELL_DEG); y <= Math.floor(b[3] / CELL_DEG); y++) {
+      for (let x = Math.floor(b[0] / CELL_DEG); x <= Math.floor(b[2] / CELL_DEG); x++) {
+        const k = `${y},${x}`
+        const list = cells.get(k)
+        if (list) list.push(s); else cells.set(k, [s])
+      }
+    }
+  }
+  ix = { cells }
+  indexCache.set(fences, ix)
+  return ix
+}
+
+/** The naming fences whose box could hold this point, smallest first. Not yet tested against the fence itself. */
+function fencesAt(lat: number, lng: number, fences: Site[]): Site[] {
+  if (!fences.length) return []
+  return fenceIndex(fences).cells.get(cellOf(lat, lng)) ?? []
 }
 
 /**
@@ -404,7 +467,7 @@ export function siteVisits(points: ReviewPoint[], plans: SitePlan[], fences: Sit
     if (seen.has(k)) continue
     seen.add(k)
     if (spot(p.lat, p.lng)?.from !== 'geofence') continue
-    const held = [...new Set(named.filter(f => inFence(p.lat, p.lng, f.fence!)).map(f => f.name))]
+    const held = [...new Set(fencesAt(p.lat, p.lng, fences).filter(f => inFence(p.lat, p.lng, f.fence!)).map(f => f.name))]
     for (const n of held.slice(1)) {
       const a = group(held[0]!), b = group(n)
       if (a !== b) parent.set(b, a)

@@ -49,13 +49,21 @@ export async function processRender(job: Job<RenderData>) {
   return { bytes: buf.length }
 }
 
+/** How long a build's lock holds without a renewal (renewed every half of it). */
+export const BUILD_LOCK_MS = 120_000
+
 /** Starts both workers, the heartbeat and the store's sweep. */
 export async function startReportWorker(): Promise<{ stop: () => Promise<void> }> {
   const connection = getQueueRedis()
   if (!connection) throw new Error('REDIS_URL is not set: the report worker needs the queue')
   setBuildSlots(env.REPORT_BUILD_CONCURRENCY)
 
-  const builds = new Worker<BuildData>(REVIEW_QUEUE, processBuild, { connection, concurrency: env.REPORT_BUILD_CONCURRENCY })
+  // A build's lock lasts BUILD_LOCK_MS, not BullMQ's 30 s. A step that holds
+  // the event loop past the lock makes the queue think the job died, and it
+  // runs the build again from the start. On 26 Nov 2026 a fence scan held the
+  // loop for 145 s (now indexed, see usage-review.siteplans), and one review
+  // was built three times.
+  const builds = new Worker<BuildData>(REVIEW_QUEUE, processBuild, { connection, concurrency: env.REPORT_BUILD_CONCURRENCY, lockDuration: BUILD_LOCK_MS })
   const renders = new Worker<RenderData>(RENDER_QUEUE, processRender, { connection, concurrency: 2 })
   for (const [w, what] of [[builds, 'build'], [renders, 'render']] as const) {
     w.on('failed', (job, err) => logger.warn({ jobId: job?.id, attempts: job?.attemptsMade, err: err.message }, `Report worker: ${what} failed`))
