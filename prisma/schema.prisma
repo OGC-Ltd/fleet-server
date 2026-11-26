@@ -347,6 +347,7 @@ model Organisation {
   deliveryDays         DeliveryDay[]
   deliveryDayVersions  DeliveryDayVersion[]
   deliveryOrders       DeliveryOrder[]
+  gateAcknowledgements GateAcknowledgement[]
 
   @@map("organisations")
 }
@@ -512,6 +513,7 @@ model User {
   /// Workflow: jobs this person works in the workshop, and investigations they hold.
   repairItemsWorkshop            RepairReportItem[]      @relation("RepairItemsWorkshopTech")
   securityInvestigationsAssigned SecurityInvestigation[] @relation("SecurityInvestigationsAssigned")
+  gateAcknowledgements           GateAcknowledgement[]
 
   @@index([organisationId])
   @@index([email])
@@ -4163,4 +4165,31 @@ model FactorySuiteFuelIssue {
   @@index([organisationId, day])
   @@index([factoryCode, day])
   @@map("factorysuite_fuel_issues")
+}
+
+/// A Gate log event acknowledged (operator, 2026-11-26): it did leave, or it
+/// did come in (CONFIRMED), or it did not (DISPUTED, with why). The latest
+/// decision per event; the event itself is a live-feed line, pointed at by its
+/// feedId. modules/gate-log.
+model GateAcknowledgement {
+  id             String   @id @default(cuid())
+  organisationId String   @map("organisation_id")
+  eventId        String   @map("event_id")
+  alertType      String   @map("alert_type")
+  vehicleId      String?  @map("vehicle_id")
+  plate          String?
+  eventAt        DateTime @map("event_at")
+  /// CONFIRMED or DISPUTED (a CHECK in the migration).
+  outcome        String
+  note           String?
+  decidedById    String?  @map("decided_by_id")
+  /// The name as it was when they decided.
+  decidedByName  String   @map("decided_by_name")
+  decidedAt      DateTime @default(now()) @map("decided_at")
+
+  organisation Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  decidedBy    User?        @relation(fields: [decidedById], references: [id], onDelete: SetNull)
+
+  @@unique([organisationId, eventId])
+  @@map("gate_acknowledgements")
 }
