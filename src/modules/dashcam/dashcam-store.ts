@@ -10,7 +10,11 @@
  *    process can stream a file the worker listed (file keys used to live only
  *    in the memory of the process that searched).
  *  · Postgres (dashcam_alarms): the numbers of every captured day, for good:
- *    the fallback for a day the cache does not hold. No media.
+ *    the fallback for a day the cache does not hold. No media. What it
+ *    answers is written back into the cache (only where the key is empty, so
+ *    the worker's copy with media is never replaced by it).
+ *  · Redis: each organisation's vehicles with a paired camera, so readers
+ *    count cameras without asking VSS for its device list.
  *
  * Nothing here throws: a Redis or database problem reads as "not held", and
  * the caller falls back to the next source.
@@ -31,6 +35,7 @@ const gunzip = promisify(zlib.gunzip)
 
 const dayKey = (orgId: string, day: string) => `vss:alarms:v1:${orgId}:${day}`
 const fileKey = (k: string) => `vss:file:v1:${k}`
+const camerasKey = (orgId: string) => `vss:cameras:v1:${orgId}`
 /** VSS deletes its files after about two weeks; a link key past that has nothing to stream. */
 const FILE_TTL_S = 15 * 86_400
 
@@ -43,6 +48,16 @@ export interface StoredDay {
   through: number
   /** When it was captured (ms). */
   cachedAt: number
+  /** 'db': written back from dashcam_alarms by a reader, without clips or photos. */
+  source?: 'vss' | 'db'
+}
+
+/** A captured day as the database holds it. */
+export interface DbDay {
+  incidents: DashcamIncident[]
+  partial: boolean
+  /** When the worker last captured it (ms). */
+  capturedAt: number
 }
 
 // Parsed blobs, briefly: the rail badge and the page poll the same day over and over.
@@ -51,13 +66,20 @@ const MEMO_TODAY_MS = 30_000
 const MEMO_PAST_MS = 10 * 60_000
 const memo = new Map<string, { at: number; value: StoredDay }>()
 
-/** Cache one day. False when Redis is not there (the database still has the numbers). */
-export async function storeDay(orgId: string, day: string, value: StoredDay): Promise<boolean> {
+/**
+ * Cache one day. False when Redis is not there (the database still has the
+ * numbers), or, with `onlyIfAbsent`, when the key is already held.
+ */
+export async function storeDay(orgId: string, day: string, value: StoredDay, { onlyIfAbsent = false } = {}): Promise<boolean> {
   const redis = getCacheRedis()
   if (!redis) return false
   try {
     const buf = await gzip(Buffer.from(JSON.stringify(value)))
-    await redis.set(dayKey(orgId, day), buf, 'EX', env.VSS_CACHE_DAYS * 86_400)
+    const ttl = env.VSS_CACHE_DAYS * 86_400
+    const ok = onlyIfAbsent
+      ? await redis.set(dayKey(orgId, day), buf, 'EX', ttl, 'NX')
+      : await redis.set(dayKey(orgId, day), buf, 'EX', ttl)
+    if (ok !== 'OK') return false
     memo.delete(dayKey(orgId, day))
     return true
   } catch (err) {
@@ -99,6 +121,30 @@ export async function readDays(orgId: string, days: string[], now = Date.now()):
   return out
 }
 
+/** The vehicles of an organisation with a paired camera (the worker writes it each sync). */
+export async function storeCameras(orgId: string, vehicleIds: string[]): Promise<void> {
+  const redis = getCacheRedis()
+  if (!redis) return
+  try {
+    await redis.set(camerasKey(orgId), JSON.stringify(vehicleIds), 'EX', env.VSS_CACHE_DAYS * 86_400)
+  } catch (err) {
+    logger.warn({ err, orgId }, 'dashcam store: cameras not cached')
+  }
+}
+
+/** Those vehicles, or null when the worker has not written them. */
+export async function readCameras(orgId: string): Promise<string[] | null> {
+  const redis = getCacheRedis()
+  if (!redis) return null
+  try {
+    const raw = await redis.get(camerasKey(orgId))
+    const v = raw ? JSON.parse(raw) : null
+    return Array.isArray(v) ? v.map(String) : null
+  } catch {
+    return null
+  }
+}
+
 /** Keep a clip or photo's real address where every process can find it. */
 export function rememberFile(k: string, orgId: string, url: string): void {
   const redis = getCacheRedis()
@@ -125,17 +171,17 @@ export async function storedFile(k: string): Promise<{ orgId: string; url: strin
  * The days the database holds (captured at least once), with their alarms.
  * No clips or photos: those were only ever in VSS.
  */
-export async function dbDays(orgId: string, days: string[]): Promise<Map<string, DashcamIncident[]>> {
-  const out = new Map<string, DashcamIncident[]>()
+export async function dbDays(orgId: string, days: string[]): Promise<Map<string, DbDay>> {
+  const out = new Map<string, DbDay>()
   if (!days.length) return out
   try {
     const held = await prisma.dashcamCaptureDay.findMany({
       where: { organisationId: orgId, day: { in: days } },
-      select: { day: true },
+      select: { day: true, partial: true, capturedAt: true },
     })
     if (!held.length) return out
     const heldDays = held.map((h) => h.day).sort()
-    for (const d of heldDays) out.set(d, [])
+    for (const h of held) out.set(h.day, { incidents: [], partial: h.partial, capturedAt: h.capturedAt.getTime() })
     const rows = await prisma.dashcamAlarm.findMany({
       where: {
         organisationId: orgId,
@@ -145,7 +191,7 @@ export async function dbDays(orgId: string, days: string[]): Promise<Map<string,
       take: 200_000,
     })
     for (const r of rows) {
-      const list = out.get(fleetDayOf(r.occurredAt.getTime()))
+      const list = out.get(fleetDayOf(r.occurredAt.getTime()))?.incidents
       if (!list) continue      // a day between two held ones that was never captured
       // An alarm held without its type reads as the live answer would give it: "Unknown".
       const ev = vssEvent(r.code)

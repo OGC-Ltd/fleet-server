@@ -14,7 +14,7 @@ const redis = vi.hoisted(() => {
   return {
     kv,
     client: {
-      set: async (k: string, v: Buffer | string, _ex: 'EX', s: number) => { kv.set(k, { v, ex: s }); return 'OK' },
+      set: async (k: string, v: Buffer | string, _ex: 'EX', s: number, nx?: 'NX') => { if (nx && kv.has(k)) return null; kv.set(k, { v, ex: s }); return 'OK' },
       get: async (k: string) => { const e = kv.get(k); return e ? String(e.v) : null },
       mgetBuffer: async (...ks: string[]) => ks.map((k) => { const e = kv.get(k); return e ? Buffer.from(e.v as Buffer) : null }),
     },
@@ -48,6 +48,20 @@ describe('day cache', () => {
     expect(got.get('2026-11-26')).toEqual(sample)
   })
 
+  it('a write-back never replaces a day already held', async () => {
+    await store.storeDay(ORG, '2026-11-26', sample)
+    expect(await store.storeDay(ORG, '2026-11-26', { ...sample, incidents: [], source: 'db' }, { onlyIfAbsent: true })).toBe(false)
+    store.resetStoreMemo()
+    expect((await store.readDays(ORG, ['2026-11-26'])).get('2026-11-26')!.incidents).toHaveLength(1)
+    expect(await store.storeDay(ORG, '2026-11-25', { ...sample, source: 'db' }, { onlyIfAbsent: true })).toBe(true)
+  })
+
+  it('the camera list round-trips; none written reads as null', async () => {
+    expect(await store.readCameras(ORG)).toBeNull()
+    await store.storeCameras(ORG, ['veh_1', 'veh_2'])
+    expect(await store.readCameras(ORG)).toEqual(['veh_1', 'veh_2'])
+  })
+
   it('a link key resolves to its VSS address, kept 15 days', async () => {
     store.rememberFile('k1', ORG, 'https://vss/f?token=T')
     await new Promise((r) => setImmediate(r))
@@ -59,14 +73,14 @@ describe('day cache', () => {
 
 describe('database days', () => {
   it('only days captured, typed as the live answer would be', async () => {
-    prismaMock.dashcamCaptureDay.findMany.mockResolvedValue([{ day: '2026-11-24' }] as never)
+    prismaMock.dashcamCaptureDay.findMany.mockResolvedValue([{ day: '2026-11-24', partial: false, capturedAt: new Date('2026-11-25T22:30:00Z') }] as never)
     prismaMock.dashcamAlarm.findMany.mockResolvedValue([
       { id: 'X', organisationId: ORG, vehicleId: null, plate: 'KCJ 099T', deviceId: '7', occurredAt: new Date('2026-11-24T05:00:00Z'),
         code: 0, label: '', group: '', severity: '', category: '', speedKmh: null, lat: null, lng: null, capturedAt: new Date(), typedAt: null },
     ] as never)
     const got = await store.dbDays(ORG, ['2026-11-23', '2026-11-24'])
     expect([...got.keys()]).toEqual(['2026-11-24'])
-    const [x] = got.get('2026-11-24')!
+    const [x] = got.get('2026-11-24')!.incidents
     expect(x).toMatchObject({ id: 'X', code: 0, label: 'Unknown', vehicleId: '', occurredAt: '2026-11-24T05:00:00Z', videos: [], photos: [] })
   })
 
