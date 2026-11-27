@@ -84,16 +84,34 @@ export function sensorValue(expr: string, params: Record<string, unknown>): numb
 /** The account's label for a value: the entry with the highest key at or below it. */
 export function labelFor(config: string | undefined, value: number): string | null {
   if (!config) return null
-  let ci: Record<string, { t?: string }> | undefined
-  try { ci = (JSON.parse(config) as { ci?: Record<string, { t?: string }> }).ci } catch { return null }
   let best: { at: number; text: string } | null = null
-  for (const [key, entry] of Object.entries(ci ?? {})) {
-    const at = Number(key)
-    const text = entry?.t?.trim()
-    if (!Number.isFinite(at) || at > value || !text) continue
+  for (const { at, text } of labelsOf(config)) {
+    if (at > value) continue
     if (!best || at > best.at) best = { at, text }
   }
   return best?.text ?? null
+}
+
+/**
+ * A sensor config's labels, parsed once per distinct config string: this runs on every message of
+ * every unit, and a fleet has a few dozen distinct configs, not thousands. Bounded all the same.
+ */
+const parsedLabels = new Map<string, Array<{ at: number; text: string }>>()
+function labelsOf(config: string): Array<{ at: number; text: string }> {
+  const held = parsedLabels.get(config)
+  if (held) return held
+  let list: Array<{ at: number; text: string }> = []
+  try {
+    const ci = (JSON.parse(config) as { ci?: Record<string, { t?: string }> }).ci ?? {}
+    list = Object.entries(ci).flatMap(([key, entry]) => {
+      const at = Number(key)
+      const text = entry?.t?.trim()
+      return Number.isFinite(at) && text ? [{ at, text }] : []
+    })
+  } catch { /* a malformed config costs the label, nothing else */ }
+  if (parsedLabels.size > 5_000) parsedLabels.clear()
+  parsedLabels.set(config, list)
+  return list
 }
 
 /** What one message says about the tracker's status sensors. */
