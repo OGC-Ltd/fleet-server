@@ -66,6 +66,14 @@ describe('the tracker’s status, by the account’s labels', () => {
     expect(readTrackerStatus(sensors(BLE_BATT), { io_29: 36 })).toEqual({ faults: [], ok: ['fuel_probe_battery'] })
     expect(readTrackerStatus(sensors(BLE_BATT), { io_29: 0 })).toEqual({ faults: [], ok: [] })
   })
+  it('the variants the account has (2026-11-27): Healthy spelt right, Fls labelled Healthy', () => {
+    const batt = { ...BLE_BATT, c: cfg({ 3.2: 'Needs Replacement', 3.3: 'Battery Degrading', 3.5: 'Healthy' }) }
+    expect(readTrackerStatus(sensors(batt), { io_29: 36 })).toEqual({ faults: [], ok: ['fuel_probe_battery'] })
+    expect(readTrackerStatus(sensors(batt), { io_29: 34 }).faults[0]?.reason).toBe('Fuel probe battery: Battery Degrading (3.40 V)')
+    const fls = { ...FLS, c: cfg({ 1: 'NO Calibration', 2: 'Healthy' }) }
+    expect(readTrackerStatus(sensors(fls), { flls1: 2 })).toEqual({ faults: [], ok: ['fuel_probe_status'] })
+    expect(readTrackerStatus(sensors(fls), { flls1: 1 })).toEqual({ faults: [], ok: [] })
+  })
   it('GPS: without a fix or with invalid data is a fault; Off and Sleep are neither', () => {
     expect(readTrackerStatus(sensors(GNSS), { io_69: 2 }).faults[0]).toEqual({ kind: 'gnss_fault', reason: 'GPS: On without Fix', raw: 2 })
     expect(readTrackerStatus(sensors(GNSS), { io_69: 4 }).faults[0]?.reason).toBe('GPS: ON with fix, invalid data')

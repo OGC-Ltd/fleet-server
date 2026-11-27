@@ -50,7 +50,7 @@ interface Family {
 /** Order matters only for the words: a unit with two probe faults gets both reasons, status first. */
 const FAMILIES: Family[] = [
   { name: /\bfls\s*status\b/i, kind: 'fuel_probe_status',
-    fault: /\berror\b/i, healthy: /^ready$/i,
+    fault: /\berror\b/i, healthy: /^(ready|healthy)$/i, // one unit labels 2 'Healthy' (2026-11-27)
     words: (l) => `Fuel probe: Status ${l}` }, // 'Status Error': the FCR note strips 'Fuel probe: '
   { name: /\bprobe\w*\s+status\b/i, kind: 'fuel_probe_status',
     fault: /no fuel error|not paired/i, healthy: /^healthy$/i,
@@ -59,7 +59,7 @@ const FAMILIES: Family[] = [
     fault: /abnormal|sensor failed|not found/i, healthy: /$^/, // a plain temperature has no label: neither
     words: (l) => `Fuel probe: ${l}` },
   { name: /\bprobe\w*\s+battery\b/i, kind: 'fuel_probe_battery',
-    fault: /needs replacement|degrading/i, healthy: /^hea(l)?thly$/i, // the account spells it both ways
+    fault: /needs replacement|degrading/i, healthy: /^(healthy|heathly)$/i, // 'Heathly' on most units, 'Healthy' on some
     words: (l, v) => `Fuel probe battery: ${l} (${v.toFixed(2)} V)` },
   { name: /\bgnss\s+status\b/i, kind: 'gnss_fault',
     fault: /without fix|invalid data/i, healthy: /^on with fix$/i,
