@@ -11,7 +11,7 @@ import { getMovementEvents } from './movement-events.service.js'
 import { getTankersReport } from './tankers-report.service.js'
 import { getTatFuelReport } from './tat-fuel-report.service.js'
 import { getSpeedReport } from './speed-report.service.js'
-import { getProbeReport } from './probe-disconnection.service.js'
+import { getProbeReport, getUnitProbeReport } from './probe-disconnection.service.js'
 import { movementFileName, movementReportsFileName } from './movement-report.pdf.js'
 import { getRecoveryVehicleReport } from './recovery-report.service.js'
 import { reportPool, sendReport, type ReportFile } from '../../lib/offload/report-jobs.js'
@@ -283,11 +283,18 @@ export const downloadTatFuelPdf = postedPdf('tat-fuel')
 export const downloadSpeedPdf = postedPdf('speed')
 export const downloadDeliveriesPdf = postedPdf('deliveries')
 
-/** GET /organisations/:orgId/reports/probe-disconnections?from&to — each time a unit's fuel probe was disconnected. */
+/** GET /organisations/:orgId/reports/probe-disconnections?from&to[&vehicleId] — each time a unit's fuel probe was disconnected. */
 export const getProbeReportData: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as ProbeReportQuery
-    sendSuccess(res, await getProbeReport(p(req, 'orgId'), q.from, q.to, req.authz?.vehicleIds ?? null))
+    const scope = req.authz?.vehicleIds ?? null
+    if (q.vehicleId) {
+      // A unit outside the caller's scope reads as no unit at all, never as an error that confirms it exists.
+      const one = !scope || scope.has(q.vehicleId) ? q.vehicleId : null
+      sendSuccess(res, await getUnitProbeReport(p(req, 'orgId'), q.from, q.to, one))
+      return
+    }
+    sendSuccess(res, await getProbeReport(p(req, 'orgId'), q.from, q.to, scope))
   } catch (err) { next(err) }
 }
 

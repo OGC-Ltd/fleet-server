@@ -911,6 +911,8 @@ export async function findFleetSnapshot(orgId: string) {
     last_moved_at: Date | null
     fuel_probe_fault: boolean | null
     fuel_probe_fault_reason: string | null
+    tracker_faults: unknown
+    tracker_ok: unknown
     camera_fitted: boolean | null
     camera_stream_url: string | null
     camera_recording: boolean | null
@@ -939,6 +941,9 @@ export async function findFleetSnapshot(orgId: string) {
         -- the flags blob; absent (SQL NULL) for every other provider.
         (r.payload->'flags'->>'fuelProbeFault')::boolean AS fuel_probe_fault,
         r.payload->'flags'->>'fuelProbeFaultReason' AS fuel_probe_fault_reason,
+        -- The tracker's status codes (wialon.status-codes); absent on units without those sensors.
+        r.payload->'flags'->'trackerFaults' AS tracker_faults,
+        r.payload->'flags'->'trackerOk' AS tracker_ok,
         -- Newest ping with actual movement — powers the "stationary for …"
         -- readout on parked vehicles (same index walk, newest-first, stops at
         -- the first moving row).
@@ -1125,6 +1130,9 @@ export async function findFleetSnapshot(orgId: string) {
         fuelProbeFault: ping?.fuel_probe_fault ?? false,
         // The tracker's reason, while it reports a fault (operator, 2026-11-25)
         fuelProbeFaultReason: ping?.fuel_probe_fault ? ping?.fuel_probe_fault_reason ?? null : null,
+        // The tracker's status faults and the kinds it last showed healthy (operator, 2026-11-27)
+        trackerFaults: Array.isArray(ping?.tracker_faults) ? ping.tracker_faults : [],
+        trackerOk: Array.isArray(ping?.tracker_ok) ? ping.tracker_ok : [],
         // Already reported for a fuel probe repair (fuel/probe-hold). Nothing
         // is held back for it; the card and the alerts say it was reported.
         probeHold: onHold.has(v.id),

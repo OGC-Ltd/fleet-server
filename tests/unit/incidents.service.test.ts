@@ -139,4 +139,11 @@ describe('the detail list is per unit', () => {
     expect(repo.speedingList).toHaveBeenCalledWith(ORG, { from, to },
       expect.objectContaining({ vehicleId: 'veh1', limit: 50 }))
   })
+  it('kind=all asks for every kind: a unit’s fault history, System and Wialon (2026-11-27)', async () => {
+    vi.mocked(repo.faultList).mockResolvedValue({ data: [], cursor: null, hasNextPage: false } as never)
+    await service.faultList(ORG, { from, to, vehicleId: 'veh1', kind: 'all', limit: 50 })
+    expect(repo.faultList).toHaveBeenLastCalledWith(ORG, { from, to }, expect.objectContaining({ kinds: 'all' }))
+    await service.faultList(ORG, { from, to, vehicleId: 'veh1', limit: 50 })
+    expect(repo.faultList).toHaveBeenLastCalledWith(ORG, { from, to }, expect.objectContaining({ kinds: undefined }))
+  })
 })

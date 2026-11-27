@@ -153,6 +153,8 @@ const PROBE_REPORT_MAX_DAYS = 31
 export const probeReportQuerySchema = z.object({
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'from must be YYYY-MM-DD'),
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'to must be YYYY-MM-DD'),
+  /** One unit only (the Sensor Monitor's fault history): only that unit is read from Wialon, truck or not. */
+  vehicleId: z.string().cuid().optional(),
 }).superRefine((q, ctx) => {
   const days = (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000
   if (!(days >= 0)) ctx.addIssue({ code: 'custom', path: ['to'], message: 'to must not be before from' })

@@ -101,7 +101,8 @@ export async function faultSummary(orgId: string, q: SummaryQuery) {
 
 export async function faultList(orgId: string, q: ListQuery) {
   return repo.faultList(orgId, range(q.from, q.to), {
-    vehicleId: q.vehicleId, kinds: kindsFrom(q.kind), cursor: q.cursor, limit: q.limit,
+    // kind=all: a unit's fault history, System and Wialon together (operator, 2026-11-27)
+    vehicleId: q.vehicleId, kinds: q.kind === 'all' ? 'all' : kindsFrom(q.kind), cursor: q.cursor, limit: q.limit,
   })
 }
 
