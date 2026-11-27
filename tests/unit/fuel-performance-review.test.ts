@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  buildPerformanceReview, reviewUnit, dailyWork, workBetween, equipmentGroup, unitRef, classify, statusOf, median,
+  buildPerformanceReview, reviewUnit, meterStep, dailyWork, workBetween, equipmentGroup, unitRef, classify, statusOf, median,
   type ReviewDay, type ReviewFill, type ReviewVehicle,
 } from '../../src/modules/fuel/fuel-performance-review.js'
 
@@ -115,7 +115,9 @@ describe('the fleet', () => {
     expect(r.coveredDays).toBe(12)
     expect(r.totals.litres).toBe(12 * 220)
     expect(r.totals.assessedUnits).toBe(2)
-    expect(r.months).toEqual([{ month: '2026-09', days: 12, litres: 2640, perDay: 220 }])
+    expect(r.months).toEqual([{ month: '2026-09', days: 12, litres: 2640, pumpL: 0, tankL: 0, perDay: 220 }])
+    expect(r.source).toBe('telemetry')
+    expect(r.pumpFrom).toBeNull()
     expect(r.groups[0]).toMatchObject({ group: 'Excavators', units: 2, worst: 'EX 08', best: 'EX 09', busiest: 'EX 08', overCount: 1 })
     expect(r.records.near + r.records.over).toBe(22)
     expect(r.units[0]!.ref).toBe('EX 08')
@@ -133,5 +135,55 @@ describe('coverage', () => {
     expect(r.days).toBe(10)
     expect(r.coveredDays).toBe(5)
     expect(r.totals.perDay).toBe(100)
+  })
+})
+
+describe('pump issues', () => {
+  // Telemetry says 10 h a day; the pump's meter says 8 h between fuellings.
+  const k = keys(8)
+  const d = days(k, () => ({ engineSeconds: 36_000 }))
+  const pump = (i: number, over: Partial<ReviewFill> = {}): ReviewFill => ({
+    at: at(k[i]!), litres: 96, source: 'pump', meterWork: 8, tankL: 90, check: 'MATCH', siv: `SIV-${i}`, ...over,
+  })
+
+  it('judges each issue on its own meter step, the first one too', () => {
+    const u = reviewUnit(EX, k.map((_, i) => pump(i)), d, { withRefills: true })
+    expect(u.refillRows).toHaveLength(8)
+    expect(u.refillRows!.every(r => r.workFrom === 'meter' && r.work === 8)).toBe(true)
+    expect(u.ratio!).toBeCloseTo(1.2, 5)   // 96 L for 8 h at 10 L/h
+    expect(u.pumpL).toBe(8 * 96)
+    expect(u.probeL).toBe(0)
+    expect(u.tankL).toBe(8 * 90)
+    expect(u.issuedWithTankL).toBe(8 * 96)
+    expect(u.work).toBe(64)
+  })
+  it('falls back to telemetry hours where the meter step is missing or impossible', () => {
+    expect(meterStep(pump(1, { meterWork: null }), pump(0), 'HOURS')).toBeNull()
+    expect(meterStep(pump(1, { meterWork: -3 }), pump(0), 'HOURS')).toBeNull()
+    expect(meterStep(pump(1, { meterWork: 30 }), pump(0), 'HOURS')).toBeNull()   // 30 h in one day
+    expect(meterStep(pump(2, { meterWork: 30 }), pump(0), 'HOURS')).toBe(30)     // over two days
+    const u = reviewUnit(EX, [pump(0, { meterWork: null }), pump(1, { meterWork: null })], d, { withRefills: true })
+    expect(u.refillRows).toHaveLength(1)
+    expect(u.refillRows![0]).toMatchObject({ workFrom: 'telemetry', work: 10 })
+  })
+  it('counts tank rise only over the issues the probe read', () => {
+    const u = reviewUnit(EX, [pump(0), pump(1, { tankL: null, check: 'NO_SENSOR' })], d)
+    expect(u.tankL).toBe(90)
+    expect(u.issuedWithTankL).toBe(96)
+  })
+  it('mixes probe refills before the pump records with pump issues after', () => {
+    const r = buildPerformanceReview({
+      from: k[0]!, to: k.at(-1)!, vehicles: [EX],
+      fills: new Map([['v1', [
+        ...k.slice(0, 4).map(x => ({ at: at(x), litres: 100, source: 'probe' as const })),
+        ...[4, 5, 6, 7].map(i => pump(i, i === 7 ? { check: 'MISMATCH', tankL: 60 } : {})),
+      ]]]),
+      days: new Map([['v1', d]]),
+    })
+    expect(r.source).toBe('mixed')
+    expect(r.pumpFrom).toBe(k[4])
+    expect(r.totals).toMatchObject({ litres: 400 + 4 * 96, pumpL: 4 * 96, probeL: 400, tankL: 330 })
+    expect(r.totals.checks).toEqual({ match: 3, mismatch: 1, noSensor: 0, noReading: 0 })
+    expect(r.months[0]).toMatchObject({ pumpL: 384, tankL: 330 })
   })
 })

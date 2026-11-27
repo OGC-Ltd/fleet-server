@@ -2,17 +2,25 @@
  * Reads the rows the fuel performance review needs and hands them to the pure
  * method in fuel-performance-review.ts.
  *
- * Telemetry only for now: "fuel put in" is the fillings ledger's confirmed
- * REFILLs, and work is the daily trend's engine-hours meter (engine time where
- * it has none) or distance. Issuance (SIV) records replace the litres once they
- * are imported. Cached per org and period for five minutes: the page and its
- * PDF export ask for the same review back to back.
+ * Fuel put in is FactorySuite's pump issues where they are kept
+ * (factorysuite_fuel_issues: litres issued, the meter at this fuelling and the
+ * last, the tank's rise on the probe), matched to a unit by its equipment
+ * reference. Before the organisation's first pump issue, and for a unit the
+ * pumps never fuelled, it is the fillings ledger's confirmed REFILLs, as
+ * before (operator 2026-11-28: "for the days we don't have value the previous
+ * days we use the fuel probes"). Work is the issue's meter step, else the
+ * daily trend's engine-hours meter (engine time where it has none) or
+ * distance. Cached per org and period for five minutes: the page and its PDF
+ * export ask for the same review back to back.
  */
 
 import { prisma } from '../../lib/prisma.js'
+import { logger } from '../../lib/logger.js'
+import { foldName } from '../planner/work-plan-match.js'
+import type { RaiFactorySuiteFuelIssueRow } from '../../providers/raifactorysuite/raifactorysuite.client.js'
 import { BadRequestError } from '../../core/errors/errors.js'
 import {
-  buildPerformanceReview, reviewUnit,
+  buildPerformanceReview, reviewUnit, pumpFill,
   type PerformanceReview, type ReviewDay, type ReviewFill, type ReviewVehicle, type ReviewUnit, type RateBasis,
 } from './fuel-performance-review.js'
 
@@ -39,15 +47,46 @@ export function reviewPeriod(from?: unknown, to?: unknown, now = new Date()): { 
   return { from: f, to: t }
 }
 
+/**
+ * The organisation's pump issues in the period, as refills, with the first
+ * day it has any pump issue at all and every machine the pumps have fuelled.
+ */
+async function pumpIssues(orgId: string, from: string, to: string) {
+  const empty = { from: null as string | null, machines: new Set<string>(), issues: [] as Array<{ machine: string; fill: ReviewFill }> }
+  try {
+    const [first, machines, rows] = await Promise.all([
+      prisma.factorySuiteFuelIssue.findFirst({
+        where: { organisationId: orgId, goneAt: null }, orderBy: { day: 'asc' }, select: { day: true },
+      }),
+      prisma.factorySuiteFuelIssue.findMany({
+        where: { organisationId: orgId, goneAt: null }, distinct: ['machine'], select: { machine: true },
+      }),
+      prisma.factorySuiteFuelIssue.findMany({
+        where: { organisationId: orgId, goneAt: null, day: { gte: from, lte: to } },
+        select: { machine: true, day: true, row: true },
+      }),
+    ])
+    const issues: Array<{ machine: string; fill: ReviewFill }> = []
+    for (const r of rows) {
+      const fill = pumpFill(r.row as unknown as RaiFactorySuiteFuelIssueRow, r.day)
+      if (fill) issues.push({ machine: r.machine, fill })
+    }
+    return { from: first?.day ?? null, machines: new Set(machines.map(m => foldName(m.machine))), issues }
+  } catch (err) {
+    logger.warn({ err, orgId }, 'Kept fuel issues unavailable for the performance review; probe refills only')
+    return empty
+  }
+}
+
 async function load(orgId: string, from: string, to: string, vehicleId?: string) {
   const start = startOf(from)
   const end = new Date(startOf(to).getTime() + DAY_MS)
   const vehicles = await prisma.vehicle.findMany({
     where: { organisationId: orgId, isActive: true, ...(vehicleId ? { id: vehicleId } : {}) },
-    select: { id: true, name: true, equipmentCategory: true, ratedConsumption: true, ratedConsumptionBasis: true },
+    select: { id: true, name: true, equipmentCategory: true, ratedConsumption: true, ratedConsumptionBasis: true, equipmentReference: true },
   })
   const ids = vehicles.map(v => v.id)
-  const [fillRows, dayRows] = await Promise.all([
+  const [fillRows, dayRows, pump] = await Promise.all([
     prisma.fuelFilling.findMany({
       where: { vehicleId: { in: ids }, verdict: 'REFILL', filledAt: { gte: start, lt: end } },
       select: { vehicleId: true, filledAt: true, filledMl: true },
@@ -57,13 +96,27 @@ async function load(orgId: string, from: string, to: string, vehicleId?: string)
       where: { vehicleId: { in: ids }, day: { gte: new Date(Date.parse(`${from}T00:00:00Z`) - DAY_MS), lte: new Date(`${to}T00:00:00Z`) } },
       select: { vehicleId: true, day: true, engineHoursMeter: true, engineSeconds: true, distanceM: true },
     }),
+    pumpIssues(orgId, from, to),
   ])
   const fills = new Map<string, ReviewFill[]>()
+  const add = (id: string, f: ReviewFill) => fills.set(id, [...(fills.get(id) ?? []), f])
+
+  const byRef = new Map<string, string>()
+  const refOf = new Map(vehicles.map(v => [v.id, v.equipmentReference]))
+  for (const v of vehicles) if (v.equipmentReference) byRef.set(foldName(v.equipmentReference), v.id)
+  for (const i of pump.issues) {
+    const id = byRef.get(foldName(i.machine))
+    if (id) add(id, i.fill)
+  }
+  // Probe refills count where the pumps have no record: before the first pump
+  // issue, and for units the pumps have never fuelled.
+  const pumpFromMs = pump.from ? startOf(pump.from).getTime() : Infinity
   for (const r of fillRows) {
     if (r.filledMl <= 0) continue
-    const list = fills.get(r.vehicleId) ?? []
-    list.push({ at: r.filledAt, litres: r.filledMl / 1000 })
-    fills.set(r.vehicleId, list)
+    const ref = refOf.get(r.vehicleId)
+    const pumped = ref != null && pump.machines.has(foldName(ref))
+    if (pumped && r.filledAt.getTime() >= pumpFromMs) continue
+    add(r.vehicleId, { at: r.filledAt, litres: r.filledMl / 1000, source: 'probe' })
   }
   const days = new Map<string, ReviewDay[]>()
   for (const r of dayRows) {

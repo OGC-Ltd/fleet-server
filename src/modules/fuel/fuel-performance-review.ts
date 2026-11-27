@@ -2,7 +2,21 @@
  * Fuel performance review — every unit's refills judged against its standard.
  *
  * The method is the operator's own (Kasulu "Fuel Issuance – Performance
- * Review", 2026-10-08), applied to telemetry until issuance records arrive:
+ * Review", 2026-10-08). Since FactorySuite's pump issues are kept
+ * (factorysuite_fuel_issues; operator 2026-11-28: "now that we are getting the
+ * actual fuel getting into tanks and usage we should utilise those values",
+ * and "for the days we don't have value the previous days we use the fuel
+ * probes"):
+ *
+ *   - Fuel put in is the litres the PUMP issued (the SIV), with the tank's
+ *     rise off the probe beside it. Telemetry refills count only where there
+ *     is no pump record: the days before the pump records start, and units
+ *     the pumps never fuel.
+ *   - The work behind a pump refill is the issue's own meter step (this
+ *     reading − the previous fuelling's), as the operator's sheet; telemetry
+ *     hours or km only where the issue has no usable reading.
+ *
+ * The rest is the document's:
  *
  *   - Each refill is compared with the fuel its standard allows for the work
  *     logged since the PREVIOUS refill: rate × hours (L/h machines) or
@@ -18,6 +32,9 @@
  * whole method is testable without a database.
  */
 
+import { wallClock } from '../planner/fuel-refills.js'
+import type { RaiFactorySuiteFuelIssueRow } from '../../providers/raifactorysuite/raifactorysuite.client.js'
+
 export type RateBasis = 'HOURS' | 'DISTANCE'
 
 export interface ReviewVehicle {
@@ -29,9 +46,20 @@ export interface ReviewVehicle {
   basis: RateBasis | null
 }
 
+export type FillSource = 'pump' | 'probe'
+
 export interface ReviewFill {
   at: Date
   litres: number
+  /** 'probe' (a telemetry REFILL) when left out. */
+  source?: FillSource
+  /** Pump issues: the meter step the issue records (hours or km since the previous fuelling). */
+  meterWork?: number | null
+  /** Pump issues: what the tank rose by on the probe (FactorySuite's sensor check), when it read. */
+  tankL?: number | null
+  /** Pump issues: FactorySuite's MATCH / MISMATCH / NO_SENSOR / NO_READING. */
+  check?: string | null
+  siv?: string | null
 }
 
 /** One fleet day of work. `day` is the fleet-day key, YYYY-MM-DD. */
@@ -50,8 +78,15 @@ export type RecordClass = 'near' | 'over' | 'implausible' | 'missing'
 export interface ReviewRefill {
   at: string
   litres: number
+  source: FillSource
+  /** Tank rise on the probe for a pump issue; null where it did not read. */
+  tankL: number | null
+  check: string | null
+  siv: string | null
   /** Hours or km since the previous refill. */
   work: number
+  /** Where `work` came from: the issue's meter, or telemetry. */
+  workFrom: 'meter' | 'telemetry'
   standardL: number | null
   /** litres ÷ standard; null where there is no standard or no work. */
   ratio: number | null
@@ -68,14 +103,20 @@ export interface ReviewUnit {
   group: string
   rate: number | null
   basis: RateBasis | null
-  /** Litres put in over the period (every confirmed refill, the first included). */
+  /** Litres put in over the period (every refill, the first included). */
   litres: number
+  /** Of `litres`, issued at the pump / seen as telemetry refills. */
+  pumpL: number
+  probeL: number
+  /** Tank rise on the probe over the pump issues it read, and the litres those issues gave. */
+  tankL: number
+  issuedWithTankL: number
   refills: number
   usableRefills: number
   /** Median refill as a share of standard (1 = 100%); null when not judged. */
   ratio: number | null
   excessL: number
-  /** Hours (HOURS) or km (DISTANCE) logged over the period. */
+  /** Hours (HOURS) or km (DISTANCE) logged over the period; with pump meters, from refill to refill. */
   work: number
   status: UnitStatus
   /** Refills logged against next to no work — the "meter readings to correct" list. */
@@ -105,6 +146,8 @@ export interface ReviewMonth {
   /** Days of the period that fall in this month. */
   days: number
   litres: number
+  pumpL: number
+  tankL: number
   perDay: number
 }
 
@@ -114,9 +157,18 @@ export interface PerformanceReview {
   days: number
   /** Days from the first refill on record (or `from`) to `to`. */
   coveredDays: number
-  source: 'telemetry'
+  /** 'pump' when every refill is a pump issue, 'telemetry' when none is. */
+  source: 'pump' | 'telemetry' | 'mixed'
+  /** The first day with a pump issue in the period; null without any. */
+  pumpFrom: string | null
   totals: {
     litres: number
+    pumpL: number
+    probeL: number
+    tankL: number
+    issuedWithTankL: number
+    /** Pump issues by FactorySuite's probe check. */
+    checks: { match: number; mismatch: number; noSensor: number; noReading: number }
     refills: number
     units: number
     unitsWithStandard: number
@@ -142,6 +194,10 @@ export const MIN_REFILLS = 5
 export const MIN_REFILLS_TRACTOR = 3
 /** Hours or km below which a refill was logged against next to no work. */
 const NEAR_ZERO = { HOURS: 0.5, DISTANCE: 1 } as const
+/** A meter step beyond this a day (since the previous refill) is a keying slip, not work. */
+const MAX_METER_A_DAY = { HOURS: 24, DISTANCE: 1500 } as const
+/** The days allowed a refill with no earlier one in the period to time it from. */
+const MAX_METER_UNTIMED_DAYS = 14
 /** A day's meter step outside this is a reset or a swap, not work. */
 const MAX_METER_STEP_H = 24
 
@@ -247,6 +303,18 @@ export function workBetween(work: Map<string, number>, fromMs: number, toMs: num
   return total
 }
 
+/**
+ * The work a pump issue records: its meter step, when the step is positive and
+ * no more than a day's work for each day since the previous refill (two weeks
+ * at most when there is none in the period). Null otherwise: telemetry then.
+ */
+export function meterStep(f: ReviewFill, prev: ReviewFill | null, basis: RateBasis): number | null {
+  const w = f.meterWork
+  if (f.source !== 'pump' || w == null || !Number.isFinite(w) || w <= 0) return null
+  const days = prev ? Math.max(1, Math.ceil((f.at.getTime() - prev.at.getTime()) / DAY_MS)) : MAX_METER_UNTIMED_DAYS
+  return w <= MAX_METER_A_DAY[basis] * days ? w : null
+}
+
 export function reviewUnit(
   v: ReviewVehicle, fills: ReviewFill[], days: ReviewDay[], opts: { withRefills?: boolean } = {},
 ): ReviewUnit {
@@ -260,13 +328,24 @@ export function reviewUnit(
   const totalWork = [...work.values()].reduce((s, w) => s + w, 0)
 
   const rows: ReviewRefill[] = []
-  for (let i = 1; i < sorted.length; i++) {
+  for (let i = 0; i < sorted.length; i++) {
     const f = sorted[i]!
-    const w = basis ? workBetween(work, sorted[i - 1]!.at.getTime(), f.at.getTime()) : 0
+    const prev = i > 0 ? sorted[i - 1]! : null
+    const meter = basis ? meterStep(f, prev, basis) : null
+    // The first refill has nothing to measure from, unless the pump recorded
+    // the meter at the fuelling before it.
+    if (!prev && meter == null) continue
+    const w = meter ?? (basis && prev ? workBetween(work, prev.at.getTime(), f.at.getTime()) : 0)
     const std = rate && basis && w > 0 ? (basis === 'HOURS' ? rate * w : w / rate) : null
     const ratio = std ? f.litres / std : null
-    rows.push({ at: f.at.toISOString(), litres: f.litres, work: w, standardL: std, ratio, record: classify(ratio) })
+    rows.push({
+      at: f.at.toISOString(), litres: f.litres, source: f.source ?? 'probe',
+      tankL: f.tankL ?? null, check: f.check ?? null, siv: f.siv ?? null,
+      work: w, workFrom: meter != null ? 'meter' : 'telemetry', standardL: std, ratio, record: classify(ratio),
+    })
   }
+  const pumpFills = sorted.filter(f => f.source === 'pump')
+  const read = pumpFills.filter(f => f.tankL != null)
 
   const usable = rows.filter(r => r.record === 'near' || r.record === 'over')
   const min = group === 'CASE tractors' ? MIN_REFILLS_TRACTOR : MIN_REFILLS
@@ -276,9 +355,32 @@ export function reviewUnit(
 
   return {
     id: v.id, name: v.name, ref, group, rate, basis,
-    litres, refills: sorted.length, usableRefills: usable.length,
-    ratio, excessL, work: totalWork, status: statusOf(ratio), nearZeroWork: nearZero,
+    litres,
+    pumpL: pumpFills.reduce((s, f) => s + f.litres, 0),
+    probeL: sorted.filter(f => f.source !== 'pump').reduce((s, f) => s + f.litres, 0),
+    tankL: read.reduce((s, f) => s + f.tankL!, 0),
+    issuedWithTankL: read.reduce((s, f) => s + f.litres, 0),
+    refills: sorted.length, usableRefills: usable.length,
+    ratio, excessL,
+    // Pump meters cover refill to refill; telemetry covers the whole period.
+    work: rows.some(r => r.workFrom === 'meter') ? rows.reduce((s, r) => s + r.work, 0) : totalWork, status: statusOf(ratio), nearZeroWork: nearZero,
     ...(opts.withRefills ? { refillRows: rows } : {}),
+  }
+}
+
+/** One pump issue as a refill: the litres issued, when it ended, its meter step and the tank's rise. */
+export function pumpFill(i: RaiFactorySuiteFuelIssueRow, day: string): ReviewFill | null {
+  const litres = Number(i.quantityIssued)
+  if (!Number.isFinite(litres) || litres <= 0 || i.completed === false) return null
+  const at = wallClock(i.fuelingEnd) ?? wallClock(i.fuelingStart) ?? new Date(`${day}T12:00:00+03:00`)
+  const prev = i.previousReading, now = i.physicalReading
+  const rise = i.sensorRiseLitres
+  return {
+    at, litres, source: 'pump',
+    meterWork: prev != null && now != null ? now - prev : null,
+    tankL: rise != null && Number.isFinite(rise) ? rise : null,
+    check: i.sensorCheck ?? null,
+    siv: i.siv ?? null,
   }
 }
 
@@ -306,6 +408,7 @@ export function buildPerformanceReview(input: ReviewInput): PerformanceReview {
   const nDays = Math.round((dayStartMs(input.to) - dayStartMs(input.from)) / DAY_MS) + 1
   const litres = units.reduce((s, u) => s + u.litres, 0)
   const excessL = units.reduce((s, u) => s + u.excessL, 0)
+  const pumpL = units.reduce((s, u) => s + u.pumpL, 0)
 
   // Litres by calendar month, over the days of the period that fall in it.
   const monthDays = new Map<string, number>()
@@ -313,16 +416,30 @@ export function buildPerformanceReview(input: ReviewInput): PerformanceReview {
     const m = dayKeyOf(dayStartMs(input.from) + i * DAY_MS).slice(0, 7)
     monthDays.set(m, (monthDays.get(m) ?? 0) + 1)
   }
-  const monthLitres = new Map<string, number>()
+  const monthLitres = new Map<string, { litres: number; pumpL: number; tankL: number }>()
+  const checks = { match: 0, mismatch: 0, noSensor: 0, noReading: 0 }
+  let firstPump = Infinity
   for (const fills of input.fills.values()) {
     for (const f of fills) {
+      if (f.source === 'pump') {
+        firstPump = Math.min(firstPump, f.at.getTime())
+        const c = String(f.check ?? '').toUpperCase()
+        if (c === 'MATCH') checks.match++
+        else if (c === 'MISMATCH') checks.mismatch++
+        else if (c === 'NO_SENSOR') checks.noSensor++
+        else checks.noReading++
+      }
       const m = dayKeyOf(f.at.getTime()).slice(0, 7)
-      if (monthDays.has(m)) monthLitres.set(m, (monthLitres.get(m) ?? 0) + f.litres)
+      if (!monthDays.has(m)) continue
+      const t = monthLitres.get(m) ?? { litres: 0, pumpL: 0, tankL: 0 }
+      t.litres += f.litres
+      if (f.source === 'pump') { t.pumpL += f.litres; t.tankL += f.tankL ?? 0 }
+      monthLitres.set(m, t)
     }
   }
   const months = [...monthDays].map(([month, days]) => {
-    const l = monthLitres.get(month) ?? 0
-    return { month, days, litres: l, perDay: l / days }
+    const t = monthLitres.get(month) ?? { litres: 0, pumpL: 0, tankL: 0 }
+    return { month, days, ...t, perDay: t.litres / days }
   })
 
   const byGroup = new Map<string, ReviewUnit[]>()
@@ -352,9 +469,16 @@ export function buildPerformanceReview(input: ReviewInput): PerformanceReview {
     : nDays
   const perDay = coveredDays > 0 ? litres / coveredDays : 0
   return {
-    from: input.from, to: input.to, days: nDays, coveredDays, source: 'telemetry',
+    from: input.from, to: input.to, days: nDays, coveredDays,
+    source: pumpL === 0 ? 'telemetry' : pumpL === litres ? 'pump' : 'mixed',
+    pumpFrom: Number.isFinite(firstPump) ? dayKeyOf(firstPump) : null,
     totals: {
       litres,
+      pumpL,
+      probeL: litres - pumpL,
+      tankL: units.reduce((s, u) => s + u.tankL, 0),
+      issuedWithTankL: units.reduce((s, u) => s + u.issuedWithTankL, 0),
+      checks,
       refills: units.reduce((s, u) => s + u.refills, 0),
       units: units.length,
       unitsWithStandard: units.filter(u => u.rate != null && u.basis != null).length,
