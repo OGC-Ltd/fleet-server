@@ -129,7 +129,20 @@ export function fuellingStatus(plannedL: number | null, fuelledL: number, open: 
   return 'As planned'
 }
 
-const typeOf = (m: FuelMachine | undefined) => m?.category?.trim() || m?.name?.trim() || null
+/**
+ * Words with a capital first letter, acronyms kept whole (operator 2026-11-27:
+ * "only acronyms are in full capital letter": "SMALL DIESEL GENERATORS" reads
+ * "Small Diesel Generators", "Fes - Generator" reads "FES - Generator").
+ */
+export const ACRONYMS = new Set(['FES', 'LMV', 'HMV', 'LCV', 'DG', 'JCB', 'KSP', 'GPS', 'FTT', 'HFT', 'HPT', 'MTR', 'CTR'])
+export function typeWords(s: string): string {
+  return s.trim().replace(/\s+/g, ' ').replace(/[A-Za-z][A-Za-z']*/g, w =>
+    ACRONYMS.has(w.toUpperCase()) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+}
+const typeOf = (m: FuelMachine | undefined) => {
+  const t = m?.category?.trim() || m?.name?.trim()
+  return t ? typeWords(t) : null
+}
 
 /**
  * `usualPumps`: folded machine → the pump it was last fuelled at, for a vehicle

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { foldName } from '../../src/modules/planner/work-plan-match.js'
 import { buildFactoryFuel, type FactoryFuel, type FuelIssue, type FuelPlanLine, type FuelVehicleRequest } from '../../src/modules/planner/factory-fuel.js'
-import { buildFuellingPlan, fuellingLead, fuellingStatus } from '../../src/modules/planner/fuelling-plan.js'
+import { buildFuellingPlan, fuellingLead, fuellingStatus, typeWords } from '../../src/modules/planner/fuelling-plan.js'
 import { renderFuellingPlanPdf } from '../../src/modules/planner/fuelling-plan.pdf.js'
 
 const DAY = '2026-11-25'
@@ -38,6 +38,15 @@ describe('fuellingStatus', () => {
     expect(fuellingStatus(100, 0, false)).toBe('Not fuelled')
     expect(fuellingStatus(null, 183, false)).toBe('As planned')
     expect(fuellingStatus(100, 40, true)).toBe('Fuelling now')
+  })
+})
+
+describe('typeWords', () => {
+  it('gives each word a capital first letter and keeps acronyms whole', () => {
+    expect(typeWords('SMALL DIESEL GENERATORS')).toBe('Small Diesel Generators')
+    expect(typeWords('Fes - Generator')).toBe('FES - Generator')
+    expect(typeWords('Hired LMV')).toBe('Hired LMV')
+    expect(typeWords('CASE 110')).toBe('Case 110')
   })
 })
 
@@ -82,7 +91,7 @@ describe('buildFuellingPlan', () => {
       ['Logistics Centre 1', 1, 2], ['Nursery B', 1, 1], ['Zone 4', 1, 1], ['Logistics Centre 2', 0, 1],
     ])
     expect(plan.byType.map(g => [g.name, g.fuelledL, g.plannedL])).toEqual([
-      ['DIESEL GENERATORS', 800, 800], ['Excavator', 85, 800], ['Unspecified', 86, 180],
+      ['Diesel Generators', 800, 800], ['Excavator', 85, 800], ['Unspecified', 86, 180],
     ])
     expect(fuellingLead(plan)).toBe('3 of the 5 planned machines were fuelled, and they received 971 litres against 1,780 litres planned. Logistics Centre 1 has the most machines still not fuelled (1).')
   })
