@@ -76,7 +76,7 @@ not fit:
    litres delivered, not fuelled, fuelled short, as planned.
 2. **Where every planned machine stands**: one bar by status.
 3. **Progress by site**: machines fuelled of machines planned.
-4. **Planting plan**: Mufindi's estate drawing in black and white (greys for
+4. **Planting plan** (no heading of its own): Mufindi's estate drawing in black and white (greys for
    the ground, black for zones and the estate boundary), each site whose name
    matches an area of the drawing marked with its machines fuelled of planned.
    Sites the drawing has no area for (the logistics centres, the irrigation
