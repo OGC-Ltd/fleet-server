@@ -24,7 +24,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import PDFDocument from 'pdfkit'
-import { AS_PLANNED_SHARE, fuellingLead, type FuellingPlan, type FuellingStatus } from './fuelling-plan.js'
+import { AS_PLANNED_SHARE, deliveredSub, fuellingLead, type FuellingPlan, type FuellingStatus } from './fuelling-plan.js'
 
 const C = {
   ink: '#121813',
@@ -259,7 +259,7 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
   {
     const tiles: { l: string; v: string; sub: string; c: string }[] = [
       { l: 'MACHINES FUELLED', v: nf(t.fuelled), sub: `${pct(t.fuelled, t.planned)} of ${nf(t.planned)} planned`, c: C.ink },
-      { l: 'LITRES DELIVERED', v: nf(t.fuelledOnFiguresL), sub: t.plannedL > 0 ? `${pct(t.fuelledOnFiguresL, t.plannedL)} of ${nf(t.plannedL)} L planned` : 'no litres planned', c: C.ink },
+      { l: 'LITRES DELIVERED', v: nf(t.deliveredL), sub: deliveredSub(t), c: C.ink },
       { l: 'NOT FUELLED', v: nf(t.notFuelled), sub: t.fullTankWaiting ? `incl. ${nf(t.fullTankWaiting)} "full tank" plan${t.fullTankWaiting === 1 ? '' : 's'}` : t.fuellingNow ? `${nf(t.fuellingNow)} fuelling now` : `of ${nf(t.planned)} planned`, c: C.red },
       { l: 'FUELLED SHORT', v: nf(t.short), sub: t.short ? `${nf(t.shortfallL)} L under their plan` : 'none under plan', c: C.amberInk },
       { l: 'AS PLANNED', v: nf(t.asPlanned), sub: t.over ? `${nf(t.over)} over plan` : `within ${Math.round(AS_PLANNED_SHARE * 100)}% of plan`, c: C.green },

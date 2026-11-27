@@ -59,7 +59,8 @@ the one day:
 | Planned litres | The fuel request's litres, else the line's own figure. A machine's shifts are added. A full tank with no figure anywhere is "Full tank": it counts in machine totals, never in a litre total or a percentage. |
 | Fuelled | The day's completed fuellings at the pumps, by machine. |
 | Status | **Fuelling now** (a fuelling still open), **Not fuelled**, **Short** (more than 10% under), **Over** (more than 10% over), **As planned** (within 10%; a full tank once fuelled). |
-| Litres delivered | Litres fuelled on plans with a litre figure, as FactorySuite counts it. Litres into full tanks are told apart in the opening sentence. |
+| Litres delivered | Every litre the pumps issued that day, read live from FactorySuite: planned machines, full tanks and off-plan fuellings alike (25 Nov: 6,651 L). The line under it gives what is not against a litre figure ("incl. 691 L into full tanks"); the opening sentence splits it. |
+| Share of plan | Litres fuelled on plans with a litre figure, against the litres planned (25 Nov: 5,960 of 31,765 L). |
 | Shortfall | Planned less fuelled, over the Short machines. |
 | Fuelled off plan | Machines fuelled that day that no counted plan or request names; listed apart, never in the planned totals. |
 | Not counted | Lines whose plan or request still waits for approval (`pendingLines`) or whose request was rejected or cancelled (`rejectedLines`). |
@@ -113,7 +114,7 @@ JPEG and Preview are always the whole day.
 ## Checked against FactorySuite
 
 On 25 Nov 2026 it gives FactorySuite's own report figure for figure: 48 of 142
-machines fuelled, 5,960 L against 31,765 L planned, 94 not fuelled (10 of them
+machines fuelled, 5,960 L against 31,765 L planned (6,651 L issued in all, 691 L of it into full tanks), 94 not fuelled (10 of them
 full tanks), 29 short (7,469 L under), 19 as planned. The one difference is
 sites for vehicle requests: FactorySuite places them at Logistics Centres 1
 and 2 from data its API does not give, so the site named as having the most

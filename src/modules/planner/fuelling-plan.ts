@@ -116,6 +116,12 @@ export interface FuellingPlan {
     /** Planned less fuelled over the Short machines. */
     shortfallL: number
     offPlanL: number
+    /**
+     * Every litre the pumps issued that day, read live from FactorySuite: planned
+     * machines (full tanks too) and machines fuelled off plan. The "Litres
+     * delivered" tile (operator 2026-11-27: 6,651 L on 25 Nov, not 5,960).
+     */
+    deliveredL: number
   }
   bySite: FuellingGroup[]
   byType: FuellingGroup[]
@@ -286,7 +292,9 @@ export function buildFuellingPlan(
     fuelledOnFiguresL: sum(withFigure, m => m.fuelledL),
     shortfallL: sum(machines.filter(m => m.status === 'Short'), m => -(m.diffL ?? 0)),
     offPlanL: round(offPlan.reduce((t, m) => t + m.fuelledL, 0)),
+    deliveredL: 0,
   }
+  totals.deliveredL = round(totals.fuelledL + totals.offPlanL)
 
   const groups = (keyOf: (m: FuellingMachine) => string | null, none: string) => {
     const by = new Map<string, FuellingGroup>()
@@ -313,6 +321,21 @@ export function buildFuellingPlan(
 
 const fmt = (n: number) => Math.round(n).toLocaleString('en-GB')
 
+/**
+ * The line under "Litres delivered": the share of the litres planned while every
+ * litre went against a plan figure, else what the figure takes in besides
+ * (25 Nov: 6,651 L, "incl. 691 L into full tanks").
+ */
+export function deliveredSub(t: FuellingPlan['totals']): string {
+  const intoFull = round(t.fuelledL - t.fuelledOnFiguresL)
+  const extra = [
+    ...(intoFull > 0 ? [`${fmt(intoFull)} L into full tanks`] : []),
+    ...(t.offPlanL > 0 ? [`${fmt(t.offPlanL)} L off plan`] : []),
+  ]
+  if (extra.length) return `incl. ${extra.join(', ')}`
+  return t.plannedL > 0 ? `${Math.round((t.fuelledOnFiguresL / t.plannedL) * 100)}% of ${fmt(t.plannedL)} L planned` : 'no litres planned'
+}
+
 /** The report's opening sentence. */
 export function fuellingLead(p: FuellingPlan): string {
   const t = p.totals
@@ -327,10 +350,17 @@ export function fuellingLead(p: FuellingPlan): string {
     : t.fuelled === 0
       ? `none of the ${fmt(t.planned)} ${machines} ${verb} fuelled${so}`
       : `${t.fuelled * 2 < t.planned ? 'only ' : ''}${fmt(t.fuelled)} of the ${fmt(t.planned)} ${machines} ${verb} fuelled${so}`
-  // Litres against litres: full tanks with no figure apart, as FactorySuite's report
+  // Every litre the pumps issued, then how it splits: against a litre figure,
+  // into full tanks (no figure to compare), off plan
   const intoFull = round(t.fuelledL - t.fuelledOnFiguresL)
+  const parts = [
+    ...(intoFull > 0 || t.offPlanL > 0 ? [`${fmt(t.fuelledOnFiguresL)} against ${fmt(t.plannedL)} litres planned`] : []),
+    ...(intoFull > 0 ? [`${fmt(intoFull)} into full tanks`] : []),
+    ...(t.offPlanL > 0 ? [`${fmt(t.offPlanL)} off plan`] : []),
+  ]
+  const and = (xs: string[]) => xs.length > 1 ? `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}` : xs[0] ?? ''
   const litres = t.fuelled
-    ? `, and they received ${fmt(t.fuelledOnFiguresL)} litres against ${fmt(t.plannedL)} litres planned${intoFull > 0 ? `, with ${fmt(intoFull)} more into full tanks` : ''}.`
+    ? `, and the pumps issued ${fmt(t.deliveredL ?? t.fuelledL)} litres${parts.length ? `: ${and(parts)}` : ` against ${fmt(t.plannedL)} litres planned`}.`
     : `; ${fmt(t.plannedL)} litres were planned.`
   const waiting = p.bySite
     .map(g => ({ name: g.name, left: g.planned - g.fuelled }))
