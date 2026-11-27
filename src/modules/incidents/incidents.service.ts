@@ -91,6 +91,7 @@ export async function faultSummary(orgId: string, q: SummaryQuery) {
   const offset = offsetFrom(q.cursor)
   const { rows, hasNextPage } = await repo.faultSummary(orgId, range(q.from, q.to), {
     sort: q.sort, limit: q.limit, offset, kinds: kindsFrom(q.kind), detail: q.detail, minCount: q.minCount, search: q.q,
+    state: q.state, minHours: q.minHours, maxHours: q.maxHours,
   })
   return {
     data:   rows,
@@ -103,12 +104,13 @@ export async function faultList(orgId: string, q: ListQuery) {
   return repo.faultList(orgId, range(q.from, q.to), {
     // kind=all: a unit's fault history, System and Wialon together (operator, 2026-11-27)
     vehicleId: q.vehicleId, kinds: q.kind === 'all' ? 'all' : kindsFrom(q.kind), detail: q.detail, cursor: q.cursor, limit: q.limit,
+    state: q.state, minHours: q.minHours, maxHours: q.maxHours,
   })
 }
 
 /** The messages in the window, with how many records and units carry each (operator, 2026-11-27). */
 export async function faultDetails(orgId: string, q: DetailsQuery) {
-  return repo.faultDetails(orgId, range(q.from, q.to), kindsFrom(q.kind))
+  return repo.faultDetails(orgId, range(q.from, q.to), kindsFrom(q.kind), { state: q.state, minHours: q.minHours, maxHours: q.maxHours })
 }
 
 export async function faultInsights(orgId: string, q: InsightsQuery) {

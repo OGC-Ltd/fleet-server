@@ -180,7 +180,7 @@ const faultInsightsCache = createWarmCache<Awaited<ReturnType<typeof service.fau
 // All three fall through to the service unchanged.
 
 // A message filter (q.detail) is not in the key either, so it goes to the service like a search.
-const pageable = (q: SummaryQuery) => !q.cursor && !q.minCount && !q.q && !q.detail
+const pageable = (q: SummaryQuery) => !q.cursor && !q.minCount && !q.q && !q.detail && !q.state && q.minHours == null && q.maxHours == null
 
 export const speedingSummary = (orgId: string, q: SummaryQuery) =>
   pageable(q) ? speedingSummaryCache.get(summaryKey(orgId, q)) : service.speedingSummary(orgId, q)

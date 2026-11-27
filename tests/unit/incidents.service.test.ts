@@ -161,7 +161,16 @@ describe('one exact message, for the Wialon view (2026-11-27)', () => {
   it('lists the messages in the window for the kinds asked', async () => {
     vi.mocked(repo.faultDetails).mockResolvedValue([{ kind: 'gnss_fault', detail: 'GPS: On without Fix', episodes: 2, units: 2 }])
     const out = await service.faultDetails(ORG, { from, to, kind: 'gnss_fault,fuel_probe_status' })
-    expect(repo.faultDetails).toHaveBeenLastCalledWith(ORG, { from, to }, ['gnss_fault', 'fuel_probe_status'])
+    expect(repo.faultDetails).toHaveBeenLastCalledWith(ORG, { from, to }, ['gnss_fault', 'fuel_probe_status'], { state: undefined, minHours: undefined, maxHours: undefined })
     expect(out).toEqual([{ kind: 'gnss_fault', detail: 'GPS: On without Fix', episodes: 2, units: 2 }])
+  })
+  it('passes open / resolved and how long it lasted to all three', async () => {
+    const f = { state: 'open' as const, minHours: 12, maxHours: 48 }
+    await service.faultSummary(ORG, { from, to, kind: 'gnss_fault', sort: 'recent', limit: 50, ...f })
+    expect(repo.faultSummary).toHaveBeenLastCalledWith(ORG, { from, to }, expect.objectContaining(f))
+    await service.faultList(ORG, { from, to, vehicleId: 'veh1', limit: 50, ...f })
+    expect(repo.faultList).toHaveBeenLastCalledWith(ORG, { from, to }, expect.objectContaining(f))
+    await service.faultDetails(ORG, { from, to, kind: 'gnss_fault', ...f })
+    expect(repo.faultDetails).toHaveBeenLastCalledWith(ORG, { from, to }, ['gnss_fault'], f)
   })
 })
