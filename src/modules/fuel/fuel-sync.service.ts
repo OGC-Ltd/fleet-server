@@ -126,6 +126,17 @@ export const wialonUnitId = (deviceId: string | null | undefined): number | null
  * 2 meaning different things) and an operator reordering their reports would
  * otherwise silently repoint us at the wrong report.
  */
+/** The resource's per-unit fuel template, best first by TEMPLATE_PREFERENCE. */
+export function pickFuelTemplate<T extends { id: number; n?: string; ct?: string }>(templates: readonly T[]): T | null {
+  for (const pattern of TEMPLATE_PREFERENCE) {
+    // Per-unit templates only — a group template takes a group id as its
+    // subject and would fail for every vehicle.
+    const hit = templates.find(t => pattern.test(t.n ?? '') && (t.ct ?? 'avl_unit') === 'avl_unit')
+    if (hit) return hit
+  }
+  return null
+}
+
 export async function resolveOrgFuelSources(client: WialonClient): Promise<OrgFuelSource[]> {
   const out: OrgFuelSource[] = []
 
@@ -133,14 +144,7 @@ export async function resolveOrgFuelSources(client: WialonClient): Promise<OrgFu
     const org = await prisma.organisation.findUnique({ where: { code }, select: { id: true } })
     if (!org) { logger.warn({ code }, 'Fuel sync: organisation not found'); continue }
 
-    const templates = await listReportTemplates(client, resourceId)
-    let chosen: { id: number; n?: string } | null = null
-    for (const pattern of TEMPLATE_PREFERENCE) {
-      // Per-unit templates only — a group template takes a group id as its
-      // subject and would fail for every vehicle.
-      const hit = templates.find(t => pattern.test(t.n ?? '') && (t.ct ?? 'avl_unit') === 'avl_unit')
-      if (hit) { chosen = hit; break }
-    }
+    const chosen = pickFuelTemplate(await listReportTemplates(client, resourceId))
     if (!chosen) {
       logger.warn({ code, resourceId }, 'Fuel sync: no per-unit fuel template on this resource')
       continue
@@ -183,6 +187,13 @@ export interface SyncOptions {
    * pass in lib/queues/fuel-events.ts.
    */
   reconcile?: boolean
+  /**
+   * Store the provider's fillings and leave its drains alone. For a backfill
+   * of history (sync-fuel-events --fillings-only): a year of old drains would
+   * be judged and raised as theft cases nobody can act on, while the fillings
+   * are what a reconciliation sheet reads (probe-fills, 2026-11-27).
+   */
+  fillingsOnly?: boolean
 }
 
 export interface SyncOutcome {
@@ -447,7 +458,7 @@ export async function syncVehicleFuelEvents(
     }
   }
 
-  for (const t of events.thefts) {
+  for (const t of opts.fillingsOnly ? [] : events.thefts) {
     const knownTheft = matchRow(
       knownThefts, claimedThefts,
       row => sameDrain(t, row),

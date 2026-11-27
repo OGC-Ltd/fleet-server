@@ -159,3 +159,12 @@ export const evaluateSignalsSchema = z.object({
   samples: z.array(signalSampleSchema).min(1).max(8_000),
 })
 export type EvaluateSignalsDto = z.infer<typeof evaluateSignalsSchema>
+
+// ── Probe fills: a sheet's units' refuels off the fuel ledger — see probe-fills.service ──
+const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'a day, YYYY-MM-DD')
+export const probeFillsSchema = z.object({
+  plates: z.array(z.string().trim().min(1).max(40)).min(1).max(500),
+  from: day,
+  to: day,
+})
+export type ProbeFillsDto = z.infer<typeof probeFillsSchema>
