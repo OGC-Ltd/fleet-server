@@ -23,6 +23,7 @@ vi.mock('../../src/modules/incidents/incidents.repository.js', () => ({
   faultSummary:      vi.fn(),
   faultList:         vi.fn(),
   faultInsights:     vi.fn(),
+  faultDetails:      vi.fn(),
   captureStart:      vi.fn(),
 }))
 
@@ -145,5 +146,31 @@ describe('the detail list is per unit', () => {
     expect(repo.faultList).toHaveBeenLastCalledWith(ORG, { from, to }, expect.objectContaining({ kinds: 'all' }))
     await service.faultList(ORG, { from, to, vehicleId: 'veh1', limit: 50 })
     expect(repo.faultList).toHaveBeenLastCalledWith(ORG, { from, to }, expect.objectContaining({ kinds: undefined }))
+  })
+})
+
+describe('one exact message, for the Wialon view (2026-11-27)', () => {
+  it('passes the message to the summary and the unit list', async () => {
+    vi.mocked(repo.faultSummary).mockResolvedValue({ rows: [], hasNextPage: false })
+    await service.faultSummary(ORG, { from, to, kind: 'fuel_probe_status', detail: 'Fuel probe: Status Error', sort: 'recent', limit: 50 })
+    expect(repo.faultSummary).toHaveBeenLastCalledWith(ORG, { from, to }, expect.objectContaining({ kinds: ['fuel_probe_status'], detail: 'Fuel probe: Status Error' }))
+    vi.mocked(repo.faultList).mockResolvedValue({ data: [], cursor: null, hasNextPage: false } as never)
+    await service.faultList(ORG, { from, to, vehicleId: 'veh1', detail: 'GPS: On without Fix', limit: 50 })
+    expect(repo.faultList).toHaveBeenLastCalledWith(ORG, { from, to }, expect.objectContaining({ detail: 'GPS: On without Fix' }))
+  })
+  it('lists the messages in the window for the kinds asked', async () => {
+    vi.mocked(repo.faultDetails).mockResolvedValue([{ kind: 'gnss_fault', detail: 'GPS: On without Fix', episodes: 2, units: 2 }])
+    const out = await service.faultDetails(ORG, { from, to, kind: 'gnss_fault,fuel_probe_status' })
+    expect(repo.faultDetails).toHaveBeenLastCalledWith(ORG, { from, to }, ['gnss_fault', 'fuel_probe_status'], { state: undefined, minHours: undefined, maxHours: undefined })
+    expect(out).toEqual([{ kind: 'gnss_fault', detail: 'GPS: On without Fix', episodes: 2, units: 2 }])
+  })
+  it('passes open / resolved and how long it lasted to all three', async () => {
+    const f = { state: 'open' as const, minHours: 12, maxHours: 48 }
+    await service.faultSummary(ORG, { from, to, kind: 'gnss_fault', sort: 'recent', limit: 50, ...f })
+    expect(repo.faultSummary).toHaveBeenLastCalledWith(ORG, { from, to }, expect.objectContaining(f))
+    await service.faultList(ORG, { from, to, vehicleId: 'veh1', limit: 50, ...f })
+    expect(repo.faultList).toHaveBeenLastCalledWith(ORG, { from, to }, expect.objectContaining(f))
+    await service.faultDetails(ORG, { from, to, kind: 'gnss_fault', ...f })
+    expect(repo.faultDetails).toHaveBeenLastCalledWith(ORG, { from, to }, ['gnss_fault'], f)
   })
 })
