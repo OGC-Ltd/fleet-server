@@ -8,7 +8,7 @@
  *   the opening sentence and five figure tiles;
  *   Where Every Planned Machine Stands — the day's machines as one bar by status;
  *   Progress by Site — machines fuelled of machines planned, site by site;
- *   Planting Plan — Mufindi's estate drawing in black and white, each site
+ *   (no heading) Mufindi's planting plan, the estate drawing in black and white, each site
  *     the report names marked on it with its progress (operator 2026-11-27);
  *   Litres by Equipment Type — litres fuelled against litres planned;
  *   Machines Fuelled: How Close to Plan — each fuelled machine's plan as a
@@ -310,7 +310,8 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
     const boxH = Math.min(540, W * (spanY / spanX))
     const scale = Math.min(W / spanX, boxH / spanY)
     const ox = M + (W - spanX * scale) / 2
-    yy = title('Planting Plan', 'The Mufindi estate drawing; each site the report names, with machines fuelled of machines planned there', yy, boxH + 60)
+    // No heading of its own (operator 2026-11-27): the map follows Progress by Site
+    yy = room(yy + 14, boxH + 60)
     const top = yy
     const px = (lng: number) => ox + (lng - x0) * kx * scale
     const py = (lat: number) => top + (y1 - lat) * scale
