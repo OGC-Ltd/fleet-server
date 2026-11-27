@@ -40,7 +40,9 @@ the one day:
   `vehicleRequests`, apart from `lines`, so the Fuel page still counts plan lines
   as FactorySuite does.
 - **Fuellings**: `/fuel/issues` merged over the kept `factorysuite_fuel_issues`.
-- **Types**: the machine register's category, else its name, else "Unspecified".
+- **Types**: the machine register's category, else its name, else "Unspecified";
+  each word with a capital first letter, acronyms (FES, LMV, DG and the like) kept
+  in capitals: "SMALL DIESEL GENERATORS" reads "Small Diesel Generators".
 
 ## How the figures are worked out
 
@@ -74,13 +76,21 @@ not fit:
    litres delivered, not fuelled, fuelled short, as planned.
 2. **Where every planned machine stands**: one bar by status.
 3. **Progress by site**: machines fuelled of machines planned.
-4. **Litres by equipment type**: litres fuelled against litres planned.
-5. **Machines fuelled: how close to plan**: each fuelled machine's plan as a
+4. **Planting plan**: Mufindi's estate drawing in black and white (greys for
+   the ground, black for zones and the estate boundary), each site whose name
+   matches an area of the drawing marked with its machines fuelled of planned.
+   Sites the drawing has no area for (the logistics centres, the irrigation
+   rooms) are listed under it. The drawing is
+   `assets/report/kasulu-planting-plan.geojson`, the site map's
+   `estate-plan.geojson` without the hectare blocks and farm areas.
+5. **Litres by equipment type**: litres fuelled against litres planned.
+6. **Machines fuelled: how close to plan**: each fuelled machine's plan as a
    track and what went in as the fill, biggest shortfall first.
-6. **Fuelled off plan**, when there are any.
-7. **Machine list**: every planned machine by status, the table head repeated
+7. **Fuelled off plan**, when there are any.
+8. **Machine list**: every planned machine by status, the table head repeated
    on each page.
-8. **How these numbers are worked out**.
+
+The PDF carries no notes section: the rules above are kept here.
 
 Status colours follow FactorySuite's: red not fuelled, amber short, green as
 planned (violet over, sky blue fuelling now).

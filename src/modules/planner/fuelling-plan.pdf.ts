@@ -8,12 +8,13 @@
  *   the opening sentence and five figure tiles;
  *   Where Every Planned Machine Stands — the day's machines as one bar by status;
  *   Progress by Site — machines fuelled of machines planned, site by site;
+ *   Planting Plan — Mufindi's estate drawing in black and white, each site
+ *     the report names marked on it with its progress (operator 2026-11-27);
  *   Litres by Equipment Type — litres fuelled against litres planned;
  *   Machines Fuelled: How Close to Plan — each fuelled machine's plan as a
  *     track and what went in as the fill, the biggest shortfall first;
  *   Fuelled Off Plan — machines the pumps fuelled that no plan named;
- *   Machine List — every planned machine, by status;
- *   How These Numbers Are Worked Out.
+ *   Machine List — every planned machine, by status.
  *
  * A section moves to a new page only when it does not fit below the last;
  * a long list carries on over pages with its heading repeated. Status colours
@@ -63,6 +64,56 @@ function logo(file: string): Buffer | null {
     try { logoCache.set(file, fs.readFileSync(path.resolve(process.cwd(), 'assets', 'report', file))) } catch { logoCache.set(file, null) }
   }
   return logoCache.get(file) ?? null
+}
+
+// ── the planting plan ──
+/** The factory whose estate drawing is on file (assets/report/kasulu-planting-plan.geojson). */
+const PLANTING_PLAN_FACTORY = 'MUFINDI PAPER MILLS'
+type PlanFeature = { properties: { c: string; n: string | null }; geometry: { type: 'Polygon'; coordinates: [number, number][][] } | { type: 'LineString'; coordinates: [number, number][] } }
+let planCache: PlanFeature[] | null | undefined
+/** Kasulu's planting plan, as the site's map draws it (new-ui public/estate-plan.geojson, the
+ *  hectare blocks and farm areas left out); null if the file is absent. */
+function plantingPlan(): PlanFeature[] | null {
+  if (planCache === undefined) {
+    try {
+      const fc = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'assets', 'report', 'kasulu-planting-plan.geojson'), 'utf8')) as { features: PlanFeature[] }
+      planCache = fc.features.filter(f => f.geometry.type === 'Polygon' || f.geometry.type === 'LineString')
+    } catch { planCache = null }
+  }
+  return planCache
+}
+/** Black and white (operator 2026-11-27): greys for the ground, black for the lines that frame it. */
+const PLAN_GREYS: Record<string, { fill?: string; stroke?: string; width?: number; dash?: [number, number] }> = {
+  planted: { fill: '#dcdcdc', stroke: '#a8a8a8', width: 0.25 },
+  rainfed: { fill: '#f0f0f0', stroke: '#8c8c8c', width: 0.4, dash: [2, 1.5] },
+  nursery: { fill: '#b8b8b8', stroke: '#555555', width: 0.5 },
+  factory: { fill: '#9a9a9a', stroke: '#333333', width: 0.6 },
+  water: { fill: '#7a7a7a', stroke: '#5a5a5a', width: 0.7 },
+  reservoir: { fill: '#5e5e5e', stroke: '#3a3a3a', width: 0.6 },
+  flood: { stroke: '#8c8c8c', width: 0.6, dash: [3, 2] },
+  irrigation: { stroke: '#8c8c8c', width: 0.45, dash: [1.5, 1.2] },
+  road: { fill: '#c4c4c4', stroke: '#3d3d3d', width: 1.1 },
+  headcontrol: { stroke: '#555555', width: 0.6 },
+  zone: { stroke: '#1a1a1a', width: 0.9 },
+  boundary: { stroke: '#000000', width: 1.6 },
+}
+const PLAN_ORDER = ['rainfed', 'planted', 'nursery', 'factory', 'water', 'reservoir', 'road', 'flood', 'irrigation', 'headcontrol', 'zone', 'boundary']
+const PLAN_KEY: [string, string][] = [
+  ['planted', 'Irrigation block'], ['nursery', 'Nursery'], ['rainfed', 'Rainfed area'], ['water', 'Water'], ['reservoir', 'Reservoir'],
+  ['factory', 'Factory'], ['road', 'Road'], ['irrigation', 'Irrigation line'], ['headcontrol', 'Head-control area'], ['zone', 'Zone'], ['boundary', 'Estate boundary'],
+]
+/** Areas a site's name can be: "Zone 4", "Nursery B", "Factory site", "Commercial area (1600)". */
+const PLACE_CLASSES = new Set(['zone', 'nursery', 'factory', 'headcontrol', 'reservoir', 'rainfed'])
+/** A ring's middle (area-weighted) and its area, in degrees. */
+function centroid(ring: [number, number][]): { lng: number; lat: number; area: number } {
+  let a = 0, cx = 0, cy = 0
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [x0, y0] = ring[j]!, [x1, y1] = ring[i]!
+    const f = x0 * y1 - x1 * y0
+    a += f; cx += (x0 + x1) * f; cy += (y0 + y1) * f
+  }
+  if (Math.abs(a) < 1e-12) return { lng: ring[0]![0], lat: ring[0]![1], area: 0 }
+  return { lng: cx / (3 * a), lat: cy / (3 * a), area: Math.abs(a / 2) }
 }
 
 const nf = (v: number, d = 0) => v.toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: d })
@@ -249,6 +300,98 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
     return yy + 26
   }
 
+  /** The estate drawing in greys, the report's sites marked on it by name. */
+  const drawPlantingPlan = (features: PlanFeature[], yy: number) => {
+    const pts: [number, number][] = features.flatMap(f => (f.geometry.type === 'Polygon' ? f.geometry.coordinates.flat() : f.geometry.coordinates))
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
+    for (const [lng, lat] of pts) { x0 = Math.min(x0, lng); x1 = Math.max(x1, lng); y0 = Math.min(y0, lat); y1 = Math.max(y1, lat) }
+    const kx = Math.cos(((y0 + y1) / 2) * Math.PI / 180)
+    const spanX = (x1 - x0) * kx, spanY = y1 - y0
+    const boxH = Math.min(540, W * (spanY / spanX))
+    const scale = Math.min(W / spanX, boxH / spanY)
+    const ox = M + (W - spanX * scale) / 2
+    yy = title('Planting Plan', 'The Mufindi estate drawing; each site the report names, with machines fuelled of machines planned there', yy, boxH + 60)
+    const top = yy
+    const px = (lng: number) => ox + (lng - x0) * kx * scale
+    const py = (lat: number) => top + (y1 - lat) * scale
+    const trace = (pts2: [number, number][], close: boolean) => {
+      pts2.forEach(([lng, lat], i) => (i ? doc.lineTo(px(lng), py(lat)) : doc.moveTo(px(lng), py(lat))))
+      if (close) doc.closePath()
+    }
+    for (const cls of PLAN_ORDER) {
+      const st = PLAN_GREYS[cls]!
+      for (const f of features) {
+        if (f.properties.c !== cls) continue
+        doc.save()
+        if (st.dash) doc.dash(st.dash[0], { space: st.dash[1] })
+        if (f.geometry.type === 'Polygon') {
+          for (const ring of f.geometry.coordinates) trace(ring, true)
+          if (st.fill && st.stroke) doc.lineWidth(st.width ?? 0.4).fillAndStroke(st.fill, st.stroke)
+          else if (st.fill) doc.fill(st.fill)
+          else doc.lineWidth(st.width ?? 0.4).stroke(st.stroke ?? C.ink)
+        } else {
+          trace(f.geometry.coordinates, false)
+          doc.lineWidth(st.width ?? 0.5).stroke(st.stroke ?? C.ink)
+        }
+        doc.restore()
+      }
+    }
+
+    // Each site matched by name to an area of the drawing, marked at the largest such area's middle
+    const fold = (t: string | null | undefined) => String(t ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')
+    const off: string[] = []
+    const marks: { x: number; y: number; label: string }[] = []
+    for (const g of p.bySite) {
+      const fig = `${nf(g.fuelled)} of ${nf(g.planned)}`
+      const hits = features.filter(f => f.geometry.type === 'Polygon' && PLACE_CLASSES.has(f.properties.c) && fold(f.properties.n) === fold(g.name))
+      if (!hits.length) { if (!/no site/i.test(g.name)) off.push(`${g.name} (${fig})`); continue }
+      const best = hits
+        .map(f => centroid((f.geometry.coordinates as [number, number][][])[0]!))
+        .sort((a, z) => z.area - a.area)[0]!
+      marks.push({ x: px(best.lng), y: py(best.lat), label: `${g.name}  ${fig}` })
+    }
+    // A label beside its dot where it clears the labels already set: right, left, above, below, then further out
+    const placed: { x: number; y: number; w: number; h: number }[] = []
+    const clear = (b: { x: number; y: number; w: number; h: number }) => b.x >= M && b.x + b.w <= M + W &&
+      placed.every(o => b.x + b.w + 2 <= o.x || o.x + o.w + 2 <= b.x || b.y + b.h + 2 <= o.y || o.y + o.h + 2 <= b.y)
+    for (const m of marks) doc.circle(m.x, m.y, 3.4).lineWidth(1.4).fillAndStroke(C.ink, '#ffffff')
+    for (const m of marks) {
+      doc.font(F.bold).fontSize(7.4)
+      const w = doc.widthOfString(m.label) + 10, h = 14
+      const tries = [0, 1, 2].flatMap(k => [
+        { x: m.x + 7, y: m.y - 7 + k * 16 }, { x: m.x - 7 - w, y: m.y - 7 + k * 16 },
+        { x: m.x - w / 2, y: m.y - 22 - k * 16 }, { x: m.x - w / 2, y: m.y + 8 + k * 16 },
+      ])
+      const at = tries.map(t => ({ ...t, w, h })).find(clear) ?? { x: m.x + 7, y: m.y - 7, w, h }
+      placed.push(at)
+      if (Math.abs(at.y + h / 2 - m.y) > 9) doc.moveTo(m.x, m.y).lineTo(at.x + w / 2, at.y + (at.y > m.y ? 0 : h)).lineWidth(0.6).stroke(C.ink)
+      doc.roundedRect(at.x, at.y, w, h, 2).lineWidth(0.7).fillAndStroke('#ffffff', C.ink)
+      doc.fillColor(C.ink).text(m.label, at.x + 5, at.y + 3.4, { width: w - 6, lineBreak: false })
+    }
+    yy = top + boxH + 10
+
+    // The key, then the sites the drawing has no area for
+    let kx2 = M
+    for (const [cls, words] of PLAN_KEY) {
+      const st = PLAN_GREYS[cls]!
+      const w = doc.font(F.reg).fontSize(7).widthOfString(words) + 22
+      if (kx2 + w > M + W) { kx2 = M; yy += 12 }
+      doc.save()
+      if (st.dash) doc.dash(st.dash[0], { space: st.dash[1] })
+      if (st.fill) doc.rect(kx2, yy + 1, 10, 7).lineWidth(0.4).fillAndStroke(st.fill, st.stroke ?? st.fill)
+      else doc.moveTo(kx2, yy + 4.5).lineTo(kx2 + 10, yy + 4.5).lineWidth(Math.max(0.8, st.width ?? 0.8)).stroke(st.stroke ?? C.ink)
+      doc.restore()
+      line(words, kx2 + 13, yy, w - 13, { size: 7, color: C.sub })
+      kx2 += w
+    }
+    yy += 14
+    if (off.length) {
+      doc.font(F.reg).fontSize(7.4).fillColor(C.sub).text(`Not on the drawing: ${off.join(', ')}.`, M, yy, { width: W, lineGap: 1 })
+      yy = doc.y + 4
+    }
+    return yy
+  }
+
   // ── progress by site ──
   if (p.bySite.length) {
     y = title('Progress by Site', 'Machines fuelled out of machines planned at each site', y, 26 * Math.min(4, p.bySite.length))
@@ -257,6 +400,10 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
       y = track(g.name, `${nf(g.fuelled)} of ${nf(g.planned)} fuelled`, g.planned, g.fuelled, g.planned, C.blue, y, { faint: /no site/i.test(g.name) })
     }
   }
+
+  // ── the planting plan, in black and white, each site's progress on it ──
+  const estate = p.factory === PLANTING_PLAN_FACTORY ? plantingPlan() : null
+  if (estate && p.bySite.length) y = drawPlantingPlan(estate, y)
 
   // ── litres by equipment type ──
   if (p.byType.length) {
@@ -326,7 +473,7 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
   if (p.machines.length) {
     y = title('Machine List', `All ${nf(t.planned)} machines, in fuelling status order: fuelling now, short, over, not fuelled, as planned.`, y, 80)
     y = table(
-      [{ h: 'MACHINE', w: 13 }, { h: 'TYPE', w: 19 }, { h: 'STATUS', w: 14 }, { h: 'SITE', w: 20 }, { h: 'PLAN', w: 8 }, { h: 'PLANNED L', w: 10, r: true }, { h: 'FUELLED L', w: 10, r: true }, { h: 'DIFFERENCE L', w: 13, r: true }],
+      [{ h: 'MACHINE', w: 13.5 }, { h: 'TYPE', w: 19.5 }, { h: 'STATUS', w: 13 }, { h: 'SITE', w: 20 }, { h: 'PLAN', w: 8.8 }, { h: 'PLANNED L', w: 11.5, r: true }, { h: 'FUELLED L', w: 10.5, r: true }, { h: 'VARIANCE L', w: 12, r: true }],
       p.machines.map(m => ({
         dot: STATUS_COLOR[m.status],
         cells: [m.machine, m.type ?? 'Unspecified', m.status, m.site ?? '-', m.plannedL == null ? 'Full tank' : m.request ? 'Request' : 'Litres',
@@ -335,31 +482,6 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
       })),
       y,
     )
-  }
-
-  // ── how these numbers are worked out ──
-  {
-    const notes = [
-      'Planned: every machine on an approved work plan for the day whose fuel request is approved, and every approved vehicle request no plan names ("Request" in the Plan column). A machine on two shifts is one machine, its litres added; the litres are the fuel request’s.',
-      'Fuelled: completed fuellings at the pumps that day, from FactorySuite.',
-      '"Full tank" plans with no litre figure count in the machine totals but not in any litre total or percentage; a full tank\'s request litres are its plan where the request gives them.',
-      'Litres delivered % = litres fuelled ÷ litres planned, on plans that give a litre figure.',
-      `"As planned" is within ${Math.round(AS_PLANNED_SHARE * 100)}% of the planned litres; "Short" is fuelled but more than ${Math.round(AS_PLANNED_SHARE * 100)}% under, "Over" more than ${Math.round(AS_PLANNED_SHARE * 100)}% over. Shortfall is planned less fuelled on the Short machines.`,
-      ...(p.pendingLines ? [`${plural(p.pendingLines, 'plan line')} whose plan or fuel request still waits for approval ${p.pendingLines === 1 ? 'is' : 'are'} not counted.`] : []),
-      ...(p.rejectedLines ? [`${plural(p.rejectedLines, 'plan line')} whose fuel request was rejected or cancelled ${p.rejectedLines === 1 ? 'is' : 'are'} not counted.`] : []),
-      'Machines with no type in the machine register are shown as "Unspecified"; a vehicle request names no site, so its site is the pump that fuelled it, else the pump it was last fuelled at.',
-    ]
-    doc.font(F.reg).fontSize(7.6)
-    const h = notes.reduce((a, n) => a + doc.heightOfString(n, { width: W - 12 }) + 3, 0)
-    current = 'Notes'
-    y = room(y + 8, h + 20)
-    line('How these numbers are worked out', M, y, W, { font: F.bold, size: 9 })
-    y += 14
-    for (const n of notes) {
-      doc.circle(M + 3, y + 3.6, 1.3).fill(C.sub)
-      doc.font(F.reg).fontSize(7.6).fillColor(C.sub).text(n, M + 10, y, { width: W - 12, lineGap: 0.5 })
-      y = doc.y + 3
-    }
   }
 
   // ── footers ──
