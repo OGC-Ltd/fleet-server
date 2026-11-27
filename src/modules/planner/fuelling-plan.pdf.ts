@@ -6,7 +6,7 @@
  * cover head, a strip of the report's particulars, then
  *
  *   the opening sentence and five figure tiles;
- *   Where Every Planned Machine Stands — the day's machines as one bar by status;
+ *   Where Every Planned Machine Stands — the period's machines as one bar by status;
  *   Progress by Site — machines fuelled of machines planned, site by site;
  *   (no heading) Mufindi's planting plan, the estate drawing in black and white, each site
  *     the report names marked on it with its progress (operator 2026-11-27);
@@ -121,17 +121,27 @@ const litres = (v: number) => nf(v, 2)
 const signed = (v: number) => (v > 0 ? `+${litres(v)}` : litres(v))
 const pct = (v: number, of: number) => (of > 0 ? `${Math.round((v / of) * 100)}%` : '-')
 const plural = (n: number, w: string) => `${nf(n)} ${w}${n === 1 ? '' : 's'}`
+/** "25 Nov". */
+const shortDay = (day: string) => `${Number(day.slice(8, 10))} ${MONTHS[Number(day.slice(5, 7)) - 1]!.slice(0, 3)}`
 export const dayWords = (day: string) => `${Number(day.slice(8, 10))} ${MONTHS[Number(day.slice(5, 7)) - 1]} ${day.slice(0, 4)}`
 const titleCase = (s: string) => s.toLowerCase().replace(/(^|[\s(/-])([a-z])/g, (_, a: string, b: string) => a + b.toUpperCase())
 
-export function fuellingPlanFileName(p: Pick<FuellingPlan, 'day'>, factoryName: string) {
-  return `Fuelling plan vs actual ${factoryName} ${p.day}.pdf`
+export function fuellingPlanFileName(p: Pick<FuellingPlan, 'from' | 'to'>, factoryName: string) {
+  return `Fuelling plan vs actual ${factoryName} ${p.from}${p.to !== p.from ? ` to ${p.to}` : ''}.pdf`
+}
+/** "25 November 2026", or "23 to 25 November 2026", "29 November to 2 December 2026". */
+export function periodWords(from: string, to: string) {
+  if (from === to) return dayWords(from)
+  const [fy, fm] = [from.slice(0, 4), from.slice(5, 7)]
+  const first = fy !== to.slice(0, 4) ? dayWords(from) : fm !== to.slice(5, 7) ? dayWords(from).replace(/ \d{4}$/, '') : String(Number(from.slice(8, 10)))
+  return `${first} to ${dayWords(to)}`
 }
 
 export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: string; orgName: string; now?: number }): Promise<Buffer> {
   const now = o.now ?? Date.now()
   const t = p.totals
-  const doc = new PDFDocument({ size: 'A4', margin: M, bufferPages: true, info: { Title: `Fuelling: plan vs actual, ${o.factoryName}, ${dayWords(p.day)}`, Author: PREPARED_BY } })
+  const several = p.from !== p.to
+  const doc = new PDFDocument({ size: 'A4', margin: M, bufferPages: true, info: { Title: `Fuelling: plan vs actual, ${o.factoryName}, ${periodWords(p.from, p.to)}`, Author: PREPARED_BY } })
   const chunks: Buffer[] = []
   doc.on('data', (c: Buffer) => chunks.push(c))
   const done = new Promise<Buffer>(res => doc.on('end', () => res(Buffer.concat(chunks))))
@@ -161,7 +171,7 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
   }
   const rule = (yy: number) => doc.moveTo(M, yy).lineTo(M + W, yy).lineWidth(0.6).stroke(C.line)
 
-  const period = dayWords(p.day)
+  const period = periodWords(p.from, p.to)
   /** The running head on pages 2 on. */
   const head = (section: string) => {
     doc.rect(0, 0, PAGE_W, 4).fill(C.ink)
@@ -204,7 +214,7 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
   {
     const prepared = (() => { const d = new Date(now + 3 * 3_600_000); return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}, ${d.toISOString().slice(11, 16)}` })()
     const meta: [string, string][] = [
-      ['DAY', period], ['SITES', nf(p.bySite.length)], ['STATE', p.closed ? 'Day closed' : 'So far today'],
+      [several ? 'DAYS' : 'DAY', period], ['SITES', nf(p.bySite.length)], ['STATE', p.closed ? (several ? 'Days closed' : 'Day closed') : 'So far today'],
       ['PREPARED', prepared], ['PREPARED BY', PREPARED_BY],
     ]
     const widths = meta.map(([l, v]) => Math.max(doc.font(F.bold).fontSize(6.8).widthOfString(l), doc.font(F.bold).fontSize(9.5).widthOfString(v)) + 20)
@@ -268,7 +278,9 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
 
   // ── where every planned machine stands ──
   if (t.planned) {
-    y = title('Where Every Planned Machine Stands', `Share of the day's ${nf(t.planned)}-machine plan by fuelling status`, y, 40)
+    y = title('Where Every Planned Machine Stands', several
+      ? `Share of the ${nf(p.days)} days' ${nf(t.planned)} planned machines by fuelling status; a machine counts once for each day it was planned`
+      : `Share of the day's ${nf(t.planned)}-machine plan by fuelling status`, y, 40)
     const parts = (['Not fuelled', 'Fuelling now', 'Short', 'Over', 'As planned'] as FuellingStatus[])
       .map(s => ({ s, n: p.machines.filter(m => m.status === s).length }))
       .filter(x => x.n > 0)
@@ -424,7 +436,7 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
     y = title('Machines Fuelled: How Close to Plan', 'Each bar is the planned amount; the fill is what was actually put in. Biggest shortfalls first.', y, 26 * Math.min(4, fuelled.length))
     for (const m of fuelled) {
       y = room(y, 26)
-      const label = [m.machine, m.type ?? 'Unspecified', m.site].filter(Boolean).join('  ·  ')
+      const label = [several ? shortDay(m.day) : null, m.machine, m.type ?? 'Unspecified', m.site].filter(Boolean).join('  ·  ')
       const figure = m.plannedL == null
         ? `${litres(m.fuelledL)} L, full tank`
         : `${litres(m.fuelledL)} / ${litres(m.plannedL)} L${m.diffL ? ` (${signed(m.diffL)})` : ''}`
@@ -434,7 +446,7 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
 
   // ── a table, carried over pages with its head repeated ──
   type Col = { h: string; w: number; r?: boolean }
-  const table = (cols: Col[], rows: { cells: string[]; dot?: string; tone?: (string | null)[] }[], yy: number) => {
+  const table = (cols: Col[], rows: { cells: string[]; dot?: string; tone?: (string | null)[] }[], yy: number, o: { dotAt?: number; size?: number } = {}) => {
     const scale = W / cols.reduce((a, c) => a + c.w, 0)
     const ws = cols.map(c => c.w * scale)
     const rowH = 15
@@ -450,9 +462,9 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
       if (n % 2 === 1) doc.rect(M, yy - 4, W, rowH).fill(C.panel)
       let x = M
       cols.forEach((c, i) => {
-        const dot = i === 2 && r.dot
+        const dot = i === (o.dotAt ?? 2) && r.dot
         if (dot) doc.circle(x + 7, yy + 3.2, 3).fill(r.dot!)
-        line(r.cells[i] ?? '', x + (dot ? 14 : 4), yy, ws[i]! - (dot ? 18 : 8), { size: 7.6, color: r.tone?.[i] ?? C.ink, align: c.r ? 'right' : 'left' })
+        line(r.cells[i] ?? '', x + (dot ? 14 : 4), yy, ws[i]! - (dot ? 18 : 8), { size: o.size ?? 7.6, color: r.tone?.[i] ?? C.ink, align: c.r ? 'right' : 'left' })
         x += ws[i]!
       })
       yy += rowH
@@ -464,24 +476,28 @@ export async function renderFuellingPlanPdf(p: FuellingPlan, o: { factoryName: s
   if (p.offPlan.length) {
     y = title('Fuelled Off Plan', `${plural(p.offPlan.length, 'machine')} fuelled that no approved plan or vehicle request named: ${litres(t.offPlanL)} L, not in the figures above`, y, 60)
     y = table(
-      [{ h: 'MACHINE', w: 16 }, { h: 'TYPE', w: 22 }, { h: 'SITE', w: 22 }, { h: 'DEPARTMENT', w: 20 }, { h: 'FUELLINGS', w: 10, r: true }, { h: 'FUELLED L', w: 12, r: true }],
-      p.offPlan.map(m => ({ cells: [m.machine, m.type ?? 'Unspecified', m.site ?? '-', m.department ? titleCase(m.department) : '-', nf(m.fuellings), litres(m.fuelledL)], tone: [null, m.type ? null : C.faint] })),
-      y,
+      [...(several ? [{ h: 'DAY', w: 9 }] : []), { h: 'MACHINE', w: 16 }, { h: 'TYPE', w: 22 }, { h: 'SITE', w: 22 }, { h: 'DEPARTMENT', w: 20 }, { h: 'FUELLINGS', w: 10, r: true }, { h: 'FUELLED L', w: 12, r: true }],
+      p.offPlan.map(m => ({
+        cells: [...(several ? [shortDay(m.day)] : []), m.machine, m.type ?? 'Unspecified', m.site ?? '-', m.department ? titleCase(m.department) : '-', nf(m.fuellings), litres(m.fuelledL)],
+        tone: [...(several ? [null] : []), null, m.type ? null : C.faint],
+      })),
+      y, { dotAt: -1 },
     )
   }
 
   // ── machine list ──
   if (p.machines.length) {
-    y = title('Machine List', `All ${nf(t.planned)} machines, in fuelling status order: fuelling now, short, over, not fuelled, as planned.`, y, 80)
+    y = title('Machine List', `All ${nf(t.planned)} ${several ? 'planned machines over the days' : 'machines'}, in fuelling status order: fuelling now, short, over, not fuelled, as planned.`, y, 80)
+    const lead = several ? 1 : 0
     y = table(
-      [{ h: 'MACHINE', w: 13.5 }, { h: 'TYPE', w: 19.5 }, { h: 'STATUS', w: 13 }, { h: 'SITE', w: 20 }, { h: 'PLAN', w: 8.8 }, { h: 'PLANNED L', w: 11.5, r: true }, { h: 'FUELLED L', w: 10.5, r: true }, { h: 'VARIANCE L', w: 12, r: true }],
+      [...(several ? [{ h: 'DAY', w: 7.5 }] : []), { h: 'MACHINE', w: 13.5 }, { h: 'TYPE', w: 19.5 }, { h: 'STATUS', w: 13 }, { h: 'SITE', w: 20 }, { h: 'PLAN', w: 8.8 }, { h: 'PLANNED L', w: 11.5, r: true }, { h: 'FUELLED L', w: several ? 11.5 : 10.5, r: true }, { h: 'VARIANCE L', w: 12, r: true }],
       p.machines.map(m => ({
         dot: STATUS_COLOR[m.status],
-        cells: [m.machine, m.type ?? 'Unspecified', m.status, m.site ?? '-', m.plannedL == null ? 'Full tank' : m.request ? 'Request' : 'Litres',
+        cells: [...(several ? [shortDay(m.day)] : []), m.machine, m.type ?? 'Unspecified', m.status, m.site ?? '-', m.plannedL == null ? 'Full tank' : m.request ? 'Request' : 'Litres',
           m.plannedL == null ? '' : litres(m.plannedL), litres(m.fuelledL), m.diffL == null ? '' : signed(m.diffL)],
-        tone: [null, m.type ? null : C.faint, null, null, m.plannedL == null ? C.faint : null, null, null, m.diffL != null && m.diffL < 0 ? C.red : null],
+        tone: [...(several ? [null] : []), null, m.type ? null : C.faint, null, null, m.plannedL == null ? C.faint : null, null, null, m.diffL != null && m.diffL < 0 ? C.red : null],
       })),
-      y,
+      y, { dotAt: 2 + lead, size: several ? 7 : 7.6 },
     )
   }
 

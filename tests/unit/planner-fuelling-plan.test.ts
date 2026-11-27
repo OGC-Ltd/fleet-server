@@ -82,7 +82,7 @@ describe('buildFuellingPlan', () => {
     ])
     expect(plan.machines.find(m => m.machine === 'T779EQV')).toMatchObject({ request: true, site: 'Logistics Centre 1', department: 'TRANSPORT', type: null })
     expect(plan.machines.find(m => m.machine === 'FES130')).toMatchObject({ fullTank: true })
-    expect(plan.offPlan).toEqual([{ machine: 'GR-04', type: null, site: 'Factory Site', department: 'CIVIL', fuelledL: 50, fuellings: 1 }])
+    expect(plan.offPlan).toEqual([{ day: DAY, machine: 'GR-04', type: null, site: 'Factory Site', department: 'CIVIL', fuelledL: 50, fuellings: 1 }])
     expect(plan.totals).toMatchObject({
       planned: 5, fuelled: 3, notFuelled: 2, short: 1, asPlanned: 2, over: 0, fullTankWaiting: 1, fullTanks: 1,
       plannedL: 1780, fuelledL: 971, fuelledOnFiguresL: 971, shortfallL: 715, offPlanL: 50,
@@ -104,6 +104,21 @@ describe('buildFuellingPlan', () => {
     expect(plan.closed).toBe(false)
     expect(plan.machines[0]).toMatchObject({ plannedL: 650, fullTank: false, status: 'Fuelling now', fuelledL: 0 })
     expect(fuellingLead(plan)).toBe('None of the 1 planned machine has been fuelled so far; 650 litres were planned. Zone 4 has the most machines still waiting (1).')
+  })
+
+  it('adds the days of a range, each judged against its own plan', () => {
+    const NEXT = '2026-11-26'
+    const plan = buildFuellingPlan(fuel({
+      to: NEXT,
+      lines: [line('EX-28', { litresRequested: 400 }), line('EX-28', { day: NEXT, litresRequested: 400 }), line('DG-12', { day: NEXT, litresRequested: 100 })],
+      issues: [issue('EX-28', 400), issue('DG-12', 100, { day: NEXT })],
+    }), { from: DAY, to: NEXT }, Date.parse('2026-11-28T08:00:00Z'))
+    expect([plan.from, plan.to, plan.days, plan.closed]).toEqual([DAY, NEXT, 2, true])
+    expect(plan.machines.map(m => [m.day, m.machine, m.status])).toEqual([
+      ['2026-11-26', 'EX-28', 'Not fuelled'], ['2026-11-26', 'DG-12', 'As planned'], ['2026-11-25', 'EX-28', 'As planned'],
+    ])
+    expect(plan.totals).toMatchObject({ planned: 3, fuelled: 2, plannedL: 900, fuelledL: 500 })
+    expect(fuellingLead(plan)).toBe('Across the 2 days, 2 of the 3 planned machines were fuelled, and they received 500 litres against 900 litres planned. Zone 4 has the most machines still not fuelled (1).')
   })
 
   it('keeps the requests no plan line asked for apart from the Fuel page lines', () => {

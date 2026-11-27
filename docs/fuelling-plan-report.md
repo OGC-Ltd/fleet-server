@@ -1,6 +1,6 @@
 # Fuelling plan vs actual
 
-One day at Mufindi Paper Mills (Kasulu): every machine an approved work plan or
+One day, or a range of up to 14 days, at Mufindi Paper Mills (Kasulu): every machine an approved work plan or
 vehicle request asked fuel for, against what FactorySuite's pumps put in. Built
 on 2026-11-27 after FactorySuite's own "Fuelling: plan vs actual" report, whose
 figures it reproduces.
@@ -15,8 +15,8 @@ Both routes require `fuel_filling:read`:
 
 | Route | Answer |
 |---|---|
-| `GET /api/v1/organisations/:orgId/planner/fuelling-plan?day=YYYY-MM-DD` | The day's figures as JSON, with `lead`, the opening sentence |
-| `GET /api/v1/organisations/:orgId/planner/fuelling-plan.pdf?day=YYYY-MM-DD` | The same day as a PDF |
+| `GET /api/v1/organisations/:orgId/planner/fuelling-plan?day=YYYY-MM-DD` (or `?from&to`) | The figures as JSON, with `lead`, the opening sentence |
+| `GET /api/v1/organisations/:orgId/planner/fuelling-plan.pdf?day=YYYY-MM-DD` (or `?from&to`) | The same report as a PDF |
 
 An organisation with no FactorySuite factory gets `{ factory: null, day }` from
 the JSON route and a 404 from the PDF route. The PDF is drawn on the report
@@ -25,6 +25,13 @@ worker pool (`pdf.fuellingPlan` in `lib/offload/cpu-tasks.ts`).
 Code: `src/modules/planner/fuelling-plan.ts` (the figures, pure),
 `fuelling-plan.pdf.ts` (the PDF), and `planner.controller.ts`. The site's tab
 is `new-ui/src/components/screens/FuellingPlanReport.jsx`.
+
+## A range of days
+
+Each day is judged against its own plan, exactly as a single day is, and the
+days are added together: a machine planned on three days counts three times,
+once for each day, in every figure, site and type. Rows carry their `day`, and
+the PDF and the page add a Day column. At most 14 days.
 
 ## Where the data comes from
 
