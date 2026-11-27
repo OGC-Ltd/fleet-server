@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { foldName } from '../../src/modules/planner/work-plan-match.js'
 import { buildFactoryFuel, type FactoryFuel, type FuelIssue, type FuelPlanLine, type FuelVehicleRequest } from '../../src/modules/planner/factory-fuel.js'
-import { buildFuellingPlan, fuellingLead, fuellingStatus, typeWords } from '../../src/modules/planner/fuelling-plan.js'
+import { buildFuellingPlan, deliveredSub, fuellingLead, fuellingStatus, typeWords } from '../../src/modules/planner/fuelling-plan.js'
 import { renderFuellingPlanPdf } from '../../src/modules/planner/fuelling-plan.pdf.js'
 
 const DAY = '2026-11-25'
@@ -85,7 +85,7 @@ describe('buildFuellingPlan', () => {
     expect(plan.offPlan).toEqual([{ day: DAY, machine: 'GR-04', type: null, site: 'Factory Site', department: 'CIVIL', fuelledL: 50, fuellings: 1 }])
     expect(plan.totals).toMatchObject({
       planned: 5, fuelled: 3, notFuelled: 2, short: 1, asPlanned: 2, over: 0, fullTankWaiting: 1, fullTanks: 1,
-      plannedL: 1780, fuelledL: 971, fuelledOnFiguresL: 971, shortfallL: 715, offPlanL: 50,
+      plannedL: 1780, fuelledL: 971, fuelledOnFiguresL: 971, shortfallL: 715, offPlanL: 50, deliveredL: 1021,
     })
     expect(plan.bySite.map(g => [g.name, g.fuelled, g.planned])).toEqual([
       ['Logistics Centre 1', 1, 2], ['Nursery B', 1, 1], ['Zone 4', 1, 1], ['Logistics Centre 2', 0, 1],
@@ -93,7 +93,7 @@ describe('buildFuellingPlan', () => {
     expect(plan.byType.map(g => [g.name, g.fuelledL, g.plannedL])).toEqual([
       ['Diesel Generators', 800, 800], ['Excavator', 85, 800], ['Unspecified', 86, 180],
     ])
-    expect(fuellingLead(plan)).toBe('3 of the 5 planned machines were fuelled, and they received 971 litres against 1,780 litres planned. Logistics Centre 1 has the most machines still not fuelled (1).')
+    expect(fuellingLead(plan)).toBe('3 of the 5 planned machines were fuelled, and the pumps issued 1,021 litres: 971 against 1,780 litres planned and 50 off plan. Logistics Centre 1 has the most machines still not fuelled (1).')
   })
 
   it('a full tank takes its request litres as its plan, and an open fuelling reads Fuelling now', () => {
@@ -118,7 +118,17 @@ describe('buildFuellingPlan', () => {
       ['2026-11-26', 'EX-28', 'Not fuelled'], ['2026-11-26', 'DG-12', 'As planned'], ['2026-11-25', 'EX-28', 'As planned'],
     ])
     expect(plan.totals).toMatchObject({ planned: 3, fuelled: 2, plannedL: 900, fuelledL: 500 })
-    expect(fuellingLead(plan)).toBe('Across the 2 days, 2 of the 3 planned machines were fuelled, and they received 500 litres against 900 litres planned. Zone 4 has the most machines still not fuelled (1).')
+    expect(fuellingLead(plan)).toBe('Across the 2 days, 2 of the 3 planned machines were fuelled, and the pumps issued 500 litres against 900 litres planned. Zone 4 has the most machines still not fuelled (1).')
+  })
+
+  it('delivers every litre the pumps issued, full tanks included (25 Nov: 6,651 L, not 5,960)', () => {
+    const plan = buildFuellingPlan(fuel({
+      lines: [line('EX-28', { litresRequested: 400 }), line('T895DSZ', { fullTank: true, litresRequested: null })],
+      issues: [issue('EX-28', 380), issue('T895DSZ', 213)],
+    }), DAY, Date.parse('2026-11-28T08:00:00Z'))
+    expect(plan.totals).toMatchObject({ plannedL: 400, fuelledL: 593, fuelledOnFiguresL: 380, deliveredL: 593 })
+    expect(deliveredSub(plan.totals)).toBe('incl. 213 L into full tanks')
+    expect(fuellingLead(plan)).toContain('the pumps issued 593 litres: 380 against 400 litres planned and 213 into full tanks.')
   })
 
   it('keeps the requests no plan line asked for apart from the Fuel page lines', () => {
