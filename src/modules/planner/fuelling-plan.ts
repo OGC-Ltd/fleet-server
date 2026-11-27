@@ -17,10 +17,11 @@
  *   Status    — Fuelling now (a fuelling still open), Not fuelled, Short
  *               (more than 10% under), Over (more than 10% over), As planned.
  *               A full tank with no figure is As planned once it is fuelled.
- *   Site      — the line's fuelling location; a vehicle request names none,
- *               so the pump that fuelled it, else the one it was last
- *               fuelled at (FactorySuite's report put Transport's buses at
- *               Logistics Centre 1).
+ *   Site      — the pump that fuelled it, as FactorySuite's "Litres issued by
+ *               location" counts it (operator 2026-11-27, "Count by pump":
+ *               25 Nov EX-10 planned at 2B-1 was fuelled at Nursery B). Not
+ *               fuelled: the line's fuelling location; a vehicle request names
+ *               none, so the pump it was last fuelled at.
  *   Off plan  — machines fuelled that day that no approved plan or request
  *               named; listed apart, never in the planned totals.
  *
@@ -224,7 +225,7 @@ function dayPlan(fuel: FactoryFuel, day: string, register: ReadonlyMap<string, F
       day,
       machine: a.machine,
       type: typeOf(register.get(k)),
-      site: a.site ?? p?.pump ?? usualPumps.get(k) ?? null,
+      site: p?.pump ?? a.site ?? usualPumps.get(k) ?? null,
       department: a.department ?? p?.department ?? null,
       plannedL,
       fullTank: a.fullTank && plannedL == null,
