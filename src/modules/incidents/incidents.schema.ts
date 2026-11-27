@@ -74,7 +74,13 @@ export const detailsQuerySchema = rangeBase.extend({
   maxHours: z.coerce.number().min(0).max(9000).optional(),
 })
 
+/** One unit's tracker readings now (Wialon view's unit report, operator 2026-11-27). */
+export const readingsQuerySchema = z.object({
+  vehicleId: z.string().cuid(),
+})
+
 export type SummaryQuery  = z.infer<typeof summaryQuerySchema>
+export type ReadingsQuery = z.infer<typeof readingsQuerySchema>
 export type DetailsQuery  = z.infer<typeof detailsQuerySchema>
 export type ListQuery     = z.infer<typeof listQuerySchema>
 export type InsightsQuery = z.infer<typeof insightsQuerySchema>
