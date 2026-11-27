@@ -21,6 +21,7 @@
  * running it twice changes nothing the second time.
  */
 
+import { WIALON_ONLY_FAULT_KINDS } from '../../lib/fault-kinds.js'
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { env } from '../../config/env.js'
@@ -59,7 +60,7 @@ export function trackerProbeStates(snapshot: SnapshotProbe[]) {
  * have lasted 10 minutes. Opened from when the fault began; closed only when the tracker shows that
  * sensor healthy again, never because a restart left the adapter not knowing yet.
  */
-export const TRACKER_STATUS_KINDS = ['fuel_probe_status', 'fuel_probe_battery', 'gnss_fault'] as const
+export const TRACKER_STATUS_KINDS = WIALON_ONLY_FAULT_KINDS
 
 interface SnapshotStatus {
   vehicleId: string

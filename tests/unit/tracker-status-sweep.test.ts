@@ -18,6 +18,7 @@ import { getFleetSnapshot } from '../../src/modules/telemetry/telemetry.service.
 import { sweepSensorFaults, trackerStatusStates } from '../../src/modules/telemetry/sensor-fault-sweep.service.js'
 import { trackerStatusCarried, TRACKER_STATUS_MIN_S } from '../../src/providers/wialon/wialon.adapter.js'
 import { PROBE_FAULT_KINDS } from '../../src/modules/reports/range-reports.service.js'
+import { WIALON_ONLY_FAULT_KINDS, WIALON_VIEW_FAULT_KINDS } from '../../src/lib/fault-kinds.js'
 
 const published = (topic: string) => vi.mocked(eventBus.publish).mock.calls.filter((c) => c[0] === topic).map((c) => c[1] as { vehicleId: string; kind: string; detail?: string; startedAt?: Date })
 const SINCE = '2026-11-27T05:00:00.000Z'
@@ -80,9 +81,13 @@ describe('the sweep', () => {
   })
 })
 
-describe('the Fuel Consumption Rate note', () => {
-  it('counts a probe status fault, not a low probe battery', () => {
-    expect(PROBE_FAULT_KINDS).toContain('fuel_probe_status')
-    expect(PROBE_FAULT_KINDS).not.toContain('fuel_probe_battery')
+describe('the system views stay as they were (operator, 2026-11-27: System | Wialon)', () => {
+  it('the Fuel Consumption Rate note reads no Wialon-only kind', () => {
+    for (const k of WIALON_ONLY_FAULT_KINDS) expect(PROBE_FAULT_KINDS).not.toContain(k)
+    expect(PROBE_FAULT_KINDS).toEqual(['fuel_probe_fault', 'fuel_probe_dead'])
+  })
+  it('the 4095 / 6500 / 7000 probe codes stay in the system views, and the Wialon view lists them too', () => {
+    expect(WIALON_ONLY_FAULT_KINDS).not.toContain('fuel_probe_fault')
+    expect(WIALON_VIEW_FAULT_KINDS).toContain('fuel_probe_fault')
   })
 })

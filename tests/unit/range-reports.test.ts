@@ -81,7 +81,7 @@ describe('fuel consumption rate', () => {
     // no probe: no figures, and says why, rather than 0 L
     // no readings, but the tracker recorded why: the probe's fault is the comment
     expect(kcx).toMatchObject({ distanceSource: null, startL: null, consumedL: null, kmPerL: null, note: 'PROBE ISSUE: Lost Contact with Tubes Error - Needs Replacement', target: { kmPerL: 5.8 } })
-    expect(prisma.sensorFaultEpisode.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ kind: { in: ['fuel_probe_fault', 'fuel_probe_dead', 'fuel_probe_status'] } }) }))
+    expect(prisma.sensorFaultEpisode.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ kind: { in: ['fuel_probe_fault', 'fuel_probe_dead'] } }) }))
     expect(out.rows.find((r) => r.vehicleId === 'v3')!.target).toEqual({ kmPerL: 2.5, words: '2.50', source: 'vehicle' })
     expect(out.totals).toMatchObject({ units: 3, measured: 1, consumedL: 9.4 })
     expect(queries.filter((q) => q.includes('LAG(')).length).toBe(2)

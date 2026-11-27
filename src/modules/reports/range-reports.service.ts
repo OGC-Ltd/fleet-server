@@ -166,8 +166,7 @@ async function rangeKm(vehicleIds: string[], days: string[], now: number) {
 }
 
 /** Probe fault episodes the report heeds: the tracker's own fault code, and the probe gone silent. */
-// fuel_probe_status: the tracker's own status codes (2026-11-27). Not the probe battery: a low battery still reads.
-export const PROBE_FAULT_KINDS = ['fuel_probe_fault', 'fuel_probe_dead', 'fuel_probe_status']
+export const PROBE_FAULT_KINDS = ['fuel_probe_fault', 'fuel_probe_dead']
 
 /**
  * Each unit's probe fault during [from, to), in words ("Lost Contact with Tubes Error - Needs

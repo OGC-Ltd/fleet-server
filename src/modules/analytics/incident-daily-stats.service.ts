@@ -24,6 +24,7 @@
  * gone keeps the numbers it was given while it still had them.
  */
 
+import { WIALON_ONLY_FAULT_KINDS } from '../../lib/fault-kinds.js'
 import { prisma } from '../../lib/prisma.js'
 import { logger } from '../../lib/logger.js'
 import { fleetDayStart, fleetDayKey } from '../../lib/provider-time.js'
@@ -68,7 +69,8 @@ export async function recordIncidentDailyStats(inDay: Date): Promise<IncidentRol
     // cannot answer it once the detail is pruned.
     prisma.sensorFaultEpisode.groupBy({
       by:     ['vehicleId', 'organisationId', 'kind'],
-      where:  { day },
+      // The Wialon-only kinds have their own view and stay out of the system's counts (fault-kinds).
+      where:  { day, kind: { notIn: [...WIALON_ONLY_FAULT_KINDS] } },
       _count: { _all: true },
       _sum:   { durationSec: true },
     }),

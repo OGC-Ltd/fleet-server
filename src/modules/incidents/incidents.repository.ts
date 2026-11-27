@@ -14,6 +14,7 @@
  * `"<count>:<vehicleId>"` with `WHERE (count, vehicle_id) < (:c, :v)`.
  */
 
+import { WIALON_ONLY_FAULT_KINDS } from '../../lib/fault-kinds.js'
 import { Prisma } from '../../../generated/prisma/client.js'
 import { prisma } from '../../lib/prisma.js'
 import { MOVING_THRESHOLD_KMH } from '../../lib/movement-state.js'
@@ -285,6 +286,9 @@ export interface FaultSummaryRow {
  * Not applied to speeding. An overspeeding incident is a point event that is
  * over in seconds, always closed, and containment and overlap agree on it.
  */
+/** The system views leave out the Wialon-only kinds (fault-kinds); the Wialon view names them. */
+const notWialonOnly = Prisma.sql`AND e.kind <> ALL(${[...WIALON_ONLY_FAULT_KINDS]})`
+
 const faultOverlap = (r: Range) => Prisma.sql`
        AND e.started_at <= ${r.to}::timestamptz
        AND COALESCE(e.recovered_at, NOW()) >= ${r.from}::timestamptz`
@@ -391,9 +395,10 @@ export async function faultSummary(
     recent:   Prisma.sql`"lastAt" DESC`,
   }[opts.sort] ?? Prisma.sql`episodes DESC, total_seconds DESC`
 
+  // Named kinds when asked; otherwise everything but the Wialon-only kinds (see fault-kinds).
   const kindFilter = opts.kinds?.length
     ? Prisma.sql`AND e.kind = ANY(${opts.kinds})`
-    : Prisma.empty
+    : notWialonOnly
 
   const rows = await prisma.$queryRaw<Array<FaultSummaryRow & { episodes: bigint; open_now: bigint; total_seconds: bigint; longest_seconds: number | null }>>(Prisma.sql`
     SELECT e.vehicle_id                          AS "vehicleId",
@@ -451,8 +456,15 @@ export async function faultSummary(
 export async function faultList(
   orgId: string,
   r: Range,
-  q: { vehicleId: string; kinds?: string[]; cursor?: string; limit: number },
+  q: { vehicleId: string; kinds?: string[] | 'all'; cursor?: string; limit: number },
 ) {
+  // 'all': a unit's fault history, System and Wialon together. Named kinds when asked; otherwise
+  // everything but the Wialon-only kinds, as the Malfunction tab has always listed.
+  const kindWhere = q.kinds === 'all'
+    ? {}
+    : q.kinds?.length
+      ? { kind: { in: q.kinds } }
+      : { kind: { notIn: [...WIALON_ONLY_FAULT_KINDS] } }
   const items = await prisma.sensorFaultEpisode.findMany({
     where: {
       organisationId: orgId,
@@ -462,7 +474,7 @@ export async function faultList(
       // empty detail table because the episode began last month.
       startedAt:      { lte: r.to },
       OR: [{ recoveredAt: null }, { recoveredAt: { gte: r.from } }],
-      ...(q.kinds?.length ? { kind: { in: q.kinds } } : {}),
+      ...kindWhere,
     },
     take: q.limit + 1,
     ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
@@ -492,6 +504,7 @@ export async function faultInsights(orgId: string, r: Range) {
         FROM sensor_fault_episodes e
        WHERE e.organisation_id = ${orgId}
          ${faultOverlap(r)}
+         ${notWialonOnly}
     `),
     prisma.$queryRaw<Array<{ kind: string; episodes: bigint; seconds: bigint }>>(Prisma.sql`
       SELECT e.kind                                         AS kind,
@@ -500,12 +513,13 @@ export async function faultInsights(orgId: string, r: Range) {
         FROM sensor_fault_episodes e
        WHERE e.organisation_id = ${orgId}
          ${faultOverlap(r)}
+         ${notWialonOnly}
        GROUP BY e.kind
     `),
     // Open RIGHT NOW, regardless of the window — this is the actionable number
     // and it is not a fact about the reporting period.
     prisma.sensorFaultEpisode.count({
-      where: { organisationId: orgId, recoveredAt: null },
+      where: { organisationId: orgId, recoveredAt: null, kind: { notIn: [...WIALON_ONLY_FAULT_KINDS] } },
     }),
   ])
 

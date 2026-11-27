@@ -39,6 +39,7 @@
  * without asking the model at all.
  */
 
+import { WIALON_ONLY_FAULT_KINDS } from '../../lib/fault-kinds.js'
 import { createHash } from 'node:crypto'
 import { env } from '../../config/env.js'
 import { logger } from '../../lib/logger.js'
@@ -187,7 +188,8 @@ export async function collectSignals(orgId: string, onlyVehicleId?: string): Pro
       SELECT id, vehicle_id, kind, started_at, recovered_at
         FROM sensor_fault_episodes
        WHERE organisation_id = ${orgId} AND (${one}::text IS NULL OR vehicle_id = ${one})
-         AND (started_at >= ${from} OR recovered_at IS NULL)`,
+         AND (started_at >= ${from} OR recovered_at IS NULL)
+         AND kind <> ALL(${[...WIALON_ONLY_FAULT_KINDS]})`,
     prisma.$queryRaw<Array<{ id: string; vehicle_id: string; target_kind: string; fault_kind: string | null; stage: string; created_at: Date; expected_resolution_at: Date | null }>>`
       SELECT id, vehicle_id, target_kind, fault_kind, stage, created_at, expected_resolution_at
         FROM repair_report_items
