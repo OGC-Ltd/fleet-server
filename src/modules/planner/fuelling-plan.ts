@@ -42,6 +42,8 @@ const NOT_APPROVED = new Set(['', 'DRAFT', 'SUBMITTED', 'PENDING', 'REJECTED', '
 const approved = (status: string | null | undefined) => !NOT_APPROVED.has(String(status ?? '').trim().toUpperCase())
 
 export interface FuellingMachine {
+  /** The day it was planned for (a range lists a machine once for each day it was planned). */
+  day: string
   machine: string
   /** The register's category, else its name; null when the register has no such machine. */
   type: string | null
@@ -61,6 +63,7 @@ export interface FuellingMachine {
 }
 
 export interface FuellingOffPlan {
+  day: string
   machine: string
   type: string | null
   site: string | null
@@ -79,8 +82,13 @@ export interface FuellingGroup {
 
 export interface FuellingPlan {
   factory: string
+  /** The first day (as `from`), kept for callers that read one day. */
   day: string
-  /** The day is over (before today in East Africa): the figures are final. */
+  from: string
+  to: string
+  /** Days in the range. */
+  days: number
+  /** The last day is over (before today in East Africa): the figures are final. */
   closed: boolean
   machines: FuellingMachine[]
   offPlan: FuellingOffPlan[]
@@ -144,12 +152,8 @@ const typeOf = (m: FuelMachine | undefined) => {
   return t ? typeWords(t) : null
 }
 
-/**
- * `usualPumps`: folded machine → the pump it was last fuelled at, for a vehicle
- * request (it names no site) the pumps have not fuelled that day.
- */
-export function buildFuellingPlan(fuel: FactoryFuel, day: string, now = Date.now(), usualPumps: ReadonlyMap<string, string> = new Map()): FuellingPlan {
-  const register = new Map(fuel.machines.map(m => [foldName(m.reference), m]))
+/** One day's planned machines and off-plan fuellings, each judged against that day alone. */
+function dayPlan(fuel: FactoryFuel, day: string, register: ReadonlyMap<string, FuelMachine>, usualPumps: ReadonlyMap<string, string>) {
   type Acc = {
     machine: string; site: string | null; department: string | null; request: boolean
     plannedL: number | null; fullTank: boolean; noFigure: boolean
@@ -211,6 +215,7 @@ export function buildFuellingPlan(fuel: FactoryFuel, day: string, now = Date.now
     // A full tank with litres on some shift and none on another: the figure stands for what is known
     const plannedL = a.plannedL == null ? null : round(a.plannedL)
     return {
+      day,
       machine: a.machine,
       type: typeOf(register.get(k)),
       site: a.site ?? p?.pump ?? usualPumps.get(k) ?? null,
@@ -224,15 +229,44 @@ export function buildFuellingPlan(fuel: FactoryFuel, day: string, now = Date.now
       request: a.request,
     }
   })
+  const offPlan: FuellingOffPlan[] = [...pumped.entries()]
+    .filter(([k, p]) => !planned.has(k) && (p.count > 0 || p.open))
+    .map(([k, p]) => ({ day, machine: p.machine, type: typeOf(register.get(k)), site: p.pump, department: p.department, fuelledL: round(p.litres), fuellings: p.count }))
+  return { machines, offPlan, pendingLines, rejectedLines }
+}
+
+/** The days from `from` to `to`, both included. */
+export function daysOf(from: string, to: string): string[] {
+  const out: string[] = []
+  for (let d = from; d <= to && out.length < 400; d = new Date(Date.parse(`${d}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10)) out.push(d)
+  return out
+}
+
+/**
+ * The report over one day or a range (operator 2026-11-27: "the date picker
+ * should allow a range"). Each day is judged against its own plan, as
+ * FactorySuite's day report does, and the days are added together: a machine
+ * planned on three days counts three times, once for each day.
+ * `usualPumps`: folded machine → the pump it was last fuelled at, for a vehicle
+ * request (it names no site) the pumps have not fuelled that day.
+ */
+export function buildFuellingPlan(
+  fuel: FactoryFuel, range: string | { from: string; to: string }, now = Date.now(), usualPumps: ReadonlyMap<string, string> = new Map(),
+): FuellingPlan {
+  const { from, to } = typeof range === 'string' ? { from: range, to: range } : range
+  const register = new Map(fuel.machines.map(m => [foldName(m.reference), m]))
+  const days = daysOf(from, to)
+  const each = days.map(d => dayPlan(fuel, d, register, usualPumps))
+  const machines = each.flatMap(e => e.machines)
+  const pendingLines = each.reduce((t, e) => t + e.pendingLines, 0)
+  const rejectedLines = each.reduce((t, e) => t + e.rejectedLines, 0)
+
   const rank = (s: FuellingStatus) => FUELLING_STATUSES.indexOf(s)
   machines.sort((a, b) => rank(a.status) - rank(b.status)
     || (a.status === 'Not fuelled' ? (b.plannedL ?? -1) - (a.plannedL ?? -1) : (a.diffL ?? Infinity) - (b.diffL ?? Infinity))
-    || a.machine.localeCompare(b.machine, undefined, { numeric: true }))
-
-  const offPlan: FuellingOffPlan[] = [...pumped.entries()]
-    .filter(([k, p]) => !planned.has(k) && (p.count > 0 || p.open))
-    .map(([k, p]) => ({ machine: p.machine, type: typeOf(register.get(k)), site: p.pump, department: p.department, fuelledL: round(p.litres), fuellings: p.count }))
-    .sort((a, b) => b.fuelledL - a.fuelledL || a.machine.localeCompare(b.machine, undefined, { numeric: true }))
+    || a.machine.localeCompare(b.machine, undefined, { numeric: true }) || a.day.localeCompare(b.day))
+  const offPlan = each.flatMap(e => e.offPlan)
+    .sort((a, b) => b.fuelledL - a.fuelledL || a.machine.localeCompare(b.machine, undefined, { numeric: true }) || a.day.localeCompare(b.day))
 
   const count = (s: FuellingStatus) => machines.filter(m => m.status === s).length
   const sum = (ms: FuellingMachine[], f: (m: FuellingMachine) => number) => round(ms.reduce((t, m) => t + f(m), 0))
@@ -274,7 +308,7 @@ export function buildFuellingPlan(fuel: FactoryFuel, day: string, now = Date.now
     .filter(g => g.plannedL > 0 || g.fuelledL > 0)
     .sort((a, b) => b.plannedL - a.plannedL || b.fuelledL - a.fuelledL || a.name.localeCompare(b.name))
 
-  return { factory: fuel.factory, day, closed: day < eatDay(now), machines, offPlan, pendingLines, rejectedLines, totals, bySite, byType }
+  return { factory: fuel.factory, day: from, from, to, days: days.length, closed: to < eatDay(now), machines, offPlan, pendingLines, rejectedLines, totals, bySite, byType }
 }
 
 const fmt = (n: number) => Math.round(n).toLocaleString('en-GB')
@@ -282,16 +316,17 @@ const fmt = (n: number) => Math.round(n).toLocaleString('en-GB')
 /** The report's opening sentence. */
 export function fuellingLead(p: FuellingPlan): string {
   const t = p.totals
-  if (!t.planned) return 'No machine was on an approved plan or vehicle request for this day.'
+  const several = (p.days ?? 1) > 1
+  if (!t.planned) return `No machine was on an approved plan or vehicle request ${several ? 'on any of these days' : 'for this day'}.`
   const so = p.closed ? '' : ' so far'
   const one = t.planned === 1
   const verb = p.closed ? (t.fuelled === 0 && one ? 'was' : 'were') : t.fuelled === 0 && one ? 'has been' : 'have been'
   const machines = `planned machine${one ? '' : 's'}`
   const head = t.fuelled === t.planned
-    ? `${one ? 'The' : `All ${fmt(t.planned)}`} ${machines} ${verb} fuelled${so}`
+    ? `${one ? 'the' : `all ${fmt(t.planned)}`} ${machines} ${verb} fuelled${so}`
     : t.fuelled === 0
-      ? `None of the ${fmt(t.planned)} ${machines} ${verb} fuelled${so}`
-      : `${t.fuelled * 2 < t.planned ? 'Only ' : ''}${fmt(t.fuelled)} of the ${fmt(t.planned)} ${machines} ${verb} fuelled${so}`
+      ? `none of the ${fmt(t.planned)} ${machines} ${verb} fuelled${so}`
+      : `${t.fuelled * 2 < t.planned ? 'only ' : ''}${fmt(t.fuelled)} of the ${fmt(t.planned)} ${machines} ${verb} fuelled${so}`
   // Litres against litres: full tanks with no figure apart, as FactorySuite's report
   const intoFull = round(t.fuelledL - t.fuelledOnFiguresL)
   const litres = t.fuelled
@@ -302,5 +337,6 @@ export function fuellingLead(p: FuellingPlan): string {
     .filter(g => g.left > 0 && !/no site/i.test(g.name))
     .sort((a, b) => b.left - a.left)[0]
   const tail = waiting ? ` ${waiting.name} has the most machines still ${p.closed ? 'not fuelled' : 'waiting'} (${fmt(waiting.left)}).` : ''
-  return `${head}${litres}${tail}`.replace(/^./, c => c.toUpperCase())
+  // Over several days a machine counts once for each day it was planned
+  return `${several ? `Across the ${fmt(p.days)} days, ` : ''}${head}${litres}${tail}`.replace(/^./, c => c.toUpperCase())
 }

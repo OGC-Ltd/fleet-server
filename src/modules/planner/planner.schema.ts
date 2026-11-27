@@ -48,10 +48,20 @@ export const factoryFuelQuerySchema = z.object({
 }).refine(q => q.from <= q.to, { message: 'from must not be after to' })
   .refine(q => (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000 <= 30, { message: 'At most 31 days' })
 
-// Fuelling: plan vs actual, one day (planner/fuelling-plan)
+// Fuelling: plan vs actual (planner/fuelling-plan): one `day`, or `from`..`to`
+// (operator 2026-11-27: "the date picker should allow a range"), at most 14 days
+export const FUELLING_PLAN_MAX_DAYS = 14
 export const fuellingPlanQuerySchema = z.object({
-  day,
-})
+  day: day.optional(),
+  from: day.optional(),
+  to: day.optional(),
+}).refine(q => q.day != null || q.from != null, { message: 'Give day, or from and to' })
+  .transform(q => {
+    const from = (q.from ?? q.day)!
+    return { from, to: q.to ?? from }
+  })
+  .refine(q => q.from <= q.to, { message: 'from must not be after to' })
+  .refine(q => (Date.parse(q.to) - Date.parse(q.from)) / 86_400_000 < FUELLING_PLAN_MAX_DAYS, { message: `At most ${FUELLING_PLAN_MAX_DAYS} days` })
 
 // The Fuel page's refills over its range: one machine in full (the panel), or
 // every machine's meters (the table) when none is named.

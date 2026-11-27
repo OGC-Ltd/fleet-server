@@ -109,30 +109,30 @@ export const factoryFuel: RequestHandler = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
-/** One day's plan vs actual, or `{ factory: null }` for an organisation with no FactorySuite factory. */
-async function fuellingPlanOf(orgId: string, day: string): Promise<FuellingPlan | { factory: null; day: string }> {
-  const fuel = await factoryFuelFor(orgId, day, day)
-  if (fuel.factory == null) return { factory: null, day }
+/** A day's or a range's plan vs actual, or `{ factory: null }` for an organisation with no FactorySuite factory. */
+async function fuellingPlanOf(orgId: string, from: string, to: string): Promise<FuellingPlan | { factory: null; day: string; from: string; to: string }> {
+  const fuel = await factoryFuelFor(orgId, from, to)
+  if (fuel.factory == null) return { factory: null, day: from, from, to }
   // A vehicle request names no site: the pump it was last fuelled at stands in
-  const requested = [...new Set(fuel.vehicleRequests.filter(v => v.day === day).map(v => v.machine))]
-  return buildFuellingPlan(fuel, day, Date.now(), await usualPumpsFor(fuel.factory, requested, day))
+  const requested = [...new Set(fuel.vehicleRequests.map(v => v.machine))]
+  return buildFuellingPlan(fuel, { from, to }, Date.now(), await usualPumpsFor(fuel.factory, requested, to))
 }
 
-/** GET …/planner/fuelling-plan?day — Reports › Fuel › Fuelling Plan (KASULU). */
+/** GET …/planner/fuelling-plan?day, or ?from&to — Reports › Fuel › Fuelling Plan (KASULU). */
 export const fuellingPlan: RequestHandler = async (req, res, next) => {
   try {
     const q = req.query as unknown as FuellingPlanQuery
-    const plan = await fuellingPlanOf(p(req, 'orgId'), q.day)
+    const plan = await fuellingPlanOf(p(req, 'orgId'), q.from, q.to)
     // The opening sentence, as the PDF has it
     sendSuccess(res, plan.factory == null ? plan : { ...plan, lead: fuellingLead(plan) })
   } catch (err) { next(err) }
 }
 
-/** GET …/planner/fuelling-plan.pdf?day — the same day as the PDF, drawn on a worker thread. */
+/** GET …/planner/fuelling-plan.pdf?day, or ?from&to — the same report as the PDF, drawn on a worker thread. */
 export const fuellingPlanPdf: RequestHandler = (req, res, next) => sendReport(req, res, next, async (run) => {
   const q = req.query as unknown as FuellingPlanQuery
   const orgId = p(req, 'orgId')
-  const [plan, org] = await Promise.all([fuellingPlanOf(orgId, q.day), orgHeading(orgId)])
+  const [plan, org] = await Promise.all([fuellingPlanOf(orgId, q.from, q.to), orgHeading(orgId)])
   if (plan.factory == null) throw new NotFoundError('This organisation has no FactorySuite fuel plans')
   const factoryName = plan.factory.toLowerCase().replace(/(^|\s)([a-z])/g, (_, a: string, b: string) => a + b.toUpperCase())
   const out = await reportPool().run('pdf.fuellingPlan', { plan, factoryName, orgName: org.name, now: Date.now() }, run)
