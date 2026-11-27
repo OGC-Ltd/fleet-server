@@ -114,6 +114,23 @@ function labelsOf(config: string): Array<{ at: number; text: string }> {
   return list
 }
 
+/**
+ * One sensor's verdict from the account's label for its value, by the same families as
+ * readTrackerStatus: 'fault', 'ok', or null where the sensor is not one of them or the label says
+ * neither (operator, 2026-11-27: the unit report's "Tracker status now"). Pure.
+ */
+export function labelVerdict(sensorName: string, label: string | null): 'fault' | 'ok' | null {
+  if (!label) return null
+  for (const fam of FAMILIES) {
+    if (!fam.name.test(sensorName)) continue
+    if (fam !== FAMILIES[0] && FAMILIES[0]!.name.test(sensorName)) continue
+    if (fam.fault.test(label)) return 'fault'
+    if (fam.healthy.test(label)) return 'ok'
+    return null
+  }
+  return null
+}
+
 /** What one message says about the tracker's status sensors. */
 export function readTrackerStatus(
   sensors: Record<string, WialonSensor> | undefined,
