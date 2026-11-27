@@ -49,6 +49,8 @@ interface Tasks {
   'pdf.endOfShift': { in: { report: import('../../modules/reports/end-of-shift.js').EndOfShift; orgName: string; reportNo: string; generatedAt: number }; out: Uint8Array }
   /** One movement report or several, as one PDF. */
   'pdf.movements': { in: { reports: import('../../modules/reports/movement-report.service.js').MovementReport[]; landscape: boolean }; out: Uint8Array }
+  /** Fuelling: plan vs actual (planner/fuelling-plan), one day. */
+  'pdf.fuellingPlan': { in: { plan: import('../../modules/planner/fuelling-plan.js').FuellingPlan; factoryName: string; orgName: string; now: number }; out: Uint8Array }
   /** A branded report (/reports/pdf/:kind) from its collected data. */
   'pdf.branded': { in: { data: import('../../modules/reports/report-pdf.renderer.js').ReportData }; out: Uint8Array }
   /** Test only: holds the thread for `ms`, or throws. */
@@ -128,6 +130,11 @@ export async function runTask<K extends TaskKind>(kind: K, input: TaskInput<K>):
       const { renderMovementReportsPdf } = await import('../../modules/reports/movement-report.pdf.js')
       const x = i as TaskInput<'pdf.movements'>
       return owned(await renderMovementReportsPdf(x.reports, { landscape: x.landscape })) as TaskOutput<K>
+    }
+    case 'pdf.fuellingPlan': {
+      const { renderFuellingPlanPdf } = await import('../../modules/planner/fuelling-plan.pdf.js')
+      const x = i as TaskInput<'pdf.fuellingPlan'>
+      return owned(await renderFuellingPlanPdf(x.plan, x)) as TaskOutput<K>
     }
     case 'pdf.branded': {
       const { renderReportPdf } = await import('../../modules/reports/report-pdf.renderer.js')

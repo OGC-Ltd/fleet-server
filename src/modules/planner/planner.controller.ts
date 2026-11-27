@@ -1,10 +1,15 @@
 import type { RequestHandler } from 'express'
 import { sendSuccess } from '../../core/response/response.js'
 import * as svc from './planner.service.js'
-import { workPlansForMap, factoryFuelFor, factoryFuelRefillsFor, factoryFuelShiftsFor, factoryOperatorsFor, factorySupervisorsFor, planSubmissionsFor } from './work-plans.service.js'
+import { workPlansForMap, usualPumpsFor, factoryFuelFor, factoryFuelRefillsFor, factoryFuelShiftsFor, factoryOperatorsFor, factorySupervisorsFor, planSubmissionsFor } from './work-plans.service.js'
 import { tankDays as tankDaysFor } from './tank-days.js'
 import { workPlanUpdatesFor } from './work-plan-watch.js'
-import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, PlanList, CustomerFence, WorkPlansQuery, PlanSubmissionsQuery, FactoryFuelQuery, FactoryFuelRefillsQuery } from './planner.schema.js'
+import type { PreviewSheet, SaveSheet, PlanListQuery, StopUpdate, PlanList, CustomerFence, WorkPlansQuery, PlanSubmissionsQuery, FactoryFuelQuery, FactoryFuelRefillsQuery, FuellingPlanQuery } from './planner.schema.js'
+import { buildFuellingPlan, fuellingLead, type FuellingPlan } from './fuelling-plan.js'
+import { fuellingPlanFileName } from './fuelling-plan.pdf.js'
+import { orgHeading } from '../reports/end-of-shift.data.js'
+import { reportPool, sendReport } from '../../lib/offload/report-jobs.js'
+import { NotFoundError } from '../../core/errors/errors.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -103,6 +108,36 @@ export const factoryFuel: RequestHandler = async (req, res, next) => {
     sendSuccess(res, await factoryFuelFor(p(req, 'orgId'), q.from, q.to))
   } catch (err) { next(err) }
 }
+
+/** One day's plan vs actual, or `{ factory: null }` for an organisation with no FactorySuite factory. */
+async function fuellingPlanOf(orgId: string, day: string): Promise<FuellingPlan | { factory: null; day: string }> {
+  const fuel = await factoryFuelFor(orgId, day, day)
+  if (fuel.factory == null) return { factory: null, day }
+  // A vehicle request names no site: the pump it was last fuelled at stands in
+  const requested = [...new Set(fuel.vehicleRequests.filter(v => v.day === day).map(v => v.machine))]
+  return buildFuellingPlan(fuel, day, Date.now(), await usualPumpsFor(fuel.factory, requested, day))
+}
+
+/** GET …/planner/fuelling-plan?day — Reports › Fuel › Fuelling Plan (KASULU). */
+export const fuellingPlan: RequestHandler = async (req, res, next) => {
+  try {
+    const q = req.query as unknown as FuellingPlanQuery
+    const plan = await fuellingPlanOf(p(req, 'orgId'), q.day)
+    // The opening sentence, as the PDF has it
+    sendSuccess(res, plan.factory == null ? plan : { ...plan, lead: fuellingLead(plan) })
+  } catch (err) { next(err) }
+}
+
+/** GET …/planner/fuelling-plan.pdf?day — the same day as the PDF, drawn on a worker thread. */
+export const fuellingPlanPdf: RequestHandler = (req, res, next) => sendReport(req, res, next, async (run) => {
+  const q = req.query as unknown as FuellingPlanQuery
+  const orgId = p(req, 'orgId')
+  const [plan, org] = await Promise.all([fuellingPlanOf(orgId, q.day), orgHeading(orgId)])
+  if (plan.factory == null) throw new NotFoundError('This organisation has no FactorySuite fuel plans')
+  const factoryName = plan.factory.toLowerCase().replace(/(^|\s)([a-z])/g, (_, a: string, b: string) => a + b.toUpperCase())
+  const out = await reportPool().run('pdf.fuellingPlan', { plan, factoryName, orgName: org.name, now: Date.now() }, run)
+  return { bytes: Buffer.from(out.buffer, out.byteOffset, out.byteLength), name: fuellingPlanFileName(plan, factoryName), type: 'application/pdf' }
+})
 
 /** The Drivers page's Operators tab (KASULU); `{ factory: null }` elsewhere. */
 export const factoryOperators: RequestHandler = async (req, res, next) => {

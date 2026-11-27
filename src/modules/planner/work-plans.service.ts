@@ -27,7 +27,7 @@ import {
   type RaiFactorySuiteWorkPlanRow,
 } from '../../providers/raifactorysuite/raifactorysuite.client.js'
 import { MACHINE_FACTORY_TO_ORG } from '../../providers/raifactorysuite/raifactorysuite.machine-sync.js'
-import { buildMapWorkPlans, type MapWorkPlans } from './work-plan-match.js'
+import { buildMapWorkPlans, foldName, type MapWorkPlans } from './work-plan-match.js'
 import { collapsePlans } from './work-plan-items.js'
 import { buildFactorySupervisors, lineWindow, runKey, type FactorySupervisors, type LineRun } from './factory-supervisors.js'
 import { buildFactoryFuel, type FactoryFuel } from './factory-fuel.js'
@@ -828,6 +828,31 @@ async function readLineRuns(windows: Array<{ key: string; vehicleId: string; sta
 }
 
 /** The kept issues of `from`..`to` that FactorySuite still listed when last read; none when the table is not there yet. */
+/**
+ * The pump each machine was last fuelled at in the 30 days to `day`, from the
+ * kept issues (Fuelling Plan: a vehicle request names no site). Keyed by the
+ * folded machine reference; empty when the table is missing.
+ */
+export async function usualPumpsFor(factory: string, machines: string[], day: string): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  if (!machines.length) return out
+  const from = new Date(Date.parse(`${day}T00:00:00Z`) - 30 * 86_400_000).toISOString().slice(0, 10)
+  try {
+    const rows = await reportDb().factorySuiteFuelIssue.findMany({
+      where: { factoryCode: factory, machine: { in: machines }, day: { gte: from, lte: day }, goneAt: null },
+      select: { machine: true, day: true, fuelingEnd: true, row: true },
+      orderBy: [{ day: 'asc' }, { fuelingEnd: 'asc' }],
+    })
+    for (const r of rows) {
+      const pump = String((r.row as { location?: unknown } | null)?.location ?? '').trim()
+      if (pump) out.set(foldName(r.machine), pump)
+    }
+  } catch (err) {
+    if (!missingTable(err)) logger.warn({ err, factory, day }, 'Kept fuel issues unavailable for the Fuelling Plan sites')
+  }
+  return out
+}
+
 async function keptIssuesFor(factory: string, from: string, to: string): Promise<RaiFactorySuiteFuelIssueRow[]> {
   try {
     const rows = await reportDb().factorySuiteFuelIssue.findMany({
