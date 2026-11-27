@@ -116,23 +116,28 @@ async function readEvents(client: WialonClient, itemId: number, from: number, to
   return out
 }
 
-async function buildReport(orgId: string, fromDay: string, toDay: string, allowed: Set<string> | null): Promise<ProbeReport> {
+/**
+ * `unitId` reads that one unit and no other, truck or not: the report's trucks-only rule is about
+ * which rows the sheet lists, and a unit somebody clicked on is already chosen.
+ */
+async function buildReport(orgId: string, fromDay: string, toDay: string, allowed: Set<string> | null, unitId?: string): Promise<ProbeReport> {
   const start = fleetDayBounds(fromDay)
   const end = fleetDayBounds(toDay)
   if (!start || !end) return { from: fromDay, to: toDay, rows: [], read: 0, failed: 0, eventsSeen: 0 }
   const vehicles = await prisma.vehicle.findMany({
-    where: { organisationId: orgId, isActive: true },
+    where: { organisationId: orgId, isActive: true, ...(unitId ? { id: unitId } : {}) },
     select: { id: true, name: true, registrationPlate: true, deviceId: true, vehicleType: true },
   })
   const planned = vehicles.flatMap((v) => {
     const wialonId = wialonIdOf(v.deviceId)
-    const truck = isTruck({ type: v.vehicleType, plate: v.registrationPlate, name: v.name })
+    const truck = unitId != null || isTruck({ type: v.vehicleType, plate: v.registrationPlate, name: v.name })
     return truck && wialonId != null && (!allowed || allowed.has(v.id)) ? [{ unit: v, wialonId }] : []
   })
   const fromMs = start.from.getTime()
   const toMs = end.to.getTime()
   const token = env.WIALON_TOKEN || process.env['access_token'] || ''
-  const sessions = Array.from({ length: SESSIONS }, () => new WialonClient(token, env.WIALON_API_URL))
+  // One Wialon session per unit at most: a single unit needs one, not SESSIONS sign-ins.
+  const sessions = Array.from({ length: Math.min(SESSIONS, Math.max(planned.length, 1)) }, () => new WialonClient(token, env.WIALON_API_URL))
 
   const rows: ProbeDisconnection[] = []
   let failed = 0
@@ -164,6 +169,15 @@ async function buildReport(orgId: string, fromDay: string, toDay: string, allowe
   }
   rows.sort((a, b) => a.name.localeCompare(b.name) || a.at - b.at)
   return { from: fromDay, to: toDay, rows, read: planned.length, failed, eventsSeen }
+}
+
+/**
+ * One unit's disconnections (the Sensor Monitor's fault history). `unitId` null is a unit the caller
+ * may not see: an empty report, with nothing read from Wialon. Not cached: one unit is one quick read.
+ */
+export async function getUnitProbeReport(orgId: string, from: string, to: string, unitId: string | null): Promise<ProbeReport> {
+  if (!unitId) return { from, to, rows: [], read: 0, failed: 0, eventsSeen: 0 }
+  return buildReport(orgId, from, to, null, unitId)
 }
 
 const made = new Map<string, { at: number; report: Promise<ProbeReport> }>()

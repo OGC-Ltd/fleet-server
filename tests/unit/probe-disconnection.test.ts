@@ -3,7 +3,8 @@
  * Kenya's Wialon sheet.
  */
 import { describe, it, expect } from 'vitest'
-import { disconnectionsOf, isTruck, parseProbeAlert, RUN_GAP_MS, type ProbeAlert } from '../../src/modules/reports/probe-disconnection.service.js'
+import { disconnectionsOf, getUnitProbeReport, isTruck, parseProbeAlert, RUN_GAP_MS, type ProbeAlert } from '../../src/modules/reports/probe-disconnection.service.js'
+import { probeReportQuerySchema } from '../../src/modules/reports/report.schema.js'
 
 const MOVING = 'WKS Fuel Probe Disconnection Alert (Omnicom)\n\nWKS - Nzoia Sugar - KDJ 813Z: Probe has been disconnected, Current Fuel Level = 0L. At 30.10.2026 19:54:54 with a speed of 5 km/h within  Location D267, South Kabras Ward, Malava Sub County, Kakamega County, Kenya, 2.11 km from Kambi-Mwanza Google Map https://maps.google.com/?q=0.376852,34.834289'
 const STANDING = 'Kabras Fuel Probe Disconnection Alert (Omnicom)\n\nWKS - Kabras - KDJ 820Z: Probe has been disconnected, Current Fuel Level = 3L. At 27.10.2026 18:53:24 with a speed of  within  Location  Google Map https://maps.google.com/?q=0.378502,34.833738'
@@ -65,5 +66,17 @@ describe('alerts as disconnections', () => {
   })
   it('has none without alerts', () => {
     expect(disconnectionsOf([])).toEqual([])
+  })
+})
+
+describe('one unit (the Sensor Monitor’s fault history)', () => {
+  it('takes a unit id, and still works without one', () => {
+    expect(probeReportQuerySchema.safeParse({ from: '2026-11-20', to: '2026-11-27', vehicleId: 'cmhx0q4ad0001qz8k3n2v7b1c' }).success).toBe(true)
+    expect(probeReportQuerySchema.safeParse({ from: '2026-11-20', to: '2026-11-27' }).success).toBe(true)
+    expect(probeReportQuerySchema.safeParse({ from: '2026-11-20', to: '2026-11-27', vehicleId: 'KDJ 813Z' }).success).toBe(false)
+  })
+  it('reads nothing for a unit the caller may not see', async () => {
+    await expect(getUnitProbeReport('org', '2026-11-20', '2026-11-27', null))
+      .resolves.toEqual({ from: '2026-11-20', to: '2026-11-27', rows: [], read: 0, failed: 0, eventsSeen: 0 })
   })
 })
