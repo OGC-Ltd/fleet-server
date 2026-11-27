@@ -6,7 +6,7 @@ import { ingestLimiter } from '../../middleware/rateLimiter.js'
 import {
   createFillingSchema, listFillingQuerySchema, createTheftSchema, listTheftQuerySchema,
   listFollowUpQuerySchema, followUpNoteSchema, assignFollowUpSchema, recallFollowUpSchema, theftOutcomesQuerySchema,
-  reviewTheftSchema, signalAlertQuerySchema, evaluateSignalsSchema, escalateFollowUpSchema,
+  reviewTheftSchema, signalAlertQuerySchema, evaluateSignalsSchema, escalateFollowUpSchema, probeFillsSchema,
 } from './fuel.schema.js'
 import * as ctrl from './fuel.controller.js'
 import { getFuelReportData, reportDataQuery } from './fuel-report-data.js'
@@ -24,6 +24,9 @@ router.get('/report-data/vehicles/:vehicleId',
 
 router.get('/fillings', requirePermission('fuel_filling:read'), validateQuery(listFillingQuerySchema), ctrl.listFillings)
 router.get('/fillings/:fillingId', requirePermission('fuel_filling:read'), ctrl.getFilling)
+// A reconciliation sheet's units' refuels, for its "Filling as per Fuel Probes"
+// (probe-fills.service). One ledger read for the whole sheet; a POST for the plate list.
+router.post('/probe-fills', requirePermission('fuel_filling:read'), validateBody(probeFillsSchema), ctrl.probeFills)
 router.post('/fillings', requirePermission('fuel_filling:create'), ingestLimiter, validateBody(createFillingSchema), ctrl.createFilling)
 
 // Whole-fleet, no pagination: the FSL table draws every vehicle at once.

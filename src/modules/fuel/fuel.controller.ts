@@ -1,5 +1,6 @@
 import type { RequestHandler } from 'express'
 import { getInvestigation } from './fuel-investigation.js'
+import { getProbeFills } from './probe-fills.service.js'
 import { sendSuccess } from '../../core/response/response.js'
 import * as service from './fuel.service.js'
 import * as followUps from './fuel-followup.service.js'
@@ -11,7 +12,7 @@ import { fleetDayStart } from '../../lib/provider-time.js'
 import * as signals from './fuel-signal-alerts.service.js'
 import { getPerformanceReview, getUnitPerformance, reviewPeriod } from './fuel-performance-review.service.js'
 import { NotFoundError } from '../../core/errors/errors.js'
-import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, AssignFollowUpDto, RecallFollowUpDto, TheftOutcomesQuery, ReviewTheftDto, SignalAlertQuery, EvaluateSignalsDto, EscalateFollowUpDto } from './fuel.schema.js'
+import type { CreateFillingDto, ListFillingQuery, CreateTheftDto, ListTheftQuery, ListFollowUpQuery, FollowUpNoteDto, AssignFollowUpDto, RecallFollowUpDto, TheftOutcomesQuery, ReviewTheftDto, SignalAlertQuery, EvaluateSignalsDto, EscalateFollowUpDto, ProbeFillsDto } from './fuel.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -323,5 +324,13 @@ export const unitPerformance: RequestHandler = async (req, res, next) => {
 export const theftInvestigation: RequestHandler = async (req, res, next) => {
   try {
     sendSuccess(res, await getInvestigation(p(req, 'orgId'), p(req, 'theftId')))
+  } catch (err) { next(err) }
+}
+
+/** POST fuel/probe-fills { plates, from, to } — a sheet's units' refuels off the fuel ledger (probe-fills.service). */
+export const probeFills: RequestHandler = async (req, res, next) => {
+  try {
+    const { plates, from, to } = req.body as ProbeFillsDto
+    sendSuccess(res, await getProbeFills(p(req, 'orgId'), plates, from, to, req.authz?.vehicleIds ?? null))
   } catch (err) { next(err) }
 }
