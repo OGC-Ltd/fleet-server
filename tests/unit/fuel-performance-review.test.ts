@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildPerformanceReview, reviewUnit, meterStep, dailyWork, workBetween, equipmentGroup, unitRef, classify, statusOf, median,
-  type ReviewDay, type ReviewFill, type ReviewVehicle,
+  type ReviewDay, type ReviewFill, type ReviewShift, type ReviewVehicle,
 } from '../../src/modules/fuel/fuel-performance-review.js'
 
 // Fleet days are EAT; 06:00 EAT = 03:00Z.
@@ -185,5 +185,56 @@ describe('pump issues', () => {
     expect(r.totals).toMatchObject({ litres: 400 + 4 * 96, pumpL: 4 * 96, probeL: 400, tankL: 330 })
     expect(r.totals.checks).toEqual({ match: 3, mismatch: 1, noSensor: 0, noReading: 0 })
     expect(r.months[0]).toMatchObject({ pumpL: 384, tankL: 330 })
+  })
+})
+
+describe('planned shifts', () => {
+  const shift = (day: string, hours: number | null, consumedL: number | null, why: string | null = null): ReviewShift =>
+    ({ day, at: at(day).toISOString(), hours, consumedL, why, issuedL: 0 })
+
+  it('judges a planned machine on one worked shift, fuelled or not', () => {
+    const u = reviewUnit(EX, [], [], {}, [shift('2026-11-27', 8, 96)])
+    expect(u.judgedOn).toBe('shifts')
+    expect(u.ratio).toBeCloseTo(96 / 80)
+    expect(u.status).toBe('over')
+    expect(u.excessL).toBeCloseTo(16)
+    expect(u.judgedL).toBe(96)
+    expect(u.work).toBe(8)
+  })
+
+  it('leaves out shifts the probe could not measure, with no hours, or a reading error', () => {
+    const u = reviewUnit(EX, [], [], { withRefills: true }, [
+      shift('2026-11-27', 8, null, 'no-probe'), shift('2026-11-26', 8, null, 'negative'),
+      shift('2026-11-25', 0, 30), shift('2026-11-24', 8, 900), shift('2026-11-23', 10, 90),
+    ])
+    // In day order: 23rd judged, 24th 900 L in 8 h, 25th no hours, 26th negative, 27th no probe.
+    expect(u.shiftRows!.map(r => r.skip)).toEqual([null, 'implausible', 'no-hours', 'negative', 'no-probe'])
+    expect(u.shifts).toBe(5)
+    expect(u.judgedShifts).toBe(1)
+    expect(u.noProbeShifts).toBe(2)
+    expect(u.ratio).toBeCloseTo(0.9)
+  })
+
+  it('keeps km-rated units on their refills', () => {
+    const truck: ReviewVehicle = { id: 't', name: 'FT 16', category: 'Truck', rate: 3, basis: 'DISTANCE' }
+    const u = reviewUnit(truck, [], [], {}, [shift('2026-11-27', 8, 96)])
+    expect(u.judgedOn).toBeNull()
+    expect(u.shifts).toBe(0)
+  })
+
+  it('shows a planned machine with no fuel issued, and the above-standard share is of the litres judged', () => {
+    const r = buildPerformanceReview({
+      from: '2026-11-27', to: '2026-11-27', vehicles: [EX, { ...EX, id: 'v2', name: 'EX 09' }],
+      fills: new Map([['v2', [{ at: at('2026-11-27', 9), litres: 200, source: 'pump' as const }]]]),
+      days: new Map(),
+      shifts: new Map([['v1', [shift('2026-11-27', 8, 120)]]]),
+    })
+    expect(r.units.map(u => u.id).sort()).toEqual(['v1', 'v2'])
+    expect(r.totals.litres).toBe(200)
+    expect(r.totals.judgedL).toBe(120)
+    expect(r.totals.excessL).toBeCloseTo(40)
+    expect(r.totals.excessShare).toBeCloseTo(40 / 120)
+    expect(r.totals.shifts).toEqual({ worked: 1, judged: 1, noProbe: 0, noHours: 0 })
+    expect(r.monthToDate).toBeNull()
   })
 })
