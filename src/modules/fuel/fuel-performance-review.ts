@@ -16,6 +16,18 @@
  *     reading − the previous fuelling's), as the operator's sheet; telemetry
  *     hours or km only where the issue has no usable reading.
  *
+ * A machine on the day's work plan is judged on its planned shifts instead
+ * (operator 2026-11-28: "if the units were on the workplan and actually worked
+ * - we know the fuel they had and consumed regardless of either the units
+ * were issued fuel that day or not"; "this is only for machines"). Each kept
+ * shift (factorysuite_fuel_befores, shift-fuel.ts) holds the litres the probe
+ * saw it burn (start − end + issued in the shift) and the engine hours it ran,
+ * so its standard is hours × L/h. Only hour-rated machines: road units off the
+ * plan stay on their refills. A shift without a probe reading at either end,
+ * or with readings that contradict each other, is not judged. One worked shift
+ * is enough, so a single day can be judged; the unit's figure is the litres it
+ * burned over the standard for its judged shifts.
+ *
  * The rest is the document's:
  *
  *   - Each refill is compared with the fuel its standard allows for the work
@@ -24,7 +36,9 @@
  *   - A unit's figure is its MEDIAN refill, so one bad reading cannot move it.
  *   - Refills above 5× or below one-tenth of standard are reading errors, not
  *     consumption, and are left out of the median and the excess.
- *   - Excess litres = fuel put in above standard across the usable refills.
+ *   - Excess litres = fuel put in above standard across the usable refills
+ *     of a judged unit; a unit not judged adds none, so the fleet's excess is
+ *     a share of the litres judged.
  *   - A unit is judged on at least 5 usable refills (3 for CASE tractors,
  *     which refill rarely).
  *
@@ -70,6 +84,31 @@ export interface ReviewDay {
   /** Seconds the engine ran, integrated from fixes. */
   engineSeconds: number | null
   distanceKm: number | null
+}
+
+/**
+ * One planned shift the machine worked, as kept (factorysuite_fuel_befores).
+ * `consumedL` is null where the probe could not say (`why`).
+ */
+export interface ReviewShift {
+  day: string
+  /** The shift's window start (ISO); the shift number's order within the day. */
+  at: string
+  /** Engine hours the tracker logged inside the shift window. */
+  hours: number | null
+  consumedL: number | null
+  /** 'no-probe' or 'negative' (shift-fuel consumedWhy) when consumedL is null. */
+  why: string | null
+  /** Litres the pump issued in the shift. */
+  issuedL: number | null
+}
+
+/** A shift as the review judged it. */
+export interface ReviewShiftRow extends ReviewShift {
+  standardL: number | null
+  ratio: number | null
+  /** Why a shift was not judged: no probe reading, readings that contradict, no engine hours, no standard, or a reading error. */
+  skip: 'no-probe' | 'negative' | 'no-hours' | 'no-standard' | 'implausible' | null
 }
 
 /** How far a single refill's record can be trusted, as the document counts them. */
@@ -121,8 +160,22 @@ export interface ReviewUnit {
   status: UnitStatus
   /** Refills logged against next to no work — the "meter readings to correct" list. */
   nearZeroWork: number
+  /** What `ratio` was judged on: the machine's planned shifts, its refills, or nothing. */
+  judgedOn: 'shifts' | 'refills' | null
+  /** Planned shifts it worked in the period, and of them the ones judged. */
+  shifts: number
+  judgedShifts: number
+  /** Shifts the probe could not measure (no reading, or readings that contradict). */
+  noProbeShifts: number
+  /** Over the judged shifts: litres burned, the standard for their hours, and the hours. */
+  consumedL: number
+  shiftStandardL: number
+  shiftHours: number
+  /** The litres behind `ratio` and `excessL`: burned over the judged shifts, or put in over the usable refills. */
+  judgedL: number
   /** Present only when asked for (single-unit drill-down). */
   refillRows?: ReviewRefill[]
+  shiftRows?: ReviewShiftRow[]
 }
 
 export interface ReviewGroup {
@@ -170,15 +223,26 @@ export interface PerformanceReview {
     /** Pump issues by FactorySuite's probe check. */
     checks: { match: number; mismatch: number; noSensor: number; noReading: number }
     refills: number
+    /** Planned machine shifts: worked, judged, and the probe could not measure. */
+    shifts: { worked: number; judged: number; noProbe: number; noHours: number }
+    /** Over the judged shifts: litres burned against the standard for their hours. */
+    consumedL: number
+    shiftStandardL: number
     units: number
     unitsWithStandard: number
     assessedUnits: number
     excessL: number
+    /** The litres compared with a standard (every unit's judgedL), so excessL is a share of them. */
+    judgedL: number
     excessShare: number
     perDay: number
-    /** perDay × 30, the "typical month" the document quotes. */
-    perMonth: number
   }
+  /**
+   * Litres put in from the 1st of `to`'s month to `to`, counted off the
+   * records (operator 2026-11-28: no "typical month" projection). Set by the
+   * service; null when it was not read.
+   */
+  monthToDate: { from: string; to: string; litres: number } | null
   months: ReviewMonth[]
   groups: ReviewGroup[]
   records: Record<RecordClass, number>
@@ -315,8 +379,26 @@ export function meterStep(f: ReviewFill, prev: ReviewFill | null, basis: RateBas
   return w <= MAX_METER_A_DAY[basis] * days ? w : null
 }
 
+/**
+ * The machine's planned shifts against its standard: each shift's burned
+ * litres over hours × L/h. Hour-rated machines only.
+ */
+export function judgeShifts(v: ReviewVehicle, shifts: ReviewShift[]): ReviewShiftRow[] {
+  const rate = v.rate != null && v.rate > 0 ? v.rate : null
+  return [...shifts].sort((a, b) => a.at.localeCompare(b.at)).map(sh => {
+    const std = rate != null && v.basis === 'HOURS' && sh.hours != null && sh.hours > 0 ? rate * sh.hours : null
+    const ratio = std != null && sh.consumedL != null ? sh.consumedL / std : null
+    const skip: ReviewShiftRow['skip'] = sh.consumedL == null ? (sh.why === 'negative' ? 'negative' : 'no-probe')
+      : sh.hours == null || sh.hours <= 0 ? 'no-hours'
+      : std == null ? 'no-standard'
+      : classify(ratio) === 'implausible' ? 'implausible'
+      : null
+    return { ...sh, standardL: std, ratio, skip }
+  })
+}
+
 export function reviewUnit(
-  v: ReviewVehicle, fills: ReviewFill[], days: ReviewDay[], opts: { withRefills?: boolean } = {},
+  v: ReviewVehicle, fills: ReviewFill[], days: ReviewDay[], opts: { withRefills?: boolean } = {}, shifts: ReviewShift[] = [],
 ): ReviewUnit {
   const ref = unitRef(v.name)
   const group = equipmentGroup(v.category, v.name)
@@ -349,8 +431,20 @@ export function reviewUnit(
 
   const usable = rows.filter(r => r.record === 'near' || r.record === 'over')
   const min = group === 'CASE tractors' ? MIN_REFILLS_TRACTOR : MIN_REFILLS
-  const ratio = usable.length >= min ? median(usable.map(r => r.ratio!)) : null
-  const excessL = usable.reduce((s, r) => s + Math.max(0, r.litres - r.standardL!), 0)
+  const refillRatio = usable.length >= min ? median(usable.map(r => r.ratio!)) : null
+
+  // A machine on the plan is judged on the shifts it worked, from one shift.
+  const shiftRows = basis === 'HOURS' ? judgeShifts(v, shifts) : []
+  const judged = shiftRows.filter(r => r.skip == null)
+  const consumedL = judged.reduce((s, r) => s + r.consumedL!, 0)
+  const shiftStandardL = judged.reduce((s, r) => s + r.standardL!, 0)
+  const byShifts = judged.length > 0 && shiftStandardL > 0
+  const ratio = byShifts ? consumedL / shiftStandardL : refillRatio
+  // Above standard and the litres judged count only for a unit with a
+  // figure, so the fleet's excess is a share of what was judged.
+  const excessL = byShifts
+    ? judged.reduce((s, r) => s + Math.max(0, r.consumedL! - r.standardL!), 0)
+    : refillRatio != null ? usable.reduce((s, r) => s + Math.max(0, r.litres - r.standardL!), 0) : 0
   const nearZero = basis ? rows.filter(r => r.work < NEAR_ZERO[basis]).length : 0
 
   return {
@@ -363,8 +457,15 @@ export function reviewUnit(
     refills: sorted.length, usableRefills: usable.length,
     ratio, excessL,
     // Pump meters cover refill to refill; telemetry covers the whole period.
-    work: rows.some(r => r.workFrom === 'meter') ? rows.reduce((s, r) => s + r.work, 0) : totalWork, status: statusOf(ratio), nearZeroWork: nearZero,
-    ...(opts.withRefills ? { refillRows: rows } : {}),
+    work: byShifts ? judged.reduce((s, r) => s + r.hours!, 0)
+      : rows.some(r => r.workFrom === 'meter') ? rows.reduce((s, r) => s + r.work, 0) : totalWork,
+    status: statusOf(ratio), nearZeroWork: nearZero,
+    judgedOn: byShifts ? 'shifts' : refillRatio != null ? 'refills' : null,
+    shifts: shiftRows.length, judgedShifts: judged.length,
+    noProbeShifts: shiftRows.filter(r => r.skip === 'no-probe' || r.skip === 'negative').length,
+    consumedL, shiftStandardL, shiftHours: judged.reduce((s, r) => s + r.hours!, 0),
+    judgedL: byShifts ? consumedL : refillRatio != null ? usable.reduce((s, r) => s + r.litres, 0) : 0,
+    ...(opts.withRefills ? { refillRows: rows, shiftRows } : {}),
   }
 }
 
@@ -390,18 +491,30 @@ export interface ReviewInput {
   vehicles: ReviewVehicle[]
   fills: Map<string, ReviewFill[]>
   days: Map<string, ReviewDay[]>
+  /** Planned shifts by unit id; absent: none kept. */
+  shifts?: Map<string, ReviewShift[]>
 }
 
 /** `from`/`to` are fleet-day keys, both inclusive. */
 export function buildPerformanceReview(input: ReviewInput): PerformanceReview {
   const units: ReviewUnit[] = []
   const records: Record<RecordClass, number> = { near: 0, over: 0, implausible: 0, missing: 0 }
+  const shiftTotals = { worked: 0, judged: 0, noProbe: 0, noHours: 0 }
   for (const v of input.vehicles) {
     const fills = input.fills.get(v.id) ?? []
-    if (!fills.length) continue
-    const u = reviewUnit(v, fills, input.days.get(v.id) ?? [], { withRefills: true })
+    const shifts = input.shifts?.get(v.id) ?? []
+    // A planned machine shows though the pumps did not fuel it.
+    if (!fills.length && !(shifts.length && v.basis === 'HOURS')) continue
+    const u = reviewUnit(v, fills, input.days.get(v.id) ?? [], { withRefills: true }, shifts)
     for (const r of u.refillRows!) records[r.record]++
+    for (const r of u.shiftRows!) {
+      shiftTotals.worked++
+      if (r.skip == null) shiftTotals.judged++
+      else if (r.skip === 'no-probe' || r.skip === 'negative') shiftTotals.noProbe++
+      else if (r.skip === 'no-hours') shiftTotals.noHours++
+    }
     delete u.refillRows
+    delete u.shiftRows
     units.push(u)
   }
 
@@ -468,6 +581,7 @@ export function buildPerformanceReview(input: ReviewInput): PerformanceReview {
     ? Math.min(nDays, Math.round((dayStartMs(input.to) - dayStartMs(dayKeyOf(firstFill))) / DAY_MS) + 1)
     : nDays
   const perDay = coveredDays > 0 ? litres / coveredDays : 0
+  const judgedL = units.reduce((s, u) => s + u.judgedL, 0)
   return {
     from: input.from, to: input.to, days: nDays, coveredDays,
     source: pumpL === 0 ? 'telemetry' : pumpL === litres ? 'pump' : 'mixed',
@@ -480,14 +594,18 @@ export function buildPerformanceReview(input: ReviewInput): PerformanceReview {
       issuedWithTankL: units.reduce((s, u) => s + u.issuedWithTankL, 0),
       checks,
       refills: units.reduce((s, u) => s + u.refills, 0),
+      shifts: shiftTotals,
+      consumedL: units.reduce((s, u) => s + u.consumedL, 0),
+      shiftStandardL: units.reduce((s, u) => s + u.shiftStandardL, 0),
       units: units.length,
       unitsWithStandard: units.filter(u => u.rate != null && u.basis != null).length,
       assessedUnits: units.filter(u => u.ratio != null).length,
       excessL,
-      excessShare: litres ? excessL / litres : 0,
+      judgedL,
+      excessShare: judgedL ? excessL / judgedL : 0,
       perDay,
-      perMonth: perDay * 30,
     },
+    monthToDate: null,
     months, groups, records,
     units: units.sort((a, b) => (b.ratio ?? -1) - (a.ratio ?? -1)),
   }
