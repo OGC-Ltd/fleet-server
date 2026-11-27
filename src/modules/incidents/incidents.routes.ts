@@ -19,7 +19,7 @@ import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission, requirePermissionStrict } from '../../middleware/authorize.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
-import { summaryQuerySchema, listQuerySchema, insightsQuerySchema } from './incidents.schema.js'
+import { summaryQuerySchema, listQuerySchema, insightsQuerySchema, detailsQuerySchema } from './incidents.schema.js'
 import * as ctrl from './incidents.controller.js'
 import { reviewSpeedingSchema } from '../alerts/alerts.schema.js'
 import { reviewSpeeding } from '../alerts/alerts.controller.js'
@@ -39,6 +39,7 @@ router.post('/speeding/:incidentId/review', requirePermissionStrict('analytics:r
 
 router.get('/faults/summary',    requirePermission('sensor:read'),    validateQuery(summaryQuerySchema),  ctrl.faultSummary)
 router.get('/faults/insights',   requirePermission('sensor:read'),    validateQuery(insightsQuerySchema), ctrl.faultInsights)
+router.get('/faults/details',    requirePermission('sensor:read'),    validateQuery(detailsQuerySchema),  ctrl.faultDetails)
 router.get('/faults',            requirePermission('sensor:read'),    validateQuery(listQuerySchema),     ctrl.faultList)
 
 export default router

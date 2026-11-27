@@ -24,6 +24,9 @@ const rangeBase = z.object({
 export const summaryQuerySchema = rangeBase.extend({
   /** Faults only — comma-separated `kind` values. */
   kind:     z.string().optional(),
+  /** Faults only — one exact message (the record's detail), e.g. 'Fuel probe: Status Error'.
+   *  One value, not a list: messages carry commas of their own. */
+  detail:   z.string().trim().min(1).max(300).optional(),
   minCount: z.coerce.number().int().min(1).optional(),
   /** Plate or name, matched anywhere — the tab's search box. Filtered here,
    *  not on the page the client holds, so a unit past the first fifty is found. */
@@ -42,6 +45,8 @@ export const summaryQuerySchema = rangeBase.extend({
 export const listQuerySchema = rangeBase.extend({
   vehicleId: z.string().cuid(),
   kind:      z.string().optional(),
+  /** Faults only — one exact message, as on the summary. */
+  detail:    z.string().trim().min(1).max(300).optional(),
   cursor:    z.string().optional(),
   limit:     z.coerce.number().int().min(1).max(200).default(50),
 })
@@ -49,6 +54,12 @@ export const listQuerySchema = rangeBase.extend({
 /** The analysis block, over the same window as the table beneath it. */
 export const insightsQuerySchema = rangeBase
 
+/** The messages found in a window, for the Wialon view's error-type list (operator, 2026-11-27). */
+export const detailsQuerySchema = rangeBase.extend({
+  kind: z.string().optional(),
+})
+
 export type SummaryQuery  = z.infer<typeof summaryQuerySchema>
+export type DetailsQuery  = z.infer<typeof detailsQuerySchema>
 export type ListQuery     = z.infer<typeof listQuerySchema>
 export type InsightsQuery = z.infer<typeof insightsQuerySchema>

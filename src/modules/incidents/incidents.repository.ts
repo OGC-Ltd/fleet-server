@@ -286,6 +286,13 @@ export interface FaultSummaryRow {
  * Not applied to speeding. An overspeeding incident is a point event that is
  * over in seconds, always closed, and containment and overlap agree on it.
  */
+/**
+ * A reading at the end of a message, " (3.20 V)": the probe battery's voltage. The error TYPE is the
+ * message without it, so the Wialon view lists "Fuel probe battery: Needs Replacement" once, not once
+ * per voltage (operator, 2026-11-27). The record keeps the reading; only types and filters drop it.
+ */
+const READING_RE = String.raw` \([0-9.]+ ?V\)$`
+
 /** The system views leave out the Wialon-only kinds (fault-kinds); the Wialon view names them. */
 const notWialonOnly = Prisma.sql`AND e.kind <> ALL(${[...WIALON_ONLY_FAULT_KINDS]})`
 
@@ -384,7 +391,7 @@ async function fillMissingPositions(rows: Positionable[]): Promise<void> {
 export async function faultSummary(
   orgId: string,
   r: Range,
-  opts: { sort: string; limit: number; offset: number; kinds?: string[]; minCount?: number; search?: string },
+  opts: { sort: string; limit: number; offset: number; kinds?: string[]; detail?: string; minCount?: number; search?: string },
 ): Promise<{ rows: FaultSummaryRow[]; hasNextPage: boolean }> {
   const orderBy = {
     count:    Prisma.sql`episodes DESC, total_seconds DESC`,
@@ -399,6 +406,8 @@ export async function faultSummary(
   const kindFilter = opts.kinds?.length
     ? Prisma.sql`AND e.kind = ANY(${opts.kinds})`
     : notWialonOnly
+  // One error type (the Wialon view's, operator 2026-11-27): the message without its reading.
+  const detailFilter = opts.detail ? Prisma.sql`AND regexp_replace(e.detail, ${READING_RE}, '') = ${opts.detail}` : Prisma.empty
 
   const rows = await prisma.$queryRaw<Array<FaultSummaryRow & { episodes: bigint; open_now: bigint; total_seconds: bigint; longest_seconds: number | null }>>(Prisma.sql`
     SELECT e.vehicle_id                          AS "vehicleId",
@@ -411,6 +420,8 @@ export async function faultSummary(
            MIN(e.started_at)                     AS "firstAt",
            MAX(e.started_at)                     AS "lastAt",
            STRING_AGG(DISTINCT e.kind, ',')      AS kinds,
+           -- The unit's newest message in the window, in the tracker's words (Wialon view).
+           (ARRAY_AGG(e.detail ORDER BY e.started_at DESC))[1] AS "latestDetail",
            -- Where this unit's sensors were last working, taken from its most
            -- recent episode THAT HAS A POSITION. The same FILTER on all five,
            -- so they are five facts about one moment rather than coordinates
@@ -428,6 +439,7 @@ export async function faultSummary(
      WHERE e.organisation_id = ${orgId}
        ${faultOverlap(r)}
        ${kindFilter}
+       ${detailFilter}
        ${unitSearch(opts.search)}
      GROUP BY e.vehicle_id, v.registration_plate, v.name
     ${opts.minCount ? Prisma.sql`HAVING COUNT(*) >= ${opts.minCount}` : Prisma.empty}
@@ -456,7 +468,7 @@ export async function faultSummary(
 export async function faultList(
   orgId: string,
   r: Range,
-  q: { vehicleId: string; kinds?: string[] | 'all'; cursor?: string; limit: number },
+  q: { vehicleId: string; kinds?: string[] | 'all'; detail?: string; cursor?: string; limit: number },
 ) {
   // 'all': a unit's fault history, System and Wialon together. Named kinds when asked; otherwise
   // everything but the Wialon-only kinds, as the Malfunction tab has always listed.
@@ -475,6 +487,8 @@ export async function faultList(
       startedAt:      { lte: r.to },
       OR: [{ recoveredAt: null }, { recoveredAt: { gte: r.from } }],
       ...kindWhere,
+      // The error type: the message itself, or the message with its reading ("… (3.20 V)").
+      ...(q.detail ? { AND: [{ OR: [{ detail: q.detail }, { detail: { startsWith: `${q.detail} (` } }] }] } : {}),
     },
     take: q.limit + 1,
     ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
@@ -486,6 +500,26 @@ export async function faultList(
   // — otherwise opening a unit would empty columns the list beside it filled.
   await fillMissingPositions(items)
   return { data: items, cursor: items.at(-1)?.id ?? null, hasNextPage }
+}
+
+/**
+ * The messages in the window (the records' detail), with how many records and units carry each:
+ * the Wialon view's error-type list (operator, 2026-11-27). Named kinds when asked, otherwise the
+ * system's kinds, as the summary.
+ */
+export async function faultDetails(orgId: string, r: Range, kinds?: string[]) {
+  const kindFilter = kinds?.length ? Prisma.sql`AND e.kind = ANY(${kinds})` : notWialonOnly
+  const rows = await prisma.$queryRaw<Array<{ kind: string; detail: string; episodes: bigint; units: bigint }>>(Prisma.sql`
+    SELECT e.kind AS kind, regexp_replace(e.detail, ${READING_RE}, '') AS detail,
+           COUNT(*) AS episodes, COUNT(DISTINCT e.vehicle_id) AS units
+      FROM sensor_fault_episodes e
+     WHERE e.organisation_id = ${orgId}
+       ${faultOverlap(r)}
+       ${kindFilter}
+     GROUP BY 1, 2
+     ORDER BY units DESC, episodes DESC, 2
+  `)
+  return rows.map(x => ({ kind: x.kind, detail: x.detail, episodes: Number(x.episodes), units: Number(x.units) }))
 }
 
 /**

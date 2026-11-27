@@ -4,7 +4,7 @@ import { sendSuccess } from '../../core/response/response.js'
    signatures and falls through to it for anything it declines to hold — see
    incidents.cache. */
 import * as service from './incidents.cache.js'
-import type { SummaryQuery, ListQuery, InsightsQuery } from './incidents.schema.js'
+import type { SummaryQuery, ListQuery, InsightsQuery, DetailsQuery } from './incidents.schema.js'
 
 const p = (req: Parameters<RequestHandler>[0], key: string) => req.params[key] as string
 
@@ -39,6 +39,13 @@ export const faultList: RequestHandler = async (req, res, next) => {
   try {
     const { data, cursor, hasNextPage } = await service.faultList(p(req, 'orgId'), req.query as unknown as ListQuery)
     sendSuccess(res, data, 200, { cursor, hasNextPage })
+  } catch (err) { next(err) }
+}
+
+/** GET …/incidents/faults/details?from&to[&kind] — the messages in the window, with counts. */
+export const faultDetails: RequestHandler = async (req, res, next) => {
+  try {
+    sendSuccess(res, await service.faultDetails(p(req, 'orgId'), req.query as unknown as DetailsQuery))
   } catch (err) { next(err) }
 }
 

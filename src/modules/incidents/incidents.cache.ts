@@ -179,7 +179,8 @@ const faultInsightsCache = createWarmCache<Awaited<ReturnType<typeof service.fau
 // sends it — and so does a search, whose key space is whatever people type.
 // All three fall through to the service unchanged.
 
-const pageable = (q: SummaryQuery) => !q.cursor && !q.minCount && !q.q
+// A message filter (q.detail) is not in the key either, so it goes to the service like a search.
+const pageable = (q: SummaryQuery) => !q.cursor && !q.minCount && !q.q && !q.detail
 
 export const speedingSummary = (orgId: string, q: SummaryQuery) =>
   pageable(q) ? speedingSummaryCache.get(summaryKey(orgId, q)) : service.speedingSummary(orgId, q)
@@ -200,3 +201,4 @@ export const faultInsights = (orgId: string, q: InsightsQuery) =>
    the private ones, and they go straight to the service. */
 export const speedingList = service.speedingList
 export const faultList    = service.faultList
+export const faultDetails = service.faultDetails
