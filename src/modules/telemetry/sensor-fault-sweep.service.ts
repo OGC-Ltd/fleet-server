@@ -53,6 +53,40 @@ export function trackerProbeStates(snapshot: SnapshotProbe[]) {
   return { faulty, reading }
 }
 
+/**
+ * The tracker's own status codes (operator, 2026-11-27): fuel probe status, probe battery and GPS,
+ * judged by the account's labels in the Wialon adapter (wialon.status-codes) and carried once they
+ * have lasted 10 minutes. Opened from when the fault began; closed only when the tracker shows that
+ * sensor healthy again, never because a restart left the adapter not knowing yet.
+ */
+export const TRACKER_STATUS_KINDS = ['fuel_probe_status', 'fuel_probe_battery', 'gnss_fault'] as const
+
+interface SnapshotStatus {
+  vehicleId: string
+  trackerFaults?: Array<{ kind?: string; reason?: string; raw?: number; since?: string }>
+  trackerOk?: string[]
+}
+
+/** Which units carry which tracker status faults now, and which kinds they last showed healthy. Pure. */
+export function trackerStatusStates(snapshot: SnapshotStatus[]) {
+  const kinds = new Set<string>(TRACKER_STATUS_KINDS)
+  const faulty = new Map<string, Array<{ kind: string; reason: string; raw: number | null; since: Date | null }>>()
+  const healthy = new Map<string, Set<string>>()
+  for (const v of snapshot) {
+    if (!v?.vehicleId) continue
+    for (const f of v.trackerFaults ?? []) {
+      if (!f?.kind || !kinds.has(f.kind)) continue
+      const since = f.since ? new Date(f.since) : null
+      const list = faulty.get(v.vehicleId) ?? []
+      list.push({ kind: f.kind, reason: f.reason ?? 'Tracker reports a fault', raw: typeof f.raw === 'number' ? f.raw : null, since: since && !Number.isNaN(since.getTime()) ? since : null })
+      faulty.set(v.vehicleId, list)
+    }
+    const ok = (v.trackerOk ?? []).filter(k => kinds.has(k))
+    if (ok.length) healthy.set(v.vehicleId, new Set(ok))
+  }
+  return { faulty, healthy }
+}
+
 /** Silent for longer than this and the tracker is not merely between fixes. */
 const SILENT_AFTER_MS = 60 * 60_000
 
@@ -198,12 +232,15 @@ export async function sweepSensorFaults(orgId: string, now = new Date()): Promis
   // The tracker's probe faults (TRACKER_PROBE_KIND). The cached snapshot, as the probe report above:
   // a failed read leaves the tracker's episodes as they are rather than closing them.
   let tracker: ReturnType<typeof trackerProbeStates> | null = null
+  let status: ReturnType<typeof trackerStatusStates> | null = null
   try {
     // Loaded here, not at the top: the telemetry service pulls in most of the server, and every
     // importer of this sweep would load it all (a test that imports the sweep without the alert
     // settings failed on it, 2026-11-25).
     const { getFleetSnapshot } = await import('./telemetry.service.js')
-    tracker = trackerProbeStates(((await getFleetSnapshot(orgId)) ?? []) as SnapshotProbe[])
+    const snapshot = (await getFleetSnapshot(orgId)) ?? []
+    tracker = trackerProbeStates(snapshot as SnapshotProbe[])
+    status = trackerStatusStates(snapshot as SnapshotStatus[])
   } catch (err) {
     logger.warn({ err, orgId }, 'Sensor fault sweep: snapshot unavailable, tracker probe faults left as they are')
   }
@@ -214,6 +251,13 @@ export async function sweepSensorFaults(orgId: string, now = new Date()): Promis
         `Fuel probe: ${reason ?? 'reporting a fault'}`,
         { reason, source: 'tracker' },
       )
+    }
+  }
+  if (status) {
+    for (const [vehicleId, faults] of status.faulty) {
+      for (const f of faults) {
+        want(vehicleId, f.kind, f.since ?? now, 'warning', f.reason, { reason: f.reason, raw: f.raw, source: 'tracker' })
+      }
     }
   }
 
@@ -227,6 +271,9 @@ export async function sweepSensorFaults(orgId: string, now = new Date()): Promis
     // A tracker probe fault closes only on a real level read with no fault (see TRACKER_PROBE_KIND)
     if (e.kind === TRACKER_PROBE_KIND) {
       if (!tracker?.reading.has(e.vehicleId)) continue
+    } else if ((TRACKER_STATUS_KINDS as readonly string[]).includes(e.kind)) {
+      // Only on the tracker's word that the sensor is healthy again.
+      if (!status?.healthy.get(e.vehicleId)?.has(e.kind)) continue
     } else if (!sweepKinds.has(e.kind)) continue
     closed++
     eventBus.publish('sensorFault:close', {

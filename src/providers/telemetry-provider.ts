@@ -136,6 +136,13 @@ export interface VehicleTelemetryFrame {
      */
     fuelProbeFaultReason?: string | null
     fuelProbeRaw?:         number | null
+    /**
+     * The tracker's own status codes that have lasted 10 minutes (fuel probe status, probe
+     * battery, GPS), in the account's words, with when each began; and the kinds its latest
+     * reading showed healthy. Only on units with those sensors (operator, 2026-11-27).
+     */
+    trackerFaults?: TrackerStatusFaultCarried[]
+    trackerOk?:     Array<'fuel_probe_status' | 'fuel_probe_battery' | 'gnss_fault'>
 
     /**
      * The unit's on-board recorder, when it has one.
@@ -174,4 +181,13 @@ export interface TelemetryProvider {
    * on the next cycle.
    */
   fetchAll(): Promise<VehicleTelemetryFrame[]>
+}
+
+/** A tracker status fault as carried in a frame's flags; see wialon.status-codes. */
+export interface TrackerStatusFaultCarried {
+  kind:   'fuel_probe_status' | 'fuel_probe_battery' | 'gnss_fault'
+  reason: string
+  raw:    number
+  /** When it began, by the message's time (ISO). */
+  since:  string
 }

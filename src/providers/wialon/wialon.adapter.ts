@@ -47,12 +47,13 @@
 
 import { logger } from '../../lib/logger.js'
 import { env } from '../../config/env.js'
-import type { AccelAxes, TelemetryProvider, VehicleTelemetryFrame } from '../telemetry-provider.js'
+import type { AccelAxes, TelemetryProvider, TrackerStatusFaultCarried, VehicleTelemetryFrame } from '../telemetry-provider.js'
 import { WialonClient, type WialonPosition } from './wialon.client.js'
 import {
   readFuel, readIgnition, readFuelProbeFault, readCamera, readAccelerometer, readVoltages, readOdometerM, type SupplyVolts, carriesFuelReading, hasFuelSensor,
   type FuelProbeFault, type CameraState, type WialonSensor, readHarshDriving,
 } from './wialon.sensors.js'
+import { readTrackerStatus, type TrackerStatusKind } from './wialon.status-codes.js'
 import { eventBus } from '../../lib/event-bus.js'
 import { noteConnection, noteMessageClock, connectionCounts } from '../../lib/connection-state.js'
 
@@ -133,6 +134,17 @@ export class WialonLiveAdapter implements TelemetryProvider {
    * without the probe's parameter proves neither, so it leaves the entry be.
    */
   private lastProbeFault = new Map<number, FuelProbeFault>()
+
+  /**
+   * unitId → the tracker's status faults (fuel probe status, probe battery, GPS) and when each
+   * began, by the message's time; see wialon.status-codes. Kept from the first message that shows
+   * one until a message shows that sensor healthy again; carried on only once it has lasted
+   * TRACKER_STATUS_MIN_S, so a blip never becomes a record. Lost on restart, which only delays a
+   * fault by that long: an open record is closed by a healthy reading, never by an empty map.
+   */
+  private trackerStatus = new Map<number, Map<TrackerStatusKind, { since: number; reason: string; raw: number }>>()
+  /** unitId → the status kinds its latest reading of them showed healthy. */
+  private trackerOk = new Map<number, Set<TrackerStatusKind>>()
 
   /**
    * unitId → total mileage (km) from Wialon's own counter. Carried forward:
@@ -439,6 +451,23 @@ export class WialonLiveAdapter implements TelemetryProvider {
       this.lastProbeFault.delete(unitId)
     }
 
+    // The tracker's own status codes (operator, 2026-11-27), judged by the account's labels.
+    if (sensors) {
+      const status = readTrackerStatus(sensors, params)
+      if (status.faults.length || status.ok.length) {
+        const held = this.trackerStatus.get(unitId) ?? new Map()
+        const ok = this.trackerOk.get(unitId) ?? new Set<TrackerStatusKind>()
+        const nowS = at ?? Math.floor(Date.now() / 1000)
+        for (const f of status.faults) {
+          held.set(f.kind, { since: held.get(f.kind)?.since ?? nowS, reason: f.reason, raw: f.raw })
+          ok.delete(f.kind)
+        }
+        for (const k of status.ok) { held.delete(k); ok.add(k) }
+        if (held.size) this.trackerStatus.set(unitId, held); else this.trackerStatus.delete(unitId)
+        if (ok.size) this.trackerOk.set(unitId, ok); else this.trackerOk.delete(unitId)
+      }
+    }
+
     // Ignition — `io_239` where the unit sends it, whatever the configured
     // sensor points at, else a sensor that decodes to a genuine digital line.
     // Readable on 174 of 211 KASULU units as of 2026-09-24; see readIgnition.
@@ -458,8 +487,24 @@ export class WialonLiveAdapter implements TelemetryProvider {
       fuelProbeFaultReason: probeFaultWords(this.lastProbeFault.get(unitId)),
       fuelProbeRaw:         this.lastProbeFault.get(unitId)?.raw ?? null,
       camera:         this.lastCamera.get(unitId) ?? null,
+      ...trackerStatusCarried(this.trackerStatus.get(unitId), this.trackerOk.get(unitId)),
     }
   }
+}
+
+/** Status faults held at least this long are carried on (operator, 2026-11-27: 10 minutes). */
+export const TRACKER_STATUS_MIN_S = 10 * 60
+
+/** The held status faults old enough to carry, and the kinds last seen healthy. Pure. */
+export function trackerStatusCarried(
+  held: Map<TrackerStatusKind, { since: number; reason: string; raw: number }> | undefined,
+  ok: Set<TrackerStatusKind> | undefined,
+  nowS = Math.floor(Date.now() / 1000),
+): { trackerFaults: TrackerStatusFaultCarried[]; trackerOk: TrackerStatusKind[] } {
+  const trackerFaults = [...(held ?? new Map()).entries()]
+    .filter(([, f]) => nowS - f.since >= TRACKER_STATUS_MIN_S)
+    .map(([kind, f]) => ({ kind, reason: f.reason, raw: f.raw, since: new Date(f.since * 1000).toISOString() }))
+  return { trackerFaults, trackerOk: [...(ok ?? [])] }
 }
 
 /** What a frame takes from the unit's latest readings rather than from its own message. */
@@ -473,6 +518,9 @@ interface Carried {
   fuelProbeFaultReason: string | null
   fuelProbeRaw:         number | null
   camera:         CameraState | null
+  /** The tracker's status faults that have lasted TRACKER_STATUS_MIN_S, and the kinds last seen healthy. */
+  trackerFaults:  TrackerStatusFaultCarried[]
+  trackerOk:      TrackerStatusKind[]
 }
 
 /**
@@ -525,7 +573,7 @@ function toFrame(
   const capturedAt = new Date((p.t ?? NaN) * 1000)
   if (Number.isNaN(capturedAt.getTime())) return null
 
-  const { fuelLevelMl, odometerKm, engineHours, ignitionOn, fuelProbeFault, fuelProbeFaultReason, fuelProbeRaw, camera } = c
+  const { fuelLevelMl, odometerKm, engineHours, ignitionOn, fuelProbeFault, fuelProbeFaultReason, fuelProbeRaw, camera, trackerFaults, trackerOk } = c
   const speedKmh = p.s ?? null
 
   return {
@@ -599,6 +647,9 @@ function toFrame(
       fuelProbeFault,
       // Only with a fault: the 1,4xx healthy units carry nothing extra
       ...(fuelProbeFault ? { fuelProbeFaultReason, fuelProbeRaw } : {}),
+      // Only where the unit has status sensors (wialon.status-codes): nothing on the rest.
+      ...(trackerFaults.length ? { trackerFaults } : {}),
+      ...(trackerOk.length ? { trackerOk } : {}),
       // Omitted entirely rather than set to a false-y object on the 1,495 units
       // with no recorder — see the field's note in telemetry-provider.
       ...(camera?.hasCamera
