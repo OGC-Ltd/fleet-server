@@ -16,7 +16,7 @@ const line = (over: Partial<FuelPlanLine> = {}): FuelPlanLine => ({
 const machine = (reference: string, vehicleId: string | null) =>
   ({ reference, name: 'Excavator', category: null, basis: 'HOUR', rate: 14, status: null, downReason: null, tankLitres: 400, vehicleId, plate: null })
 const fuel = (lines: FuelPlanLine[], machines = [machine('EX-21', 'v21')]): FactoryFuel =>
-  ({ factory: 'MUFINDI PAPER MILLS', from: '2026-11-20', to: '2026-11-20', lines, issues: [], machines })
+  ({ factory: 'MUFINDI PAPER MILLS', from: '2026-11-20', to: '2026-11-20', lines, issues: [], machines, vehicleRequests: [] })
 
 const NOW = new Date('2026-11-20T05:48:00Z')
 const shift2 = line({ lineId: 'l2', planCode: 'WP-261120-IRR-2', shiftNo: 2, shiftStart: '18:00:00', plannedHours: 10, needLitres: 140 })

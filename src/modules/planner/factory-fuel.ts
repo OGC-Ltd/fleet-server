@@ -109,6 +109,27 @@ export interface FuelMachine {
   plate: string | null
 }
 
+/**
+ * A fuel request no plan line asked for: FactorySuite's vehicle requests
+ * (Transport's buses and hired vehicles, Security, 25 Nov 2026: 24 of 190).
+ * Kept apart from `lines`, so the Fuel page counts plan lines as FactorySuite
+ * does; the Fuelling Plan report counts them as planned (operator 2026-11-27,
+ * after FactorySuite's own "plan vs actual": "approved work plan or vehicle
+ * request").
+ */
+export interface FuelVehicleRequest {
+  requestId: string
+  day: string
+  machine: string
+  department: string | null
+  shiftNo: number | null
+  status: string | null
+  fullTank: boolean
+  litresRequested: number | null
+  /** Litres the pump issued against this request. */
+  issuedLitres: number
+}
+
 export interface FactoryFuel {
   factory: string
   from: string
@@ -116,9 +137,12 @@ export interface FactoryFuel {
   lines: FuelPlanLine[]
   issues: FuelIssue[]
   machines: FuelMachine[]
+  vehicleRequests: FuelVehicleRequest[]
 }
 
 const QUIET_STATUS = new Set(['', 'AVAILABLE', 'ACTIVE', 'OPERATIONAL'])
+/** Which of two requests for one machine-shift stands: approved over pending over the rest. */
+const REQUEST_RANK: Record<string, number> = { APPROVED: 3, ISSUED: 3, FULFILLED: 3, COMPLETED: 3, PENDING: 2, REJECTED: 0, CANCELLED: 0, WITHDRAWN: 0 }
 
 export function buildFactoryFuel(
   factory: string,
@@ -135,7 +159,14 @@ export function buildFactoryFuel(
   const unitByRef = new Map<string, FuelUnitRef>()
   for (const u of units) if (u.equipmentReference) unitByRef.set(foldName(u.equipmentReference), u)
   const requestFor = new Map<string, RaiFactorySuiteFuelRequestRow>()
-  for (const r of requests) requestFor.set(requestKey(r.machine, r.planDate, r.shift), r)
+  // Two requests for one machine-shift: the one that stands wins (DG-03, 25 Nov:
+  // a rejected request, then an approved one the pump filled).
+  const standing = (r: RaiFactorySuiteFuelRequestRow) => REQUEST_RANK[String(r.status ?? '').toUpperCase()] ?? 1
+  for (const r of requests) {
+    const k = requestKey(r.machine, r.planDate, r.shift)
+    const had = requestFor.get(k)
+    if (!had || standing(r) >= standing(had)) requestFor.set(k, r)
+  }
   const issuedFor = new Map<string, number>()
   for (const i of issueRows) {
     if (i.requestId && i.quantityIssued != null) issuedFor.set(i.requestId, (issuedFor.get(i.requestId) ?? 0) + i.quantityIssued)
@@ -183,6 +214,22 @@ export function buildFactoryFuel(
   }
   lines.sort((a, b) => b.day.localeCompare(a.day) || a.machine.localeCompare(b.machine, undefined, { numeric: true }) || (a.shiftNo ?? 1) - (b.shiftNo ?? 1))
 
+  const onLines = new Set(lines.map(l => requestKey(l.machine, l.day, l.shiftNo)))
+  const vehicleRequests: FuelVehicleRequest[] = requests
+    .filter(r => r.planDate >= from && r.planDate <= to && !onLines.has(requestKey(r.machine, r.planDate, r.shift)))
+    .map(r => ({
+      requestId: r.id,
+      day: r.planDate,
+      machine: r.machine,
+      department: r.department ?? null,
+      shiftNo: r.shift ?? null,
+      status: r.status ?? null,
+      fullTank: r.fullTank === true,
+      litresRequested: r.litresRequested ?? null,
+      issuedLitres: issuedFor.get(r.id) ?? 0,
+    }))
+    .sort((a, b) => b.day.localeCompare(a.day) || a.machine.localeCompare(b.machine, undefined, { numeric: true }) || (a.shiftNo ?? 1) - (b.shiftNo ?? 1))
+
   const issues: FuelIssue[] = issueRows
     .filter(i => i.issueDate >= from && i.issueDate <= to)
     .map(i => ({
@@ -203,7 +250,7 @@ export function buildFactoryFuel(
     .sort((a, b) => String(b.at ?? b.day).localeCompare(String(a.at ?? a.day)))
 
   const refs = new Map<string, string>()
-  for (const r of [...lines.map(l => l.machine), ...issues.map(i => i.machine)]) {
+  for (const r of [...lines.map(l => l.machine), ...issues.map(i => i.machine), ...vehicleRequests.map(v => v.machine)]) {
     const k = foldName(r)
     if (!refs.has(k)) refs.set(k, r)
   }
@@ -225,7 +272,7 @@ export function buildFactoryFuel(
     }
   }).sort((a, b) => a.reference.localeCompare(b.reference, undefined, { numeric: true }))
 
-  return { factory, from, to, lines, issues, machines }
+  return { factory, from, to, lines, issues, machines, vehicleRequests }
 }
 
 function issueSensor(i: RaiFactorySuiteFuelIssueRow): FuelIssueSensor | null {

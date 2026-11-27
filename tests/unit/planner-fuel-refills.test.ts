@@ -20,7 +20,7 @@ const issue = (over: Partial<FuelIssue> = {}): FuelIssue => ({
 })
 const fuel = (over: Partial<FactoryFuel> = {}): FactoryFuel => ({
   factory: 'MUFINDI PAPER MILLS', from: '2026-11-19', to: '2026-11-19',
-  lines: [line()], issues: [issue()],
+  lines: [line()], issues: [issue()], vehicleRequests: [],
   machines: [{ reference: 'EX-17', name: 'Excavator', category: null, basis: 'HOUR', rate: 30, status: null, downReason: null, tankLitres: 650, vehicleId: 'v17', plate: null }],
   ...over,
 })

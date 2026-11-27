@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { authenticate, requireOrgAccess } from '../../middleware/auth.js'
 import { requirePermission } from '../../middleware/authorize.js'
 import { validateBody, validateQuery } from '../../middleware/validate.js'
-import { previewSheetSchema, saveSheetSchema, planListQuerySchema, stopUpdateSchema, customerListQuerySchema, customerFenceSchema, workPlansQuerySchema, planSubmissionsQuerySchema, factoryFuelQuerySchema, factoryFuelRefillsQuerySchema, planListSchema } from './planner.schema.js'
+import { previewSheetSchema, saveSheetSchema, planListQuerySchema, stopUpdateSchema, customerListQuerySchema, customerFenceSchema, workPlansQuerySchema, planSubmissionsQuerySchema, factoryFuelQuerySchema, fuellingPlanQuerySchema, factoryFuelRefillsQuerySchema, planListSchema } from './planner.schema.js'
 import * as ctrl from './planner.controller.js'
 
 // Planner: delivery sheets per truck and day, their customers' geofences, and
@@ -37,6 +37,10 @@ router.get('/factory-fuel/refills', requirePermission('fuel_filling:read'), vali
 // Its Probe used column: each machine's fuel burned over its planned shifts,
 // by its probe, with the hours run (fuel-shifts.ts)
 router.get('/factory-fuel/shifts', requirePermission('fuel_filling:read'), validateQuery(factoryFuelQuerySchema), ctrl.factoryFuelShifts)
+// Reports › Fuel › Fuelling Plan: one day's plans and requests against the
+// pumps (fuelling-plan.ts), as figures and as the PDF
+router.get('/fuelling-plan', requirePermission('fuel_filling:read'), validateQuery(fuellingPlanQuerySchema), ctrl.fuellingPlan)
+router.get('/fuelling-plan.pdf', requirePermission('fuel_filling:read'), validateQuery(fuellingPlanQuerySchema), ctrl.fuellingPlanPdf)
 
 // The Drivers page's Operators tab: who the work plans put on each machine. A
 // people screen, so the drivers' right.
