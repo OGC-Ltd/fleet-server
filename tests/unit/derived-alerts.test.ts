@@ -113,10 +113,11 @@ describe('the limit', () => {
     expect(overspeedLimitFor('SOMETHING_NEW')).toBe(env.OVERSPEED_LIMIT_KMH)
   })
 
-  it('uses the 140 km/h per-unit override for KBR 316T, KBU 666C and KCV 507R', () => {
+  it('uses the 140 km/h per-unit override for KBR 316T, KBU 666C, KCV 507R and KDB 703N', () => {
     expect(overspeedLimitFor('UNSPECIFIED', undefined, 'KBR 316T')).toBe(140)
     expect(overspeedLimitFor('UNSPECIFIED', undefined, 'KBU666C')).toBe(140)
     expect(overspeedLimitFor('UNSPECIFIED', undefined, 'KCV 507R')).toBe(140)
+    expect(overspeedLimitFor('UNSPECIFIED', undefined, 'kdb 703n')).toBe(140)
     expect(overspeedLimitFor('UNSPECIFIED', undefined, 'OTHER')).toBe(env.OVERSPEED_LIMIT_KMH)
   })
 
