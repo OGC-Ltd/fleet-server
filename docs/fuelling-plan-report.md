@@ -65,10 +65,15 @@ the one day:
 | Fuelled off plan | Machines fuelled that day that no counted plan or request names; listed apart, never in the planned totals. |
 | Not counted | Lines whose plan or request still waits for approval (`pendingLines`) or whose request was rejected or cancelled (`rejectedLines`). |
 
-**Site** is the plan line's fuelling location. FactorySuite's API gives a vehicle
-request no site, so it takes the pump that fuelled it that day, else the pump it
-was last fuelled at in the 30 days before (kept issues), else it is grouped as
-"Vehicle requests, no site".
+**Site** is the pump that fuelled the machine that day, as FactorySuite's
+"Litres issued by location" counts it (operator 2026-11-27, "Count by pump": on
+25 Nov EX-10, planned at Irrigation room 2B-1, was fuelled at Nursery B, and
+DZ-04, planned at Commercial Area (1600), at Intake 3). A machine not fuelled
+yet sits at its plan line's fuelling location. FactorySuite's API gives a
+vehicle request no site, so one not fuelled takes the pump it was last fuelled
+at in the 30 days before (kept issues), else it is grouped as "Vehicle
+requests, no site". The pump's location is typed at the pump, so a mistyped
+one moves the machine with it.
 
 The day is **closed** once it is before today in East Africa time; until then
 the wording says "so far".

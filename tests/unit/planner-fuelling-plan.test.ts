@@ -65,7 +65,7 @@ describe('buildFuellingPlan', () => {
       ],
       vehicleRequests: [request('T779EQV'), request('KSPBUS-02'), request('T999XX', { status: 'CANCELLED' })],
       issues: [
-        issue('EX-28', 85), issue('DG-12', 800), issue('T779EQV', 86),
+        issue('EX-28', 85), issue('DG-12', 800, { pump: 'Nursery B' }), issue('T779EQV', 86),
         issue('GR-04', 50, { pump: 'Factory Site' }), issue('EX-17', 70, { day: '2026-11-24' }),
       ],
     }), DAY, AFTER, new Map([[foldName('KSPBUS-02'), 'Logistics Centre 1']]))
@@ -88,8 +88,10 @@ describe('buildFuellingPlan', () => {
       plannedL: 1780, fuelledL: 971, fuelledOnFiguresL: 971, shortfallL: 715, offPlanL: 50, deliveredL: 1021,
     })
     expect(plan.bySite.map(g => [g.name, g.fuelled, g.planned])).toEqual([
-      ['Logistics Centre 1', 1, 2], ['Nursery B', 1, 1], ['Zone 4', 1, 1], ['Logistics Centre 2', 0, 1],
+      ['Logistics Centre 1', 2, 3], ['Nursery B', 1, 1], ['Logistics Centre 2', 0, 1],
     ])
+    // Fuelled: the pump's site, not the plan's (EX-28 planned at Zone 4, fuelled at Logistics Centre 1)
+    expect(plan.machines.find(m => m.machine === 'EX-28')).toMatchObject({ site: 'Logistics Centre 1' })
     expect(plan.byType.map(g => [g.name, g.fuelledL, g.plannedL])).toEqual([
       ['Diesel Generators', 800, 800], ['Excavator', 85, 800], ['Unspecified', 86, 180],
     ])
@@ -103,7 +105,7 @@ describe('buildFuellingPlan', () => {
     }), DAY, Date.parse(`${DAY}T08:00:00Z`))
     expect(plan.closed).toBe(false)
     expect(plan.machines[0]).toMatchObject({ plannedL: 650, fullTank: false, status: 'Fuelling now', fuelledL: 0 })
-    expect(fuellingLead(plan)).toBe('None of the 1 planned machine has been fuelled so far; 650 litres were planned. Zone 4 has the most machines still waiting (1).')
+    expect(fuellingLead(plan)).toBe('None of the 1 planned machine has been fuelled so far; 650 litres were planned. Logistics Centre 1 has the most machines still waiting (1).')
   })
 
   it('adds the days of a range, each judged against its own plan', () => {
