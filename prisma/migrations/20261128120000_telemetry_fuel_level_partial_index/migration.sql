@@ -1,0 +1,44 @@
+-- Partial index for "a unit's tank readings in a range".
+--
+-- Several queries ask for a unit's first or last fixes WITH a tank reading:
+--
+--   SELECT fuel_level_ml FROM vehicle_telemetries t
+--    WHERE t.vehicle_id = $1 AND t.captured_at >= $from AND t.captured_at < $to
+--      AND t.fuel_level_ml >= 1000
+--    ORDER BY t.captured_at ASC LIMIT 7          -- and DESC
+--
+-- (reports/range-reports.service edgeLevels: the Fuel Consumption Rate report
+-- and the Monthly report; planner/work-plans.service: fuel before and after a
+-- shift). The (vehicle_id, captured_at) index cannot check fuel_level_ml, so
+-- for a unit with NO tank reading in the range (no probe, a dead probe, or
+-- one that reads 0) Postgres walks every fix the unit has in the range, from
+-- both ends, fetching each row to look at its fuel. On 28 Nov 2026 Aquamist's
+-- Fuel Consumption Rate for October (77 units, a third with no readings) and
+-- for 20-27 Nov both hit the 55 s statement_timeout in edgeLevels and came back
+-- as a 500; 1-7 Oct, with little data yet, answered. Measured read-only on
+-- production: KAU 374Y, which has no readings, took 1.8 s for ONE direction
+-- over October (6,862 rows on 6,457 pages, all read from disk); with both
+-- directions and ~26 such units, that comes to about 95 s.
+--
+-- With this index a unit with readings is answered from its first entries, and
+-- one without hits an EMPTY index range and stops at once. Same shape and
+-- reason as vehicle_telemetries_moving_idx (20260801000000).
+--
+-- Written as a raw migration because Prisma's schema language cannot express a
+-- partial index (see the note on model VehicleTelemetry in schema.prisma).
+--
+-- ON PRODUCTION THIS IS NOT RUN BY `prisma migrate deploy`. vehicle_telemetries
+-- is partitioned (20261125120000), and CREATE INDEX on a partitioned parent
+-- builds every partition's index under a lock that holds ingest, while
+-- CREATE INDEX CONCURRENTLY is not allowed on a partitioned table at all. So
+-- the parent's index is made ON ONLY (instant, invalid), each partition's index
+-- is built CONCURRENTLY and attached, and this migration is then marked applied
+-- with `prisma migrate resolve`. Runbook: docs/telemetry-fuel-level-index.md.
+-- IF NOT EXISTS keeps that resolution safe, and on a new or small database
+-- (CI, a new environment) the statement below builds it all inline.
+--
+-- Partitions made later by vehicle_telemetries_ensure_partitions() get their
+-- own copy on ATTACH, as with every other index on the parent.
+CREATE INDEX IF NOT EXISTS "vehicle_telemetries_fuel_level_idx"
+  ON "vehicle_telemetries" ("vehicle_id", "captured_at")
+  WHERE "fuel_level_ml" >= 1000;
